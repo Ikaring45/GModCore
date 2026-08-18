@@ -1,10 +1,14 @@
 import SwiftUI
+import GModEngine
 import GModMetal
 
 public struct GModMainView: View {
 
     @State private var stats =
         "Starting ARM engine..."
+
+    @State private var luaLog =
+        "Starting Lua 5.1 bootstrap..."
 
     public init() {}
 
@@ -18,6 +22,21 @@ public struct GModMainView: View {
                 .font(.largeTitle)
                 .bold()
 
+            Text(luaLog)
+                .font(
+                    .system(
+                        .body,
+                        design:
+                            .monospaced
+                    )
+                )
+                .frame(
+                    maxWidth:
+                        .infinity,
+                    alignment:
+                        .leading
+                )
+
             Text(stats)
                 .font(
                     .system(
@@ -26,8 +45,11 @@ public struct GModMainView: View {
                             .monospaced
                     )
                 )
-                .multilineTextAlignment(
-                    .leading
+                .frame(
+                    maxWidth:
+                        .infinity,
+                    alignment:
+                        .leading
                 )
 
             GModMetalView(
@@ -38,7 +60,7 @@ public struct GModMainView: View {
                     .infinity
             )
             .frame(
-                height: 500
+                height: 420
             )
             .clipShape(
                 RoundedRectangle(
@@ -47,5 +69,11 @@ public struct GModMainView: View {
             )
         }
         .padding()
+        .onAppear {
+
+            luaLog =
+                GMLuaRuntime
+                    .phase1SmokeTest()
+        }
     }
 }
