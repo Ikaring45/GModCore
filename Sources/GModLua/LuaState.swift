@@ -43,10 +43,6 @@ final class LuaEnvironment {
             )
         }
 
-        /*
-         Lua:
-         undefined global -> nil
-        */
         return .nilValue
     }
 
@@ -83,15 +79,19 @@ public final class LuaState {
     private let globals =
         LuaEnvironment()
 
+    private static let
+        maxMetatableChainDepth = 100
+
     public init(
         output:
             @escaping (String) -> Void =
                 { print($0) }
     ) {
 
-        /*
-         Lua print()
-        */
+        // -------------------------
+        // print
+        // -------------------------
+
         register(
             "print"
         ) { arguments in
@@ -112,7 +112,183 @@ public final class LuaState {
 
             return []
         }
+
+        // -------------------------
+        // setmetatable
+        // -------------------------
+
+        register(
+            "setmetatable"
+        ) { arguments in
+
+            guard
+                arguments.count >= 2
+            else {
+
+                throw LuaError.runtime(
+                    "bad argument to 'setmetatable'"
+                )
+            }
+
+            guard
+                case let .table(table) =
+                    arguments[0]
+            else {
+
+                throw LuaError.runtime(
+                    "bad argument #1 to 'setmetatable' " +
+                    "(table expected)"
+                )
+            }
+
+            switch arguments[1] {
+
+            case .nilValue:
+
+                table.metatable =
+                    nil
+
+            case let .table(
+                metatable
+            ):
+
+                table.metatable =
+                    metatable
+
+            default:
+
+                throw LuaError.runtime(
+                    "bad argument #2 to 'setmetatable' " +
+                    "(nil or table expected)"
+                )
+            }
+
+            return [
+                .table(table)
+            ]
+        }
+
+        // -------------------------
+        // getmetatable
+        // -------------------------
+
+        register(
+            "getmetatable"
+        ) { arguments in
+
+            guard
+                let first =
+                    arguments.first
+            else {
+
+                throw LuaError.runtime(
+                    "bad argument to 'getmetatable'"
+                )
+            }
+
+            guard
+                case let .table(table) =
+                    first
+            else {
+
+                return [
+                    .nilValue
+                ]
+            }
+
+            if let metatable =
+                table.metatable
+            {
+
+                return [
+                    .table(
+                        metatable
+                    )
+                ]
+            }
+
+            return [
+                .nilValue
+            ]
+        }
+
+        // -------------------------
+        // rawget
+        // -------------------------
+
+        register(
+            "rawget"
+        ) { arguments in
+
+            guard
+                arguments.count >= 2
+            else {
+
+                throw LuaError.runtime(
+                    "bad argument to 'rawget'"
+                )
+            }
+
+            guard
+                case let .table(table) =
+                    arguments[0]
+            else {
+
+                throw LuaError.runtime(
+                    "bad argument #1 to 'rawget' " +
+                    "(table expected)"
+                )
+            }
+
+            return [
+                try table.rawValue(
+                    for:
+                        arguments[1]
+                )
+            ]
+        }
+
+        // -------------------------
+        // rawset
+        // -------------------------
+
+        register(
+            "rawset"
+        ) { arguments in
+
+            guard
+                arguments.count >= 3
+            else {
+
+                throw LuaError.runtime(
+                    "bad argument to 'rawset'"
+                )
+            }
+
+            guard
+                case let .table(table) =
+                    arguments[0]
+            else {
+
+                throw LuaError.runtime(
+                    "bad argument #1 to 'rawset' " +
+                    "(table expected)"
+                )
+            }
+
+            try table.rawSetValue(
+                arguments[2],
+                for:
+                    arguments[1]
+            )
+
+            return [
+                .table(table)
+            ]
+        }
     }
+
+    // MARK: - Public API
 
     public func register(
         _ name: String,
@@ -168,12 +344,6 @@ public final class LuaState {
             )
             .parse()
 
-        /*
-         1 chunkにつき
-         top-level local scopeを作る。
-
-         globalsとは別。
-        */
         let environment =
             LuaEnvironment(
                 parent:
@@ -187,13 +357,8 @@ public final class LuaState {
         )
     }
 
-    /*
-     nil:
-       blockが普通に終了
+    // MARK: - Statements
 
-     [LuaValue]:
-       returnが発生
-    */
     private func executeBlock(
         _ statements:
             [LuaStatement],
@@ -255,19 +420,6 @@ public final class LuaState {
 
             return nil
 
-        /*
-         local function f()
-
-         Lua semanticsとして、
-
-         local f
-         f = function()
-
-         に近い。
-
-         先にlocalを作るので
-         再帰関数も後で対応できる。
-        */
         case let .localFunction(
             name,
             parameters,
@@ -355,15 +507,14 @@ public final class LuaState {
             expressions
         ):
 
-            return try expressions
-                .map {
+            return try expressions.map {
 
-                    try evaluate(
-                        $0,
-                        environment:
-                            environment
-                    )
-                }
+                try evaluate(
+                    $0,
+                    environment:
+                        environment
+                )
+            }
 
         case let .expression(
             expression
@@ -378,6 +529,8 @@ public final class LuaState {
             return nil
         }
     }
+
+    // MARK: - Assignment
 
     private func assign(
         _ target:
@@ -396,11 +549,6 @@ public final class LuaState {
             name
         ):
 
-            /*
-             既存localがあればそこへ。
-
-             なければglobal。
-            */
             if !environment
                 .assignExisting(
                     name,
@@ -421,7 +569,7 @@ public final class LuaState {
             name
         ):
 
-            let base =
+            let receiver =
                 try evaluate(
                     baseExpression,
                     environment:
@@ -429,24 +577,31 @@ public final class LuaState {
                 )
 
             guard
-                case let
-                    .table(table) =
-                    base
+                case let .table(table) =
+                    receiver
             else {
 
                 throw LuaError.runtime(
                     "attempt to index a " +
-                    "\(base.typeName) value"
+                    "\(receiver.typeName) value"
                 )
             }
 
-            table.setValue(
-                value,
-                forString:
-                    name
+            try setTableValue(
+                table: table,
+                receiver:
+                    receiver,
+                key:
+                    .string(name),
+                value:
+                    value,
+                depth:
+                    0
             )
         }
     }
+
+    // MARK: - Evaluation
 
     private func evaluate(
         _ expression:
@@ -494,11 +649,10 @@ public final class LuaState {
                 name
             )
 
-        /*
-         {
-             value = 42
-         }
-        */
+        // -------------------------
+        // table constructor
+        // -------------------------
+
         case let .table(
             fields
         ):
@@ -518,7 +672,7 @@ public final class LuaState {
                     valueExpression
                 ):
 
-                    table.setValue(
+                    table.rawSetValue(
                         try evaluate(
                             valueExpression,
                             environment:
@@ -532,7 +686,7 @@ public final class LuaState {
                     valueExpression
                 ):
 
-                    table.setValue(
+                    table.rawSetValue(
                         try evaluate(
                             valueExpression,
                             environment:
@@ -550,13 +704,10 @@ public final class LuaState {
                 table
             )
 
-        /*
-         anonymous function:
+        // -------------------------
+        // function literal
+        // -------------------------
 
-         function()
-             ...
-         end
-        */
         case let .function(
             parameters,
             body
@@ -573,15 +724,16 @@ public final class LuaState {
                 )
             )
 
-        /*
-         self.value
-        */
+        // -------------------------
+        // t.field
+        // -------------------------
+
         case let .field(
             baseExpression,
             name
         ):
 
-            let base =
+            let receiver =
                 try evaluate(
                     baseExpression,
                     environment:
@@ -589,21 +741,30 @@ public final class LuaState {
                 )
 
             guard
-                case let
-                    .table(table) =
-                    base
+                case let .table(table) =
+                    receiver
             else {
 
                 throw LuaError.runtime(
                     "attempt to index a " +
-                    "\(base.typeName) value"
+                    "\(receiver.typeName) value"
                 )
             }
 
-            return table.value(
-                forString:
-                    name
+            return try getTableValue(
+                table:
+                    table,
+                receiver:
+                    receiver,
+                key:
+                    .string(name),
+                depth:
+                    0
             )
+
+        // -------------------------
+        // unary
+        // -------------------------
 
         case let .unary(
             operation,
@@ -631,34 +792,32 @@ public final class LuaState {
                 )
             }
 
+        // -------------------------
+        // binary
+        // -------------------------
+
         case let .binary(
             left,
             operation,
             right
         ):
 
-            let leftValue =
-                try evaluate(
-                    left,
-                    environment:
-                        environment
-                )
-
-            let rightValue =
-                try evaluate(
-                    right,
-                    environment:
-                        environment
-                )
-
             let lhs =
                 try numericValue(
-                    leftValue
+                    evaluate(
+                        left,
+                        environment:
+                            environment
+                    )
                 )
 
             let rhs =
                 try numericValue(
-                    rightValue
+                    evaluate(
+                        right,
+                        environment:
+                            environment
+                    )
                 )
 
             switch operation {
@@ -697,10 +856,10 @@ public final class LuaState {
                 )
             }
 
-        /*
-         counter()
-         print(...)
-        */
+        // -------------------------
+        // f(...)
+        // -------------------------
+
         case let .call(
             calleeExpression,
             argumentExpressions
@@ -714,15 +873,14 @@ public final class LuaState {
                 )
 
             let arguments =
-                try argumentExpressions
-                    .map {
+                try argumentExpressions.map {
 
-                        try evaluate(
-                            $0,
-                            environment:
-                                environment
-                        )
-                    }
+                    try evaluate(
+                        $0,
+                        environment:
+                            environment
+                    )
+                }
 
             let results =
                 try call(
@@ -735,12 +893,10 @@ public final class LuaState {
                 results.first ??
                 .nilValue
 
-        /*
-         t:GetValue()
+        // -------------------------
+        // t:method(...)
+        // -------------------------
 
-         receiverをselfとして
-         argument 0へ自動挿入。
-        */
         case let .methodCall(
             receiverExpression,
             name,
@@ -755,8 +911,7 @@ public final class LuaState {
                 )
 
             guard
-                case let
-                    .table(table) =
+                case let .table(table) =
                     receiver
             else {
 
@@ -766,22 +921,38 @@ public final class LuaState {
                 )
             }
 
+            /*
+             IMPORTANT:
+
+             Method lookup must also honor
+             __index.
+
+             This will later allow
+             Entity / Vector methods to
+             live in prototype tables.
+            */
+
             let callable =
-                table.value(
-                    forString:
-                        name
+                try getTableValue(
+                    table:
+                        table,
+                    receiver:
+                        receiver,
+                    key:
+                        .string(name),
+                    depth:
+                        0
                 )
 
             let arguments =
-                try argumentExpressions
-                    .map {
+                try argumentExpressions.map {
 
-                        try evaluate(
-                            $0,
-                            environment:
-                                environment
-                        )
-                    }
+                    try evaluate(
+                        $0,
+                        environment:
+                            environment
+                    )
+                }
 
             let results =
                 try call(
@@ -797,6 +968,261 @@ public final class LuaState {
         }
     }
 
+    // MARK: - Metatables
+
+    private func getTableValue(
+        table:
+            LuaTable,
+
+        receiver:
+            LuaValue,
+
+        key:
+            LuaValue,
+
+        depth:
+            Int
+    ) throws -> LuaValue {
+
+        guard
+            depth <
+                Self.maxMetatableChainDepth
+        else {
+
+            throw LuaError.runtime(
+                "loop in gettable"
+            )
+        }
+
+        /*
+         Raw value always wins.
+        */
+
+        let raw =
+            try table.rawValue(
+                for:
+                    key
+            )
+
+        if !isNil(raw) {
+            return raw
+        }
+
+        guard
+            let metatable =
+                table.metatable
+        else {
+
+            return .nilValue
+        }
+
+        let index =
+            metatable.rawValue(
+                forString:
+                    "__index"
+            )
+
+        switch index {
+
+        case .nilValue:
+
+            return .nilValue
+
+        /*
+         __index = anotherTable
+        */
+
+        case let .table(
+            fallbackTable
+        ):
+
+            return try getTableValue(
+                table:
+                    fallbackTable,
+                receiver:
+                    .table(
+                        fallbackTable
+                    ),
+                key:
+                    key,
+                depth:
+                    depth + 1
+            )
+
+        /*
+         __index = function(t, key)
+        */
+
+        case .luaFunction,
+             .nativeFunction:
+
+            let results =
+                try call(
+                    index,
+                    arguments: [
+                        receiver,
+                        key
+                    ]
+                )
+
+            return
+                results.first ??
+                .nilValue
+
+        default:
+
+            throw LuaError.runtime(
+                "attempt to index a " +
+                "\(index.typeName) value"
+            )
+        }
+    }
+
+    private func setTableValue(
+        table:
+            LuaTable,
+
+        receiver:
+            LuaValue,
+
+        key:
+            LuaValue,
+
+        value:
+            LuaValue,
+
+        depth:
+            Int
+    ) throws {
+
+        guard
+            depth <
+                Self.maxMetatableChainDepth
+        else {
+
+            throw LuaError.runtime(
+                "loop in settable"
+            )
+        }
+
+        /*
+         Existing raw key:
+         write directly.
+
+         __newindex is only consulted
+         when the key is absent.
+        */
+
+        let existing =
+            try table.rawValue(
+                for:
+                    key
+            )
+
+        if !isNil(existing) {
+
+            try table.rawSetValue(
+                value,
+                for:
+                    key
+            )
+
+            return
+        }
+
+        guard
+            let metatable =
+                table.metatable
+        else {
+
+            try table.rawSetValue(
+                value,
+                for:
+                    key
+            )
+
+            return
+        }
+
+        let newIndex =
+            metatable.rawValue(
+                forString:
+                    "__newindex"
+            )
+
+        switch newIndex {
+
+        case .nilValue:
+
+            try table.rawSetValue(
+                value,
+                for:
+                    key
+            )
+
+        /*
+         __newindex = anotherTable
+        */
+
+        case let .table(
+            targetTable
+        ):
+
+            try setTableValue(
+                table:
+                    targetTable,
+                receiver:
+                    .table(
+                        targetTable
+                    ),
+                key:
+                    key,
+                value:
+                    value,
+                depth:
+                    depth + 1
+            )
+
+        /*
+         __newindex =
+             function(t, key, value)
+        */
+
+        case .luaFunction,
+             .nativeFunction:
+
+            _ = try call(
+                newIndex,
+                arguments: [
+                    receiver,
+                    key,
+                    value
+                ]
+            )
+
+        default:
+
+            throw LuaError.runtime(
+                "attempt to index a " +
+                "\(newIndex.typeName) value"
+            )
+        }
+    }
+
+    private func isNil(
+        _ value:
+            LuaValue
+    ) -> Bool {
+
+        if case .nilValue = value {
+            return true
+        }
+
+        return false
+    }
+
+    // MARK: - Calls
+
     private func call(
         _ callable:
             LuaValue,
@@ -807,9 +1233,6 @@ public final class LuaState {
 
         switch callable {
 
-        /*
-         Swift側から登録した関数。
-        */
         case let .nativeFunction(
             function
         ):
@@ -818,9 +1241,6 @@ public final class LuaState {
                 arguments
             )
 
-        /*
-         Luaで定義された関数。
-        */
         case let .luaFunction(
             function
         ):
@@ -831,12 +1251,6 @@ public final class LuaState {
                         function.closure
                 )
 
-            /*
-             足りない引数はnil。
-
-             余分な引数は
-             vararg未実装なので今は捨てる。
-            */
             for (
                 index,
                 parameter
@@ -873,6 +1287,8 @@ public final class LuaState {
         }
     }
 
+    // MARK: - Number conversion
+
     private func numericValue(
         _ value:
             LuaValue
@@ -886,11 +1302,6 @@ public final class LuaState {
 
             return number
 
-        /*
-         Lua 5.1では
-         arithmetic時に数値文字列を
-         numberへcoerceする。
-        */
         case let .string(
             string
         ):
@@ -898,6 +1309,7 @@ public final class LuaState {
             if let number =
                 Double(string)
             {
+
                 return number
             }
 
