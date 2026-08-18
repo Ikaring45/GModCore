@@ -18,7 +18,15 @@ let package = Package(
 
     targets: [
         .target(
+            name: "GModLua",
+            path: "Sources/GModLua"
+        ),
+
+        .target(
             name: "GModEngine",
+            dependencies: [
+                "GModLua"
+            ],
             path: "Sources/GModEngine"
         ),
 
