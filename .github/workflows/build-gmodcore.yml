@@ -1,0 +1,74 @@
+name: Build GModCore XCFramework
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare directories
+        run: |
+          rm -rf build
+          rm -rf Binaries/GModCore.xcframework
+          mkdir -p build/Headers
+          mkdir -p Binaries
+
+      - name: Copy public headers
+        run: |
+          cp Sources/GModCore/include/GModCore.h build/Headers/GModCore.h
+
+          cat > build/Headers/module.modulemap <<'EOF'
+          module GModCoreBinary {
+              header "GModCore.h"
+              export *
+          }
+          EOF
+
+      - name: Build C++ for iPadOS arm64
+        run: |
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+
+          xcrun clang++ \
+            -std=c++17 \
+            -arch arm64 \
+            -isysroot "$SDK_PATH" \
+            -miphoneos-version-min=16.0 \
+            -I Sources/GModCore/include \
+            -c Sources/GModCore/GModCore.cpp \
+            -o build/GModCore.o
+
+      - name: Create static library
+        run: |
+          libtool \
+            -static \
+            build/GModCore.o \
+            -o build/libGModCore.a
+
+      - name: Create XCFramework
+        run: |
+          xcodebuild -create-xcframework \
+            -library build/libGModCore.a \
+            -headers build/Headers \
+            -output Binaries/GModCore.xcframework
+
+      - name: Commit XCFramework
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add Binaries/GModCore.xcframework
+
+          if git diff --cached --quiet; then
+            echo "No binary changes."
+          else
+            git commit -m "Build GModCore XCFramework"
+            git push
+          fi
