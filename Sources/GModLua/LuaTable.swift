@@ -1,18 +1,9 @@
 enum LuaTableKey:
     Hashable
 {
-
-    case string(
-        String
-    )
-
-    case number(
-        Double
-    )
-
-    case boolean(
-        Bool
-    )
+    case string(String)
+    case number(Double)
+    case boolean(Bool)
 }
 
 public final class LuaTable {
@@ -20,17 +11,46 @@ public final class LuaTable {
     private var storage:
         [LuaTableKey: LuaValue] = [:]
 
-    /*
-     次Phaseで
-     __index / __newindex 等を実装するとき使う。
-    */
     public var metatable:
         LuaTable?
 
     public init() {
     }
 
-    public func value(
+    // MARK: - Raw access
+
+    func rawValue(
+        for key: LuaValue
+    ) throws -> LuaValue {
+
+        let tableKey =
+            try makeKey(
+                from: key
+            )
+
+        return storage[
+            tableKey
+        ] ?? .nilValue
+    }
+
+    func rawSetValue(
+        _ value: LuaValue,
+        for key: LuaValue
+    ) throws {
+
+        let tableKey =
+            try makeKey(
+                from: key
+            )
+
+        set(
+            value,
+            for:
+                tableKey
+        )
+    }
+
+    func rawValue(
         forString key: String
     ) -> LuaValue {
 
@@ -39,7 +59,7 @@ public final class LuaTable {
         ] ?? .nilValue
     }
 
-    public func setValue(
+    func rawSetValue(
         _ value: LuaValue,
         forString key: String
     ) {
@@ -51,7 +71,7 @@ public final class LuaTable {
         )
     }
 
-    func value(
+    func rawValue(
         forNumber key: Double
     ) -> LuaValue {
 
@@ -60,7 +80,7 @@ public final class LuaTable {
         ] ?? .nilValue
     }
 
-    func setValue(
+    func rawSetValue(
         _ value: LuaValue,
         forNumber key: Double
     ) {
@@ -72,18 +92,19 @@ public final class LuaTable {
         )
     }
 
+    // MARK: - Internal
+
     private func set(
         _ value: LuaValue,
         for key: LuaTableKey
     ) {
 
         /*
-         Luaでは
-
+         Lua:
          table[key] = nil
-
-         はキーの削除。
+         removes the key.
         */
+
         if case .nilValue = value {
 
             storage.removeValue(
@@ -94,6 +115,61 @@ public final class LuaTable {
 
             storage[key] =
                 value
+        }
+    }
+
+    private func makeKey(
+        from value: LuaValue
+    ) throws -> LuaTableKey {
+
+        switch value {
+
+        case let .string(string):
+
+            return .string(
+                string
+            )
+
+        case let .number(number):
+
+            guard !number.isNaN
+            else {
+
+                throw LuaError.runtime(
+                    "table index is NaN"
+                )
+            }
+
+            return .number(
+                number
+            )
+
+        case let .boolean(boolean):
+
+            return .boolean(
+                boolean
+            )
+
+        case .nilValue:
+
+            throw LuaError.runtime(
+                "table index is nil"
+            )
+
+        default:
+
+            /*
+             Lua itself also allows
+             tables/functions as keys.
+
+             We add reference identity
+             keys in a later phase.
+            */
+
+            throw LuaError.runtime(
+                "unsupported table key type: " +
+                value.typeName
+            )
         }
     }
 }
