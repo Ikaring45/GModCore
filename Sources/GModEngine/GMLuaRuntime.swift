@@ -3,7 +3,6 @@ import GModLua
 public enum GMLuaRealm:
     String
 {
-
     case server = "SERVER"
     case client = "CLIENT"
     case menu = "MENU"
@@ -47,7 +46,7 @@ public final class GMLuaRuntime {
         )
     }
 
-    public static func phase2SmokeTest()
+    public static func phase3SmokeTest()
         -> String
     {
 
@@ -69,29 +68,44 @@ public final class GMLuaRuntime {
 
             try runtime.execute(
                 """
-                local t = {
-                    value = 42
+                local defaults = {
+                    answer = 42
                 }
 
-                function t:GetValue()
-                    return self.value
-                end
+                local object = {}
 
-                print(t:GetValue())
+                setmetatable(
+                    object,
+                    {
+                        __index = defaults
+                    }
+                )
 
-                local function makeCounter()
-                    local n = 0
+                print(object.answer)
 
-                    return function()
-                        n = n + 1
-                        return n
-                    end
-                end
+                local proxy = {}
 
-                local counter = makeCounter()
+                setmetatable(
+                    proxy,
+                    {
+                        __index = function(self, key)
+                            return 99
+                        end,
 
-                print(counter())
-                print(counter())
+                        __newindex = function(self, key, value)
+                            print("__newindex", key, value)
+                            rawset(self, key, value)
+                        end
+                    }
+                )
+
+                print(proxy.missing)
+
+                proxy.bonus = 7
+
+                print(proxy.bonus)
+
+                print(getmetatable(proxy))
                 """
             )
 
