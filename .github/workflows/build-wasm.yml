@@ -1,0 +1,54 @@
+name: Build GModCore WASM
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "Sources/GModCore/**"
+      - ".github/workflows/build-wasm.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld
+
+      - name: Build GModCore WASM
+        run: |
+          mkdir -p Sources/GModApp/Resources
+
+          clang++ \
+            --target=wasm32 \
+            -std=c++17 \
+            -O2 \
+            -nostdlib \
+            -Wl,--no-entry \
+            -Wl,--export=gm_test_add \
+            -Wl,--export-memory \
+            -Wl,--allow-undefined \
+            Sources/GModCore/GModCore.cpp \
+            -o Sources/GModApp/Resources/GModCore.wasm
+
+      - name: Commit WASM
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add Sources/GModApp/Resources/GModCore.wasm
+
+          if git diff --cached --quiet; then
+            echo "No WASM changes."
+          else
+            git commit -m "Build GModCore WASM"
+            git push
+          fi
