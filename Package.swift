@@ -5,11 +5,11 @@ import PackageDescription
 let package = Package(
     name: "GModCore",
 
+    platforms: [
+        .iOS("16.0")
+    ],
+
     products: [
-        .library(
-            name: "GModCore",
-            targets: ["GModCore"]
-        ),
         .library(
             name: "GModApp",
             targets: ["GModApp"]
@@ -18,17 +18,8 @@ let package = Package(
 
     targets: [
         .target(
-            name: "GModCore",
-            path: "Sources/GModCore",
-            publicHeadersPath: "include"
-        ),
-
-        .target(
             name: "GModApp",
-            dependencies: ["GModCore"],
             path: "Sources/GModApp"
         )
-    ],
-
-    cxxLanguageStandard: .cxx17
+    ]
 )
