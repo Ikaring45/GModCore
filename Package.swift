@@ -17,8 +17,14 @@ let package = Package(
     ],
 
     targets: [
+        .binaryTarget(
+            name: "GModCoreBinary",
+            path: "Binaries/GModCore.xcframework"
+        ),
+
         .target(
             name: "GModApp",
+            dependencies: ["GModCoreBinary"],
             path: "Sources/GModApp"
         )
     ]
