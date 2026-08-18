@@ -313,10 +313,13 @@ public final class LuaState {
 
             case .negate:
 
-                return .number(
-                    -try numericValue(
+                let number =
+                    try numericValue(
                         value
                     )
+
+                return .number(
+                    -number
                 )
             }
 
@@ -413,10 +416,9 @@ public final class LuaState {
                     }
 
             guard
-                case let
-                    .nativeFunction(
-                        function
-                    ) =
+                case let .nativeFunction(
+                    function
+                ) =
                     callable
             else {
 
