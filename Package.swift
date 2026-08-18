@@ -9,6 +9,10 @@ let package = Package(
         .library(
             name: "GModCore",
             targets: ["GModCore"]
+        ),
+        .library(
+            name: "GModApp",
+            targets: ["GModApp"]
         )
     ],
 
@@ -17,6 +21,12 @@ let package = Package(
             name: "GModCore",
             path: "Sources/GModCore",
             publicHeadersPath: "include"
+        ),
+
+        .target(
+            name: "GModApp",
+            dependencies: ["GModCore"],
+            path: "Sources/GModApp"
         )
     ],
 
