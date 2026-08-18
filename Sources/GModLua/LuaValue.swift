@@ -8,6 +8,14 @@ public enum LuaValue {
     case number(Double)
     case string(String)
 
+    case table(
+        LuaTable
+    )
+
+    case luaFunction(
+        LuaFunction
+    )
+
     case nativeFunction(
         LuaNativeFunction
     )
@@ -89,7 +97,12 @@ extension LuaValue {
         case .string:
             return "string"
 
-        case .nativeFunction:
+        case .table:
+            return "table"
+
+        case .luaFunction,
+             .nativeFunction:
+
             return "function"
         }
     }
@@ -102,6 +115,7 @@ extension LuaValue {
             return "nil"
 
         case let .boolean(value):
+
             return value
                 ? "true"
                 : "false"
@@ -116,6 +130,7 @@ extension LuaValue {
                     .towardZero
                 ) == value
             {
+
                 return String(
                     Int64(value)
                 )
@@ -124,9 +139,16 @@ extension LuaValue {
             return String(value)
 
         case let .string(value):
+
             return value
 
-        case .nativeFunction:
+        case .table:
+
+            return "table"
+
+        case .luaFunction,
+             .nativeFunction:
+
             return "function"
         }
     }
@@ -135,13 +157,13 @@ extension LuaValue {
 
         switch self {
 
-        case .nilValue:
-            return false
+        case .nilValue,
+             .boolean(false):
 
-        case .boolean(false):
             return false
 
         default:
+
             return true
         }
     }
