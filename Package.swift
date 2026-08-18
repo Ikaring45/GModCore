@@ -6,13 +6,13 @@ let package = Package(
     name: "GModCore",
 
     platforms: [
-        .iOS("16.0")
+        .iOS(.v16)
     ],
 
     products: [
         .library(
-            name: "GModApp",
-            targets: ["GModApp"]
+            name: "GModCoreBinary",
+            targets: ["GModCoreBinary"]
         )
     ],
 
@@ -20,12 +20,6 @@ let package = Package(
         .binaryTarget(
             name: "GModCoreBinary",
             path: "Binaries/GModCore.xcframework"
-        ),
-
-        .target(
-            name: "GModApp",
-            dependencies: ["GModCoreBinary"],
-            path: "Sources/GModApp"
         )
     ]
 )
