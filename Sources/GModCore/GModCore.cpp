@@ -1,93 +1,205 @@
-#include "GModCore.h"
+#include <stdint.h>
 
-#include <cstdint>
-#include <new>
+namespace {
 
-struct GMEngine
-{
-    uint64_t frameNumber = 0;
-    bool booted = false;
+constexpr uint32_t GM_ENGINE_HANDLE = 1;
+constexpr double GM_TICK_INTERVAL = 0.015;
+constexpr uint32_t GM_MAX_TICKS_PER_FRAME = 8;
+constexpr uint32_t GM_LOG_CAPACITY = 32;
+
+enum GMLogEvent : uint32_t {
+    GM_LOG_ENGINE_CREATED = 1,
+    GM_LOG_BOOT_BEGIN = 2,
+    GM_LOG_CLOCK_INITIALIZED = 3,
+    GM_LOG_BOOT_COMPLETE = 4,
+    GM_LOG_ENGINE_DESTROYED = 5
 };
 
-static GMLogCallback gLogCallback = nullptr;
+struct GMEngineState {
+    uint32_t alive;
+    uint32_t running;
+    uint32_t tickCount;
+    double accumulator;
+};
 
-static void GMLog(const char *message)
+GMEngineState gEngine = {};
+
+uint32_t gLogEvents[GM_LOG_CAPACITY] = {};
+uint32_t gLogCount = 0;
+
+void GMLogEventPush(uint32_t eventCode)
 {
-    if (gLogCallback != nullptr)
-    {
-        gLogCallback(message);
+    if (gLogCount < GM_LOG_CAPACITY) {
+        gLogEvents[gLogCount++] = eventCode;
     }
 }
 
-extern "C"
+bool GMValidHandle(uint32_t handle)
 {
+    return
+        handle == GM_ENGINE_HANDLE &&
+        gEngine.alive != 0;
+}
+
+}
+
+extern "C" {
 
 uint32_t gm_abi_version(void)
 {
     return 1;
 }
 
-GMEngine *gm_create(void)
+uint32_t gm_create(void)
 {
-    GMEngine *engine = new (std::nothrow) GMEngine();
+    gEngine.alive = 1;
+    gEngine.running = 0;
+    gEngine.tickCount = 0;
+    gEngine.accumulator = 0.0;
 
-    if (engine == nullptr)
-    {
-        GMLog("[GModCore] Failed to allocate engine");
-        return nullptr;
-    }
+    gLogCount = 0;
 
-    GMLog("[GModCore] Native C++ engine created");
+    GMLogEventPush(
+        GM_LOG_ENGINE_CREATED
+    );
 
-    return engine;
+    return GM_ENGINE_HANDLE;
 }
 
-void gm_destroy(GMEngine *engine)
+void gm_destroy(uint32_t handle)
 {
-    if (engine == nullptr)
-    {
+    if (!GMValidHandle(handle)) {
         return;
     }
 
-    GMLog("[GModCore] Shutting down");
+    GMLogEventPush(
+        GM_LOG_ENGINE_DESTROYED
+    );
 
-    delete engine;
+    gEngine.running = 0;
+    gEngine.alive = 0;
+    gEngine.accumulator = 0.0;
 }
 
-void gm_boot(GMEngine *engine)
+int32_t gm_boot(uint32_t handle)
 {
-    if (engine == nullptr)
-    {
-        GMLog("[GModCore] gm_boot called with null engine");
-        return;
+    if (!GMValidHandle(handle)) {
+        return 0;
     }
 
-    GMLog("[GModCore] Boot begin");
+    GMLogEventPush(
+        GM_LOG_BOOT_BEGIN
+    );
 
-    engine->booted = true;
+    gEngine.tickCount = 0;
+    gEngine.accumulator = 0.0;
 
-    GMLog("[GModCore] C++17 runtime OK");
-    GMLog("[GModCore] Boot complete");
+    GMLogEventPush(
+        GM_LOG_CLOCK_INITIALIZED
+    );
+
+    gEngine.running = 1;
+
+    GMLogEventPush(
+        GM_LOG_BOOT_COMPLETE
+    );
+
+    return 1;
 }
 
-const char *gm_version(void)
-{
-    return "GModCore 0.0.1";
-}
-
-int32_t gm_test_add(
-    int32_t a,
-    int32_t b
+uint32_t gm_frame(
+    uint32_t handle,
+    double deltaSeconds
 )
 {
-    return a + b;
+    if (
+        !GMValidHandle(handle) ||
+        gEngine.running == 0
+    ) {
+        return 0;
+    }
+
+    if (deltaSeconds < 0.0) {
+        deltaSeconds = 0.0;
+    }
+
+    // Prevent huge catch-up bursts after a pause.
+    if (deltaSeconds > 0.25) {
+        deltaSeconds = 0.25;
+    }
+
+    gEngine.accumulator +=
+        deltaSeconds;
+
+    uint32_t ticksExecuted = 0;
+
+    while (
+        gEngine.accumulator >=
+            GM_TICK_INTERVAL &&
+        ticksExecuted <
+            GM_MAX_TICKS_PER_FRAME
+    ) {
+        gEngine.accumulator -=
+            GM_TICK_INTERVAL;
+
+        ++gEngine.tickCount;
+        ++ticksExecuted;
+    }
+
+    // Avoid a spiral of death.
+    if (
+        ticksExecuted ==
+            GM_MAX_TICKS_PER_FRAME &&
+        gEngine.accumulator >=
+            GM_TICK_INTERVAL
+    ) {
+        gEngine.accumulator = 0.0;
+    }
+
+    return ticksExecuted;
 }
 
-void gm_set_log_callback(
-    GMLogCallback callback
+double gm_tick_interval(void)
+{
+    return GM_TICK_INTERVAL;
+}
+
+uint32_t gm_tick_count(
+    uint32_t handle
 )
 {
-    gLogCallback = callback;
+    if (!GMValidHandle(handle)) {
+        return 0;
+    }
+
+    return gEngine.tickCount;
+}
+
+uint32_t gm_is_running(
+    uint32_t handle
+)
+{
+    if (!GMValidHandle(handle)) {
+        return 0;
+    }
+
+    return gEngine.running;
+}
+
+uint32_t gm_log_event_count(void)
+{
+    return gLogCount;
+}
+
+uint32_t gm_log_event(
+    uint32_t index
+)
+{
+    if (index >= gLogCount) {
+        return 0;
+    }
+
+    return gLogEvents[index];
 }
 
 }
