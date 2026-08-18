@@ -18,7 +18,24 @@ let package = Package(
 
     targets: [
         .target(
+            name: "GModEngine",
+            path: "Sources/GModEngine"
+        ),
+
+        .target(
+            name: "GModMetal",
+            dependencies: [
+                "GModEngine"
+            ],
+            path: "Sources/GModMetal"
+        ),
+
+        .target(
             name: "GModApp",
+            dependencies: [
+                "GModEngine",
+                "GModMetal"
+            ],
             path: "Sources/GModApp",
             resources: [
                 .process("Resources")
