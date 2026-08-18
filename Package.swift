@@ -19,7 +19,10 @@ let package = Package(
     targets: [
         .target(
             name: "GModApp",
-            path: "Sources/GModApp"
+            path: "Sources/GModApp",
+            resources: [
+                .process("Resources")
+            ]
         )
     ]
 )
