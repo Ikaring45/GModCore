@@ -1,0 +1,4 @@
+module GModCoreBinary {
+    header "GModCore.h"
+    export *
+}
