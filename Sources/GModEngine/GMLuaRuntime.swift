@@ -18,7 +18,9 @@ public final class GMLuaRuntime {
         LuaState
 
     public init(
-        realm: GMLuaRealm,
+        realm:
+            GMLuaRealm,
+
         logger:
             @escaping (String) -> Void
     ) {
@@ -45,7 +47,7 @@ public final class GMLuaRuntime {
         )
     }
 
-    public static func phase1SmokeTest()
+    public static func phase2SmokeTest()
         -> String
     {
 
@@ -67,13 +69,29 @@ public final class GMLuaRuntime {
 
             try runtime.execute(
                 """
-                print("Hello from SERVER Lua")
+                local t = {
+                    value = 42
+                }
 
-                local x = 20
-                local y = 22
+                function t:GetValue()
+                    return self.value
+                end
 
-                print(x + y)
-                print(2 + 3 * 4)
+                print(t:GetValue())
+
+                local function makeCounter()
+                    local n = 0
+
+                    return function()
+                        n = n + 1
+                        return n
+                    end
+                end
+
+                local counter = makeCounter()
+
+                print(counter())
+                print(counter())
                 """
             )
 
@@ -85,7 +103,8 @@ public final class GMLuaRuntime {
         }
 
         return lines.joined(
-            separator: "\n"
+            separator:
+                "\n"
         )
     }
 }
