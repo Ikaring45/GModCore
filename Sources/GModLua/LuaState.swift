@@ -9,7 +9,8 @@ final class LuaEnvironment {
         LuaEnvironment?
 
     init(
-        parent: LuaEnvironment? = nil
+        parent:
+            LuaEnvironment? = nil
     ) {
 
         self.parent =
@@ -36,10 +37,16 @@ final class LuaEnvironment {
         }
 
         if let parent {
-            return parent.get(name)
+
+            return parent.get(
+                name
+            )
         }
 
-        // Luaでは存在しないglobalはnil。
+        /*
+         Lua:
+         undefined global -> nil
+        */
         return .nilValue
     }
 
@@ -62,7 +69,8 @@ final class LuaEnvironment {
             return parent
                 .assignExisting(
                     name,
-                    value: value
+                    value:
+                        value
                 )
         }
 
@@ -81,21 +89,25 @@ public final class LuaState {
                 { print($0) }
     ) {
 
+        /*
+         Lua print()
+        */
         register(
             "print"
         ) { arguments in
 
-            let message =
+            let text =
                 arguments
                     .map {
                         $0.printable
                     }
                     .joined(
-                        separator: "\t"
+                        separator:
+                            "\t"
                     )
 
             output(
-                message
+                text
             )
 
             return []
@@ -124,7 +136,8 @@ public final class LuaState {
 
         globals.define(
             name,
-            value: value
+            value:
+                value
         )
     }
 
@@ -141,28 +154,25 @@ public final class LuaState {
         _ source: String
     ) throws {
 
-        let lexer =
-            LuaLexer(
-                source: source
-            )
-
         let tokens =
-            try lexer.tokenize()
+            try LuaLexer(
+                source:
+                    source
+            )
+            .tokenize()
 
-        let parser =
-            LuaParser(
+        let chunk =
+            try LuaParser(
                 tokens:
                     tokens
             )
-
-        let chunk =
-            try parser.parse()
+            .parse()
 
         /*
-         Top-level local variables belong
-         to this chunk.
+         1 chunkにつき
+         top-level local scopeを作る。
 
-         Globals live in `globals`.
+         globalsとは別。
         */
         let environment =
             LuaEnvironment(
@@ -170,16 +180,45 @@ public final class LuaState {
                     globals
             )
 
+        _ = try executeBlock(
+            chunk.statements,
+            environment:
+                environment
+        )
+    }
+
+    /*
+     nil:
+       blockが普通に終了
+
+     [LuaValue]:
+       returnが発生
+    */
+    private func executeBlock(
+        _ statements:
+            [LuaStatement],
+
+        environment:
+            LuaEnvironment
+    ) throws -> [LuaValue]? {
+
         for statement
-            in chunk.statements
+            in statements
         {
 
-            try execute(
-                statement,
-                environment:
-                    environment
-            )
+            if let returned =
+                try execute(
+                    statement,
+                    environment:
+                        environment
+                )
+            {
+
+                return returned
+            }
         }
+
+        return nil
     }
 
     private func execute(
@@ -188,7 +227,7 @@ public final class LuaState {
 
         environment:
             LuaEnvironment
-    ) throws {
+    ) throws -> [LuaValue]? {
 
         switch statement {
 
@@ -197,23 +236,16 @@ public final class LuaState {
             expression
         ):
 
-            let value:
-                LuaValue
+            let value =
+                try expression.map {
 
-            if let expression {
-
-                value =
                     try evaluate(
-                        expression,
+                        $0,
                         environment:
                             environment
                     )
 
-            } else {
-
-                value =
-                    .nilValue
-            }
+                } ?? .nilValue
 
             environment.define(
                 name,
@@ -221,8 +253,56 @@ public final class LuaState {
                     value
             )
 
-        case let .assignment(
+            return nil
+
+        /*
+         local function f()
+
+         Lua semanticsとして、
+
+         local f
+         f = function()
+
+         に近い。
+
+         先にlocalを作るので
+         再帰関数も後で対応できる。
+        */
+        case let .localFunction(
             name,
+            parameters,
+            body
+        ):
+
+            environment.define(
+                name,
+                value:
+                    .nilValue
+            )
+
+            let function =
+                LuaFunction(
+                    parameters:
+                        parameters,
+                    body:
+                        body,
+                    closure:
+                        environment
+                )
+
+            _ = environment
+                .assignExisting(
+                    name,
+                    value:
+                        .luaFunction(
+                            function
+                        )
+                )
+
+            return nil
+
+        case let .assignment(
+            target,
             expression
         ):
 
@@ -233,19 +313,57 @@ public final class LuaState {
                         environment
                 )
 
-            if !environment
-                .assignExisting(
-                    name,
-                    value:
-                        value
+            try assign(
+                target,
+                value:
+                    value,
+                environment:
+                    environment
+            )
+
+            return nil
+
+        case let .functionDeclaration(
+            target,
+            parameters,
+            body
+        ):
+
+            let function =
+                LuaFunction(
+                    parameters:
+                        parameters,
+                    body:
+                        body,
+                    closure:
+                        environment
                 )
-            {
-                globals.define(
-                    name,
-                    value:
-                        value
-                )
-            }
+
+            try assign(
+                target,
+                value:
+                    .luaFunction(
+                        function
+                    ),
+                environment:
+                    environment
+            )
+
+            return nil
+
+        case let .returnValues(
+            expressions
+        ):
+
+            return try expressions
+                .map {
+
+                    try evaluate(
+                        $0,
+                        environment:
+                            environment
+                    )
+                }
 
         case let .expression(
             expression
@@ -255,6 +373,77 @@ public final class LuaState {
                 expression,
                 environment:
                     environment
+            )
+
+            return nil
+        }
+    }
+
+    private func assign(
+        _ target:
+            LuaAssignmentTarget,
+
+        value:
+            LuaValue,
+
+        environment:
+            LuaEnvironment
+    ) throws {
+
+        switch target {
+
+        case let .variable(
+            name
+        ):
+
+            /*
+             既存localがあればそこへ。
+
+             なければglobal。
+            */
+            if !environment
+                .assignExisting(
+                    name,
+                    value:
+                        value
+                )
+            {
+
+                globals.define(
+                    name,
+                    value:
+                        value
+                )
+            }
+
+        case let .field(
+            baseExpression,
+            name
+        ):
+
+            let base =
+                try evaluate(
+                    baseExpression,
+                    environment:
+                        environment
+                )
+
+            guard
+                case let
+                    .table(table) =
+                    base
+            else {
+
+                throw LuaError.runtime(
+                    "attempt to index a " +
+                    "\(base.typeName) value"
+                )
+            }
+
+            table.setValue(
+                value,
+                forString:
+                    name
             )
         }
     }
@@ -269,19 +458,25 @@ public final class LuaState {
 
         switch expression {
 
-        case let .number(value):
+        case let .number(
+            value
+        ):
 
             return .number(
                 value
             )
 
-        case let .string(value):
+        case let .string(
+            value
+        ):
 
             return .string(
                 value
             )
 
-        case let .boolean(value):
+        case let .boolean(
+            value
+        ):
 
             return .boolean(
                 value
@@ -291,20 +486,133 @@ public final class LuaState {
 
             return .nilValue
 
-        case let .variable(name):
+        case let .variable(
+            name
+        ):
 
             return environment.get(
                 name
             )
 
+        /*
+         {
+             value = 42
+         }
+        */
+        case let .table(
+            fields
+        ):
+
+            let table =
+                LuaTable()
+
+            var arrayIndex =
+                1.0
+
+            for field in fields {
+
+                switch field {
+
+                case let .named(
+                    name,
+                    valueExpression
+                ):
+
+                    table.setValue(
+                        try evaluate(
+                            valueExpression,
+                            environment:
+                                environment
+                        ),
+                        forString:
+                            name
+                    )
+
+                case let .array(
+                    valueExpression
+                ):
+
+                    table.setValue(
+                        try evaluate(
+                            valueExpression,
+                            environment:
+                                environment
+                        ),
+                        forNumber:
+                            arrayIndex
+                    )
+
+                    arrayIndex += 1
+                }
+            }
+
+            return .table(
+                table
+            )
+
+        /*
+         anonymous function:
+
+         function()
+             ...
+         end
+        */
+        case let .function(
+            parameters,
+            body
+        ):
+
+            return .luaFunction(
+                LuaFunction(
+                    parameters:
+                        parameters,
+                    body:
+                        body,
+                    closure:
+                        environment
+                )
+            )
+
+        /*
+         self.value
+        */
+        case let .field(
+            baseExpression,
+            name
+        ):
+
+            let base =
+                try evaluate(
+                    baseExpression,
+                    environment:
+                        environment
+                )
+
+            guard
+                case let
+                    .table(table) =
+                    base
+            else {
+
+                throw LuaError.runtime(
+                    "attempt to index a " +
+                    "\(base.typeName) value"
+                )
+            }
+
+            return table.value(
+                forString:
+                    name
+            )
+
         case let .unary(
             operation,
-            expression
+            inner
         ):
 
             let value =
                 try evaluate(
-                    expression,
+                    inner,
                     environment:
                         environment
                 )
@@ -381,11 +689,6 @@ public final class LuaState {
 
             case .modulo:
 
-                /*
-                 Lua modulo semantics:
-                 a - floor(a / b) * b
-                */
-
                 return .number(
                     lhs -
                     floor(
@@ -394,14 +697,20 @@ public final class LuaState {
                 )
             }
 
+        /*
+         counter()
+         print(...)
+        */
         case let .call(
-            name,
+            calleeExpression,
             argumentExpressions
         ):
 
             let callable =
-                environment.get(
-                    name
+                try evaluate(
+                    calleeExpression,
+                    environment:
+                        environment
                 )
 
             let arguments =
@@ -415,22 +724,71 @@ public final class LuaState {
                         )
                     }
 
+            let results =
+                try call(
+                    callable,
+                    arguments:
+                        arguments
+                )
+
+            return
+                results.first ??
+                .nilValue
+
+        /*
+         t:GetValue()
+
+         receiverをselfとして
+         argument 0へ自動挿入。
+        */
+        case let .methodCall(
+            receiverExpression,
+            name,
+            argumentExpressions
+        ):
+
+            let receiver =
+                try evaluate(
+                    receiverExpression,
+                    environment:
+                        environment
+                )
+
             guard
-                case let .nativeFunction(
-                    function
-                ) =
-                    callable
+                case let
+                    .table(table) =
+                    receiver
             else {
 
                 throw LuaError.runtime(
-                    "attempt to call " +
-                    "a \(callable.typeName) value"
+                    "attempt to index a " +
+                    "\(receiver.typeName) value"
                 )
             }
 
+            let callable =
+                table.value(
+                    forString:
+                        name
+                )
+
+            let arguments =
+                try argumentExpressions
+                    .map {
+
+                        try evaluate(
+                            $0,
+                            environment:
+                                environment
+                        )
+                    }
+
             let results =
-                try function(
-                    arguments
+                try call(
+                    callable,
+                    arguments:
+                        [receiver] +
+                        arguments
                 )
 
             return
@@ -439,17 +797,103 @@ public final class LuaState {
         }
     }
 
+    private func call(
+        _ callable:
+            LuaValue,
+
+        arguments:
+            [LuaValue]
+    ) throws -> [LuaValue] {
+
+        switch callable {
+
+        /*
+         Swift側から登録した関数。
+        */
+        case let .nativeFunction(
+            function
+        ):
+
+            return try function(
+                arguments
+            )
+
+        /*
+         Luaで定義された関数。
+        */
+        case let .luaFunction(
+            function
+        ):
+
+            let callEnvironment =
+                LuaEnvironment(
+                    parent:
+                        function.closure
+                )
+
+            /*
+             足りない引数はnil。
+
+             余分な引数は
+             vararg未実装なので今は捨てる。
+            */
+            for (
+                index,
+                parameter
+            ) in function
+                .parameters
+                .enumerated()
+            {
+
+                callEnvironment.define(
+                    parameter,
+                    value:
+                        index <
+                            arguments.count
+
+                        ? arguments[index]
+
+                        : .nilValue
+                )
+            }
+
+            return try
+                executeBlock(
+                    function.body,
+                    environment:
+                        callEnvironment
+                ) ?? []
+
+        default:
+
+            throw LuaError.runtime(
+                "attempt to call a " +
+                "\(callable.typeName) value"
+            )
+        }
+    }
+
     private func numericValue(
-        _ value: LuaValue
+        _ value:
+            LuaValue
     ) throws -> Double {
 
         switch value {
 
-        case let .number(number):
+        case let .number(
+            number
+        ):
 
             return number
 
-        case let .string(string):
+        /*
+         Lua 5.1では
+         arithmetic時に数値文字列を
+         numberへcoerceする。
+        */
+        case let .string(
+            string
+        ):
 
             if let number =
                 Double(string)
