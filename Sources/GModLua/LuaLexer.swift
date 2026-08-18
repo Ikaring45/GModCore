@@ -1,10 +1,24 @@
-enum LuaTokenKind: Equatable {
+enum LuaTokenKind:
+    Equatable
+{
 
-    case identifier(String)
-    case number(Double)
-    case string(String)
+    case identifier(
+        String
+    )
+
+    case number(
+        Double
+    )
+
+    case string(
+        String
+    )
 
     case keywordLocal
+    case keywordFunction
+    case keywordEnd
+    case keywordReturn
+
     case keywordTrue
     case keywordFalse
     case keywordNil
@@ -18,19 +32,29 @@ enum LuaTokenKind: Equatable {
     case leftParen
     case rightParen
 
+    case leftBrace
+    case rightBrace
+
     case comma
     case equal
     case semicolon
+
+    case dot
+    case colon
 
     case eof
 }
 
 struct LuaToken {
 
-    let kind: LuaTokenKind
+    let kind:
+        LuaTokenKind
 
-    let line: Int
-    let column: Int
+    let line:
+        Int
+
+    let column:
+        Int
 }
 
 final class LuaLexer {
@@ -39,7 +63,9 @@ final class LuaLexer {
         [Character]
 
     private var index = 0
+
     private var line = 1
+
     private var column = 1
 
     init(
@@ -156,6 +182,26 @@ final class LuaLexer {
                     )
                 )
 
+            case "{":
+
+                tokens.append(
+                    token(
+                        .leftBrace,
+                        startLine,
+                        startColumn
+                    )
+                )
+
+            case "}":
+
+                tokens.append(
+                    token(
+                        .rightBrace,
+                        startLine,
+                        startColumn
+                    )
+                )
+
             case ",":
 
                 tokens.append(
@@ -186,13 +232,36 @@ final class LuaLexer {
                     )
                 )
 
+            case ".":
+
+                tokens.append(
+                    token(
+                        .dot,
+                        startLine,
+                        startColumn
+                    )
+                )
+
+            case ":":
+
+                tokens.append(
+                    token(
+                        .colon,
+                        startLine,
+                        startColumn
+                    )
+                )
+
             case "\"", "'":
 
                 let value =
                     try scanString(
-                        quote: character,
-                        line: startLine,
-                        column: startColumn
+                        quote:
+                            character,
+                        line:
+                            startLine,
+                        column:
+                            startColumn
                     )
 
                 tokens.append(
@@ -209,9 +278,12 @@ final class LuaLexer {
 
                     let value =
                         try scanNumber(
-                            first: character,
-                            line: startLine,
-                            column: startColumn
+                            first:
+                                character,
+                            line:
+                                startLine,
+                            column:
+                                startColumn
                         )
 
                     tokens.append(
@@ -246,8 +318,10 @@ final class LuaLexer {
                 } else {
 
                     throw LuaError.lexer(
-                        line: startLine,
-                        column: startColumn,
+                        line:
+                            startLine,
+                        column:
+                            startColumn,
                         message:
                             "unexpected character '\(character)'"
                     )
@@ -266,7 +340,10 @@ final class LuaLexer {
         return tokens
     }
 
-    private var isAtEnd: Bool {
+    private var isAtEnd:
+        Bool
+    {
+
         index >=
             characters.count
     }
@@ -282,9 +359,12 @@ final class LuaLexer {
         index += 1
 
         if value == "\n" {
+
             line += 1
             column = 1
+
         } else {
+
             column += 1
         }
 
@@ -322,6 +402,7 @@ final class LuaLexer {
             let value = peek(),
             value.isNumber
         {
+
             text.append(
                 advance()
             )
@@ -341,6 +422,7 @@ final class LuaLexer {
                 let value = peek(),
                 value.isNumber
             {
+
                 text.append(
                     advance()
                 )
@@ -392,18 +474,35 @@ final class LuaLexer {
         switch name {
 
         case "local":
+
             return .keywordLocal
 
+        case "function":
+
+            return .keywordFunction
+
+        case "end":
+
+            return .keywordEnd
+
+        case "return":
+
+            return .keywordReturn
+
         case "true":
+
             return .keywordTrue
 
         case "false":
+
             return .keywordFalse
 
         case "nil":
+
             return .keywordNil
 
         default:
+
             return .identifier(
                 name
             )
@@ -430,7 +529,8 @@ final class LuaLexer {
             if value == "\n" {
 
                 throw LuaError.lexer(
-                    line: startLine,
+                    line:
+                        startLine,
                     column:
                         startColumn,
                     message:
@@ -450,24 +550,43 @@ final class LuaLexer {
                 switch escaped {
 
                 case "n":
-                    result.append("\n")
+
+                    result.append(
+                        "\n"
+                    )
 
                 case "r":
-                    result.append("\r")
+
+                    result.append(
+                        "\r"
+                    )
 
                 case "t":
-                    result.append("\t")
+
+                    result.append(
+                        "\t"
+                    )
 
                 case "\\":
-                    result.append("\\")
+
+                    result.append(
+                        "\\"
+                    )
 
                 case "\"":
-                    result.append("\"")
+
+                    result.append(
+                        "\""
+                    )
 
                 case "'":
-                    result.append("'")
+
+                    result.append(
+                        "'"
+                    )
 
                 default:
+
                     result.append(
                         escaped
                     )
@@ -482,8 +601,10 @@ final class LuaLexer {
         }
 
         throw LuaError.lexer(
-            line: startLine,
-            column: startColumn,
+            line:
+                startLine,
+            column:
+                startColumn,
             message:
                 "unfinished string"
         )
