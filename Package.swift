@@ -11,15 +11,15 @@ let package = Package(
 
     products: [
         .library(
-            name: "GModCoreBinary",
-            targets: ["GModCoreBinary"]
+            name: "GModApp",
+            targets: ["GModApp"]
         )
     ],
 
     targets: [
-        .binaryTarget(
-            name: "GModCoreBinary",
-            path: "Binaries/GModCore.xcframework"
+        .target(
+            name: "GModApp",
+            path: "Sources/GModApp"
         )
     ]
 )
