@@ -89,7 +89,7 @@ public struct GModMainView:
 
             luaLog =
                 GMLuaRuntime
-                    .phase2SmokeTest()
+    .phase3SmokeTest()
         }
     }
 }
