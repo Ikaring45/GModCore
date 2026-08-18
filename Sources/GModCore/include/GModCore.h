@@ -6,42 +6,37 @@
 extern "C" {
 #endif
 
-typedef struct GMEngine GMEngine;
-
-typedef void (*GMLogCallback)(const char *message);
-
-/*
-    ABI
-*/
-
 uint32_t gm_abi_version(void);
 
-/*
-    Engine lifecycle
-*/
+uint32_t gm_create(void);
 
-GMEngine *gm_create(void);
-void gm_destroy(GMEngine *engine);
-
-void gm_boot(GMEngine *engine);
-
-/*
-    Debug / Test
-*/
-
-const char *gm_version(void);
-
-int32_t gm_test_add(
-    int32_t a,
-    int32_t b
+void gm_destroy(
+    uint32_t handle
 );
 
-/*
-    Logging
-*/
+int32_t gm_boot(
+    uint32_t handle
+);
 
-void gm_set_log_callback(
-    GMLogCallback callback
+uint32_t gm_frame(
+    uint32_t handle,
+    double deltaSeconds
+);
+
+double gm_tick_interval(void);
+
+uint32_t gm_tick_count(
+    uint32_t handle
+);
+
+uint32_t gm_is_running(
+    uint32_t handle
+);
+
+uint32_t gm_log_event_count(void);
+
+uint32_t gm_log_event(
+    uint32_t index
 );
 
 #ifdef __cplusplus
