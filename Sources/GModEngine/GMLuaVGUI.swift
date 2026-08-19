@@ -108,6 +108,9 @@ public struct GMLuaPanelRenderSnapshot: Equatable, Sendable {
     public let alpha: Double
     public let mouseInputEnabled: Bool
     public let keyboardInputEnabled: Bool
+    public let cursorName: String
+    public let drawOnTop: Bool
+    public let drawOnTopOrder: UInt64?
     public let text: LuaString
     public let fontName: LuaString
     public let foregroundColor: GMLuaPanelColorSnapshot?
@@ -146,6 +149,8 @@ private final class GMLuaPanelValue: @unchecked Sendable {
     var isVisible = true
     var mouseInputEnabled = true
     var keyboardInputEnabled = true
+    var cursorName = "none"
+    var drawOnTopOrder: UInt64?
     var paintBackgroundEnabled = true
     var paintBorderEnabled = true
     var zPosition = 0.0
@@ -153,6 +158,8 @@ private final class GMLuaPanelValue: @unchecked Sendable {
     var isPerformingLayout = false
     var text = LuaString(bytes: [])
     var fontName = LuaString("Default")
+    var textInsetX = 0
+    var textInsetY = 0
     var foregroundColor: GMLuaPanelColorSnapshot?
     var contentAlignment = 5
     var dock = GMLuaPanelDock.none
@@ -192,6 +199,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     private let typeSystem: GMLuaTypeSystem
     private let panelMetatable: LuaTable
     fileprivate let screenMetrics: GMLuaScreenMetrics?
+    private let surfaceCommandState: GMLuaSurfaceCommandState?
     private let lock = NSLock()
     private var controls: [String: LuaTable] = [:]
     private var panels: [Int: LuaValue] = [:]
@@ -203,17 +211,62 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     private var hoveredPanelIdentifier: Int?
     private var pressedPanelIdentifier: Int?
     private var focusedPanelIdentifier: Int?
+    private var latestDrawOnTopOrder: UInt64 = 0
 
     fileprivate init(
         state: LuaState,
         typeSystem: GMLuaTypeSystem,
         panelMetatable: LuaTable,
-        screenMetrics: GMLuaScreenMetrics?
+        screenMetrics: GMLuaScreenMetrics?,
+        surfaceCommandState: GMLuaSurfaceCommandState?
     ) {
         self.state = state
         self.typeSystem = typeSystem
         self.panelMetatable = panelMetatable
         self.screenMetrics = screenMetrics
+        self.surfaceCommandState = surfaceCommandState
+    }
+
+    fileprivate func labelContentSize(
+        _ panel: GMLuaPanelValue
+    ) throws -> GMLuaTextMeasurement {
+        guard let surfaceCommandState else {
+            throw LuaError.runtime(
+                "Panel:GetContentSize requires the shared surface text measurement boundary"
+            )
+        }
+        guard panel.imageName == nil else {
+            throw LuaError.runtime(
+                "Panel:GetContentSize cannot measure a Label image without a platform image boundary"
+            )
+        }
+
+        let fullContentSize = try surfaceCommandState.measureText(
+            panel.text,
+            usingFontNamed: panel.fontName,
+            fallbackFontNamed: LuaString("Default")
+        )
+        // Label.cpp replaces the current TextImage width with its full content
+        // width. With wrapping deliberately unsupported, both measurements are
+        // identical today, but retaining the two concepts prevents a future
+        // wrapped implementation from silently applying the wrong formula.
+        let currentTextImageSize = fullContentSize
+        let alignedContentWidth = currentTextImageSize.width
+        // Native Label.cpp uses max(current aligned TextImage height + the
+        // vertical inset, full content height). Original DLabel overrides the
+        // native PerformLayout without sizing that TextImage, so the current
+        // image height is zero throughout the bootstrap path. Do not add the
+        // inset to the full glyph height: the Windows oracle returns 14, not
+        // 27, for a 13px line with a 14px vertical inset.
+        let alignedContentHeight = 0
+        return GMLuaTextMeasurement(
+            width: alignedContentWidth + panel.textInsetX
+                - currentTextImageSize.width + fullContentSize.width,
+            height: max(
+                alignedContentHeight + panel.textInsetY,
+                fullContentSize.height
+            )
+        )
     }
 
     public var registeredControlCount: Int {
@@ -305,9 +358,35 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         lock.unlock()
     }
 
+    fileprivate func setDrawOnTop(identifier: Int, enabled: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let value = panels[identifier], let descriptor = panelDescriptor(from: value) else {
+            return
+        }
+        guard enabled else {
+            descriptor.drawOnTopOrder = nil
+            return
+        }
+        latestDrawOnTopOrder &+= 1
+        descriptor.drawOnTopOrder = latestDrawOnTopOrder
+    }
+
     /// Applies native docking and returns a stable back-to-front draw tree.
     /// Coordinates are physical drawable pixels, matching ScrW/ScrH.
     public func renderTree(viewportWidth: Int, viewportHeight: Int) -> [GMLuaPanelRenderSnapshot] {
+        renderTree(
+            viewportWidth: viewportWidth,
+            viewportHeight: viewportHeight,
+            placeDrawOnTopLast: true
+        )
+    }
+
+    private func renderTree(
+        viewportWidth: Int,
+        viewportHeight: Int,
+        placeDrawOnTopLast: Bool
+    ) -> [GMLuaPanelRenderSnapshot] {
         guard viewportWidth > 0, viewportHeight > 0 else { return [] }
         lock.lock()
         defer { lock.unlock() }
@@ -416,7 +495,8 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
             originX: Double,
             originY: Double,
             ancestorClip: GMLuaPanelRect,
-            ancestorAlpha: Double
+            ancestorAlpha: Double,
+            inheritedDrawOnTopOrder: UInt64?
         ) {
             let frame = GMLuaPanelRect(
                 x: originX + panel.x,
@@ -427,6 +507,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
             guard let ownClip = ancestorClip.intersection(frame) else { return }
             let effectiveAlpha = ancestorAlpha * panel.alpha / 255
             guard effectiveAlpha > 0 else { return }
+            let effectiveDrawOnTopOrder = panel.drawOnTopOrder ?? inheritedDrawOnTopOrder
             result.append(GMLuaPanelRenderSnapshot(
                 identifier: panel.identifier,
                 parentIdentifier: panel.parentIdentifier,
@@ -438,6 +519,9 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
                 alpha: effectiveAlpha,
                 mouseInputEnabled: panel.mouseInputEnabled,
                 keyboardInputEnabled: panel.keyboardInputEnabled,
+                cursorName: panel.cursorName,
+                drawOnTop: effectiveDrawOnTopOrder != nil,
+                drawOnTopOrder: effectiveDrawOnTopOrder,
                 text: panel.text,
                 fontName: panel.fontName,
                 foregroundColor: panel.foregroundColor,
@@ -451,7 +535,8 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
                     originX: frame.x,
                     originY: frame.y,
                     ancestorClip: childClip,
-                    ancestorAlpha: effectiveAlpha
+                    ancestorAlpha: effectiveAlpha,
+                    inheritedDrawOnTopOrder: effectiveDrawOnTopOrder
                 )
             }
         }
@@ -461,10 +546,22 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
                 originX: 0,
                 originY: 0,
                 ancestorClip: viewport,
-                ancestorAlpha: 255
+                ancestorAlpha: 255,
+                inheritedDrawOnTopOrder: nil
             )
         }
-        return result
+        guard placeDrawOnTopLast else { return result }
+        let normal = result.filter { !$0.drawOnTop }
+        let onTop = result.enumerated()
+            .filter { $0.element.drawOnTop }
+            .sorted {
+                let firstOrder = $0.element.drawOnTopOrder ?? 0
+                let secondOrder = $1.element.drawOnTopOrder ?? 0
+                if firstOrder != secondOrder { return firstOrder < secondOrder }
+                return $0.offset < $1.offset
+            }
+            .map(\.element)
+        return normal + onTop
     }
 
     /// Routes a UIKit touch through VGUI's existing Lua callbacks. The return
@@ -478,7 +575,14 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         viewportWidth: Int,
         viewportHeight: Int
     ) throws -> GMLuaPointerDispatchResult {
-        let tree = renderTree(viewportWidth: viewportWidth, viewportHeight: viewportHeight)
+        // SetDrawOnTop changes paint order only. Native VGUI keeps ordinary
+        // input stacking, so a visually raised panel can still be covered for
+        // hit-testing by a panel that would otherwise be in front of it.
+        let tree = renderTree(
+            viewportWidth: viewportWidth,
+            viewportHeight: viewportHeight,
+            placeDrawOnTopLast: false
+        )
         let hit = tree.reversed().first {
             $0.mouseInputEnabled && $0.clipRect.contains(x: x, y: y)
         }
@@ -1104,7 +1208,8 @@ public enum GMLuaVGUI {
     public static func install(
         into state: LuaState,
         typeSystem: GMLuaTypeSystem,
-        screenMetrics: GMLuaScreenMetrics? = nil
+        screenMetrics: GMLuaScreenMetrics? = nil,
+        surfaceCommandState: GMLuaSurfaceCommandState? = nil
     ) throws -> GMLuaVGUIRegistry {
         guard let panelMetatable = typeSystem.metatable(named: "Panel") else {
             throw LuaError.runtime("GLua Panel metatable was not installed")
@@ -1113,7 +1218,8 @@ public enum GMLuaVGUI {
             state: state,
             typeSystem: typeSystem,
             panelMetatable: panelMetatable,
-            screenMetrics: screenMetrics
+            screenMetrics: screenMetrics,
+            surfaceCommandState: surfaceCommandState
         )
         let semanticIndex = try state.executeReturningValues(
             "return function(container, key) return container[key] end",
@@ -1459,6 +1565,38 @@ public enum GMLuaVGUI {
                 let panel = try requiredTextPanel(arguments, "GetFont")
                 return [.string(panel.fontName)]
             }),
+            ("SetTextInset", { arguments in
+                let panel = try requiredLabel(arguments, "SetTextInset")
+                let x = try requiredCoercibleInteger(
+                    arguments,
+                    1,
+                    "SetTextInset"
+                )
+                let y = try requiredCoercibleInteger(
+                    arguments,
+                    2,
+                    "SetTextInset"
+                )
+                panel.textInsetX = x
+                panel.textInsetY = y
+                try registry.invalidateLayout(identifier: panel.identifier, layoutNow: false)
+                return []
+            }),
+            ("GetTextInset", { arguments in
+                let panel = try requiredLabel(arguments, "GetTextInset")
+                return [
+                    .number(Double(panel.textInsetX)),
+                    .number(Double(panel.textInsetY))
+                ]
+            }),
+            ("GetContentSize", { arguments in
+                let panel = try requiredLabel(arguments, "GetContentSize")
+                let measurement = try registry.labelContentSize(panel)
+                return [
+                    .number(Double(measurement.width)),
+                    .number(Double(measurement.height))
+                ]
+            }),
             ("SetFGColor", { arguments in
                 let panel = try requiredTextPanel(arguments, "SetFGColor")
                 panel.foregroundColor = try requiredPanelColor(
@@ -1550,6 +1688,21 @@ public enum GMLuaVGUI {
             ("IsKeyboardInputEnabled", { arguments in
                 [.boolean(try requiredPanel(arguments, "IsKeyboardInputEnabled").keyboardInputEnabled)]
             }),
+            ("SetCursor", { arguments in
+                let panel = try requiredPanel(arguments, "SetCursor")
+                panel.cursorName = normalizedCursorName(
+                    try requiredString(arguments, 1, "SetCursor")
+                )
+                return []
+            }),
+            ("SetDrawOnTop", { arguments in
+                let panel = try requiredPanel(arguments, "SetDrawOnTop")
+                registry.setDrawOnTop(
+                    identifier: panel.identifier,
+                    enabled: try optionalBoolean(arguments, 1, false, "SetDrawOnTop")
+                )
+                return []
+            }),
             ("RequestFocus", { arguments in
                 let panel = try requiredPanel(arguments, "RequestFocus")
                 registry.focus(identifier: panel.identifier)
@@ -1612,6 +1765,16 @@ public enum GMLuaVGUI {
             )
         }
     }
+}
+
+private let validCursorNames: Set<String> = [
+    "arrow", "beam", "hourglass", "waitarrow", "crosshair", "up",
+    "sizenwse", "sizenesw", "sizewe", "sizens", "sizeall", "no",
+    "hand", "blank"
+]
+
+private func normalizedCursorName(_ name: String) -> String {
+    validCursorNames.contains(name) ? name : "none"
 }
 
 private func nativeFunction(
@@ -1789,6 +1952,41 @@ private func requiredInteger(
     let integral = value.rounded(.towardZero)
     guard integral == value, integral >= Double(Int.min), integral < Double(Int.max) else {
         throw LuaError.runtime("bad argument #\(index) to '\(function)' (integer expected)")
+    }
+    return Int(integral)
+}
+
+private func requiredCoercibleInteger(
+    _ arguments: [LuaValue],
+    _ index: Int,
+    _ function: String
+) throws -> Int {
+    guard arguments.indices.contains(index) else {
+        throw LuaError.runtime(
+            "bad argument #\(index) to '\(function)' (number expected)"
+        )
+    }
+    let number: Double?
+    switch arguments[index] {
+    case let .number(value):
+        number = value
+    case let .string(value):
+        number = Double(
+            value.utf8String.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    default:
+        number = nil
+    }
+    guard let number, number.isFinite else {
+        throw LuaError.runtime(
+            "bad argument #\(index) to '\(function)' (number expected)"
+        )
+    }
+    let integral = number.rounded(.towardZero)
+    guard integral >= Double(Int.min), integral < Double(Int.max) else {
+        throw LuaError.runtime(
+            "bad argument #\(index) to '\(function)' (integer range expected)"
+        )
     }
     return Int(integral)
 }

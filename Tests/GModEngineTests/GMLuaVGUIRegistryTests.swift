@@ -254,6 +254,318 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
         XCTAssertNil(server.vguiRegistry)
     }
 
+    func testDButtonCursorStateUsesOfficialNamesAndInvalidFallbackInHostSnapshot() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: typeSystem)
+        try state.execute(
+            """
+            local BUTTON = {}
+            function BUTTON:Init()
+                self:SetCursor("hand")
+            end
+            vgui.Register("SyntheticDButton", BUTTON, "Panel")
+
+            BUTTON_PANEL = assert(vgui.Create("SyntheticDButton"))
+            BUTTON_PANEL:SetSize(100, 20)
+
+            FALLBACK_PANEL = assert(vgui.Create("Panel"))
+            FALLBACK_PANEL:SetPos(0, 30)
+            FALLBACK_PANEL:SetSize(100, 20)
+            FALLBACK_PANEL:SetCursor("unsupported-cursor")
+
+            BLANK_PANEL = assert(vgui.Create("Panel"))
+            BLANK_PANEL:SetPos(0, 60)
+            BLANK_PANEL:SetSize(100, 20)
+            BLANK_PANEL:SetCursor("blank")
+
+            local ok = pcall(FALLBACK_PANEL.SetCursor, FALLBACK_PANEL, nil)
+            assert(ok == false)
+            """,
+            sourceName: "@GMLuaDButtonCursorRegression.lua"
+        )
+
+        let tree = registry.renderTree(viewportWidth: 200, viewportHeight: 100)
+        let button = try XCTUnwrap(
+            tree.first(where: { $0.requestedClassName == "SyntheticDButton" })
+        )
+        XCTAssertEqual(button.cursorName, "hand")
+        XCTAssertEqual(
+            tree.first(where: { $0.identifier != button.identifier && $0.frame.y == 30 })?.cursorName,
+            "none"
+        )
+        XCTAssertEqual(tree.first(where: { $0.frame.y == 60 })?.cursorName, "blank")
+    }
+
+    func testDrawOnTopUsesLastCallPriorityAndFalseReturnsPanelToNormalOrder() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: typeSystem)
+        try state.execute(
+            """
+            vgui.Register("NormalPanel", {}, "Panel")
+            local FIRST_TOP = {}
+            function FIRST_TOP:OnMousePressed() POINTER_HIT = "first" end
+            vgui.Register("FirstTopPanel", FIRST_TOP, "Panel")
+            local SECOND_TOP = {}
+            function SECOND_TOP:OnMousePressed() POINTER_HIT = "second" end
+            vgui.Register("SecondTopPanel", SECOND_TOP, "Panel")
+
+            NORMAL_PANEL = assert(vgui.Create("NormalPanel"))
+            FIRST_TOP_PANEL = assert(vgui.Create("FirstTopPanel"))
+            SECOND_TOP_PANEL = assert(vgui.Create("SecondTopPanel"))
+            NORMAL_PANEL:SetSize(100, 100)
+            FIRST_TOP_PANEL:SetSize(100, 100)
+            SECOND_TOP_PANEL:SetSize(100, 100)
+
+            FIRST_TOP_PANEL:SetDrawOnTop(true)
+            SECOND_TOP_PANEL:SetDrawOnTop(true)
+            FIRST_TOP_PANEL:SetDrawOnTop(true)
+            """,
+            sourceName: "@GMLuaDrawOnTopRegression.lua"
+        )
+
+        var tree = registry.renderTree(viewportWidth: 100, viewportHeight: 100)
+        XCTAssertEqual(
+            tree.map(\.requestedClassName),
+            ["NormalPanel", "SecondTopPanel", "FirstTopPanel"]
+        )
+        XCTAssertFalse(tree[0].drawOnTop)
+        XCTAssertNil(tree[0].drawOnTopOrder)
+        XCTAssertTrue(tree[1].drawOnTop)
+        let secondTopOrder = try XCTUnwrap(tree[1].drawOnTopOrder)
+        let firstTopOrder = try XCTUnwrap(tree[2].drawOnTopOrder)
+        XCTAssertLessThan(secondTopOrder, firstTopOrder)
+        let pointer = try registry.dispatchPointerEvent(
+            x: 10,
+            y: 10,
+            phase: .began,
+            timestamp: 1,
+            viewportWidth: 100,
+            viewportHeight: 100
+        )
+        XCTAssertEqual(pointer.callbackNames, ["OnMousePressed"])
+        try state.execute(
+            "assert(POINTER_HIT == 'second')",
+            sourceName: "@GMLuaDrawOnTopInputOrderRegression.lua"
+        )
+
+        try state.execute(
+            "FIRST_TOP_PANEL:SetDrawOnTop(false)",
+            sourceName: "@GMLuaDrawOnTopReleaseRegression.lua"
+        )
+        tree = registry.renderTree(viewportWidth: 100, viewportHeight: 100)
+        XCTAssertEqual(
+            tree.map(\.requestedClassName),
+            ["NormalPanel", "FirstTopPanel", "SecondTopPanel"]
+        )
+        XCTAssertFalse(tree[1].drawOnTop)
+
+        try state.execute(
+            "SECOND_TOP_PANEL:SetDrawOnTop()",
+            sourceName: "@GMLuaDrawOnTopDefaultFalseRegression.lua"
+        )
+        tree = registry.renderTree(viewportWidth: 100, viewportHeight: 100)
+        XCTAssertEqual(
+            tree.map(\.requestedClassName),
+            ["NormalPanel", "FirstTopPanel", "SecondTopPanel"]
+        )
+        XCTAssertTrue(tree.allSatisfy { !$0.drawOnTop && $0.drawOnTopOrder == nil })
+    }
+
+    func testLabelInsetsAndNoWrapContentSizeUseSharedNamedSurfaceMeasurement() throws {
+        struct LabelOracleMeasurer: GMLuaTextMeasurer {
+            let fidelity = GMLuaTextMeasurementFidelity.platformGlyphMetrics
+
+            func measure(
+                _ text: LuaString,
+                using font: GMLuaFontDescriptor
+            ) -> GMLuaTextMeasurement {
+                let value = String(decoding: text.bytes, as: UTF8.self)
+                switch (font.name.utf8String, value) {
+                case ("Oracle", "ABC"):
+                    return GMLuaTextMeasurement(width: 20, height: 13)
+                case ("Oracle", ""):
+                    return GMLuaTextMeasurement(width: 0, height: 13)
+                case ("Oracle", "ABC\nDEF"):
+                    return GMLuaTextMeasurement(width: 24, height: 26)
+                case ("Default", "fallback"):
+                    return GMLuaTextMeasurement(width: 41, height: 13)
+                default:
+                    return GMLuaTextMeasurement(width: 900, height: 900)
+                }
+            }
+        }
+
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let surface = try GMLuaSurface.install(
+            into: state,
+            textMeasurer: LabelOracleMeasurer()
+        )
+        _ = try GMLuaVGUI.install(
+            into: state,
+            typeSystem: typeSystem,
+            surfaceCommandState: surface
+        )
+
+        try state.execute(
+            """
+            surface.CreateFont("Oracle", { size = 31 })
+            surface.SetFont("Trebuchet24")
+
+            LABEL = assert(vgui.Create("Label"))
+            LABEL:SetFontInternal("oRaClE")
+            LABEL:SetText("ABC")
+            local w, h = LABEL:GetContentSize()
+            assert(w == 20 and h == 13)
+
+            LABEL:SetTextInset("7", "3", "ignored extra argument")
+            local ix, iy = LABEL:GetTextInset()
+            assert(ix == 7 and iy == 3)
+            w, h = LABEL:GetContentSize()
+            assert(w == 27 and h == 13)
+
+            LABEL:SetText("")
+            w, h = LABEL:GetContentSize()
+            assert(w == 7 and h == 13)
+
+            LABEL:SetText("ABC\\nDEF")
+            w, h = LABEL:GetContentSize()
+            assert(w == 31 and h == 26)
+
+            -- Label.cpp takes max(current TextImage height + insetY,
+            -- full content height). The DLabel bootstrap has a zero-height
+            -- current TextImage, matching the authenticated Windows oracle.
+            LABEL:SetTextInset(0, 14)
+            w, h = LABEL:GetContentSize()
+            assert(w == 24 and h == 26)
+            LABEL:SetTextInset(0, 100)
+            w, h = LABEL:GetContentSize()
+            assert(w == 24 and h == 100)
+            LABEL:SetTextInset(0, -3)
+            w, h = LABEL:GetContentSize()
+            assert(w == 24 and h == 26)
+
+            LABEL:SetText("ABC")
+            LABEL:SetTextInset(0, 3)
+            w, h = LABEL:GetContentSize()
+            assert(w == 20 and h == 13)
+            LABEL:SetTextInset(0, 14)
+            w, h = LABEL:GetContentSize()
+            assert(w == 20 and h == 14)
+            LABEL:SetTextInset(0, 100)
+            w, h = LABEL:GetContentSize()
+            assert(w == 20 and h == 100)
+            LABEL:SetTextInset(0, -3)
+            w, h = LABEL:GetContentSize()
+            assert(w == 20 and h == 13)
+
+            LABEL:SetText("")
+            LABEL:SetTextInset(0, 14)
+            w, h = LABEL:GetContentSize()
+            assert(w == 0 and h == 14)
+            LABEL:SetTextInset(0, 100)
+            w, h = LABEL:GetContentSize()
+            assert(w == 0 and h == 100)
+            LABEL:SetTextInset(0, -3)
+            w, h = LABEL:GetContentSize()
+            assert(w == 0 and h == 13)
+
+            LABEL:SetText("ABC")
+            LABEL:SetTextInset(-10, 0)
+            w, h = LABEL:GetContentSize()
+            assert(w == 10 and h == 13)
+            LABEL:SetTextInset(1000, 0)
+            w, h = LABEL:GetContentSize()
+            assert(w == 1020 and h == 13)
+            LABEL:SetTextInset(7.9, 3.9)
+            ix, iy = LABEL:GetTextInset()
+            assert(ix == 7 and iy == 3)
+            LABEL:SetTextInset(-7.9, -3.9)
+            ix, iy = LABEL:GetTextInset()
+            assert(ix == -7 and iy == -3)
+            LABEL:SetTextInset("7.9", "3.9")
+            ix, iy = LABEL:GetTextInset()
+            assert(ix == 7 and iy == 3)
+
+            local missingY = pcall(LABEL.SetTextInset, LABEL, 19)
+            assert(missingY == false)
+            ix, iy = LABEL:GetTextInset()
+            assert(ix == 7 and iy == 3)
+
+            local panel = assert(vgui.Create("Panel"))
+            assert(pcall(panel.GetContentSize, panel) == false)
+            assert(type(LABEL.SetWrap) == "nil")
+
+            LABEL:SetFontInternal("FontThatDoesNotExist")
+            LABEL:SetText("fallback")
+            w, h = LABEL:GetContentSize()
+            assert(w == 48 and h == 13)
+            """,
+            sourceName: "@GMLuaLabelContentSizeOracle.lua"
+        )
+
+        XCTAssertEqual(surface.selectedFontName, LuaString("Trebuchet24"))
+        XCTAssertEqual(surface.textMeasurementFidelity, .platformGlyphMetrics)
+    }
+
+    func testSyntheticDButtonSizeToContentsXUsesLabelContentWidthFormula() throws {
+        struct ButtonOracleMeasurer: GMLuaTextMeasurer {
+            let fidelity = GMLuaTextMeasurementFidelity.platformGlyphMetrics
+
+            func measure(
+                _ text: LuaString,
+                using font: GMLuaFontDescriptor
+            ) -> GMLuaTextMeasurement {
+                XCTAssertEqual(font.name, LuaString("Default"))
+                XCTAssertEqual(text, LuaString("ABC"))
+                return GMLuaTextMeasurement(width: 20, height: 13)
+            }
+        }
+
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let surface = try GMLuaSurface.install(
+            into: state,
+            textMeasurer: ButtonOracleMeasurer()
+        )
+        _ = try GMLuaVGUI.install(
+            into: state,
+            typeSystem: typeSystem,
+            surfaceCommandState: surface
+        )
+        try state.execute(
+            """
+            local BUTTON = {}
+            function BUTTON:SizeToContentsX(addVal)
+                local w, h = self:GetContentSize()
+                self:SetWide(w + 8 + (addVal or 0))
+            end
+            vgui.Register("SyntheticDButtonSize", BUTTON, "Label")
+
+            local button = assert(vgui.Create("SyntheticDButtonSize"))
+            button:SetText("ABC")
+            button:SetTextInset(7, 3)
+            button:SizeToContentsX(16)
+            assert(button:GetWide() == 51)
+            """,
+            sourceName: "@GMLuaDButtonSizeToContentsXRegression.lua"
+        )
+    }
+
     func testRenderTreeAppliesDockingClippingZOrderAndTextStateAtIPadViewport() throws {
         let state = LuaState(output: { _ in })
         let typeSystem = try GMLuaTypeSystem.install(

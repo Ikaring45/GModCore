@@ -316,10 +316,13 @@ public final class GMLuaRuntime {
                     initialViewport: initialViewport
                 )
                 screenMetrics = installedScreenMetrics
+                let installedSurfaceCommandState = try GMLuaSurface.install(into: state)
+                surfaceCommandState = installedSurfaceCommandState
                 let installedVGUIRegistry = try GMLuaVGUI.install(
                     into: state,
                     typeSystem: installedTypeSystem,
-                    screenMetrics: installedScreenMetrics
+                    screenMetrics: installedScreenMetrics,
+                    surfaceCommandState: installedSurfaceCommandState
                 )
                 vguiRegistry = installedVGUIRegistry
                 dermaRegistry = try GMLuaDerma.install(
@@ -336,7 +339,6 @@ public final class GMLuaRuntime {
                     into: state,
                     fileSystem: presetFileSystem
                 )
-                surfaceCommandState = try GMLuaSurface.install(into: state)
             }
         } catch {
             // Initialization stays source-compatible with existing callers;

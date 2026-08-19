@@ -217,6 +217,32 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
         return textMeasurer.measure(text, using: descriptor)
     }
 
+    /// Measures with a named font without changing `surface`'s selected font.
+    /// VGUI controls own their font selection independently from the immediate
+    /// mode surface API, so consulting a Label must not leak into later draws.
+    public func measureText(
+        _ text: LuaString,
+        usingFontNamed name: LuaString,
+        fallbackFontNamed fallbackName: LuaString? = nil
+    ) throws -> GMLuaTextMeasurement {
+        let descriptor: GMLuaFontDescriptor
+        lock.lock()
+        if let selected = fontDescriptors[Self.canonicalFontName(name)] {
+            descriptor = selected
+            lock.unlock()
+        } else if let fallbackName,
+                  let fallback = fontDescriptors[Self.canonicalFontName(fallbackName)] {
+            descriptor = fallback
+            lock.unlock()
+        } else {
+            lock.unlock()
+            throw LuaError.runtime(
+                "surface text measurement: invalid font '\(name.utf8String)'"
+            )
+        }
+        return textMeasurer.measure(text, using: descriptor)
+    }
+
     public func beginFrame(viewportWidth: Int, viewportHeight: Int) {
         lock.lock()
         self.viewportWidth = max(0, viewportWidth)

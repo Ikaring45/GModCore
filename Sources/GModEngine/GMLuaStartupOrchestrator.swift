@@ -12,6 +12,7 @@ public enum GMLuaStartupStage: String, Sendable, Equatable {
     case realmAutorun
     case addons
     case targetGamemode
+    case onGamemodeLoaded
     case postGamemodeLoaded
     case initialize
     case playerConnection
@@ -122,7 +123,7 @@ public enum GMLuaStartupError: Error, CustomStringConvertible {
 ///
 /// CLIENT Derma bootstrap -> Base -> shared autorun -> realm autorun -> addon boundary
 ///      -> postprocess -> VGUI controls -> material proxies -> Default skin -> target
-///      -> PostGamemodeLoaded -> Initialize -> InitPostEntity
+///      -> OnGamemodeLoaded -> PostGamemodeLoaded -> Initialize -> InitPostEntity
 ///
 /// The game client does not use the menu realm's `lua/includes/vgui_base.lua`.
 /// It loads `lua/derma/init.lua` before Base, then the visible direct Lua files
@@ -258,6 +259,13 @@ public final class GMLuaStartupOrchestrator {
                 : "target loaded after autorun; cached Base was not re-executed"
         )
 
+        try dispatchLifecycle(
+            event: "OnGamemodeLoaded",
+            stage: .onGamemodeLoaded,
+            runtime: runtime,
+            loader: loader,
+            targetName: targetReport.requestedName
+        )
         try dispatchLifecycle(
             event: "PostGamemodeLoaded",
             stage: .postGamemodeLoaded,

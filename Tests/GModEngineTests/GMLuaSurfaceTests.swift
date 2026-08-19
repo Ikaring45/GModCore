@@ -184,6 +184,34 @@ final class GMLuaSurfaceTests: XCTestCase {
         XCTAssertNil(server.surfaceCommandState)
     }
 
+    func testRuntimeSharesSurfaceFontCatalogWithVGUIWithoutChangingSurfaceSelection() throws {
+        let runtime = GMLuaRuntime(
+            realm: .client,
+            logger: { _ in },
+            bootstrapMode: .strict
+        )
+        try runtime.execute(
+            """
+            surface.CreateFont("RuntimeLabelShared", { size = 22 })
+            surface.SetFont("Default")
+
+            local label = assert(vgui.Create("Label"))
+            label:SetFontInternal("runtimelabelshared")
+            label:SetText("abcd")
+            local labelWidth, labelHeight = label:GetContentSize()
+            assert(labelWidth == 44 and labelHeight == 22)
+
+            local surfaceWidth, surfaceHeight = surface.GetTextSize("abcd")
+            assert(surfaceWidth == 26 and surfaceHeight == 13)
+            """,
+            sourceName: "@GMLuaRuntimeSharedSurfaceVGUIFontCatalog.lua"
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(runtime.surfaceCommandState).selectedFontName,
+            LuaString("Default")
+        )
+    }
+
     func testPanelPaintProducesClippedRendererCommandsWithoutClaimingGPUBacking() throws {
         let runtime = GMLuaRuntime(
             realm: .client,

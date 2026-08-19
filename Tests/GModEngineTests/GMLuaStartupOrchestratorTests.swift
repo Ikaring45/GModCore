@@ -30,6 +30,7 @@ final class GMLuaStartupOrchestratorTests: XCTestCase {
             .realmAutorun,
             .addons,
             .targetGamemode,
+            .onGamemodeLoaded,
             .postGamemodeLoaded,
             .initialize,
             .initPostEntity
@@ -42,7 +43,8 @@ final class GMLuaStartupOrchestratorTests: XCTestCase {
             """
             assert(table.concat(STARTUP_ORDER, ",") ==
                 "base,shared-10,shared-nested,shared-20,server-05,sandbox," ..
-                "hook-post,gm-post,hook-init,gm-init,hook-entity,gm-entity")
+                "hook-on,gm-on,hook-post,gm-post,hook-init,gm-init," ..
+                "hook-entity,gm-entity")
             assert(SERVER and not CLIENT)
             assert(VGUI_BOOTSTRAPPED == nil)
             """,
@@ -70,6 +72,7 @@ final class GMLuaStartupOrchestratorTests: XCTestCase {
             .clientMaterialProxyBootstrap,
             .clientDefaultSkinBootstrap,
             .targetGamemode,
+            .onGamemodeLoaded,
             .postGamemodeLoaded,
             .initialize,
             .playerConnection,
@@ -117,7 +120,8 @@ final class GMLuaStartupOrchestratorTests: XCTestCase {
                 "derma,derma-core,base,shared-10,shared-nested,shared-20," ..
                 "client-07,post-10,post-20,vgui-10,vgui-nested,vgui-20," ..
                 "matproxy-10,skin,sandbox," ..
-                "hook-post,gm-post,hook-init,gm-init,hook-entity,gm-entity")
+                "hook-on,gm-on,hook-post,gm-post,hook-init,gm-init," ..
+                "hook-entity,gm-entity")
             assert(CLIENT and not SERVER)
             assert(DERMA_BOOTSTRAPPED and VGUI_BOOTSTRAPPED and DEFAULT_SKIN_LOADED)
             assert(MENU_VGUI_BASE_EXECUTED == nil)
@@ -182,7 +186,8 @@ final class GMLuaStartupOrchestratorTests: XCTestCase {
                 "derma,derma-core,base,shared-10,shared-nested,shared-20," ..
                 "client-07,post-10,post-20,vgui-10,vgui-nested,vgui-20," ..
                 "matproxy-10,skin,sandbox," ..
-                "hook-post,gm-post,hook-init,gm-init,connection,hook-entity,gm-entity")
+                "hook-on,gm-on,hook-post,gm-post,hook-init,gm-init," ..
+                "connection,hook-entity,gm-entity")
             """
         )
     }
@@ -220,7 +225,7 @@ final class GMLuaStartupOrchestratorTests: XCTestCase {
                 "derma,derma-core,base,shared-10,shared-nested,shared-20," ..
                 "client-07,post-10,post-20,vgui-10,vgui-nested,vgui-20," ..
                 "matproxy-10,skin,sandbox," ..
-                "hook-post,gm-post,hook-init,gm-init")
+                "hook-on,gm-on,hook-post,gm-post,hook-init,gm-init")
             """
         )
     }
@@ -444,6 +449,10 @@ final class GMLuaStartupOrchestratorTests: XCTestCase {
         assert(GM.FolderName == "sandbox")
         if CLIENT then assert(DEFAULT_SKIN_LOADED) end
         table.insert(STARTUP_ORDER, "sandbox")
+        function GM:OnGamemodeLoaded()
+            if CLIENT then assert(LocalPlayer() == NULL) end
+            table.insert(STARTUP_ORDER, "gm-on")
+        end
         function GM:PostGamemodeLoaded() table.insert(STARTUP_ORDER, "gm-post") end
         function GM:Initialize() table.insert(STARTUP_ORDER, "gm-init") end
         function GM:InitPostEntity()
@@ -492,6 +501,10 @@ final class GMLuaStartupOrchestratorTests: XCTestCase {
                 local callback = gm and gm[event]
                 if callback then return callback(gm, ...) end
             end
+            hook.Add("OnGamemodeLoaded", "fixture", function()
+                if CLIENT then assert(LocalPlayer() == NULL) end
+                table.insert(STARTUP_ORDER, "hook-on")
+            end)
             hook.Add("PostGamemodeLoaded", "fixture", function()
                 table.insert(STARTUP_ORDER, "hook-post")
             end)
