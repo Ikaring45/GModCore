@@ -466,18 +466,18 @@ extension LuaState {
                 return [.number(Double(self.garbageCollector.restart()))]
             case "step":
                 let size = arguments.count > 1
-                    ? Int(try self.numberFromValue(arguments[1]))
+                    ? try self.collectGarbageIntegerArgument(arguments[1])
                     : 0
                 return [.boolean(try self.garbageCollector.step(size))]
             case "count": return [.number(self.estimatedMemoryKilobytes())]
             case "setpause":
                 let value = arguments.count > 1
-                    ? Int(try self.numberFromValue(arguments[1]))
+                    ? try self.collectGarbageIntegerArgument(arguments[1])
                     : 0
                 return [.number(Double(self.garbageCollector.setPause(value)))]
             case "setstepmul":
                 let value = arguments.count > 1
-                    ? Int(try self.numberFromValue(arguments[1]))
+                    ? try self.collectGarbageIntegerArgument(arguments[1])
                     : 0
                 return [.number(Double(self.garbageCollector.setStepMultiplier(value)))]
             default: throw LuaError.runtime("bad argument #1 to 'collectgarbage' (invalid option)")
@@ -1895,6 +1895,21 @@ extension LuaState {
     func numberFromValue(_ value: LuaValue) throws -> Double {
         if let number = coerceNumber(value) { return number }
         throw LuaError.runtime("number expected, got \(value.typeName)")
+    }
+
+    func collectGarbageIntegerArgument(_ value: LuaValue) throws -> Int {
+        let number = try numberFromValue(value)
+        let truncated = number.rounded(.towardZero)
+        let lowerInclusive = Double(Int.min)
+        let upperExclusive = -lowerInclusive
+        guard truncated.isFinite,
+              truncated >= lowerInclusive,
+              truncated < upperExclusive else {
+            throw LuaError.runtime(
+                "bad argument #2 to 'collectgarbage' (number has no integer representation)"
+            )
+        }
+        return Int(truncated)
     }
 
     func stringFromValue(_ value: LuaValue) throws -> String {

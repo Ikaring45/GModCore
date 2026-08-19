@@ -1615,9 +1615,21 @@ public final class LuaState {
     private func primitiveConcatString(_ value: LuaValue) -> LuaString? {
         switch value {
         case let .string(string): return string
-        case .number: return LuaString(value.printable)
+        case .number: return allocatedLuaString(value.printable)
         default: return nil
         }
+    }
+
+    private func allocatedLuaString(_ value: String) -> LuaString {
+        let string = LuaString(value)
+        garbageCollector.accountStringAllocation(string)
+        return string
+    }
+
+    private func allocatedLuaString(bytes: [UInt8]) -> LuaString {
+        let string = LuaString(bytes: bytes)
+        garbageCollector.accountStringAllocation(string)
+        return string
     }
 
     private func evaluateConcatenation(
@@ -1653,7 +1665,7 @@ public final class LuaState {
             var bytes: [UInt8] = []
             bytes.reserveCapacity(Int(total))
             for piece in pieces { bytes.append(contentsOf: piece.bytes) }
-            return .string(LuaString(bytes: bytes))
+            return .string(allocatedLuaString(bytes: bytes))
         }
 
         guard var result = values.last else { return .string("") }
@@ -1663,7 +1675,7 @@ public final class LuaState {
                 guard count <= UInt64(UInt32.max) else {
                     throw LuaError.runtime("string length overflow")
                 }
-                result = .string(LuaString(bytes: a.bytes + b.bytes))
+                result = .string(allocatedLuaString(bytes: a.bytes + b.bytes))
             } else if let metamethodResult = try callBinaryMetamethod(value, result, name: "__concat") {
                 result = metamethodResult
             } else {
