@@ -11,6 +11,14 @@ var products: [Product] = [
 
 var targets: [Target] = [
     .target(
+        name: "GModGameAssets",
+        path: "Sources/GModGameAssets",
+        resources: [
+            .copy("Resources")
+        ]
+    ),
+
+    .target(
         name: "GModImageDecode",
         path: "Sources/GModImageDecode",
         publicHeadersPath: "include",
@@ -64,7 +72,8 @@ var targets: [Target] = [
         name: "GModEngineTests",
         dependencies: [
             "GModEngine",
-            "GModLua"
+            "GModLua",
+            "GModGameAssets"
         ],
         path: "Tests/GModEngineTests",
         resources: [
@@ -99,7 +108,8 @@ targets.insert(
             name: "GModApp",
             dependencies: [
                 "GModEngine",
-                "GModMetal"
+                "GModMetal",
+                "GModGameAssets"
             ],
             path: "Sources/GModApp",
             resources: [
