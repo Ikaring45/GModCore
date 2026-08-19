@@ -1,0 +1,500 @@
+name: Validate iPadOS Libraries and Installable Host
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "Apps/GarrysPAD/**"
+      - "Package.swift"
+      - "Sources/**"
+      - "Tests/**"
+      - "Tools/iPadValidation/**"
+      - ".github/workflows/validate-ipados.yml"
+  push:
+    paths:
+      - "Apps/GarrysPAD/**"
+      - "Package.swift"
+      - "Sources/**"
+      - "Tests/**"
+      - "Tools/iPadValidation/**"
+      - ".github/workflows/validate-ipados.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-ipados-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APP_PROJECT: Apps/GarrysPAD/GarrysPAD.xcodeproj
+  APP_SCHEME: GarrysPAD
+  APP_BUNDLE_ID: org.example.GarrysPAD
+
+jobs:
+  validate-ipados:
+    name: iPadOS libraries, app, launch, and XCTest
+    runs-on: macos-15
+    timeout-minutes: 75
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Verify bundled map LFS payloads
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          resource_root = Path("Sources/GModGameAssets/Resources")
+          manifest_path = resource_root / "GModGameAssetManifest.json"
+          with manifest_path.open(encoding="utf-8") as handle:
+              manifest = json.load(handle)
+
+          assets = manifest.get("assets", [])
+          if len(assets) != 6:
+              raise SystemExit(f"expected 6 bundled map files, found {len(assets)}")
+
+          lfs_pointer_prefix = b"version https://git-lfs.github.com/spec/v1"
+          for entry in assets:
+              logical = entry["logicalPath"]
+              parts = Path(logical).parts
+              if not parts or parts[0].lower() != "maps":
+                  raise SystemExit(f"unexpected map manifest path: {logical}")
+              payload_path = resource_root / "Maps" / Path(*parts[1:])
+              payload = payload_path.read_bytes()
+              if payload.startswith(lfs_pointer_prefix):
+                  raise SystemExit(f"Git LFS pointer was not hydrated: {payload_path}")
+              if len(payload) != entry["byteCount"]:
+                  raise SystemExit(f"map byte-count mismatch: {payload_path}")
+              digest = hashlib.sha256(payload).hexdigest()
+              if digest != entry["sha256"]:
+                  raise SystemExit(f"map SHA-256 mismatch: {payload_path}")
+              if payload_path.suffix.lower() == ".bsp" and payload[:4] != b"VBSP":
+                  raise SystemExit(f"invalid BSP signature: {payload_path}")
+
+          print("Verified 6 hydrated bundled map payloads against the declared manifest")
+          PY
+
+      - name: Record Apple toolchain and SDKs
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "arm64"
+          xcodebuild -version
+          swift --version
+          xcrun --sdk iphoneos --show-sdk-path
+          xcrun --sdk iphonesimulator --show-sdk-path
+          xcrun simctl list runtimes available
+
+      - name: Validate checked-in host contract
+        run: |
+          set -euo pipefail
+          python3 Tools/iPadValidation/validate-host-project.py "$GITHUB_WORKSPACE"
+
+      - name: Validate Swift package libraries and discover Xcode schemes
+        id: package
+        run: |
+          set -euo pipefail
+
+          manifest_json="$RUNNER_TEMP/gmod-package.json"
+          dependencies_json="$RUNNER_TEMP/gmod-dependencies.json"
+          package_schemes_json="$RUNNER_TEMP/gmod-package-schemes.json"
+          host_schemes_json="$RUNNER_TEMP/gmod-host-schemes.json"
+
+          swift package dump-package > "$manifest_json"
+          swift package show-dependencies --format json > "$dependencies_json"
+          xcodebuild -list -json > "$package_schemes_json"
+          xcodebuild -list -json -project "$APP_PROJECT" > "$host_schemes_json"
+
+          python3 - \
+            "$manifest_json" \
+            "$dependencies_json" \
+            "$package_schemes_json" \
+            "$host_schemes_json" <<'PY'
+          import json
+          import os
+          import sys
+
+          (
+              manifest_path,
+              dependencies_path,
+              package_schemes_path,
+              host_schemes_path,
+          ) = sys.argv[1:]
+          with open(manifest_path, encoding="utf-8") as handle:
+              manifest = json.load(handle)
+          with open(dependencies_path, encoding="utf-8") as handle:
+              dependencies = json.load(handle)
+          with open(package_schemes_path, encoding="utf-8") as handle:
+              package_listing = json.load(handle)
+          with open(host_schemes_path, encoding="utf-8") as handle:
+              host_listing = json.load(handle)
+
+          required_library_targets = {
+              "GModApp",
+              "GModMetal",
+              "GModGameSession",
+              "GModEngine",
+          }
+          target_names = {target["name"] for target in manifest.get("targets", [])}
+          missing_targets = sorted(required_library_targets - target_names)
+          if missing_targets:
+              raise SystemExit(
+                  "Apple manifest graph is missing library targets: "
+                  + ", ".join(missing_targets)
+              )
+
+          required_test_targets = {"GModAppTests", "GModEngineTests"}
+          missing_test_targets = sorted(required_test_targets - target_names)
+          if missing_test_targets:
+              raise SystemExit(
+                  "Apple manifest graph is missing test targets: "
+                  + ", ".join(missing_test_targets)
+              )
+
+          ios_versions = [
+              platform.get("version")
+              for platform in manifest.get("platforms", [])
+              if platform.get("platformName") == "ios"
+          ]
+          if ios_versions != ["16.0"]:
+              raise SystemExit(
+                  "Expected exact iOS deployment floor 16.0; found: "
+                  + repr(ios_versions)
+              )
+
+          products = {
+              product["name"]: set(product.get("targets", []))
+              for product in manifest.get("products", [])
+          }
+          if products.get("GModApp") != {"GModApp"}:
+              raise SystemExit(
+                  "GModApp must remain a package library product consumed by "
+                  "the checked-in application target"
+              )
+
+          package_schemes = set()
+          for container_name in ("workspace", "project"):
+              package_schemes.update(
+                  package_listing.get(container_name, {}).get("schemes", [])
+              )
+          package_name = manifest.get("name")
+          if not isinstance(package_name, str) or not package_name:
+              raise SystemExit("dump-package returned no package name")
+          expected_test_scheme = f"{package_name}-Package"
+          aggregate_test_schemes = sorted(
+              scheme for scheme in package_schemes if scheme.endswith("-Package")
+          )
+          if expected_test_scheme in aggregate_test_schemes:
+              test_scheme = expected_test_scheme
+          elif len(aggregate_test_schemes) == 1:
+              test_scheme = aggregate_test_schemes[0]
+          else:
+              raise SystemExit(
+                  "Could not identify one aggregate package test scheme. "
+                  "Discovered package schemes: "
+                  + ", ".join(sorted(package_schemes))
+              )
+
+          host_project = host_listing.get("project", {})
+          host_targets = set(host_project.get("targets", []))
+          host_schemes = set(host_project.get("schemes", []))
+          expected_host_targets = {"GarrysPAD", "GarrysPADUITests"}
+          missing_host_targets = sorted(expected_host_targets - host_targets)
+          if missing_host_targets:
+              raise SystemExit(
+                  "Checked-in Xcode project is missing targets: "
+                  + ", ".join(missing_host_targets)
+              )
+          if os.environ["APP_SCHEME"] not in host_schemes:
+              raise SystemExit(
+                  f"Checked-in host scheme {os.environ['APP_SCHEME']!r} was not "
+                  "discovered by xcodebuild: "
+                  + ", ".join(sorted(host_schemes))
+              )
+
+          dependency_name = dependencies.get("name")
+          if dependency_name != package_name:
+              raise SystemExit(
+                  "show-dependencies root does not match dump-package: "
+                  f"{dependency_name!r} != {package_name!r}"
+              )
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"test_scheme={test_scheme}\n")
+
+          print(
+              "Swift package library targets:",
+              ", ".join(sorted(required_library_targets)),
+          )
+          print("Package XCTest scheme:", test_scheme)
+          print("Installable host targets:", ", ".join(sorted(host_targets)))
+          print("Installable host scheme:", os.environ["APP_SCHEME"])
+          PY
+
+      - name: Build each iPadOS arm64 Swift package library strictly
+        env:
+          IOS_TRIPLE: arm64-apple-ios16.0
+        run: |
+          set -euo pipefail
+
+          ios_sdk="$(xcrun --sdk iphoneos --show-sdk-path)"
+          target_info="$RUNNER_TEMP/gmod-ios-target-info.json"
+          scratch="$RUNNER_TEMP/gmod-swiftpm-iphoneos"
+
+          swiftc \
+            -print-target-info \
+            -target "$IOS_TRIPLE" \
+            -sdk "$ios_sdk" \
+            > "$target_info"
+
+          python3 - "$target_info" "$IOS_TRIPLE" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              info = json.load(handle)
+          requested = sys.argv[2]
+          actual = info.get("target", {}).get("triple", "")
+          if not actual.startswith("arm64-apple-ios"):
+              raise SystemExit(
+                  f"swiftc resolved {requested!r} to unexpected target {actual!r}"
+              )
+          print("Resolved Swift compiler target:", actual)
+          PY
+
+          for target in GModEngine GModGameSession GModMetal GModApp; do
+            echo "Building Swift package library target $target for $IOS_TRIPLE"
+            swift build \
+              --scratch-path "$scratch" \
+              --configuration debug \
+              --target "$target" \
+              --triple "$IOS_TRIPLE" \
+              --sdk "$ios_sdk" \
+              -Xswiftc -strict-concurrency=complete \
+              -Xswiftc -warnings-as-errors \
+              -Xcc -Werror \
+              -Xcxx -Werror
+          done
+
+      - name: Build the installable app for generic iPadOS device
+        run: |
+          set -euo pipefail
+
+          derived_data="$RUNNER_TEMP/gmod-host-iphoneos"
+          xcodebuild build \
+            -project "$APP_PROJECT" \
+            -scheme "$APP_SCHEME" \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "$derived_data" \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=YES \
+            IPHONEOS_DEPLOYMENT_TARGET=16.0 \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            DEVELOPMENT_TEAM="" \
+            SWIFT_STRICT_CONCURRENCY=complete \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            GCC_TREAT_WARNINGS_AS_ERRORS=YES
+
+          app_path="$derived_data/Build/Products/Release-iphoneos/GarrysPAD.app"
+          plist_path="$app_path/Info.plist"
+          executable_path="$app_path/GarrysPAD"
+          test -d "$app_path"
+          test -f "$plist_path"
+          test -x "$executable_path"
+
+          python3 - "$plist_path" "$APP_BUNDLE_ID" <<'PY'
+          import plistlib
+          import sys
+
+          with open(sys.argv[1], "rb") as handle:
+              info = plistlib.load(handle)
+          expected_bundle_id = sys.argv[2]
+          expected = {
+              "CFBundleIdentifier": expected_bundle_id,
+              "CFBundlePackageType": "APPL",
+              "MinimumOSVersion": "16.0",
+          }
+          for key, value in expected.items():
+              if info.get(key) != value:
+                  raise SystemExit(
+                      f"Built app Info.plist has {key}={info.get(key)!r}; "
+                      f"expected {value!r}"
+                  )
+          if info.get("UIDeviceFamily") != [2]:
+              raise SystemExit(
+                  "Built app must be iPad-only; UIDeviceFamily is "
+                  + repr(info.get("UIDeviceFamily"))
+              )
+          if "iPhoneOS" not in info.get("CFBundleSupportedPlatforms", []):
+              raise SystemExit("Built app does not declare iPhoneOS support")
+          print("Built iPadOS app Info.plist contract passed")
+          PY
+
+          test "$(xcrun lipo -archs "$executable_path")" = "arm64"
+          echo "Unsigned generic-device .app: $app_path"
+
+      - name: Compile embedded Metal library and smoke runtime pipelines
+        run: |
+          set -euo pipefail
+          bash Tools/iPadValidation/verify-embedded-metal.sh "$GITHUB_WORKSPACE"
+
+      - name: Discover an available iPad Simulator
+        id: simulator
+        run: |
+          set -euo pipefail
+          devices_json="$RUNNER_TEMP/gmod-simulator-devices.json"
+          xcrun simctl list devices available --json > "$devices_json"
+
+          python3 - "$devices_json" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              payload = json.load(handle)
+
+          candidates = []
+          for runtime, devices in payload.get("devices", {}).items():
+              version = tuple(int(part) for part in re.findall(r"\d+", runtime))
+              for device in devices:
+                  name = device.get("name", "")
+                  if "iPad" not in name or not device.get("isAvailable", True):
+                      continue
+                  candidates.append(
+                      (
+                          version,
+                          name,
+                          device.get("udid", ""),
+                          device.get("state", ""),
+                      )
+                  )
+
+          if not candidates:
+              raise SystemExit("No available iPad Simulator is installed")
+          _, name, udid, state = max(candidates)
+          if not udid:
+              raise SystemExit(f"Selected iPad Simulator {name!r} has no UDID")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"udid={udid}\n")
+              output.write(f"name={name}\n")
+              output.write(f"state={state}\n")
+          print(f"Selected iPad Simulator: {name} ({udid}), state={state}")
+          PY
+
+      - name: Boot iPad Simulator and install and launch the real app
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+          SIMULATOR_STATE: ${{ steps.simulator.outputs.state }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$SIMULATOR_STATE" != "Booted" ]]; then
+            xcrun simctl boot "$SIMULATOR_UDID"
+          fi
+          xcrun simctl bootstatus "$SIMULATOR_UDID" -b
+
+          derived_data="$RUNNER_TEMP/gmod-host-simulator"
+          xcodebuild build \
+            -project "$APP_PROJECT" \
+            -scheme "$APP_SCHEME" \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
+            -derivedDataPath "$derived_data" \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=YES \
+            IPHONEOS_DEPLOYMENT_TARGET=16.0 \
+            SWIFT_STRICT_CONCURRENCY=complete \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            GCC_TREAT_WARNINGS_AS_ERRORS=YES
+
+          app_path="$derived_data/Build/Products/Debug-iphonesimulator/GarrysPAD.app"
+          test -d "$app_path"
+          test -x "$app_path/GarrysPAD"
+          xcrun simctl install "$SIMULATOR_UDID" "$app_path"
+
+          installed_path="$(
+            xcrun simctl get_app_container \
+              "$SIMULATOR_UDID" \
+              "$APP_BUNDLE_ID" \
+              app
+          )"
+          test -d "$installed_path"
+          echo "Installed app container: $installed_path"
+
+          launch_output="$(
+            xcrun simctl launch \
+              --terminate-running-process \
+              "$SIMULATOR_UDID" \
+              "$APP_BUNDLE_ID" \
+              --ui-testing
+          )"
+          echo "$launch_output"
+          python3 - "$launch_output" "$APP_BUNDLE_ID" <<'PY'
+          import re
+          import sys
+
+          output, bundle_id = sys.argv[1:]
+          match = re.fullmatch(re.escape(bundle_id) + r":\s*(\d+)", output.strip())
+          if match is None or int(match.group(1)) <= 0:
+              raise SystemExit(f"simctl launch returned no positive PID: {output!r}")
+          print("Simulator app launch PID:", match.group(1))
+          PY
+
+      - name: Run accessibility launch smoke on the real app target
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+        run: |
+          set -euo pipefail
+
+          xcodebuild test \
+            -project "$APP_PROJECT" \
+            -scheme "$APP_SCHEME" \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
+            -derivedDataPath "$RUNNER_TEMP/gmod-host-simulator" \
+            -resultBundlePath "$RUNNER_TEMP/GarrysPAD-Launch-Smoke.xcresult" \
+            -only-testing:GarrysPADUITests/GarrysPADLaunchTests/testRootIsAccessibleAfterLaunch \
+            -parallel-testing-enabled NO \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=YES \
+            IPHONEOS_DEPLOYMENT_TARGET=16.0 \
+            SWIFT_STRICT_CONCURRENCY=complete \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            GCC_TREAT_WARNINGS_AS_ERRORS=YES
+
+      - name: Run Swift package XCTest libraries on iPad Simulator
+        env:
+          TEST_SCHEME: ${{ steps.package.outputs.test_scheme }}
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+        run: |
+          set -euo pipefail
+
+          xcodebuild test \
+            -scheme "$TEST_SCHEME" \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
+            -derivedDataPath "$RUNNER_TEMP/gmod-package-simulator" \
+            -resultBundlePath "$RUNNER_TEMP/GModCore-iPadOS.xcresult" \
+            -parallel-testing-enabled NO \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=YES \
+            IPHONEOS_DEPLOYMENT_TARGET=16.0 \
+            CODE_SIGNING_ALLOWED=NO \
+            SWIFT_STRICT_CONCURRENCY=complete \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            GCC_TREAT_WARNINGS_AS_ERRORS=YES
+
+      - name: Confirm validation did not modify tracked sources
+        run: |
+          set -euo pipefail
+          git diff --exit-code
