@@ -131,7 +131,14 @@ final class LuaParser {
 
     private var isDefineBaseClassDirectiveStart: Bool {
         guard case .identifier("DEFINE_BASECLASS") = peek.kind else { return false }
-        return checkNext(.leftParen)
+        guard current + 1 < tokens.count else { return false }
+
+        switch tokens[current + 1].kind {
+        case .leftParen, .string:
+            return true
+        default:
+            return false
+        }
     }
 
     private func parseDefineBaseClassDirective() throws -> LuaStatement {
