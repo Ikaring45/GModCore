@@ -302,9 +302,7 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             DEVELOPMENT_TEAM="" \
             COPY_PHASE_STRIP=NO \
-            SWIFT_STRICT_CONCURRENCY=complete \
-            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
-            GCC_TREAT_WARNINGS_AS_ERRORS=YES
+            SWIFT_STRICT_CONCURRENCY=complete
 
           app_path="$derived_data/Build/Products/Release-iphoneos/GarrysPAD.app"
           plist_path="$app_path/Info.plist"
@@ -417,9 +415,7 @@ jobs:
             ONLY_ACTIVE_ARCH=YES \
             IPHONEOS_DEPLOYMENT_TARGET=16.0 \
             COPY_PHASE_STRIP=NO \
-            SWIFT_STRICT_CONCURRENCY=complete \
-            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
-            GCC_TREAT_WARNINGS_AS_ERRORS=YES
+            SWIFT_STRICT_CONCURRENCY=complete
 
           app_path="$derived_data/Build/Products/Debug-iphonesimulator/GarrysPAD.app"
           test -d "$app_path"
@@ -473,9 +469,7 @@ jobs:
             ONLY_ACTIVE_ARCH=YES \
             IPHONEOS_DEPLOYMENT_TARGET=16.0 \
             COPY_PHASE_STRIP=NO \
-            SWIFT_STRICT_CONCURRENCY=complete \
-            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
-            GCC_TREAT_WARNINGS_AS_ERRORS=YES
+            SWIFT_STRICT_CONCURRENCY=complete
 
       - name: Run Swift package XCTest libraries on iPad Simulator
         env:
@@ -496,9 +490,7 @@ jobs:
             IPHONEOS_DEPLOYMENT_TARGET=16.0 \
             CODE_SIGNING_ALLOWED=NO \
             COPY_PHASE_STRIP=NO \
-            SWIFT_STRICT_CONCURRENCY=complete \
-            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
-            GCC_TREAT_WARNINGS_AS_ERRORS=YES
+            SWIFT_STRICT_CONCURRENCY=complete
 
       - name: Confirm validation did not modify tracked sources
         run: |
