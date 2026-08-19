@@ -23,7 +23,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: validate-ipados-${{ github.ref }}
+  # A branch push and its open PR otherwise use different refs and duplicate
+  # the same expensive iPad build. Both events resolve to the head branch here.
+  group: validate-ipados-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 env:
@@ -299,6 +301,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             DEVELOPMENT_TEAM="" \
+            COPY_PHASE_STRIP=NO \
             SWIFT_STRICT_CONCURRENCY=complete \
             SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
             GCC_TREAT_WARNINGS_AS_ERRORS=YES
@@ -413,6 +416,7 @@ jobs:
             ARCHS=arm64 \
             ONLY_ACTIVE_ARCH=YES \
             IPHONEOS_DEPLOYMENT_TARGET=16.0 \
+            COPY_PHASE_STRIP=NO \
             SWIFT_STRICT_CONCURRENCY=complete \
             SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
             GCC_TREAT_WARNINGS_AS_ERRORS=YES
@@ -468,6 +472,7 @@ jobs:
             ARCHS=arm64 \
             ONLY_ACTIVE_ARCH=YES \
             IPHONEOS_DEPLOYMENT_TARGET=16.0 \
+            COPY_PHASE_STRIP=NO \
             SWIFT_STRICT_CONCURRENCY=complete \
             SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
             GCC_TREAT_WARNINGS_AS_ERRORS=YES
@@ -490,6 +495,7 @@ jobs:
             ONLY_ACTIVE_ARCH=YES \
             IPHONEOS_DEPLOYMENT_TARGET=16.0 \
             CODE_SIGNING_ALLOWED=NO \
+            COPY_PHASE_STRIP=NO \
             SWIFT_STRICT_CONCURRENCY=complete \
             SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
             GCC_TREAT_WARNINGS_AS_ERRORS=YES
