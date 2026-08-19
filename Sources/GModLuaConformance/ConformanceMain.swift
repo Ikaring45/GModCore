@@ -253,6 +253,185 @@ enum GModLuaConformanceMain {
             return
         }
 
+        if arguments.first == "--gmod-shared-session" {
+            guard arguments.count == 4 else {
+                print(
+                    "usage: GModLuaConformance --gmod-shared-session " +
+                    "<gmod root> <strict|discovery> <name>"
+                )
+                terminate(2)
+                return
+            }
+
+            let session = GMLuaSharedSession()
+            var server: GMLuaRuntime?
+            var client: GMLuaRuntime?
+            var serverStartup: GMLuaStartupOrchestrator?
+            var clientStartup: GMLuaStartupOrchestrator?
+            var phase = "setup"
+            do {
+                let bootstrapMode = try gmodBootstrapMode(arguments[2])
+                let name = arguments[3]
+                let serverContext = try makeGModRuntimeContext(
+                    rootPath: arguments[1],
+                    realm: .server,
+                    bootstrapMode: bootstrapMode,
+                    logger: { print($0) },
+                    netTransport: session.netTransport
+                )
+                let createdServer = serverContext.runtime
+                server = createdServer
+                defer { _ = createdServer.close() }
+
+                print(
+                    "[GLUA][SESSION][START] mode=\(bootstrapMode.rawValue) " +
+                    "name=\(name) topology=1-server+1-client " +
+                    "playerEntIndex=1 playerUserID=1"
+                )
+
+                phase = "server-core"
+                try createdServer.loadFile("lua/includes/init.lua")
+                let coreStatus = bootstrapMode == .discovery
+                    ? "SKIP][DISCOVERY"
+                    : "PASS"
+                print(
+                    "[GLUA][SESSION][SERVER][CORE][\(coreStatus)] " +
+                    "path=lua/includes/init.lua"
+                )
+
+                phase = "server-startup"
+                let createdServerStartup = GMLuaStartupOrchestrator(
+                    runtime: createdServer,
+                    fileSystem: serverContext.fileSystem
+                )
+                serverStartup = createdServerStartup
+                let serverReport = try createdServerStartup.start(
+                    targetGamemodeNamed: name
+                )
+
+                let clientContext = try makeGModRuntimeContext(
+                    rootPath: arguments[1],
+                    realm: .client,
+                    bootstrapMode: bootstrapMode,
+                    logger: { print($0) },
+                    netTransport: session.netTransport
+                )
+                let createdClient = clientContext.runtime
+                client = createdClient
+                defer { _ = createdClient.close() }
+
+                phase = "client-core"
+                try createdClient.loadFile("lua/includes/init.lua")
+                print(
+                    "[GLUA][SESSION][CLIENT][CORE][\(coreStatus)] " +
+                    "path=lua/includes/init.lua"
+                )
+
+                phase = "client-startup"
+                let createdClientStartup = GMLuaStartupOrchestrator(
+                    runtime: createdClient,
+                    fileSystem: clientContext.fileSystem,
+                    playerConnection: {
+                        try session.connect(
+                            server: createdServer,
+                            client: createdClient,
+                            playerIndex: 1,
+                            userID: 1
+                        )
+                    }
+                )
+                clientStartup = createdClientStartup
+                let clientReport = try createdClientStartup.start(
+                    targetGamemodeNamed: name
+                )
+
+                guard clientReport.playerConnectionModeled else {
+                    throw ConformanceCLIError.sharedSessionConnectionMissing
+                }
+                try createdClient.execute(
+                    "assert(IsValid(LocalPlayer()) and LocalPlayer() == Entity(1))",
+                    sourceName: "=(shared session LocalPlayer identity)"
+                )
+
+                phase = "session-pump"
+                var delivered = 0
+                while session.netTransport.pendingDeliveryCount > 0 {
+                    guard delivered < 10_000 else {
+                        throw ConformanceCLIError.sharedSessionDeliveryLimitExceeded
+                    }
+                    delivered += try session.pump(
+                        maxDeliveries: min(
+                            10_000 - delivered,
+                            session.netTransport.pendingDeliveryCount
+                        )
+                    )
+                }
+
+                for (realm, report) in [
+                    (GMLuaRealm.server, serverReport),
+                    (GMLuaRealm.client, clientReport)
+                ] {
+                    for stage in report.stages {
+                        let status: String
+                        if bootstrapMode == .discovery {
+                            status = "SKIP][DISCOVERY"
+                        } else {
+                            status = stage.outcome == .completed ? "PASS" : "SKIP"
+                        }
+                        print(
+                            "[GLUA][SESSION][\(realm.rawValue)][STAGE][\(status)] " +
+                            "name=\(stage.stage.rawValue) direct=\(stage.directPaths.count) " +
+                            "transitiveIncludes=\(stage.transitiveIncludePaths.count) " +
+                            "detail=\(stage.detail)"
+                        )
+                    }
+                }
+                print(
+                    "[GLUA][SESSION][BOUNDARY] connectedClients=\(session.connectedClientCount) " +
+                    "players=\(session.connectedPlayerIndices) delivered=\(delivered) " +
+                    "addonsLoaded=false engineEntityReadiness=false " +
+                    "steamAuthentication=false desktopStartupComplete=false"
+                )
+                if bootstrapMode == .discovery {
+                    print(
+                        "[GLUA][SESSION][SKIP][DISCOVERY] target=\(name) " +
+                        "pairedRuntimePassed=false"
+                    )
+                } else {
+                    print(
+                        "[GLUA][SESSION][MODELED-STAGES-COMPLETE] target=\(name) " +
+                        "pairedRuntimePassed=true"
+                    )
+                }
+            } catch {
+                let serverCompleted = serverStartup?.stages
+                    .map { $0.stage.rawValue }.joined(separator: ",") ?? "<none>"
+                let clientCompleted = clientStartup?.stages
+                    .map { $0.stage.rawValue }.joined(separator: ",") ?? "<none>"
+                print(
+                    "[GLUA][SESSION][FAIL] phase=\(phase) " +
+                    "serverCompleted=\(serverCompleted) " +
+                    "serverActive=\(serverStartup?.activeStage?.rawValue ?? "<none>") " +
+                    "serverPath=\(serverStartup?.activePath ?? "<none>") " +
+                    "serverIncludes=\(server?.includedFiles.count ?? 0) " +
+                    "serverLastInclude=\(server?.includedFiles.last ?? "<none>") " +
+                    "clientCompleted=\(clientCompleted) " +
+                    "clientActive=\(clientStartup?.activeStage?.rawValue ?? "<none>") " +
+                    "clientPath=\(clientStartup?.activePath ?? "<none>") " +
+                    "clientIncludes=\(client?.includedFiles.count ?? 0) " +
+                    "clientLastInclude=\(client?.includedFiles.last ?? "<none>")"
+                )
+                print(
+                    "[GLUA][SESSION][BOUNDARY] connectedClients=\(session.connectedClientCount) " +
+                    "addonsLoaded=false engineEntityReadiness=false " +
+                    "desktopStartupComplete=false"
+                )
+                print("[GLUA][SESSION][ERROR] \(GMLuaRuntime.describe(error))")
+                terminate(1)
+            }
+            return
+        }
+
         if arguments.first == "--gmod-startup" {
             guard arguments.count == 5 else {
                 print(
@@ -790,13 +969,15 @@ enum GModLuaConformanceMain {
         rootPath: String,
         realm: GMLuaRealm,
         bootstrapMode: GMLuaBootstrapMode,
-        logger: @escaping (String) -> Void
+        logger: @escaping (String) -> Void,
+        netTransport: GMLuaNetTransport? = nil
     ) throws -> GMLuaRuntime {
         try makeGModRuntimeContext(
             rootPath: rootPath,
             realm: realm,
             bootstrapMode: bootstrapMode,
-            logger: logger
+            logger: logger,
+            netTransport: netTransport
         ).runtime
     }
 
@@ -804,7 +985,8 @@ enum GModLuaConformanceMain {
         rootPath: String,
         realm: GMLuaRealm,
         bootstrapMode: GMLuaBootstrapMode,
-        logger: @escaping (String) -> Void
+        logger: @escaping (String) -> Void,
+        netTransport: GMLuaNetTransport? = nil
     ) throws -> (runtime: GMLuaRuntime, fileSystem: GMLuaMountedFileSystem) {
         let rootURL = URL(fileURLWithPath: rootPath, isDirectory: true)
         let install = try GMLuaHostDirectoryFileSystem(rootURL: rootURL, writable: false)
@@ -881,8 +1063,33 @@ enum GModLuaConformanceMain {
             gameEnvironmentConfiguration: gameEnvironmentConfiguration,
             engineConfiguration: engineConfiguration,
             engineConVarCatalog: engineConVarCatalog,
+            netTransport: netTransport,
             inputConfiguration: inputConfiguration
         )
+        // Resolve Source material pixels from the caller's installed VPK in
+        // place. No GMod image or palette is copied into the package, and a
+        // missing archive remains honestly unresolved.
+        let materialArchiveURL = rootURL.appendingPathComponent("garrysmod_dir.vpk")
+        if FileManager.default.fileExists(atPath: materialArchiveURL.path),
+           let resourceRegistry = runtime.resourceRegistry {
+            let materialArchive = try GMLuaVPKArchive(directoryFileURL: materialArchiveURL)
+            resourceRegistry.setMaterialPixelResolver(
+                GMLuaVPKMaterialPixelResolver(
+                    looseFileSystem: mounted,
+                    archivesInPriorityOrder: [materialArchive]
+                )
+            )
+            logger(
+                "[GLUA][HOST] materialPixels=installed-vpk-platform-decoder " +
+                    "archive=garrysmod_dir.vpk indexedFiles=\(materialArchive.fileCount) " +
+                    "copiedAssets=0"
+            )
+        } else {
+            logger(
+                "[GLUA][HOST] materialPixels=unresolved " +
+                    "reason=garrysmod_dir.vpk-not-mounted copiedAssets=0"
+            )
+        }
         // The desktop conformance process has no Source console. Connect one
         // deliberately narrow engine fixture so TTT's mandatory friendly-fire
         // initialization can be measured beyond the native dispatch boundary.
@@ -928,4 +1135,6 @@ private enum ConformanceCLIError: Error {
     case caseInsensitiveMountMismatch
     case sequenceObservationMismatch
     case gamemodeLoaderUnavailable
+    case sharedSessionConnectionMissing
+    case sharedSessionDeliveryLimitExceeded
 }

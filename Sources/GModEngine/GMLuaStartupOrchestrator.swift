@@ -2,7 +2,11 @@ import Foundation
 import GModLua
 
 public enum GMLuaStartupStage: String, Sendable, Equatable {
+    case clientDermaBootstrap
+    case clientPostProcessBootstrap
     case clientVGUIBootstrap
+    case clientMaterialProxyBootstrap
+    case clientDefaultSkinBootstrap
     case baseGamemode
     case sharedAutorun
     case realmAutorun
@@ -77,9 +81,10 @@ public enum GMLuaStartupError: Error, CustomStringConvertible {
     case alreadyStarted
     case runtimeUnavailable
     case gamemodeLoaderUnavailable
-    case clientVGUIBootstrap(path: String, reason: String)
+    case clientBootstrap(stage: GMLuaStartupStage, path: String, reason: String)
     case autorunEnumeration(path: String, reason: String)
     case autorunExecution(path: String, reason: String)
+    case playerConnection(reason: String)
     case lifecycleUnavailable(event: String, reason: String)
     case lifecycleExecution(event: String, reason: String)
 
@@ -93,12 +98,14 @@ public enum GMLuaStartupError: Error, CustomStringConvertible {
             return "startup runtime is no longer available"
         case .gamemodeLoaderUnavailable:
             return "startup runtime has no mounted gamemode loader"
-        case let .clientVGUIBootstrap(path, reason):
-            return "client VGUI bootstrap failed at \(path): \(reason)"
+        case let .clientBootstrap(stage, path, reason):
+            return "client \(stage.rawValue) failed at \(path): \(reason)"
         case let .autorunEnumeration(path, reason):
             return "cannot enumerate autorun directory \(path): \(reason)"
         case let .autorunExecution(path, reason):
             return "autorun file failed at \(path): \(reason)"
+        case let .playerConnection(reason):
+            return "player connection activation failed: \(reason)"
         case let .lifecycleUnavailable(event, reason):
             return "cannot dispatch lifecycle event \(event): \(reason)"
         case let .lifecycleExecution(event, reason):
@@ -113,14 +120,16 @@ public enum GMLuaStartupError: Error, CustomStringConvertible {
 /// orchestrator then reproduces the boundary which is material to gamemode
 /// compatibility:
 ///
-/// CLIENT VGUI bootstrap -> Base -> shared autorun -> realm autorun -> addon boundary -> target
+/// CLIENT Derma bootstrap -> Base -> shared autorun -> realm autorun -> addon boundary
+///      -> postprocess -> VGUI controls -> material proxies -> Default skin -> target
 ///      -> PostGamemodeLoaded -> Initialize -> InitPostEntity
 ///
-/// GMod asks the client Lua state to load `lua/includes/vgui_base.lua` after
-/// core init and before Base. That engine-owned step is not included by
-/// `lua/includes/init.lua` itself. The client report also inserts its observed
-/// player/session boundary between the last two lifecycle events. Server
-/// startup has neither client-only stage.
+/// The game client does not use the menu realm's `lua/includes/vgui_base.lua`.
+/// It loads `lua/derma/init.lua` before Base, then the visible direct Lua files
+/// in the merged postprocess/VGUI/matproxy folders after autorun, followed by
+/// the exact Default skin before the target gamemode. The client report also
+/// inserts its observed player/session boundary between the last two lifecycle
+/// events. Server startup has none of these client-only stages.
 ///
 /// Autorun files are direct `.lua` children sorted A-Z, matching GMod's public
 /// loading-order contract. Addon mount/GMA/VPK discovery and player/entity
@@ -131,14 +140,20 @@ public enum GMLuaStartupError: Error, CustomStringConvertible {
 public final class GMLuaStartupOrchestrator {
     private weak var runtime: GMLuaRuntime?
     private let fileSystem: LuaVirtualFileSystem
+    private let playerConnection: (() throws -> Void)?
     private var didStart = false
     private var stageStorage: [GMLuaStartupStageRecord] = []
     private var activeStageStorage: GMLuaStartupStage?
     private var activePathStorage: String?
 
-    public init(runtime: GMLuaRuntime, fileSystem: LuaVirtualFileSystem) {
+    public init(
+        runtime: GMLuaRuntime,
+        fileSystem: LuaVirtualFileSystem,
+        playerConnection: (() throws -> Void)? = nil
+    ) {
         self.runtime = runtime
         self.fileSystem = fileSystem
+        self.playerConnection = playerConnection
     }
 
     public var stages: [GMLuaStartupStageRecord] { stageStorage }
@@ -158,7 +173,12 @@ public final class GMLuaStartupOrchestrator {
         }
 
         if runtime.realm == .client {
-            try loadClientVGUIBootstrap(runtime: runtime)
+            try loadRequiredClientBootstrap(
+                path: "lua/derma/init.lua",
+                stage: .clientDermaBootstrap,
+                detail: "engine-invoked Derma runtime loaded after core and before Base",
+                runtime: runtime
+            )
         }
 
         activeStageStorage = .baseGamemode
@@ -202,6 +222,33 @@ public final class GMLuaStartupOrchestrator {
             detail: "loose addon merge, GMA/VPK discovery, and addon precedence are not implemented"
         )
 
+        if runtime.realm == .client {
+            try loadClientSpecialDirectory(
+                "lua/postprocess",
+                stage: .clientPostProcessBootstrap,
+                detail: "visible direct postprocess Lua files executed in deterministic name order",
+                runtime: runtime
+            )
+            try loadClientSpecialDirectory(
+                "lua/vgui",
+                stage: .clientVGUIBootstrap,
+                detail: "visible direct scripted VGUI controls executed in deterministic name order",
+                runtime: runtime
+            )
+            try loadClientSpecialDirectory(
+                "lua/matproxy",
+                stage: .clientMaterialProxyBootstrap,
+                detail: "visible direct material proxies executed in deterministic name order",
+                runtime: runtime
+            )
+            try loadRequiredClientBootstrap(
+                path: "lua/skins/default.lua",
+                stage: .clientDefaultSkinBootstrap,
+                detail: "engine-invoked exact Default Derma skin loaded before target gamemode",
+                runtime: runtime
+            )
+        }
+
         activeStageStorage = .targetGamemode
         let targetReport = try loader.loadTargetGamemode(named: rawName)
         record(
@@ -228,11 +275,25 @@ public final class GMLuaStartupOrchestrator {
 
         if runtime.realm == .client {
             activeStageStorage = .playerConnection
-            record(
-                .playerConnection,
-                outcome: .skipped,
-                detail: "player/session connection and LocalPlayer validity are not modeled"
-            )
+            if let playerConnection {
+                do {
+                    try playerConnection()
+                } catch {
+                    throw GMLuaStartupError.playerConnection(
+                        reason: GMLuaRuntime.describe(error)
+                    )
+                }
+                record(
+                    .playerConnection,
+                    detail: "explicit host connection activated after Initialize and before InitPostEntity"
+                )
+            } else {
+                record(
+                    .playerConnection,
+                    outcome: .skipped,
+                    detail: "no explicit host player connection was supplied"
+                )
+            }
         }
 
         try dispatchLifecycle(
@@ -253,25 +314,80 @@ public final class GMLuaStartupOrchestrator {
         )
     }
 
-    private func loadClientVGUIBootstrap(runtime: GMLuaRuntime) throws {
-        let path = "lua/includes/vgui_base.lua"
-        activeStageStorage = .clientVGUIBootstrap
+    private func loadRequiredClientBootstrap(
+        path: String,
+        stage: GMLuaStartupStage,
+        detail: String,
+        runtime: GMLuaRuntime
+    ) throws {
+        activeStageStorage = stage
         activePathStorage = path
         let includesBefore = runtime.includedFiles.count
         do {
             try runtime.loadFile(path)
         } catch {
-            throw GMLuaStartupError.clientVGUIBootstrap(
+            throw GMLuaStartupError.clientBootstrap(
+                stage: stage,
                 path: path,
                 reason: GMLuaRuntime.describe(error)
             )
         }
         activePathStorage = nil
         record(
-            .clientVGUIBootstrap,
+            stage,
             paths: [path],
             includes: Array(runtime.includedFiles.dropFirst(includesBefore)),
-            detail: "engine-invoked client VGUI controls loaded before Base"
+            detail: detail
+        )
+    }
+
+    private func loadClientSpecialDirectory(
+        _ directory: String,
+        stage: GMLuaStartupStage,
+        detail: String,
+        runtime: GMLuaRuntime
+    ) throws {
+        activeStageStorage = stage
+        activePathStorage = directory
+        guard fileSystem.directoryExists(at: directory) else {
+            activePathStorage = nil
+            record(stage, detail: detail + "; directory absent, so zero files executed")
+            return
+        }
+
+        let entries: [LuaVirtualFileSystemEntry]
+        do {
+            entries = try fileSystem.listDirectory(at: directory)
+        } catch {
+            throw GMLuaStartupError.clientBootstrap(
+                stage: stage,
+                path: directory,
+                reason: String(describing: error)
+            )
+        }
+        let paths = entries
+            .filter { !$0.isDirectory && $0.name.lowercased().hasSuffix(".lua") }
+            .sorted(by: Self.alphabetical)
+            .map { directory + "/" + $0.name }
+        let includesBefore = runtime.includedFiles.count
+        for path in paths {
+            activePathStorage = path
+            do {
+                try runtime.loadFile(path)
+            } catch {
+                throw GMLuaStartupError.clientBootstrap(
+                    stage: stage,
+                    path: path,
+                    reason: GMLuaRuntime.describe(error)
+                )
+            }
+        }
+        activePathStorage = nil
+        record(
+            stage,
+            paths: paths,
+            includes: Array(runtime.includedFiles.dropFirst(includesBefore)),
+            detail: detail + "; this is a host reproducibility rule, not an asserted public A-Z contract"
         )
     }
 

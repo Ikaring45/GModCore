@@ -2,6 +2,29 @@ assert(type(derma) == "table")
 assert(derma.Controls == derma.GetControlList())
 assert(type(derma.SkinList) == "table")
 
+-- Independent fixture implementation of the observable copy behavior needed
+-- below. The real core normally supplies table.Copy before Derma, while this
+-- focused test intentionally starts without the installed GMod bootstrap.
+local function fixtureTableCopy(input, visited)
+    if input == nil then return nil end
+
+    local result = setmetatable({}, debug.getmetatable(input))
+    for key, candidate in pairs(input) do
+        local replacement = candidate
+        if type(candidate) == "table" then
+            visited = visited or {}
+            replacement = visited[candidate]
+            if replacement == nil then
+                visited[input] = result
+                replacement = fixtureTableCopy(candidate, visited)
+            end
+        end
+        result[key] = replacement
+    end
+    return result
+end
+table.Copy = fixtureTableCopy
+
 local Base = {}
 function Base:Init()
     self.baseInitialized = true
@@ -53,7 +76,22 @@ assert(derma.GetNamedSkin("Missing") == nil)
 assert(derma.GetDefaultSkin() == Default)
 local skinCopy = derma.GetSkinTable()
 assert(skinCopy != derma.SkinList)
-assert(skinCopy.Default == Default and skinCopy.Derived == Derived)
+assert(skinCopy.Default != Default and skinCopy.Derived != Derived)
+assert(skinCopy.Default.tex != Default.tex)
+assert(skinCopy.Default.tex.Button == "texture")
+assert(skinCopy.Derived.Own == "value" and skinCopy.Derived.Accent == "blue")
+
+Default.self = Default
+Default.shared = Default.tex
+Default.otherShared = Default.tex
+Default.emptyShared = {}
+Default.otherEmptyShared = Default.emptyShared
+skinCopy = derma.GetSkinTable()
+assert(skinCopy.Default.self == skinCopy.Default)
+assert(skinCopy.Default.shared != skinCopy.Default.otherShared)
+assert(skinCopy.Default.shared != Default.tex)
+assert(skinCopy.Default.emptyShared != skinCopy.Default.otherEmptyShared)
+assert(getmetatable(skinCopy.Derived) == getmetatable(Derived))
 
 panel.GetSkin = function() return Derived end
 assert(derma.Color("Accent", panel, "fallback") == "blue")

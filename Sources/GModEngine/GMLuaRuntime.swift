@@ -217,7 +217,8 @@ public final class GMLuaRuntime {
             )
             let installedEntityRegistry = try GMLuaEntityRegistry.install(
                 into: state,
-                typeSystem: installedTypeSystem
+                typeSystem: installedTypeSystem,
+                realm: realm
             )
             entityRegistry = installedEntityRegistry
             chat = try GMLuaChat.install(
@@ -254,7 +255,8 @@ public final class GMLuaRuntime {
                 netTransport = installedNetTransport
                 netEndpoint = try installedNetTransport.installEndpoint(
                     into: state,
-                    realm: realm
+                    realm: realm,
+                    entityRegistry: installedEntityRegistry
                 )
             }
             let installedEngineConVarCatalog = explicitEngineConVarCatalog
@@ -270,10 +272,12 @@ public final class GMLuaRuntime {
             let installedConsoleDispatcher = GMLuaConsoleCommandDispatcher(
                 state: state,
                 realm: realm,
-                conVars: installedConVarRegistry
+                conVars: installedConVarRegistry,
+                entityRegistry: installedEntityRegistry
             )
             installedConsoleDispatcher.installBindings()
             consoleCommandDispatcher = installedConsoleDispatcher
+            netEndpoint?.connectConsoleCommandDispatcher(installedConsoleDispatcher)
             try GMLuaSQL.install(into: state)
             timerScheduler = try GMLuaTimer.install(
                 into: state,
@@ -295,13 +299,15 @@ public final class GMLuaRuntime {
                 realm: realm
             )
             if realm != .server {
-                screenMetrics = GMLuaScreenMetrics.install(
+                let installedScreenMetrics = GMLuaScreenMetrics.install(
                     into: state,
                     initialViewport: initialViewport
                 )
+                screenMetrics = installedScreenMetrics
                 let installedVGUIRegistry = try GMLuaVGUI.install(
                     into: state,
-                    typeSystem: installedTypeSystem
+                    typeSystem: installedTypeSystem,
+                    screenMetrics: installedScreenMetrics
                 )
                 vguiRegistry = installedVGUIRegistry
                 dermaRegistry = try GMLuaDerma.install(
@@ -533,6 +539,7 @@ public final class GMLuaRuntime {
                 net.ReadData = __gmod_net_ReadData
                 net.ReadHeader = __gmod_net_ReadHeader
                 net.Broadcast = __gmod_net_Broadcast
+                net.Send = __gmod_net_Send
                 net.SendToServer = __gmod_net_SendToServer
                 net.BytesWritten = __gmod_net_BytesWritten
                 net.BytesLeft = __gmod_net_BytesLeft

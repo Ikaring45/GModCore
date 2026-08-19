@@ -34,19 +34,23 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
     private let state: LuaState
     private let realm: GMLuaRealm
     private let conVars: GMLuaConVarRegistry
+    private let entityRegistry: GMLuaEntityRegistry
     private let lock = NSLock()
     private var hostHandler: GMLuaConsoleCommandHostHandler?
+    private var remoteServerHandler: GMLuaConsoleCommandHostHandler?
     private var registeredNamesByKey: [String: String] = [:]
     private var registeredKeysInOrder: [String] = []
 
     init(
         state: LuaState,
         realm: GMLuaRealm,
-        conVars: GMLuaConVarRegistry
+        conVars: GMLuaConVarRegistry,
+        entityRegistry: GMLuaEntityRegistry
     ) {
         self.state = state
         self.realm = realm
         self.conVars = conVars
+        self.entityRegistry = entityRegistry
     }
 
     /// Commands registered through the native `AddConsoleCommand` ABI, in
@@ -66,6 +70,18 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
     public func disconnectHost() {
         lock.lock()
         hostHandler = nil
+        lock.unlock()
+    }
+
+    func connectRemoteServer(_ handler: @escaping GMLuaConsoleCommandHostHandler) {
+        lock.lock()
+        remoteServerHandler = handler
+        lock.unlock()
+    }
+
+    func disconnectRemoteServer() {
+        lock.lock()
+        remoteServerHandler = nil
         lock.unlock()
     }
 
@@ -158,14 +174,43 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
         }
 
         if isRegistered(command) {
-            guard realm == .server else {
+            let caller: LuaValue
+            if realm == .server {
+                caller = state.getGlobal("NULL")
+            } else {
+                caller = entityRegistry.localPlayer()
+                guard GMLuaTypeSystem.typedObject(from: caller)?.isValid == true else {
+                    throw LuaError.runtime(
+                        "RunConsoleCommand cannot dispatch local \(realm.rawValue) command " +
+                        "'\(command)' without a host-owned player context (connected LocalPlayer unavailable)"
+                    )
+                }
+            }
+            try dispatchLuaCommand(
+                command: command,
+                arguments: arguments,
+                caller: caller
+            )
+            return []
+        }
+
+
+        let remoteHandler: GMLuaConsoleCommandHostHandler? = {
+            lock.lock()
+            defer { lock.unlock() }
+            return remoteServerHandler
+        }()
+        if realm == .client, let remoteHandler {
+            switch try remoteHandler(invocation) {
+            case .handled:
+                return []
+            case .unhandled:
+                break
+            case let .rejected(reason):
                 throw LuaError.runtime(
-                    "RunConsoleCommand cannot dispatch local \(realm.rawValue) command " +
-                    "'\(command)' without a host-owned player context"
+                    "RunConsoleCommand server rejected command '\(command)': \(reason)"
                 )
             }
-            try dispatchServerLuaCommand(command: command, arguments: arguments)
-            return []
         }
 
         if handler != nil {
@@ -179,9 +224,10 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
         )
     }
 
-    private func dispatchServerLuaCommand(
+    func dispatchLuaCommand(
         command: String,
-        arguments: [String]
+        arguments: [String],
+        caller: LuaValue
     ) throws {
         guard case let .table(concommand) = state.getGlobal("concommand") else {
             throw LuaError.runtime(
@@ -208,11 +254,75 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
         _ = try state.call(
             runner,
             arguments: [
-                state.getGlobal("NULL"),
+                caller,
                 .string(LuaString(command)),
                 .table(argumentTable),
                 .string(LuaString(arguments.joined(separator: " ")))
             ]
+        )
+    }
+
+    /// Applies a CLIENT-originated command through the SERVER command surface.
+    /// This intentionally repeats SERVER `RunConsoleCommand` ownership order:
+    /// Lua ConVar, engine host, then a registered Lua concommand. Forwarding
+    /// must not jump straight to `concommand.Run` and bypass engine commands.
+    func dispatchRemoteCommand(
+        command: String,
+        arguments: [String],
+        caller: LuaValue
+    ) throws {
+        guard realm == .server else {
+            throw LuaError.runtime("remote console command destination is not SERVER")
+        }
+
+        let handledLuaConVar: Bool
+        if let value = arguments.first {
+            handledLuaConVar = conVars.setConsoleValue(value, for: command)
+        } else if let currentValue = conVars.stringValue(for: command) {
+            handledLuaConVar = conVars.setConsoleValue(currentValue, for: command)
+        } else {
+            handledLuaConVar = false
+        }
+        if handledLuaConVar { return }
+
+        let invocation = GMLuaConsoleCommandInvocation(
+            realm: .server,
+            command: command,
+            arguments: arguments
+        )
+        let handler: GMLuaConsoleCommandHostHandler? = {
+            lock.lock()
+            defer { lock.unlock() }
+            return hostHandler
+        }()
+        if let handler {
+            switch try handler(invocation) {
+            case .handled:
+                return
+            case .unhandled:
+                break
+            case let .rejected(reason):
+                throw LuaError.runtime(
+                    "RunConsoleCommand host rejected command '\(command)': \(reason)"
+                )
+            }
+        }
+        if isRegistered(command) {
+            try dispatchLuaCommand(
+                command: command,
+                arguments: arguments,
+                caller: caller
+            )
+            return
+        }
+        if handler != nil {
+            throw LuaError.runtime(
+                "RunConsoleCommand host did not recognize engine command '\(command)'"
+            )
+        }
+        throw LuaError.runtime(
+            "RunConsoleCommand cannot execute SERVER command '\(command)' " +
+            "because no console host or Lua concommand owns it"
         )
     }
 

@@ -47,6 +47,51 @@ public struct GMLuaTextMeasurement: Sendable, Equatable {
     }
 }
 
+public struct GMLuaSurfaceColor: Sendable, Equatable {
+    public let red: Double
+    public let green: Double
+    public let blue: Double
+    public let alpha: Double
+
+    public init(red: Double, green: Double, blue: Double, alpha: Double) {
+        self.red = red
+        self.green = green
+        self.blue = blue
+        self.alpha = alpha
+    }
+}
+
+public enum GMLuaSurfaceDrawCommand: Sendable, Equatable {
+    case rectangle(
+        frame: GMLuaPanelRect,
+        color: GMLuaSurfaceColor,
+        clip: GMLuaPanelRect
+    )
+    case texturedRectangle(
+        frame: GMLuaPanelRect,
+        uv: GMLuaPanelRect,
+        textureName: LuaString,
+        color: GMLuaSurfaceColor,
+        clip: GMLuaPanelRect
+    )
+    case text(
+        value: LuaString,
+        position: GMLuaCursorPosition,
+        font: GMLuaFontDescriptor,
+        color: GMLuaSurfaceColor,
+        clip: GMLuaPanelRect
+    )
+}
+
+public struct GMLuaSurfaceFrameSnapshot: Sendable, Equatable {
+    public let viewportWidth: Int
+    public let viewportHeight: Int
+    public let commands: [GMLuaSurfaceDrawCommand]
+    public let textureCount: Int
+
+    public var drawCallCount: Int { commands.count }
+}
+
 /// Host boundary for replacing deterministic layout estimates with the real
 /// iPad text backend without changing GLua's surface API.
 public protocol GMLuaTextMeasurer: Sendable {
@@ -87,13 +132,29 @@ public struct GMLuaLogicalTextMeasurer: GMLuaTextMeasurer {
 /// assets, rasterizing glyphs, and submitting draw commands to Metal are
 /// deliberately outside this layer.
 public final class GMLuaSurfaceCommandState: @unchecked Sendable {
+    private struct PaintContext {
+        let originX: Double
+        let originY: Double
+        let clip: GMLuaPanelRect
+        let alphaMultiplier: Double
+    }
+
     private let lock = NSLock()
     private var textureIDs: [LuaString: Int] = [:]
+    private var textureNames: [Int: LuaString] = [:]
     private var nextTextureID = 1
     private var selectedTexture: Int?
     private var fontDescriptors: [LuaString: GMLuaFontDescriptor] = [:]
     private var customFontKeys: Set<LuaString> = []
     private var selectedFontKey: LuaString?
+    private var drawColor = GMLuaSurfaceColor(red: 255, green: 255, blue: 255, alpha: 255)
+    private var textColor = GMLuaSurfaceColor(red: 255, green: 255, blue: 255, alpha: 255)
+    private var textPosition = GMLuaCursorPosition(x: 0, y: 0)
+    private var contexts: [PaintContext] = []
+    private var commands: [GMLuaSurfaceDrawCommand] = []
+    private var viewportWidth = 0
+    private var viewportHeight = 0
+    private var clippingDisabled = false
     private let textMeasurer: any GMLuaTextMeasurer
 
     fileprivate init(textMeasurer: any GMLuaTextMeasurer) {
@@ -156,6 +217,100 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
         return textMeasurer.measure(text, using: descriptor)
     }
 
+    public func beginFrame(viewportWidth: Int, viewportHeight: Int) {
+        lock.lock()
+        self.viewportWidth = max(0, viewportWidth)
+        self.viewportHeight = max(0, viewportHeight)
+        commands.removeAll(keepingCapacity: true)
+        contexts.removeAll(keepingCapacity: true)
+        clippingDisabled = false
+        lock.unlock()
+    }
+
+    public var frameSnapshot: GMLuaSurfaceFrameSnapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return GMLuaSurfaceFrameSnapshot(
+            viewportWidth: viewportWidth,
+            viewportHeight: viewportHeight,
+            commands: commands,
+            textureCount: textureIDs.count
+        )
+    }
+
+    func pushPanelContext(frame: GMLuaPanelRect, clip: GMLuaPanelRect, alpha: Double) {
+        lock.lock()
+        contexts.append(PaintContext(
+            originX: frame.x,
+            originY: frame.y,
+            clip: clip,
+            alphaMultiplier: min(1, max(0, alpha / 255))
+        ))
+        lock.unlock()
+    }
+
+    func popPanelContext() {
+        lock.lock()
+        if !contexts.isEmpty { contexts.removeLast() }
+        lock.unlock()
+    }
+
+    func appendPanelText(_ panel: GMLuaPanelRenderSnapshot) {
+        guard !panel.text.isEmpty else { return }
+        lock.lock()
+        let descriptor = fontDescriptors[Self.canonicalFontName(panel.fontName)]
+            ?? fontDescriptors[Self.canonicalFontName("Default")]
+        guard let descriptor else {
+            lock.unlock()
+            return
+        }
+        let color = panel.foregroundColor.map {
+            GMLuaSurfaceColor(red: $0.red, green: $0.green, blue: $0.blue, alpha: $0.alpha)
+        } ?? GMLuaSurfaceColor(red: 230, green: 230, blue: 230, alpha: 255)
+        let measurement = textMeasurer.measure(panel.text, using: descriptor)
+        let horizontal: Double
+        switch panel.contentAlignment {
+        case 2, 5, 8:
+            horizontal = floor((panel.frame.width - Double(measurement.width)) * 0.5)
+        case 3, 6, 9:
+            horizontal = panel.frame.width - Double(measurement.width)
+        default:
+            horizontal = 0
+        }
+        let vertical: Double
+        switch panel.contentAlignment {
+        case 4, 5, 6:
+            vertical = floor((panel.frame.height - Double(measurement.height)) * 0.5)
+        case 1, 2, 3:
+            vertical = panel.frame.height - Double(measurement.height)
+        default:
+            vertical = 0
+        }
+        commands.append(.text(
+            value: panel.text,
+            position: GMLuaCursorPosition(
+                x: panel.frame.x + max(0, horizontal),
+                y: panel.frame.y + max(0, vertical)
+            ),
+            font: descriptor,
+            color: multipliedAlpha(color, panel.alpha / 255),
+            clip: panel.clipRect
+        ))
+        lock.unlock()
+    }
+
+    func appendPanelImage(_ panel: GMLuaPanelRenderSnapshot) throws {
+        guard let imageName = panel.imageName else { return }
+        try selectTexture(named: imageName)
+        try appendTexturedRectangle(
+            x: 0,
+            y: 0,
+            width: panel.frame.width,
+            height: panel.frame.height,
+            uv: GMLuaPanelRect(x: 0, y: 0, width: 1, height: 1)
+        )
+    }
+
     fileprivate func textureID(for name: LuaString) throws -> Int {
         lock.lock()
         defer { lock.unlock() }
@@ -169,6 +324,7 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
         let identifier = nextTextureID
         nextTextureID += 1
         textureIDs[name] = identifier
+        textureNames[identifier] = name
         return identifier
     }
 
@@ -176,6 +332,130 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
         lock.lock()
         selectedTexture = identifier
         lock.unlock()
+    }
+
+    fileprivate func selectTexture(named name: LuaString) throws {
+        let identifier = try textureID(for: name)
+        lock.lock()
+        selectedTexture = identifier
+        lock.unlock()
+    }
+
+    fileprivate func setDrawColor(_ color: GMLuaSurfaceColor) {
+        lock.lock()
+        drawColor = color
+        lock.unlock()
+    }
+
+    fileprivate func setTextColor(_ color: GMLuaSurfaceColor) {
+        lock.lock()
+        textColor = color
+        lock.unlock()
+    }
+
+    fileprivate func setTextPosition(x: Double, y: Double) {
+        lock.lock()
+        textPosition = GMLuaCursorPosition(x: x, y: y)
+        lock.unlock()
+    }
+
+    fileprivate func setClippingDisabled(_ disabled: Bool) -> Bool {
+        lock.lock()
+        let previous = clippingDisabled
+        clippingDisabled = disabled
+        lock.unlock()
+        return previous
+    }
+
+    fileprivate func appendRectangle(x: Double, y: Double, width: Double, height: Double) {
+        lock.lock()
+        guard let context = contexts.last, width > 0, height > 0 else {
+            lock.unlock()
+            return
+        }
+        commands.append(.rectangle(
+            frame: GMLuaPanelRect(
+                x: context.originX + x,
+                y: context.originY + y,
+                width: width,
+                height: height
+            ),
+            color: multipliedAlpha(drawColor, context.alphaMultiplier),
+            clip: effectiveClip(context)
+        ))
+        lock.unlock()
+    }
+
+    fileprivate func appendTexturedRectangle(
+        x: Double,
+        y: Double,
+        width: Double,
+        height: Double,
+        uv: GMLuaPanelRect
+    ) throws {
+        lock.lock()
+        guard let context = contexts.last, width > 0, height > 0,
+              let selectedTexture, let textureName = textureNames[selectedTexture] else {
+            lock.unlock()
+            return
+        }
+        commands.append(.texturedRectangle(
+            frame: GMLuaPanelRect(
+                x: context.originX + x,
+                y: context.originY + y,
+                width: width,
+                height: height
+            ),
+            uv: uv,
+            textureName: textureName,
+            color: multipliedAlpha(drawColor, context.alphaMultiplier),
+            clip: effectiveClip(context)
+        ))
+        lock.unlock()
+    }
+
+    fileprivate func appendText(_ value: LuaString) throws {
+        let descriptor: GMLuaFontDescriptor
+        lock.lock()
+        guard let context = contexts.last,
+              let selectedFontKey,
+              let selected = fontDescriptors[selectedFontKey] else {
+            lock.unlock()
+            throw LuaError.runtime("surface.DrawText called without a selected font or panel paint context")
+        }
+        descriptor = selected
+        commands.append(.text(
+            value: value,
+            position: GMLuaCursorPosition(
+                x: context.originX + textPosition.x,
+                y: context.originY + textPosition.y
+            ),
+            font: descriptor,
+            color: multipliedAlpha(textColor, context.alphaMultiplier),
+            clip: effectiveClip(context)
+        ))
+        lock.unlock()
+    }
+
+    private func effectiveClip(_ context: PaintContext) -> GMLuaPanelRect {
+        if clippingDisabled {
+            return GMLuaPanelRect(
+                x: 0,
+                y: 0,
+                width: Double(viewportWidth),
+                height: Double(viewportHeight)
+            )
+        }
+        return context.clip
+    }
+
+    private func multipliedAlpha(_ color: GMLuaSurfaceColor, _ multiplier: Double) -> GMLuaSurfaceColor {
+        GMLuaSurfaceColor(
+            red: color.red,
+            green: color.green,
+            blue: color.blue,
+            alpha: color.alpha * min(1, max(0, multiplier))
+        )
     }
 
     fileprivate func registerFont(_ descriptor: GMLuaFontDescriptor) {
@@ -398,8 +678,168 @@ public enum GMLuaSurface {
             in: surfaceTable
         )
 
+        let setDrawColor = LuaNativeFunctionBox(
+            { [unowned state, commandState] arguments in
+                commandState.setDrawColor(try surfaceColor(arguments, state: state, function: "SetDrawColor"))
+                return []
+            },
+            debugName: "surface.SetDrawColor"
+        )
+        let setTextColor = LuaNativeFunctionBox(
+            { [unowned state, commandState] arguments in
+                commandState.setTextColor(try surfaceColor(arguments, state: state, function: "SetTextColor"))
+                return []
+            },
+            debugName: "surface.SetTextColor"
+        )
+        let drawRect = LuaNativeFunctionBox(
+            { [commandState] arguments in
+                let values = try finiteNumbers(arguments, count: 4, function: "DrawRect")
+                commandState.appendRectangle(
+                    x: values[0], y: values[1], width: values[2], height: values[3]
+                )
+                return []
+            },
+            debugName: "surface.DrawRect"
+        )
+        let setTextPos = LuaNativeFunctionBox(
+            { [commandState] arguments in
+                let values = try finiteNumbers(arguments, count: 2, function: "SetTextPos")
+                commandState.setTextPosition(x: values[0], y: values[1])
+                return []
+            },
+            debugName: "surface.SetTextPos"
+        )
+        let drawText = LuaNativeFunctionBox(
+            { [commandState] arguments in
+                guard let first = arguments.first, case let .string(value) = first else {
+                    throw LuaError.runtime("bad argument #1 to 'DrawText' (string expected)")
+                }
+                try commandState.appendText(value)
+                return []
+            },
+            debugName: "surface.DrawText"
+        )
+        let drawTexturedRect = LuaNativeFunctionBox(
+            { [commandState] arguments in
+                let values = try finiteNumbers(arguments, count: 4, function: "DrawTexturedRect")
+                try commandState.appendTexturedRectangle(
+                    x: values[0], y: values[1], width: values[2], height: values[3],
+                    uv: GMLuaPanelRect(x: 0, y: 0, width: 1, height: 1)
+                )
+                return []
+            },
+            debugName: "surface.DrawTexturedRect"
+        )
+        let drawTexturedRectUV = LuaNativeFunctionBox(
+            { [commandState] arguments in
+                let values = try finiteNumbers(arguments, count: 8, function: "DrawTexturedRectUV")
+                try commandState.appendTexturedRectangle(
+                    x: values[0], y: values[1], width: values[2], height: values[3],
+                    uv: GMLuaPanelRect(
+                        x: values[4], y: values[5],
+                        width: values[6] - values[4], height: values[7] - values[5]
+                    )
+                )
+                return []
+            },
+            debugName: "surface.DrawTexturedRectUV"
+        )
+        let setMaterial = LuaNativeFunctionBox(
+            { [commandState] arguments in
+                guard let first = arguments.first,
+                      let descriptor = GMLuaTypeSystem.typedObject(from: first)?.payload
+                        as? GMLuaMaterialDescriptor else {
+                    throw LuaError.runtime("bad argument #1 to 'SetMaterial' (IMaterial expected)")
+                }
+                try commandState.selectTexture(named: descriptor.path)
+                return []
+            },
+            debugName: "surface.SetMaterial"
+        )
+        let disableClipping = LuaNativeFunctionBox(
+            { [commandState] arguments in
+                guard let first = arguments.first, case let .boolean(disabled) = first else {
+                    throw LuaError.runtime("bad argument #1 to 'DisableClipping' (boolean expected)")
+                }
+                return [.boolean(commandState.setClippingDisabled(disabled))]
+            },
+            debugName: "DisableClipping"
+        )
+        for (name, function) in [
+            ("SetDrawColor", setDrawColor), ("SetTextColor", setTextColor),
+            ("DrawRect", drawRect), ("SetTextPos", setTextPos),
+            ("DrawText", drawText), ("DrawTexturedRect", drawTexturedRect),
+            ("DrawTexturedRectUV", drawTexturedRectUV), ("SetMaterial", setMaterial),
+            ("DisableClipping", disableClipping)
+        ] {
+            try state.setRawTableValue(
+                .nativeFunction(function),
+                for: .string(LuaString(name)),
+                in: surfaceTable
+            )
+        }
+
+        // DisableClipping is a global engine function in GMod. Keep the
+        // surface alias as a compatibility convenience, but do not require
+        // shipped Derma Lua to call a non-existent namespaced API.
+        state.setGlobal("DisableClipping", value: .nativeFunction(disableClipping))
         state.setGlobal("surface", value: .table(surfaceTable))
         return commandState
+    }
+
+    private static func finiteNumbers(
+        _ arguments: [LuaValue],
+        count: Int,
+        function: String
+    ) throws -> [Double] {
+        guard arguments.count >= count else {
+            throw LuaError.runtime("bad argument count to '\(function)'")
+        }
+        return try (0..<count).map { index in
+            guard case let .number(value) = arguments[index], value.isFinite else {
+                throw LuaError.runtime(
+                    "bad argument #\(index + 1) to '\(function)' (finite number expected)"
+                )
+            }
+            return value
+        }
+    }
+
+    private static func surfaceColor(
+        _ arguments: [LuaValue],
+        state: LuaState,
+        function: String
+    ) throws -> GMLuaSurfaceColor {
+        if let first = arguments.first, case let .table(table) = first {
+            func component(_ name: String) throws -> Double {
+                guard case let .number(value) = try state.rawTableValue(
+                    for: .string(LuaString(name)), in: table
+                ), value.isFinite else {
+                    throw LuaError.runtime("bad Color.\(name) passed to '\(function)'")
+                }
+                return value
+            }
+            return try GMLuaSurfaceColor(
+                red: component("r"), green: component("g"),
+                blue: component("b"), alpha: component("a")
+            )
+        }
+        let values = try finiteNumbers(arguments, count: 3, function: function)
+        let alpha: Double
+        if arguments.indices.contains(3) {
+            guard case let .number(value) = arguments[3], value.isFinite else {
+                throw LuaError.runtime(
+                    "bad argument #4 to '\(function)' (finite number expected)"
+                )
+            }
+            alpha = value
+        } else {
+            alpha = 255
+        }
+        return GMLuaSurfaceColor(
+            red: values[0], green: values[1], blue: values[2], alpha: alpha
+        )
     }
 
     private static func fontDescriptor(

@@ -201,6 +201,8 @@ public final class LuaState {
     private let callStackKey = "GModLua.CallStack.\(UUID().uuidString)"
     private var primitiveMetatables: [String: LuaTable] = [:]
     private var mainFailureFrames: [LuaCallFrame]?
+    private let garbageCollectionRootProviderLock = NSLock()
+    private var garbageCollectionRootProviders: [@Sendable () -> [LuaValue]] = []
     public var fileLoader: ((String) throws -> String)?
     public var virtualFileSystem: LuaVirtualFileSystem?
     var threadEnvironmentTable: LuaTable
@@ -241,6 +243,28 @@ public final class LuaState {
         guard !isClosed else { return }
         globalTable.rawSetValue(value, forString: name)
         garbageCollector.adopt(value)
+    }
+
+    /// Registers host-owned Lua values which must remain GC roots even when a
+    /// script overwrites every global function that originally exposed them.
+    /// Providers must only snapshot host storage and must not execute Lua.
+    /// Capture host owners weakly to avoid a State/host retain cycle.
+    public func registerGarbageCollectionRootProvider(
+        _ provider: @escaping @Sendable () -> [LuaValue]
+    ) {
+        guard !isClosed else { return }
+        garbageCollectionRootProviderLock.lock()
+        garbageCollectionRootProviders.append(provider)
+        garbageCollectionRootProviderLock.unlock()
+        garbageCollector.adopt(provider())
+    }
+
+    /// Adopts values added by dynamic providers after their registration.
+    /// Root enumeration marks them; adoption also enrolls new host objects in
+    /// Lua's sweep/finalization heap.
+    public func refreshGarbageCollectionRootProviders() {
+        guard !isClosed else { return }
+        garbageCollector.adopt(externalGarbageCollectionRoots())
     }
 
     public func getGlobal(_ name: String) -> LuaValue {
@@ -1792,6 +1816,7 @@ public final class LuaState {
         ]
         values.append(contentsOf: primitiveMetatables.values.map(LuaValue.table))
         values.append(contentsOf: dumpRegistry.values.map(LuaValue.luaFunction))
+        values.append(contentsOf: externalGarbageCollectionRoots())
         if let currentThread = LuaThread.current { values.append(.thread(currentThread)) }
 
         var environments: [LuaEnvironment] = []
@@ -1805,6 +1830,13 @@ public final class LuaState {
         appendFrames(currentCallStack().frames)
         if let mainFailureFrames { appendFrames(mainFailureFrames) }
         return (values, environments)
+    }
+
+    private func externalGarbageCollectionRoots() -> [LuaValue] {
+        garbageCollectionRootProviderLock.lock()
+        let providers = garbageCollectionRootProviders
+        garbageCollectionRootProviderLock.unlock()
+        return providers.flatMap { $0() }
     }
 
     func captureFailureFrames(_ frames: [LuaCallFrame]) {

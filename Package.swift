@@ -11,6 +11,19 @@ var products: [Product] = [
 
 var targets: [Target] = [
     .target(
+        name: "GModImageDecode",
+        path: "Sources/GModImageDecode",
+        publicHeadersPath: "include",
+        linkerSettings: [
+            .linkedLibrary("ole32", .when(platforms: [.windows])),
+            .linkedLibrary("windowscodecs", .when(platforms: [.windows])),
+            .linkedFramework("CoreFoundation", .when(platforms: [.iOS, .macOS])),
+            .linkedFramework("CoreGraphics", .when(platforms: [.iOS, .macOS])),
+            .linkedFramework("ImageIO", .when(platforms: [.iOS, .macOS]))
+        ]
+    ),
+
+    .target(
         name: "GModLua",
         path: "Sources/GModLua"
     ),
@@ -18,7 +31,8 @@ var targets: [Target] = [
     .target(
         name: "GModEngine",
         dependencies: [
-            "GModLua"
+            "GModLua",
+            "GModImageDecode"
         ],
         path: "Sources/GModEngine",
         linkerSettings: [

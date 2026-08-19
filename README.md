@@ -30,47 +30,47 @@ No skipped or unfinished feature is reported as a pass. See
 [`LUA51_CONFORMANCE_STATUS.md`](LUA51_CONFORMANCE_STATUS.md) for the exact
 verification boundary.
 
-The native GLua bootstrap now includes M3's host-owned realm-networking
-substrate. A shared byte-preserving NetworkString pool backs the legacy
-`SetGlobal*`/`GetGlobal*` family and net message names. A deterministic
-one-SERVER/many-CLIENT session implements queued SERVER broadcast, explicit
-host pumping, bit/number/Float32/string/data codecs, and read cursors. CLIENT
-gains logical `chat.AddText`; CLIENT/MENU gain host-fed input bindings/state;
-every realm can receive explicitly host-populated engine ConVars and use a
-logical named-sound registry; and CLIENT/MENU panels gain native layout
-invalidation plus logical Label text/font/foreground/alignment controls. Net
-and network-global APIs remain SERVER/CLIENT-only. These are native
-compatibility contracts, not simulated desktop networking, rendered text, or
-audio playback.
+The native GLua bootstrap now includes M4's measured CLIENT UI order and a
+paired-realm host session. CLIENT loads Derma before Base, then realm-correct
+autorun, the installed postprocess/VGUI/matproxy directories, the real Default
+skin, and the target gamemode. The Default skin samples
+`gwenskin/GModDefault.png` directly from a legally installed VPK through a
+cached platform decoder; no game asset or hard-coded palette is bundled.
 
-Strict mode completes the real `lua/includes/init.lua` in SERVER/CLIENT and
-the realm-correct `lua/includes/init_menu.lua` in MENU (23 includes, zero
-gaps). M3 advances strict SERVER TTT modeled startup through Base,
-realm-correct loose autorun, TTT, and all three currently modeled lifecycle
-hook dispatches, exiting 0 through `InitPostEntity`. Strict CLIENT Sandbox
-modeled startup also exits 0. Strict CLIENT TTT reaches `InitPostEntity` after
-177 includes, with `cl_voice.lua` as its last include, then stops precisely at
-`lua/vgui/DLabel.lua:127`: the default Derma skin and its `Colours` table have
-not yet been constructed. Addon mounting, CLIENT player connection, live
-entity readiness, `net.Send`, a real `net.SendToServer` player path, automatic
-global resend scheduling, renderer/physics/Source assets, and complete
-Entity/Panel/Derma behavior remain explicit boundaries.
+A deterministic one-SERVER/many-CLIENT session now provides canonical Player
+mirrors, `LocalPlayer`, client-to-server and targeted server-to-client net
+delivery, forwarded console commands, generation-safe disconnect cleanup, and
+explicit host pumping. Entity-family userdata have realm-local Lua sidecar
+tables with exact `GetTable`/`SetTable` identity, method precedence, stale/NULL
+behavior, and GC roots. `Player(number)` correctly uses UserID while
+`Entity(number)` uses EntIndex.
 
-The 0.1.44 packaging snapshot passes 135/135 Swift tests and the Engine target
-under complete strict-concurrency checking. Its GC-enabled official Lua 5.1
-run exits 0 through `final OK`, with 38 chunk loads, two classified skips, and
-an elapsed time of 88.39 seconds. The installed-GMod parser gate passes 259/259
+Strict paired Sandbox and TTT both exit 0 through the SERVER and CLIENT
+`InitPostEntity` stages represented by the harness; the TTT run delivers four
+queued cross-realm events. This is a modeled startup result, not a claim that
+either gamemode is playable. Addon discovery, Steam authentication, live
+engine entity readiness, real sockets/channels, prediction, and desktop
+startup completion remain false/SKIP boundaries. Spawnmenu Lua is loaded and
+registered, but the runner does not dispatch `OnGamemodeLoaded` to instantiate
+the menu.
+
+The logical VGUI/Surface layer now covers measured docking, render-command,
+text, focus, and pointer plumbing, but it is not yet connected to the existing
+app/Metal platform view or draw backend. General VMT/VTF shader/material
+resolution is also incomplete; the installed Default PNG atlas path is
+narrower than full material/rendering compatibility. VPK/image inputs are
+trusted installed content in this milestone, not a hardened untrusted-Workshop
+ingestion path.
+
+The 0.1.45 release commit passes 170/170 Swift tests and the complete Engine
+strict-concurrency gate with warnings treated as errors. Its GC-enabled
+official Lua 5.1 run exits 0 through `final OK` in 92.84 seconds, with 38 chunk
+loads and two classified skips. The installed-GMod parser gate passes 259/259
 files; the deliberately independent-file load diagnostic reaches 26/259.
-These are separate results: parsing a corpus file does not claim that every
-engine API it calls is implemented.
-
-The current installed-tree checkpoint completes core init with 27 SERVER and
-42 CLIENT includes, plus 23 MENU includes through `init_menu.lua`. Isolated
-CLIENT Sandbox loading reaches 101 includes, and SERVER TTT registration
-reaches 59. The new M3 checkpoint removes the former TTT `SetGlobalFloat`
-startup blocker: strict SERVER TTT now exits 0 through all stages represented
-by the modeled startup harness. Strict CLIENT TTT is measured separately and
-reaches the default-Derma-skin boundary reported above and in the 0.1.44
+These are separate results: parsing or independently loading a corpus file
+does not claim that every engine API it calls is implemented. Exact details
+are recorded in
+[`LUA51_CONFORMANCE_STATUS.md`](LUA51_CONFORMANCE_STATUS.md) and the 0.1.45
 release notes.
 
 ## Verified native path
@@ -139,6 +139,7 @@ copied Garry's Mod Lua corpus or proprietary assets:
 - [`Docs/GLuaAnalysis/04_RUNTIME_M1_IMPLEMENTATION.md`](Docs/GLuaAnalysis/04_RUNTIME_M1_IMPLEMENTATION.md)
 - [`Docs/GLuaAnalysis/05_NATIVE_BOOTSTRAP_M2.md`](Docs/GLuaAnalysis/05_NATIVE_BOOTSTRAP_M2.md)
 - [`Docs/GLuaAnalysis/06_REALM_NETWORKING_M3.md`](Docs/GLuaAnalysis/06_REALM_NETWORKING_M3.md)
+- [`Docs/GLuaAnalysis/08_DERMA_SHARED_SESSION_M4.md`](Docs/GLuaAnalysis/08_DERMA_SHARED_SESSION_M4.md)
 - [`GMOD_BOOT_SEQUENCE.md`](GMOD_BOOT_SEQUENCE.md)
 - [`Tests/GModCorpus/README.md`](Tests/GModCorpus/README.md)
 
@@ -167,8 +168,8 @@ Work proceeds from the bottom of the actual GMod boot chain:
 The observed high-level order is:
 
 ```text
-SERVER: Base -> autorun/addons -> Sandbox -> PostGamemodeLoaded -> Initialize -> InitPostEntity
-CLIENT: Base -> autorun/addons -> Sandbox/Spawnmenu/VGUI -> PostGamemodeLoaded -> Initialize -> player connection -> InitPostEntity
+SERVER: Base -> autorun/addons -> target -> PostGamemodeLoaded -> Initialize -> InitPostEntity
+CLIENT: Derma -> Base -> autorun -> postprocess/VGUI/matproxy -> Default skin -> target -> PostGamemodeLoaded -> Initialize -> player connection -> InitPostEntity
 ```
 
 ## Project scope

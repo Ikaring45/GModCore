@@ -65,8 +65,39 @@ private struct GMLuaNetPacket: Sendable {
     let sequence: UInt64
     let sourceEndpointID: Int
     let destinationEndpointID: Int
+    let senderPlayerIndex: Int?
+    let connectionGeneration: UInt64?
     let unreliable: Bool
     let bits: GMLuaNetBitBuffer
+}
+
+private struct GMLuaConsolePacket: Sendable {
+    let sequence: UInt64
+    let sourceEndpointID: Int
+    let destinationEndpointID: Int
+    let senderPlayerIndex: Int
+    let connectionGeneration: UInt64
+    let command: String
+    let arguments: [String]
+}
+
+private enum GMLuaTransportDelivery: Sendable {
+    case net(GMLuaNetPacket)
+    case console(GMLuaConsolePacket)
+
+    var sourceEndpointID: Int {
+        switch self {
+        case let .net(packet): return packet.sourceEndpointID
+        case let .console(packet): return packet.sourceEndpointID
+        }
+    }
+
+    var destinationEndpointID: Int {
+        switch self {
+        case let .net(packet): return packet.destinationEndpointID
+        case let .console(packet): return packet.destinationEndpointID
+        }
+    }
 }
 
 /// Realm-local native net binding owned by a ``GMLuaNetTransport`` session.
@@ -80,6 +111,8 @@ public final class GMLuaNetEndpoint: @unchecked Sendable {
     fileprivate let identifier: Int
     fileprivate weak var state: LuaState?
     private weak var transport: GMLuaNetTransport?
+    private weak var entityRegistry: GMLuaEntityRegistry?
+    private weak var consoleCommandDispatcher: GMLuaConsoleCommandDispatcher?
     private let lock = NSLock()
     private var writer: GMLuaNetWriter?
     private var reader: GMLuaNetBitReader?
@@ -88,11 +121,13 @@ public final class GMLuaNetEndpoint: @unchecked Sendable {
         identifier: Int,
         realm: GMLuaRealm,
         state: LuaState,
+        entityRegistry: GMLuaEntityRegistry,
         transport: GMLuaNetTransport
     ) {
         self.identifier = identifier
         self.realm = realm
         self.state = state
+        self.entityRegistry = entityRegistry
         self.transport = transport
     }
 
@@ -300,7 +335,20 @@ public final class GMLuaNetEndpoint: @unchecked Sendable {
             guard let transport = self.transport else {
                 throw LuaError.runtime("net.SendToServer transport is unavailable")
             }
-            throw transport.sendToServerError(for: self)
+            try transport.sendToServer(from: self)
+            return []
+        }
+
+        state.register("__gmod_net_Send") { [unowned self] arguments in
+            guard self.realm == .server else {
+                throw LuaError.runtime("net.Send is server-only")
+            }
+            guard let transport = self.transport else {
+                throw LuaError.runtime("net.Send transport is unavailable")
+            }
+            let recipients = try self.recipientPlayerIndices(arguments.first)
+            try transport.send(from: self, toPlayerIndices: recipients)
+            return []
         }
 
         state.register("__gmod_net_BytesWritten") { [unowned self] _ in
@@ -481,16 +529,36 @@ public final class GMLuaNetEndpoint: @unchecked Sendable {
         lock.unlock()
     }
 
+    fileprivate func resetForConnectionBoundary() {
+        lock.lock()
+        writer = nil
+        reader = nil
+        lock.unlock()
+    }
+
+    func connectConsoleCommandDispatcher(
+        _ dispatcher: GMLuaConsoleCommandDispatcher
+    ) {
+        lock.lock()
+        consoleCommandDispatcher = dispatcher
+        lock.unlock()
+    }
+
     fileprivate func detachFromSession() {
         lock.lock()
         writer = nil
         reader = nil
         state = nil
         transport = nil
+        entityRegistry = nil
+        consoleCommandDispatcher = nil
         lock.unlock()
     }
 
-    fileprivate func invokeIncoming(totalBits: Int) throws {
+    fileprivate func invokeIncoming(
+        totalBits: Int,
+        senderPlayerIndex: Int?
+    ) throws {
         guard let state else {
             throw LuaError.runtime("destination Lua state is unavailable")
         }
@@ -504,10 +572,82 @@ public final class GMLuaNetEndpoint: @unchecked Sendable {
         guard incoming.typeName == "function" else {
             throw LuaError.runtime("net.Incoming is unavailable")
         }
+        let sender: LuaValue
+        if realm == .server {
+            guard let senderPlayerIndex,
+                  let entityRegistry else {
+                throw LuaError.runtime(
+                    "SERVER net.Incoming requires a connected sender Player"
+                )
+            }
+            sender = entityRegistry.player(at: senderPlayerIndex)
+            guard GMLuaTypeSystem.typedObject(from: sender)?.isValid == true else {
+                throw LuaError.runtime(
+                    "SERVER net.Incoming sender Player mirror is unavailable"
+                )
+            }
+        } else {
+            sender = .nilValue
+        }
         _ = try state.call(
             incoming,
-            arguments: [.number(Double(totalBits)), .nilValue]
+            arguments: [.number(Double(totalBits)), sender]
         )
+    }
+
+    fileprivate func invokeConsoleCommand(
+        command: String,
+        arguments: [String],
+        senderPlayerIndex: Int
+    ) throws {
+        guard realm == .server,
+              let entityRegistry,
+              let dispatcher = consoleCommandDispatcher else {
+            throw LuaError.runtime(
+                "SERVER console command destination is unavailable"
+            )
+        }
+        let sender = entityRegistry.player(at: senderPlayerIndex)
+        guard GMLuaTypeSystem.typedObject(from: sender)?.isValid == true else {
+            throw LuaError.runtime(
+                "SERVER console command sender Player mirror is unavailable"
+            )
+        }
+        try dispatcher.dispatchRemoteCommand(
+            command: command,
+            arguments: arguments,
+            caller: sender
+        )
+    }
+
+    private func recipientPlayerIndices(_ value: LuaValue?) throws -> [Int] {
+        guard let value else {
+            throw LuaError.runtime(
+                "bad argument #1 to 'net.Send' (Player or table expected, got no value)"
+            )
+        }
+        guard let entityRegistry else {
+            throw LuaError.runtime("net.Send Player registry is unavailable")
+        }
+        let values: [LuaValue]
+        if case let .table(table) = value {
+            guard let state else {
+                throw LuaError.runtime("net.Send Lua state is unavailable")
+            }
+            values = try state.rawTablePairs(in: table).map { $0.1 }
+        } else {
+            values = [value]
+        }
+        var seen: Set<Int> = []
+        var result: [Int] = []
+        for recipient in values {
+            let index = try entityRegistry.playerNetworkIndex(
+                from: recipient,
+                function: "net.Send"
+            )
+            if seen.insert(index).inserted { result.append(index) }
+        }
+        return result
     }
 
     private func requiredString(
@@ -670,22 +810,41 @@ public final class GMLuaNetTransport: @unchecked Sendable {
 
     public let networkedGlobalTransport: GMLuaNetworkedGlobalTransport
 
-    // LuaState is deliberately entered only at host pump boundaries. Keep the
-    // whole dequeue/callback/reader-cleanup operation single-filed so two host
-    // callers cannot remove packets for the same realm concurrently.
-    private let pumpLock = NSLock()
+    // LuaState is deliberately entered only at host pump boundaries. The
+    // condition serializes boundaries, but is never held while Lua executes.
+    // That matters because host-native callbacks may inspect session state.
+    private let boundaryCondition = NSCondition()
+    private var boundaryActive = false
     private let lock = NSLock()
     private var nextEndpointID = 1
     private var nextSequence: UInt64 = 0
     private var serverEndpointID: Int?
     private var endpoints: [Int: GMLuaNetEndpoint] = [:]
-    private var deliveries: [GMLuaNetPacket] = []
+    private struct ClientConnection: Sendable {
+        let endpointID: Int
+        let playerIndex: Int
+        let generation: UInt64
+    }
+    private var clientConnectionsByEndpoint: [Int: ClientConnection] = [:]
+    private var clientEndpointByPlayerIndex: [Int: Int] = [:]
+    private var disconnectHandlers: [Int: @Sendable () -> Void] = [:]
+    private var deliveries: [GMLuaTransportDelivery] = []
     private var completedMessages: UInt64 = 0
+    private var requiresExplicitClientConnections = false
 
     public init(
         networkedGlobalTransport: GMLuaNetworkedGlobalTransport = GMLuaNetworkedGlobalTransport()
     ) {
         self.networkedGlobalTransport = networkedGlobalTransport
+    }
+
+    /// Marks this transport as the substrate of a host-owned shared session.
+    /// In that mode merely constructing a CLIENT runtime does not make it a
+    /// broadcast recipient; only an explicit player connection does.
+    func requireExplicitClientConnections() {
+        lock.lock()
+        requiresExplicitClientConnections = true
+        lock.unlock()
     }
 
     public var pendingDeliveryCount: Int {
@@ -708,9 +867,28 @@ public final class GMLuaNetTransport: @unchecked Sendable {
         }
     }
 
+    /// True only on the thread currently invoking a Lua receiver from `pump`.
+    /// Lifecycle APIs use this to reject synchronous detach/reconnect rather
+    /// than deadlocking or closing a LuaState underneath its own callback.
+    func isPumpingOnCurrentThread() -> Bool {
+        Thread.current.threadDictionary[pumpThreadMarkerKey] as? Bool == true
+    }
+
+    /// Serializes a complete host lifecycle mutation against packet delivery.
+    /// The condition itself is released before `body` runs; same-thread nested
+    /// transport helpers reuse the boundary rather than deadlocking.
+    func withExclusiveLifecycleBoundary<T>(
+        _ body: () throws -> T
+    ) rethrows -> T {
+        beginExclusiveBoundary()
+        defer { endExclusiveBoundary() }
+        return try body()
+    }
+
     func installEndpoint(
         into state: LuaState,
-        realm: GMLuaRealm
+        realm: GMLuaRealm,
+        entityRegistry: GMLuaEntityRegistry
     ) throws -> GMLuaNetEndpoint {
         lock.lock()
         if realm == .server, serverEndpointID != nil {
@@ -723,6 +901,7 @@ public final class GMLuaNetTransport: @unchecked Sendable {
             identifier: identifier,
             realm: realm,
             state: state,
+            entityRegistry: entityRegistry,
             transport: self
         )
         endpoints[identifier] = endpoint
@@ -736,22 +915,101 @@ public final class GMLuaNetTransport: @unchecked Sendable {
     func detachEndpoint(_ endpoint: GMLuaNetEndpoint) {
         // Wait for any in-flight callback before allowing its LuaState to be
         // closed. Runtime shutdown is itself a host lifecycle boundary.
-        pumpLock.lock()
-        defer { pumpLock.unlock() }
-
+        beginExclusiveBoundary()
+        var cleanupHandlers: [@Sendable () -> Void] = []
         lock.lock()
         if endpoints[endpoint.identifier] === endpoint {
             endpoints.removeValue(forKey: endpoint.identifier)
             if serverEndpointID == endpoint.identifier {
                 serverEndpointID = nil
+                cleanupHandlers.append(contentsOf: disconnectHandlers.values)
+                disconnectHandlers.removeAll()
+                clientConnectionsByEndpoint.removeAll()
+                clientEndpointByPlayerIndex.removeAll()
+            } else if let connection = clientConnectionsByEndpoint.removeValue(
+                forKey: endpoint.identifier
+            ) {
+                clientEndpointByPlayerIndex.removeValue(forKey: connection.playerIndex)
+                if let handler = disconnectHandlers.removeValue(
+                    forKey: endpoint.identifier
+                ) {
+                    cleanupHandlers.append(handler)
+                }
             }
+            deliveries.removeAll {
+                $0.sourceEndpointID == endpoint.identifier ||
+                    $0.destinationEndpointID == endpoint.identifier ||
+                    endpoint.realm == .server
+            }
+        }
+        lock.unlock()
+        endpoint.detachFromSession()
+        cleanupHandlers.forEach { $0() }
+        endExclusiveBoundary()
+    }
+
+    func connectClientEndpoint(
+        _ endpoint: GMLuaNetEndpoint,
+        playerIndex: Int,
+        generation: UInt64,
+        onDisconnect: @escaping @Sendable () -> Void
+    ) throws {
+        guard endpoint.realm == .client else {
+            throw LuaError.runtime("shared session can only connect CLIENT endpoints")
+        }
+        beginExclusiveBoundary()
+        lock.lock()
+        let serverAvailable = serverEndpointID.flatMap { endpoints[$0] }?.state != nil
+        let endpointAvailable = endpoints[endpoint.identifier] === endpoint
+        let endpointUnused = clientConnectionsByEndpoint[endpoint.identifier] == nil
+        let playerUnused = clientEndpointByPlayerIndex[playerIndex] == nil
+        if serverAvailable, endpointAvailable, endpointUnused, playerUnused {
+            let connection = ClientConnection(
+                endpointID: endpoint.identifier,
+                playerIndex: playerIndex,
+                generation: generation
+            )
+            clientConnectionsByEndpoint[endpoint.identifier] = connection
+            clientEndpointByPlayerIndex[playerIndex] = endpoint.identifier
+            disconnectHandlers[endpoint.identifier] = onDisconnect
+        }
+        lock.unlock()
+        if serverAvailable, endpointAvailable, endpointUnused, playerUnused {
+            endpoint.resetForConnectionBoundary()
+            endExclusiveBoundary()
+            return
+        }
+        endExclusiveBoundary()
+        if !serverAvailable {
+            throw LuaError.runtime("shared session SERVER endpoint is unavailable")
+        }
+        if !endpointAvailable {
+            throw LuaError.runtime("shared session CLIENT endpoint is detached")
+        }
+        if !endpointUnused {
+            throw LuaError.runtime("shared session CLIENT endpoint is already connected")
+        }
+        throw LuaError.runtime("shared session player index \(playerIndex) is already connected")
+    }
+
+    func disconnectClientEndpoint(_ endpoint: GMLuaNetEndpoint) {
+        beginExclusiveBoundary()
+        lock.lock()
+        let connection = clientConnectionsByEndpoint.removeValue(
+            forKey: endpoint.identifier
+        )
+        if let connection {
+            clientEndpointByPlayerIndex.removeValue(forKey: connection.playerIndex)
             deliveries.removeAll {
                 $0.sourceEndpointID == endpoint.identifier ||
                     $0.destinationEndpointID == endpoint.identifier
             }
         }
+        let handler = disconnectHandlers.removeValue(forKey: endpoint.identifier)
         lock.unlock()
-        endpoint.detachFromSession()
+        endpoint.resetForConnectionBoundary()
+        handler?()
+        endExclusiveBoundary()
     }
 
     fileprivate func broadcast(from source: GMLuaNetEndpoint) throws {
@@ -770,32 +1028,146 @@ public final class GMLuaNetTransport: @unchecked Sendable {
         }
         completedMessages &+= 1
         let destinations = endpoints.values
-            .filter { $0.realm == .client && $0.state != nil }
+            .filter {
+                $0.realm == .client && $0.state != nil &&
+                    (!requiresExplicitClientConnections ||
+                        clientConnectionsByEndpoint[$0.identifier] != nil)
+            }
             .sorted { $0.identifier < $1.identifier }
         for destination in destinations {
             nextSequence &+= 1
-            deliveries.append(GMLuaNetPacket(
+            deliveries.append(.net(GMLuaNetPacket(
                 sequence: nextSequence,
                 sourceEndpointID: source.identifier,
                 destinationEndpointID: destination.identifier,
+                senderPlayerIndex: nil,
+                connectionGeneration: clientConnectionsByEndpoint[destination.identifier]?.generation,
                 unreliable: writer.unreliable,
                 bits: messageBits
-            ))
+            )))
         }
     }
 
-    fileprivate func sendToServerError(for source: GMLuaNetEndpoint) -> LuaError {
+    fileprivate func sendToServer(from source: GMLuaNetEndpoint) throws {
+        guard source.realm == .client else {
+            throw LuaError.runtime("net.SendToServer is client-only")
+        }
         lock.lock()
-        let hasServer = serverEndpointID.flatMap { endpoints[$0] }?.state != nil
+        let connection = clientConnectionsByEndpoint[source.identifier]
+        let destinationID = serverEndpointID
+        let destinationAvailable = destinationID.flatMap { endpoints[$0] }?.state != nil
         lock.unlock()
-        if !hasServer {
-            return LuaError.runtime(
+        guard let connection, let destinationID, destinationAvailable else {
+            throw LuaError.runtime(
                 "net.SendToServer cannot send: client transport is disconnected"
             )
         }
-        return LuaError.runtime(
-            "net.SendToServer requires a canonical server-side Player endpoint (not implemented in P0/P1)"
-        )
+
+        let writer = try source.takeWriter(function: "net.SendToServer")
+        var messageBits = GMLuaNetBitBuffer()
+        messageBits.appendUInt(UInt64(writer.messageID), bitCount: 16)
+        messageBits.append(writer.payload)
+
+        lock.lock()
+        defer { lock.unlock() }
+        guard clientConnectionsByEndpoint[source.identifier]?.generation == connection.generation,
+              serverEndpointID == destinationID,
+              endpoints[destinationID]?.state != nil else {
+            throw LuaError.runtime(
+                "net.SendToServer cannot send: client transport disconnected during send"
+            )
+        }
+        completedMessages &+= 1
+        nextSequence &+= 1
+        deliveries.append(.net(GMLuaNetPacket(
+            sequence: nextSequence,
+            sourceEndpointID: source.identifier,
+            destinationEndpointID: destinationID,
+            senderPlayerIndex: connection.playerIndex,
+            connectionGeneration: connection.generation,
+            unreliable: writer.unreliable,
+            bits: messageBits
+        )))
+    }
+
+    fileprivate func send(
+        from source: GMLuaNetEndpoint,
+        toPlayerIndices playerIndices: [Int]
+    ) throws {
+        guard source.realm == .server else {
+            throw LuaError.runtime("net.Send is server-only")
+        }
+        let writer = try source.takeWriter(function: "net.Send")
+        var messageBits = GMLuaNetBitBuffer()
+        messageBits.appendUInt(UInt64(writer.messageID), bitCount: 16)
+        messageBits.append(writer.payload)
+
+        lock.lock()
+        defer { lock.unlock() }
+        guard serverEndpointID == source.identifier,
+              endpoints[source.identifier] === source else {
+            throw LuaError.runtime("net.Send SERVER endpoint is detached")
+        }
+        let destinations = playerIndices.map { playerIndex -> ClientConnection in
+            guard let endpointID = clientEndpointByPlayerIndex[playerIndex],
+                  let connection = clientConnectionsByEndpoint[endpointID] else {
+                // A stale or foreign Player must not become an accidental
+                // broadcast or a silent success.
+                return ClientConnection(
+                    endpointID: -1,
+                    playerIndex: playerIndex,
+                    generation: 0
+                )
+            }
+            return connection
+        }
+        if let missing = destinations.first(where: { $0.endpointID < 0 }) {
+            throw LuaError.runtime(
+                "net.Send target Player(\(missing.playerIndex)) is not connected"
+            )
+        }
+        completedMessages &+= 1
+        for destination in destinations {
+            nextSequence &+= 1
+            deliveries.append(.net(GMLuaNetPacket(
+                sequence: nextSequence,
+                sourceEndpointID: source.identifier,
+                destinationEndpointID: destination.endpointID,
+                senderPlayerIndex: nil,
+                connectionGeneration: destination.generation,
+                unreliable: writer.unreliable,
+                bits: messageBits
+            )))
+        }
+    }
+
+    func enqueueConsoleCommand(
+        from source: GMLuaNetEndpoint,
+        command: String,
+        arguments: [String]
+    ) throws {
+        guard source.realm == .client else {
+            throw LuaError.runtime("remote console commands require a CLIENT endpoint")
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        guard let connection = clientConnectionsByEndpoint[source.identifier],
+              let destinationID = serverEndpointID,
+              endpoints[destinationID]?.state != nil else {
+            throw LuaError.runtime(
+                "RunConsoleCommand cannot send: client transport is disconnected"
+            )
+        }
+        nextSequence &+= 1
+        deliveries.append(.console(GMLuaConsolePacket(
+            sequence: nextSequence,
+            sourceEndpointID: source.identifier,
+            destinationEndpointID: destinationID,
+            senderPlayerIndex: connection.playerIndex,
+            connectionGeneration: connection.generation,
+            command: command,
+            arguments: arguments
+        )))
     }
 
     /// Delivers queued packets in deterministic sequence order.
@@ -805,33 +1177,146 @@ public final class GMLuaNetTransport: @unchecked Sendable {
     @discardableResult
     public func pump(maxDeliveries: Int = .max) throws -> Int {
         guard maxDeliveries > 0 else { return 0 }
-        pumpLock.lock()
-        defer { pumpLock.unlock() }
+        guard !isPumpingOnCurrentThread() else {
+            throw LuaError.runtime(
+                "GMLuaNetTransport.pump cannot be re-entered from a Lua delivery callback"
+            )
+        }
+        beginExclusiveBoundary(markPumpThread: true)
+        defer { endExclusiveBoundary(markPumpThread: true) }
         var delivered = 0
         while delivered < maxDeliveries {
-            let next: (GMLuaNetEndpoint, GMLuaNetPacket)?
+            let next: (GMLuaNetEndpoint, GMLuaTransportDelivery)?
             lock.lock()
             if deliveries.isEmpty {
                 next = nil
             } else {
-                let packet = deliveries.removeFirst()
-                if let endpoint = endpoints[packet.destinationEndpointID] {
-                    next = (endpoint, packet)
+                let delivery = deliveries.removeFirst()
+                if let endpoint = endpoints[delivery.destinationEndpointID] {
+                    next = (endpoint, delivery)
                 } else {
                     next = nil
                 }
             }
             lock.unlock()
-            guard let (endpoint, packet) = next else {
+            guard let (endpoint, delivery) = next else {
                 if pendingDeliveryCount == 0 { break }
                 continue
             }
-
-            try endpoint.beginReading(packet.bits)
-            defer { endpoint.finishReading() }
-            try endpoint.invokeIncoming(totalBits: packet.bits.bitCount)
+            switch delivery {
+            case let .net(packet):
+                try validateConnectionGeneration(
+                    endpoint: endpoint,
+                    sourceEndpointID: packet.sourceEndpointID,
+                    senderPlayerIndex: packet.senderPlayerIndex,
+                    generation: packet.connectionGeneration
+                )
+                try endpoint.beginReading(packet.bits)
+                do {
+                    try endpoint.invokeIncoming(
+                        totalBits: packet.bits.bitCount,
+                        senderPlayerIndex: packet.senderPlayerIndex
+                    )
+                    endpoint.finishReading()
+                } catch {
+                    endpoint.finishReading()
+                    throw error
+                }
+            case let .console(packet):
+                try validateConnectionGeneration(
+                    endpoint: endpoint,
+                    sourceEndpointID: packet.sourceEndpointID,
+                    senderPlayerIndex: packet.senderPlayerIndex,
+                    generation: packet.connectionGeneration
+                )
+                try endpoint.invokeConsoleCommand(
+                    command: packet.command,
+                    arguments: packet.arguments,
+                    senderPlayerIndex: packet.senderPlayerIndex
+                )
+            }
             delivered += 1
         }
         return delivered
+    }
+
+    private func validateConnectionGeneration(
+        endpoint: GMLuaNetEndpoint,
+        sourceEndpointID: Int,
+        senderPlayerIndex: Int?,
+        generation: UInt64?
+    ) throws {
+        lock.lock()
+        let connection: ClientConnection?
+        if endpoint.realm == .server {
+            connection = clientConnectionsByEndpoint[sourceEndpointID]
+        } else {
+            connection = clientConnectionsByEndpoint[endpoint.identifier]
+        }
+        lock.unlock()
+        if endpoint.realm == .client,
+           senderPlayerIndex == nil,
+           generation == nil,
+           connection == nil {
+            // Preserve the transport's standalone server-broadcast mode. A
+            // player-connected shared session always carries a generation.
+            return
+        }
+        guard let connection,
+              connection.generation == generation else {
+            throw LuaError.runtime(
+                "queued delivery belongs to a stale player connection generation"
+            )
+        }
+        if let senderPlayerIndex,
+           connection.playerIndex != senderPlayerIndex {
+            throw LuaError.runtime(
+                "queued delivery sender does not match its connected Player"
+            )
+        }
+    }
+
+    private var pumpThreadMarkerKey: String {
+        "GMLuaNetTransport.pump.\(ObjectIdentifier(self))"
+    }
+
+    private var boundaryThreadMarkerKey: String {
+        "GMLuaNetTransport.boundary.\(ObjectIdentifier(self))"
+    }
+
+    private func beginExclusiveBoundary(markPumpThread: Bool = false) {
+        let threadDictionary = Thread.current.threadDictionary
+        if let depth = threadDictionary[boundaryThreadMarkerKey] as? Int {
+            threadDictionary[boundaryThreadMarkerKey] = depth + 1
+            if markPumpThread { threadDictionary[pumpThreadMarkerKey] = true }
+            return
+        }
+        boundaryCondition.lock()
+        while boundaryActive { boundaryCondition.wait() }
+        boundaryActive = true
+        boundaryCondition.unlock()
+        threadDictionary[boundaryThreadMarkerKey] = 1
+        if markPumpThread {
+            threadDictionary[pumpThreadMarkerKey] = true
+        }
+    }
+
+    private func endExclusiveBoundary(markPumpThread: Bool = false) {
+        let threadDictionary = Thread.current.threadDictionary
+        if markPumpThread {
+            threadDictionary.removeObject(forKey: pumpThreadMarkerKey)
+        }
+        guard let depth = threadDictionary[boundaryThreadMarkerKey] as? Int else {
+            preconditionFailure("unbalanced GMLuaNetTransport lifecycle boundary")
+        }
+        if depth > 1 {
+            threadDictionary[boundaryThreadMarkerKey] = depth - 1
+            return
+        }
+        threadDictionary.removeObject(forKey: boundaryThreadMarkerKey)
+        boundaryCondition.lock()
+        boundaryActive = false
+        boundaryCondition.broadcast()
+        boundaryCondition.unlock()
     }
 }

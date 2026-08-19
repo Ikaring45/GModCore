@@ -13,10 +13,10 @@ cleaning all!!!!
 [CONFORMANCE][PASS] final OK = true
 ```
 
-The verified 0.1.44 packaging run executes `gc.lua` in its original `all.lua`
+The verified 0.1.45 packaging run executes `gc.lua` in its original `all.lua`
 position. It does not replace, shorten, or classify GC as a pass. The run
 completed with process exit code 0 after fetching 24 test files and performing
-38 chunk loads from the local mirror. The final run completed in 88.39 seconds.
+38 chunk loads from the local mirror. The final run completed in 92.84 seconds.
 
 Only two files are intentionally classified outside the embedded language
 runtime:
@@ -91,15 +91,14 @@ This result is not a claim that every host-facing GMod API is implemented.
   not features of the embedded Swift VM.
 - Final iPad filesystem, sandbox, UI, and Metal integration still require iPad
   hardware validation even though the same runtime source passes on Windows.
-- Lua 5.1 conformance does not imply GLua engine completeness. Native M3 adds
-  shared NetworkStrings, legacy network globals, a bounded queued SERVER
-  broadcast path, logical chat/input, and host-owned engine ConVars to the M2
-  bootstrap substrate. `net.Send`, a real `net.SendToServer` player path,
-  automatic global resend scheduling, complete Entity/Player network state,
-  physics, Source assets, and platform-backed UI/rendering/audio remain later
-  compatibility layers. M3's sound registry and Panel/Label controls are
-  logical state only; they do not provide audio playback or UIKit, CoreText,
-  or Metal text rendering.
+- Lua 5.1 conformance does not imply GLua engine completeness. Native M4 adds
+  the measured CLIENT Derma/special-directory/Default-skin order, installed-VPK
+  PNG decoding, a paired SERVER/CLIENT session, targeted net delivery, remote
+  console dispatch, and Entity Lua sidecars to the earlier bootstrap and
+  networking substrate. Sockets, Steam authentication, prediction, physics,
+  general VMT/VTF material resolution, and platform-backed VGUI rendering
+  remain later compatibility layers. The new UI and sound contracts are
+  logical host state rather than UIKit/CoreText/Metal or audio output.
 
 ## GLua bootstrap evidence
 
@@ -125,21 +124,28 @@ hooks in one state. Addon mounting, CLIENT player connection, and engine entity
 readiness remain explicit false/SKIP boundaries, so this is not reported as a
 complete desktop startup lifecycle.
 
-For the final 0.1.44 snapshot, fresh Swift tests pass 135/135 and the Engine
-target passes complete strict-concurrency checking. Strict core init passes in
-SERVER and CLIENT. The former M2 42-include MENU measurement ran the gameplay
-`init.lua` entry and is superseded by the realm-correct `init_menu.lua` gate:
-23 includes and zero gaps.
+For the final 0.1.45 snapshot, the clean Swift suite passes 170/170 tests and
+the Engine target passes complete strict-concurrency checking with warnings
+treated as errors. The real installed-VPK Default-atlas diagnostic ran rather
+than being environment-skipped. Strict core init passes in SERVER and CLIENT.
+The realm-correct MENU `init_menu.lua` gate remains a separate checkpoint.
 
-Strict SERVER TTT modeled startup exits 0 through Base, autorun, TTT,
-`PostGamemodeLoaded`, `Initialize`, and `InitPostEntity`. Strict CLIENT Sandbox
-modeled startup also exits 0. Strict CLIENT TTT performs 177 includes, with
-`cl_voice.lua` last, and reaches `InitPostEntity`; it then stops at
-`lua/vgui/DLabel.lua:127` because the default Derma skin and its `Colours`
-table have not yet been constructed. Addon discovery, CLIENT player
-connection, and live engine entity readiness remain explicit false/SKIP
-boundaries. These startup results are compatibility checkpoints, not claims
+Strict paired Sandbox and TTT modeled startup both exit 0 through Base,
+realm-correct autorun, the corrected CLIENT Derma/postprocess/VGUI/matproxy and
+Default-skin stages, target gamemode load, `PostGamemodeLoaded`, `Initialize`,
+logical player connection, and both realms' `InitPostEntity`. The TTT run
+delivers four queued cross-realm net/console events. Addon discovery, Steam
+authentication, live engine entity readiness, and desktop startup completion
+remain explicit false/SKIP boundaries. `OnGamemodeLoaded` is not dispatched,
+so Spawnmenu Lua loading and registration do not mean that the menu is
+instantiated. These startup results are compatibility checkpoints, not claims
 that TTT or Sandbox is playable.
+
+The installed-tree parser gate passes 259/259 targeted files. Its deliberately
+independent-file load diagnostic reaches 26/259; the first load blocker is
+`lua/includes/extensions/entity.lua:166` because that diagnostic intentionally
+does not supply the ordered bootstrap's `hook` state. This is not a holistic
+startup failure.
 
 ## Reproduction
 

@@ -60,11 +60,15 @@ final class GMLuaStartupOrchestratorTests: XCTestCase {
             "lua/autorun/client/07_client.lua"
         ])
         XCTAssertEqual(result.report.stages.map(\.stage), [
-            .clientVGUIBootstrap,
+            .clientDermaBootstrap,
             .baseGamemode,
             .sharedAutorun,
             .realmAutorun,
             .addons,
+            .clientPostProcessBootstrap,
+            .clientVGUIBootstrap,
+            .clientMaterialProxyBootstrap,
+            .clientDefaultSkinBootstrap,
             .targetGamemode,
             .postGamemodeLoaded,
             .initialize,
@@ -75,23 +79,149 @@ final class GMLuaStartupOrchestratorTests: XCTestCase {
             result.report.stages.filter { $0.outcome == .skipped }.map(\.stage),
             [.addons, .playerConnection]
         )
+        let dermaStage = try XCTUnwrap(
+            result.report.stages.first { $0.stage == .clientDermaBootstrap }
+        )
+        XCTAssertEqual(dermaStage.directPaths, ["lua/derma/init.lua"])
+        XCTAssertEqual(dermaStage.transitiveIncludePaths, [
+            "lua/derma/parts/core.lua"
+        ])
+        let postProcessStage = try XCTUnwrap(
+            result.report.stages.first { $0.stage == .clientPostProcessBootstrap }
+        )
+        XCTAssertEqual(postProcessStage.directPaths, [
+            "lua/postprocess/10_first.lua",
+            "lua/postprocess/20_second.lua"
+        ])
         let vguiStage = try XCTUnwrap(
             result.report.stages.first { $0.stage == .clientVGUIBootstrap }
         )
-        XCTAssertEqual(vguiStage.directPaths, ["lua/includes/vgui_base.lua"])
-        XCTAssertEqual(vguiStage.transitiveIncludePaths, [
-            "lua/includes/vgui/fixture_control.lua"
+        XCTAssertEqual(vguiStage.directPaths, [
+            "lua/vgui/10_control.lua",
+            "lua/vgui/20_control.lua"
         ])
+        XCTAssertEqual(vguiStage.transitiveIncludePaths, [
+            "lua/vgui/parts/nested.lua"
+        ])
+        let materialProxyStage = try XCTUnwrap(
+            result.report.stages.first { $0.stage == .clientMaterialProxyBootstrap }
+        )
+        XCTAssertEqual(materialProxyStage.directPaths, ["lua/matproxy/10_proxy.lua"])
+        let skinStage = try XCTUnwrap(
+            result.report.stages.first { $0.stage == .clientDefaultSkinBootstrap }
+        )
+        XCTAssertEqual(skinStage.directPaths, ["lua/skins/default.lua"])
         try result.runtime.execute(
             """
             assert(table.concat(STARTUP_ORDER, ",") ==
-                "vgui-base,vgui-control,base,shared-10,shared-nested,shared-20," ..
-                "client-07,sandbox," ..
+                "derma,derma-core,base,shared-10,shared-nested,shared-20," ..
+                "client-07,post-10,post-20,vgui-10,vgui-nested,vgui-20," ..
+                "matproxy-10,skin,sandbox," ..
                 "hook-post,gm-post,hook-init,gm-init,hook-entity,gm-entity")
             assert(CLIENT and not SERVER)
-            assert(VGUI_BOOTSTRAPPED == true)
+            assert(DERMA_BOOTSTRAPPED and VGUI_BOOTSTRAPPED and DEFAULT_SKIN_LOADED)
+            assert(MENU_VGUI_BASE_EXECUTED == nil)
             """,
             sourceName: "=(client startup order assertion)"
+        )
+    }
+
+    func testExplicitClientConnectionRunsAfterInitializeAndBeforeInitPostEntity() throws {
+        let files = try LuaMemoryFileSystem(initialFiles: fixtureFiles())
+        let mounted = try mounted(files)
+        let session = GMLuaSharedSession()
+        let server = GMLuaRuntime(
+            realm: .server,
+            logger: { _ in },
+            netTransport: session.netTransport
+        )
+        let client = GMLuaRuntime(
+            realm: .client,
+            logger: { _ in },
+            virtualFileSystem: mounted,
+            bootstrapMode: .strict,
+            netTransport: session.netTransport
+        )
+        defer {
+            _ = client.close()
+            _ = server.close()
+        }
+        try installSyntheticLibraries(in: client)
+        try client.execute("EXPECT_CONNECTED = true; assert(LocalPlayer() == NULL)")
+        let startup = GMLuaStartupOrchestrator(
+            runtime: client,
+            fileSystem: mounted,
+            playerConnection: {
+                try session.connect(
+                    server: server,
+                    client: client,
+                    playerIndex: 12,
+                    userID: 112
+                )
+                try client.execute(
+                    """
+                    assert(LocalPlayer():IsValid())
+                    assert(LocalPlayer() == Entity(12) and LocalPlayer() == Player(112))
+                    assert(Player(12) == NULL)
+                    table.insert(STARTUP_ORDER, "connection")
+                    """
+                )
+            }
+        )
+
+        let report = try startup.start(targetGamemodeNamed: "sandbox")
+
+        XCTAssertTrue(report.playerConnectionModeled)
+        XCTAssertEqual(
+            report.stages.first { $0.stage == .playerConnection }?.outcome,
+            .completed
+        )
+        try client.execute(
+            """
+            assert(table.concat(STARTUP_ORDER, ",") ==
+                "derma,derma-core,base,shared-10,shared-nested,shared-20," ..
+                "client-07,post-10,post-20,vgui-10,vgui-nested,vgui-20," ..
+                "matproxy-10,skin,sandbox," ..
+                "hook-post,gm-post,hook-init,gm-init,connection,hook-entity,gm-entity")
+            """
+        )
+    }
+
+    func testExplicitClientConnectionFailureStopsBeforeInitPostEntity() throws {
+        let files = try LuaMemoryFileSystem(initialFiles: fixtureFiles())
+        let mounted = try mounted(files)
+        let runtime = GMLuaRuntime(
+            realm: .client,
+            logger: { _ in },
+            virtualFileSystem: mounted,
+            bootstrapMode: .strict
+        )
+        defer { _ = runtime.close() }
+        try installSyntheticLibraries(in: runtime)
+        let startup = GMLuaStartupOrchestrator(
+            runtime: runtime,
+            fileSystem: mounted,
+            playerConnection: {
+                throw LuaError.runtime("synthetic connection refusal")
+            }
+        )
+
+        XCTAssertThrowsError(try startup.start(targetGamemodeNamed: "sandbox")) { error in
+            guard case let GMLuaStartupError.playerConnection(reason) = error else {
+                return XCTFail("unexpected connection-stage error: \(error)")
+            }
+            XCTAssertTrue(reason.contains("synthetic connection refusal"))
+        }
+        XCTAssertEqual(startup.activeStage, .playerConnection)
+        XCTAssertFalse(startup.stages.contains { $0.stage == .initPostEntity })
+        try runtime.execute(
+            """
+            assert(table.concat(STARTUP_ORDER, ",") ==
+                "derma,derma-core,base,shared-10,shared-nested,shared-20," ..
+                "client-07,post-10,post-20,vgui-10,vgui-nested,vgui-20," ..
+                "matproxy-10,skin,sandbox," ..
+                "hook-post,gm-post,hook-init,gm-init")
+            """
         )
     }
 
@@ -121,6 +251,69 @@ final class GMLuaStartupOrchestratorTests: XCTestCase {
             guard case GMLuaStartupError.alreadyStarted = error else {
                 return XCTFail("unexpected repeated-start error: \(error)")
             }
+        }
+    }
+
+    func testClientRequiresDermaAndExactDefaultSkinBootstraps() throws {
+        for (missingPath, expectedStage) in [
+            ("lua/derma/init.lua", GMLuaStartupStage.clientDermaBootstrap),
+            ("lua/skins/default.lua", GMLuaStartupStage.clientDefaultSkinBootstrap)
+        ] {
+            var files = fixtureFiles()
+            files.removeValue(forKey: missingPath)
+            let mounted = try mounted(LuaMemoryFileSystem(initialFiles: files))
+            let runtime = GMLuaRuntime(
+                realm: .client,
+                logger: { _ in },
+                virtualFileSystem: mounted,
+                bootstrapMode: .strict
+            )
+            defer { _ = runtime.close() }
+            try installSyntheticLibraries(in: runtime)
+            let startup = GMLuaStartupOrchestrator(runtime: runtime, fileSystem: mounted)
+
+            XCTAssertThrowsError(try startup.start(targetGamemodeNamed: "sandbox")) { error in
+                guard case let GMLuaStartupError.clientBootstrap(stage, path, _) = error else {
+                    return XCTFail("unexpected missing-bootstrap error: \(error)")
+                }
+                XCTAssertEqual(stage, expectedStage)
+                XCTAssertEqual(path, missingPath)
+            }
+        }
+    }
+
+    func testAbsentClientSpecialDirectoriesAreCompletedWithZeroDirectFiles() throws {
+        var files = fixtureFiles().filter { path, _ in
+            !path.hasPrefix("lua/postprocess/") &&
+                !path.hasPrefix("lua/vgui/") &&
+                !path.hasPrefix("lua/matproxy/")
+        }
+        files["lua/skins/default.lua"] = data(
+            "DEFAULT_SKIN_LOADED = true; table.insert(STARTUP_ORDER, 'skin')"
+        )
+        let mounted = try mounted(LuaMemoryFileSystem(initialFiles: files))
+        let runtime = GMLuaRuntime(
+            realm: .client,
+            logger: { _ in },
+            virtualFileSystem: mounted,
+            bootstrapMode: .strict
+        )
+        defer { _ = runtime.close() }
+        try installSyntheticLibraries(in: runtime)
+        let report = try GMLuaStartupOrchestrator(
+            runtime: runtime,
+            fileSystem: mounted
+        ).start(targetGamemodeNamed: "sandbox")
+
+        for stage in [
+            GMLuaStartupStage.clientPostProcessBootstrap,
+            .clientVGUIBootstrap,
+            .clientMaterialProxyBootstrap
+        ] {
+            let record = try XCTUnwrap(report.stages.first { $0.stage == stage })
+            XCTAssertEqual(record.outcome, .completed)
+            XCTAssertTrue(record.directPaths.isEmpty)
+            XCTAssertTrue(record.transitiveIncludePaths.isEmpty)
         }
     }
 
@@ -180,7 +373,8 @@ final class GMLuaStartupOrchestratorTests: XCTestCase {
                 "STARTUP_ORDER = { 'base' }; GM.BaseLoaded = true"
             ),
             "gamemodes/base/gamemode/cl_init.lua": data(
-                "assert(VGUI_BOOTSTRAPPED); table.insert(STARTUP_ORDER, 'base'); " +
+                "assert(DERMA_BOOTSTRAPPED and not VGUI_BOOTSTRAPPED); " +
+                "table.insert(STARTUP_ORDER, 'base'); " +
                 "GM.BaseLoaded = true"
             ),
             "gamemodes/sandbox/sandbox.txt": data(
@@ -204,13 +398,42 @@ final class GMLuaStartupOrchestratorTests: XCTestCase {
             "lua/autorun/client/07_client.lua": data(
                 "assert(CLIENT); table.insert(STARTUP_ORDER, 'client-07')"
             ),
-            "lua/includes/vgui_base.lua": data(
+            "lua/derma/init.lua": data(
                 "assert(CLIENT and STARTUP_ORDER == nil); " +
-                "STARTUP_ORDER = { 'vgui-base' }; VGUI_BOOTSTRAPPED = true; " +
-                "include('vgui/fixture_control.lua')"
+                "STARTUP_ORDER = { 'derma' }; DERMA_BOOTSTRAPPED = true; " +
+                "include('parts/core.lua')"
             ),
-            "lua/includes/vgui/fixture_control.lua": data(
-                "assert(VGUI_BOOTSTRAPPED); table.insert(STARTUP_ORDER, 'vgui-control')"
+            "lua/derma/parts/core.lua": data(
+                "assert(DERMA_BOOTSTRAPPED); table.insert(STARTUP_ORDER, 'derma-core')"
+            ),
+            "lua/includes/vgui_base.lua": data(
+                "MENU_VGUI_BASE_EXECUTED = true; error('menu-only vgui_base executed in CLIENT')"
+            ),
+            "lua/postprocess/20_second.lua": data(
+                "assert(not VGUI_BOOTSTRAPPED); table.insert(STARTUP_ORDER, 'post-20')"
+            ),
+            "lua/postprocess/10_first.lua": data(
+                "assert(not VGUI_BOOTSTRAPPED); table.insert(STARTUP_ORDER, 'post-10')"
+            ),
+            "lua/postprocess/subdirectory/ignored.lua": data(
+                "error('recursive postprocess file was executed')"
+            ),
+            "lua/vgui/10_control.lua": data(
+                "VGUI_BOOTSTRAPPED = true; table.insert(STARTUP_ORDER, 'vgui-10'); " +
+                "include('parts/nested.lua')"
+            ),
+            "lua/vgui/20_control.lua": data(
+                "assert(VGUI_BOOTSTRAPPED); table.insert(STARTUP_ORDER, 'vgui-20')"
+            ),
+            "lua/vgui/parts/nested.lua": data(
+                "table.insert(STARTUP_ORDER, 'vgui-nested')"
+            ),
+            "lua/matproxy/10_proxy.lua": data(
+                "assert(VGUI_BOOTSTRAPPED); table.insert(STARTUP_ORDER, 'matproxy-10')"
+            ),
+            "lua/skins/default.lua": data(
+                "assert(VGUI_BOOTSTRAPPED); DEFAULT_SKIN_LOADED = true; " +
+                "table.insert(STARTUP_ORDER, 'skin')"
             )
         ]
     }
@@ -219,10 +442,16 @@ final class GMLuaStartupOrchestratorTests: XCTestCase {
         """
         assert(GAMEMODE.FolderName == "base")
         assert(GM.FolderName == "sandbox")
+        if CLIENT then assert(DEFAULT_SKIN_LOADED) end
         table.insert(STARTUP_ORDER, "sandbox")
         function GM:PostGamemodeLoaded() table.insert(STARTUP_ORDER, "gm-post") end
         function GM:Initialize() table.insert(STARTUP_ORDER, "gm-init") end
-        function GM:InitPostEntity() table.insert(STARTUP_ORDER, "gm-entity") end
+        function GM:InitPostEntity()
+            if CLIENT and EXPECT_CONNECTED then
+                assert(LocalPlayer():IsValid())
+            end
+            table.insert(STARTUP_ORDER, "gm-entity")
+        end
         """
     }
 

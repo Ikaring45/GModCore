@@ -126,11 +126,20 @@ public final class GMLuaDermaRegistry: @unchecked Sendable {
     }
 
     fileprivate func skinTableCopy() throws -> LuaTable {
-        let copy = LuaTable()
-        for (key, value) in try state.rawTablePairs(in: skins) {
-            try state.setRawTableValue(value, for: key, in: copy)
+        guard case let .table(tableLibrary) = state.getGlobal("table") else {
+            throw LuaError.runtime("derma.GetSkinTable requires table.Copy")
         }
-        return copy
+        let copy = try state.rawTableValue(for: .string("Copy"), in: tableLibrary)
+        guard isCallable(copy) else {
+            throw LuaError.runtime("derma.GetSkinTable requires table.Copy")
+        }
+        guard case let .table(result) = try state.call(
+            copy,
+            arguments: [.table(skins)]
+        ).first ?? .nilValue else {
+            throw LuaError.runtime("table.Copy returned a non-table skin registry")
+        }
+        return result
     }
 
     fileprivate func refreshSkins() {

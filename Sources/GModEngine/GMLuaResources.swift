@@ -1,6 +1,55 @@
 import Foundation
 import GModLua
 
+/// Pixel dimensions reported by a host material-image resolver.
+///
+/// The Lua engine deliberately does not decode Source assets itself. The
+/// desktop conformance host and the eventual iPad asset layer can both provide
+/// the same resolver boundary without changing IMaterial/ITexture semantics.
+public struct GMLuaImageDimensions: Sendable, Equatable {
+    public let width: Int
+    public let height: Int
+
+    public init(width: Int, height: Int) {
+        self.width = width
+        self.height = height
+    }
+}
+
+/// One un-premultiplied eight-bit RGBA pixel from a decoded material image.
+public struct GMLuaRGBA8: Sendable, Equatable {
+    public let red: UInt8
+    public let green: UInt8
+    public let blue: UInt8
+    public let alpha: UInt8
+
+    public init(red: UInt8, green: UInt8, blue: UInt8, alpha: UInt8) {
+        self.red = red
+        self.green = green
+        self.blue = blue
+        self.alpha = alpha
+    }
+}
+
+/// Host boundary used by PNG-backed IMaterial:GetColor/ITexture:GetColor.
+///
+/// Returning `nil` means that this resolver did not resolve the requested
+/// material. Implementations are expected to cache decoded images: a Derma
+/// skin samples several pixels from the same atlas while it is constructed.
+public protocol GMLuaMaterialPixelResolver: Sendable {
+    func dimensions(
+        materialPath: LuaString,
+        encodedParameters: LuaString?
+    ) throws -> GMLuaImageDimensions?
+
+    func pixel(
+        materialPath: LuaString,
+        encodedParameters: LuaString?,
+        x: Int,
+        y: Int
+    ) throws -> GMLuaRGBA8?
+}
+
 /// Whether a logical Source resource has been connected to decoded asset data.
 /// This milestone only creates identity-preserving descriptors, so every newly
 /// registered resource remains unresolved.
@@ -24,6 +73,48 @@ public final class GMLuaMaterialDescriptor: @unchecked Sendable {
 
 public enum GMLuaTextureDescriptorKind: Sendable, Equatable {
     case screenEffect(index: Int)
+    case materialBaseTexture(path: LuaString, encodedParameters: LuaString?)
+    /// An engine-owned render target exposed by a named render-library getter.
+    /// The name is an identity token; this descriptor does not claim pixels or
+    /// GPU storage exist in the current host.
+    case engineRenderTarget(name: LuaString)
+    /// A logical render target requested through GetRenderTargetEx. The first
+    /// request for a canonical Source texture name owns its creation settings.
+    case renderTarget(GMLuaRenderTargetRequest)
+}
+
+/// Creation settings retained for a logical GetRenderTargetEx resource.
+///
+/// These are metadata only until the renderer connects a GPU-backed target.
+public struct GMLuaRenderTargetRequest: Sendable, Equatable {
+    public let name: LuaString
+    public let width: Int
+    public let height: Int
+    public let sizeMode: Int
+    public let depthMode: Int
+    public let textureFlags: Int
+    public let renderTargetFlags: Int
+    public let imageFormat: Int
+
+    public init(
+        name: LuaString,
+        width: Int,
+        height: Int,
+        sizeMode: Int,
+        depthMode: Int,
+        textureFlags: Int,
+        renderTargetFlags: Int,
+        imageFormat: Int
+    ) {
+        self.name = name
+        self.width = width
+        self.height = height
+        self.sizeMode = sizeMode
+        self.depthMode = depthMode
+        self.textureFlags = textureFlags
+        self.renderTargetFlags = renderTargetFlags
+        self.imageFormat = imageFormat
+    }
 }
 
 public final class GMLuaTextureDescriptor: @unchecked Sendable {
@@ -53,6 +144,10 @@ public final class GMLuaResourceRegistry: @unchecked Sendable {
     private let lock = NSLock()
     private var materialValues: [GMLuaMaterialKey: LuaValue] = [:]
     private var textureValues: [Int: LuaValue] = [:]
+    private var materialTextureValues: [GMLuaMaterialKey: LuaValue] = [:]
+    private var namedTextureValues: [LuaString: LuaValue] = [:]
+    private var materialTextureBindings: [GMLuaMaterialKey: [LuaString: LuaValue]] = [:]
+    private var materialPixelResolver: (any GMLuaMaterialPixelResolver)?
     private var requestedSounds: Set<LuaString> = []
     private var requestedModels: Set<LuaString> = []
     private var requestedParticleSystems: Set<LuaString> = []
@@ -70,7 +165,25 @@ public final class GMLuaResourceRegistry: @unchecked Sendable {
     public var textureCount: Int {
         lock.lock()
         defer { lock.unlock() }
-        return textureValues.count
+        return textureValues.count + materialTextureValues.count + namedTextureValues.count
+    }
+
+    /// True only after the embedding host has connected a real decoded-image
+    /// source. An absent resolver is not silently replaced with a fake palette.
+    public var hasMaterialPixelResolver: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return materialPixelResolver != nil
+    }
+
+    /// Connects or removes the decoded-image source used by material pixels.
+    /// Existing Lua userdata identities remain valid across resolver changes.
+    public func setMaterialPixelResolver(
+        _ resolver: (any GMLuaMaterialPixelResolver)?
+    ) {
+        lock.lock()
+        materialPixelResolver = resolver
+        lock.unlock()
     }
 
     /// Logical requests retained for the future Source asset resolver. A name
@@ -113,10 +226,22 @@ public final class GMLuaResourceRegistry: @unchecked Sendable {
         return Self.textureDescriptor(from: value)
     }
 
+    public func namedTextureDescriptor(name: LuaString) -> GMLuaTextureDescriptor? {
+        let key = Self.canonicalResourceName(name)
+        lock.lock()
+        let value = namedTextureValues[key]
+        lock.unlock()
+        return Self.textureDescriptor(from: value)
+    }
+
     fileprivate var references: [LuaValue] {
         lock.lock()
         defer { lock.unlock() }
-        return Array(materialValues.values) + Array(textureValues.values)
+        return Array(materialValues.values)
+            + Array(textureValues.values)
+            + Array(materialTextureValues.values)
+            + Array(namedTextureValues.values)
+            + materialTextureBindings.values.flatMap { $0.values }
     }
 
     fileprivate func material(path: LuaString, parameters: LuaString?) throws -> LuaValue {
@@ -146,6 +271,140 @@ public final class GMLuaResourceRegistry: @unchecked Sendable {
         let value = try typeSystem.makeObject(metaName: "ITexture", payload: descriptor)
         textureValues[index] = value
         return value
+    }
+
+    fileprivate func baseTexture(for material: GMLuaMaterialDescriptor) throws -> LuaValue {
+        let key = GMLuaMaterialKey(
+            path: material.path,
+            encodedParameters: material.encodedParameters
+        )
+        lock.lock()
+        defer { lock.unlock() }
+        if let existing = materialTextureValues[key] {
+            return existing
+        }
+        let descriptor = GMLuaTextureDescriptor(
+            name: material.path,
+            kind: .materialBaseTexture(
+                path: material.path,
+                encodedParameters: material.encodedParameters
+            )
+        )
+        let value = try typeSystem.makeObject(metaName: "ITexture", payload: descriptor)
+        materialTextureValues[key] = value
+        return value
+    }
+
+    fileprivate func setTexture(
+        _ texture: LuaValue,
+        parameter: LuaString,
+        for material: GMLuaMaterialDescriptor
+    ) throws {
+        guard Self.textureDescriptor(from: texture) != nil else {
+            throw LuaError.runtime(
+                "bad argument #2 to 'IMaterial:SetTexture' (ITexture expected, got \(texture.typeName))"
+            )
+        }
+        let materialKey = GMLuaMaterialKey(
+            path: material.path,
+            encodedParameters: material.encodedParameters
+        )
+        let parameterKey = Self.canonicalResourceName(parameter)
+        lock.lock()
+        materialTextureBindings[materialKey, default: [:]][parameterKey] = texture
+        lock.unlock()
+    }
+
+    fileprivate func boundTexture(
+        parameter: LuaString,
+        for material: GMLuaMaterialDescriptor
+    ) -> LuaValue? {
+        let materialKey = GMLuaMaterialKey(
+            path: material.path,
+            encodedParameters: material.encodedParameters
+        )
+        let parameterKey = Self.canonicalResourceName(parameter)
+        lock.lock()
+        let value = materialTextureBindings[materialKey]?[parameterKey]
+        lock.unlock()
+        return value
+    }
+
+    fileprivate func engineRenderTarget(
+        name: LuaString
+    ) throws -> LuaValue {
+        let key = Self.canonicalResourceName(name)
+        lock.lock()
+        defer { lock.unlock() }
+        if let existing = namedTextureValues[key] {
+            return existing
+        }
+        let descriptor = GMLuaTextureDescriptor(
+            name: name,
+            kind: .engineRenderTarget(name: name)
+        )
+        let value = try typeSystem.makeObject(metaName: "ITexture", payload: descriptor)
+        namedTextureValues[key] = value
+        return value
+    }
+
+    fileprivate func renderTarget(
+        request: GMLuaRenderTargetRequest
+    ) throws -> LuaValue {
+        let canonicalName = Self.renderTargetNameWithoutExtension(request.name)
+        let key = Self.canonicalResourceName(canonicalName)
+        lock.lock()
+        defer { lock.unlock() }
+        if let existing = namedTextureValues[key] {
+            return existing
+        }
+        let canonicalRequest = GMLuaRenderTargetRequest(
+            name: canonicalName,
+            width: request.width,
+            height: request.height,
+            sizeMode: request.sizeMode,
+            depthMode: request.depthMode,
+            textureFlags: request.textureFlags,
+            renderTargetFlags: request.renderTargetFlags,
+            imageFormat: request.imageFormat
+        )
+        let descriptor = GMLuaTextureDescriptor(
+            name: canonicalName,
+            kind: .renderTarget(canonicalRequest)
+        )
+        let value = try typeSystem.makeObject(metaName: "ITexture", payload: descriptor)
+        namedTextureValues[key] = value
+        return value
+    }
+
+    fileprivate func dimensions(
+        path: LuaString,
+        encodedParameters: LuaString?
+    ) throws -> GMLuaImageDimensions? {
+        lock.lock()
+        let resolver = materialPixelResolver
+        lock.unlock()
+        return try resolver?.dimensions(
+            materialPath: path,
+            encodedParameters: encodedParameters
+        )
+    }
+
+    fileprivate func pixel(
+        path: LuaString,
+        encodedParameters: LuaString?,
+        x: Int,
+        y: Int
+    ) throws -> GMLuaRGBA8? {
+        lock.lock()
+        let resolver = materialPixelResolver
+        lock.unlock()
+        return try resolver?.pixel(
+            materialPath: path,
+            encodedParameters: encodedParameters,
+            x: x,
+            y: y
+        )
     }
 
     fileprivate func noteSound(_ name: LuaString) {
@@ -178,6 +437,21 @@ public final class GMLuaResourceRegistry: @unchecked Sendable {
               let object = GMLuaTypeSystem.typedObject(from: value),
               object.metaName == "ITexture" else { return nil }
         return object.payload as? GMLuaTextureDescriptor
+    }
+
+    private static func canonicalResourceName(_ value: LuaString) -> LuaString {
+        LuaString(bytes: value.bytes.map { byte in
+            (65...90).contains(byte) ? byte + 32 : byte
+        })
+    }
+
+    /// Source treats render-target names as paths and discards the extension.
+    private static func renderTargetNameWithoutExtension(_ value: LuaString) -> LuaString {
+        let bytes = value.bytes
+        let lastSeparator = bytes.lastIndex(where: { $0 == 47 || $0 == 92 })
+        guard let dot = bytes.lastIndex(of: 46),
+              lastSeparator.map({ dot > $0 }) ?? true else { return value }
+        return LuaString(bytes: Array(bytes[..<dot]))
     }
 }
 
@@ -213,6 +487,152 @@ public enum GMLuaResources {
             in: materialMetatable
         )
 
+        let materialGetColor = LuaNativeFunctionBox(
+            { [unowned state, registry] arguments in
+                guard let descriptor = GMLuaResourceRegistry.materialDescriptor(
+                    from: arguments.first
+                ) else {
+                    throw LuaError.runtime("bad self to 'IMaterial:GetColor'")
+                }
+                let (x, y) = try pixelCoordinates(arguments, functionName: "IMaterial:GetColor")
+                let pixel = try resolvedPixel(
+                    registry: registry,
+                    path: descriptor.path,
+                    encodedParameters: descriptor.encodedParameters,
+                    x: x,
+                    y: y,
+                    functionName: "IMaterial:GetColor"
+                )
+                return [try colorValue(pixel, state: state)]
+            },
+            debugName: "IMaterial:GetColor",
+            gcReferences: { [weak registry] in registry?.references ?? [] }
+        )
+        try state.setRawTableValue(
+            .nativeFunction(materialGetColor),
+            for: .string("GetColor"),
+            in: materialMetatable
+        )
+
+        let materialGetTexture = LuaNativeFunctionBox(
+            { [registry] arguments in
+                guard let descriptor = GMLuaResourceRegistry.materialDescriptor(
+                    from: arguments.first
+                ) else {
+                    throw LuaError.runtime("bad self to 'IMaterial:GetTexture'")
+                }
+                let parameter = try requiredString(
+                    arguments,
+                    index: 1,
+                    functionName: "IMaterial:GetTexture"
+                )
+                if let bound = registry.boundTexture(
+                    parameter: parameter,
+                    for: descriptor
+                ) {
+                    return [bound]
+                }
+                guard asciiCaseInsensitiveEqual(parameter, "$basetexture") else {
+                    return []
+                }
+                return [try registry.baseTexture(for: descriptor)]
+            },
+            debugName: "IMaterial:GetTexture",
+            gcReferences: { [weak registry] in registry?.references ?? [] }
+        )
+        try state.setRawTableValue(
+            .nativeFunction(materialGetTexture),
+            for: .string("GetTexture"),
+            in: materialMetatable
+        )
+
+        let materialSetTexture = LuaNativeFunctionBox(
+            { [registry] arguments in
+                guard let descriptor = GMLuaResourceRegistry.materialDescriptor(
+                    from: arguments.first
+                ) else {
+                    throw LuaError.runtime("bad self to 'IMaterial:SetTexture'")
+                }
+                let parameter = try requiredString(
+                    arguments,
+                    index: 1,
+                    functionName: "IMaterial:SetTexture"
+                )
+                guard arguments.indices.contains(2) else {
+                    throw LuaError.runtime(
+                        "bad argument #2 to 'IMaterial:SetTexture' (ITexture expected, got no value)"
+                    )
+                }
+                try registry.setTexture(
+                    arguments[2],
+                    parameter: parameter,
+                    for: descriptor
+                )
+                return []
+            },
+            debugName: "IMaterial:SetTexture",
+            gcReferences: { [weak registry] in registry?.references ?? [] }
+        )
+        try state.setRawTableValue(
+            .nativeFunction(materialSetTexture),
+            for: .string("SetTexture"),
+            in: materialMetatable
+        )
+
+        for (name, component) in [("Width", true), ("Height", false)] {
+            let method = LuaNativeFunctionBox(
+                { [registry] arguments in
+                    guard let descriptor = GMLuaResourceRegistry.materialDescriptor(
+                        from: arguments.first
+                    ) else {
+                        throw LuaError.runtime("bad self to 'IMaterial:\(name)'")
+                    }
+                    let dimensions = try requiredDimensions(
+                        registry: registry,
+                        path: descriptor.path,
+                        encodedParameters: descriptor.encodedParameters,
+                        functionName: "IMaterial:\(name)"
+                    )
+                    return [.number(Double(component ? dimensions.width : dimensions.height))]
+                },
+                debugName: "IMaterial:\(name)",
+                gcReferences: { [weak registry] in registry?.references ?? [] }
+            )
+            try state.setRawTableValue(
+                .nativeFunction(method),
+                for: .string(LuaString(name)),
+                in: materialMetatable
+            )
+        }
+
+        let materialIsError = LuaNativeFunctionBox(
+            { [registry] arguments in
+                guard let descriptor = GMLuaResourceRegistry.materialDescriptor(
+                    from: arguments.first
+                ) else {
+                    throw LuaError.runtime("bad self to 'IMaterial:IsError'")
+                }
+                let dimensions = try registry.dimensions(
+                    path: descriptor.path,
+                    encodedParameters: descriptor.encodedParameters
+                )
+                guard dimensions != nil else {
+                    throw LuaError.runtime(
+                        "IMaterial:IsError cannot determine material error state " +
+                        "without authoritative asset resolution for '\(descriptor.path.utf8String)'"
+                    )
+                }
+                return [.boolean(false)]
+            },
+            debugName: "IMaterial:IsError",
+            gcReferences: { [weak registry] in registry?.references ?? [] }
+        )
+        try state.setRawTableValue(
+            .nativeFunction(materialIsError),
+            for: .string("IsError"),
+            in: materialMetatable
+        )
+
         let textureGetName = LuaNativeFunctionBox(
             { arguments in
                 guard let descriptor = GMLuaResourceRegistry.textureDescriptor(
@@ -229,6 +649,67 @@ public enum GMLuaResources {
             for: .string("GetName"),
             in: textureMetatable
         )
+
+        let textureGetColor = LuaNativeFunctionBox(
+            { [unowned state, registry] arguments in
+                guard let descriptor = GMLuaResourceRegistry.textureDescriptor(
+                    from: arguments.first
+                ) else {
+                    throw LuaError.runtime("bad self to 'ITexture:GetColor'")
+                }
+                let source = try materialSource(
+                    descriptor,
+                    functionName: "ITexture:GetColor"
+                )
+                let (x, y) = try pixelCoordinates(arguments, functionName: "ITexture:GetColor")
+                let pixel = try resolvedPixel(
+                    registry: registry,
+                    path: source.path,
+                    encodedParameters: source.encodedParameters,
+                    x: x,
+                    y: y,
+                    functionName: "ITexture:GetColor"
+                )
+                return [try colorValue(pixel, state: state)]
+            },
+            debugName: "ITexture:GetColor",
+            gcReferences: { [weak registry] in registry?.references ?? [] }
+        )
+        try state.setRawTableValue(
+            .nativeFunction(textureGetColor),
+            for: .string("GetColor"),
+            in: textureMetatable
+        )
+
+        for (name, component) in [("Width", true), ("Height", false)] {
+            let method = LuaNativeFunctionBox(
+                { [registry] arguments in
+                    guard let descriptor = GMLuaResourceRegistry.textureDescriptor(
+                        from: arguments.first
+                    ) else {
+                        throw LuaError.runtime("bad self to 'ITexture:\(name)'")
+                    }
+                    let source = try materialSource(
+                        descriptor,
+                        functionName: "ITexture:\(name)"
+                    )
+                    let dimensions = try requiredDimensions(
+                        registry: registry,
+                        path: source.path,
+                        encodedParameters: source.encodedParameters,
+                        functionName: "ITexture:\(name)"
+                    )
+                    return [.number(Double(component ? dimensions.width : dimensions.height))]
+                },
+                debugName: "ITexture:\(name)",
+                gcReferences: { [weak registry] in registry?.references ?? [] }
+            )
+            try state.setRawTableValue(
+                .nativeFunction(method),
+                for: .string(LuaString(name)),
+                in: textureMetatable
+            )
+        }
 
         let materialFunction = LuaNativeFunctionBox(
             { [registry] arguments in
@@ -334,11 +815,55 @@ public enum GMLuaResources {
                 for: .string("GetScreenEffectTexture"),
                 in: renderTable
             )
+
+            // These getters expose stable engine render-target identities. They
+            // intentionally remain unresolved until a renderer supplies actual
+            // pixel/GPU backing.
+            for (functionName, textureName) in [
+                ("GetBloomTex0", "_rt_SmallFB0"),
+                ("GetBloomTex1", "_rt_SmallFB1"),
+                ("GetMoBlurTex0", "s_pMoBlurTex0"),
+                ("GetMoBlurTex1", "s_pMoBlurTex1"),
+                ("GetSuperFPTex", "_rt_SuperTexture1"),
+                ("GetSuperFPTex2", "_rt_SuperTexture2")
+            ] {
+                let getter = LuaNativeFunctionBox(
+                    { [registry] _ in
+                        [try registry.engineRenderTarget(name: LuaString(textureName))]
+                    },
+                    debugName: "render.\(functionName)",
+                    gcReferences: { [weak registry] in registry?.references ?? [] }
+                )
+                try state.setRawTableValue(
+                    .nativeFunction(getter),
+                    for: .string(LuaString(functionName)),
+                    in: renderTable
+                )
+            }
             state.setGlobal("render", value: .table(renderTable))
+
+            let getRenderTargetEx = LuaNativeFunctionBox(
+                { [registry] arguments in
+                    let request = try renderTargetRequest(arguments)
+                    return [try registry.renderTarget(request: request)]
+                },
+                debugName: "GetRenderTargetEx",
+                gcReferences: { [weak registry] in registry?.references ?? [] }
+            )
+            state.setGlobal(
+                "GetRenderTargetEx",
+                value: .nativeFunction(getRenderTargetEx)
+            )
 
             // Exact values from the public STUDIO enum used at halo.lua load.
             state.setGlobal("STUDIO_RENDER", value: .number(1))
             state.setGlobal("STUDIO_SKIP_DECALS", value: .number(268_435_456))
+
+            // Public render-target enum values used by the stock
+            // postprocess/frame_blend.lua top-level resource declaration.
+            state.setGlobal("RT_SIZE_FULL_FRAME_BUFFER", value: .number(4))
+            state.setGlobal("MATERIAL_RT_DEPTH_NONE", value: .number(2))
+            state.setGlobal("IMAGE_FORMAT_DEFAULT", value: .number(-1))
         }
 
         return registry
@@ -390,5 +915,214 @@ public enum GMLuaResources {
             )
         }
         return Int(truncated)
+    }
+
+    private static func renderTargetRequest(
+        _ arguments: [LuaValue]
+    ) throws -> GMLuaRenderTargetRequest {
+        GMLuaRenderTargetRequest(
+            name: try requiredString(
+                arguments,
+                index: 0,
+                functionName: "GetRenderTargetEx"
+            ),
+            width: try requiredInteger(
+                arguments,
+                index: 1,
+                functionName: "GetRenderTargetEx"
+            ),
+            height: try requiredInteger(
+                arguments,
+                index: 2,
+                functionName: "GetRenderTargetEx"
+            ),
+            sizeMode: try requiredInteger(
+                arguments,
+                index: 3,
+                functionName: "GetRenderTargetEx"
+            ),
+            depthMode: try requiredInteger(
+                arguments,
+                index: 4,
+                functionName: "GetRenderTargetEx"
+            ),
+            textureFlags: try requiredInteger(
+                arguments,
+                index: 5,
+                functionName: "GetRenderTargetEx"
+            ),
+            renderTargetFlags: try requiredInteger(
+                arguments,
+                index: 6,
+                functionName: "GetRenderTargetEx"
+            ),
+            imageFormat: try requiredInteger(
+                arguments,
+                index: 7,
+                functionName: "GetRenderTargetEx"
+            )
+        )
+    }
+
+    private static func requiredInteger(
+        _ arguments: [LuaValue],
+        index: Int,
+        functionName: String
+    ) throws -> Int {
+        guard arguments.indices.contains(index), case let .number(value) = arguments[index] else {
+            let actual = arguments.indices.contains(index) ? arguments[index].typeName : "no value"
+            throw LuaError.runtime(
+                "bad argument #\(index + 1) to '\(functionName)' (number expected, got \(actual))"
+            )
+        }
+        let truncated = value.rounded(.towardZero)
+        guard truncated.isFinite,
+              truncated >= Double(Int32.min),
+              truncated <= Double(Int32.max) else {
+            throw LuaError.runtime(
+                "bad argument #\(index + 1) to '\(functionName)' (32-bit integer expected)"
+            )
+        }
+        return Int(truncated)
+    }
+
+    private static func pixelCoordinates(
+        _ arguments: [LuaValue],
+        functionName: String
+    ) throws -> (Int, Int) {
+        (
+            try pixelCoordinate(arguments, index: 1, functionName: functionName),
+            try pixelCoordinate(arguments, index: 2, functionName: functionName)
+        )
+    }
+
+    private static func pixelCoordinate(
+        _ arguments: [LuaValue],
+        index: Int,
+        functionName: String
+    ) throws -> Int {
+        guard arguments.indices.contains(index), case let .number(value) = arguments[index] else {
+            let actual = arguments.indices.contains(index) ? arguments[index].typeName : "no value"
+            throw LuaError.runtime(
+                "bad argument #\(index) to '\(functionName)' (number expected, got \(actual))"
+            )
+        }
+        let truncated = value.rounded(.towardZero)
+        guard truncated.isFinite,
+              truncated >= Double(Int32.min),
+              truncated <= Double(Int32.max) else {
+            throw LuaError.runtime(
+                "bad argument #\(index) to '\(functionName)' (finite pixel coordinate expected)"
+            )
+        }
+        return Int(truncated)
+    }
+
+    private static func requiredDimensions(
+        registry: GMLuaResourceRegistry,
+        path: LuaString,
+        encodedParameters: LuaString?,
+        functionName: String
+    ) throws -> GMLuaImageDimensions {
+        guard let dimensions = try registry.dimensions(
+            path: path,
+            encodedParameters: encodedParameters
+        ) else {
+            throw LuaError.runtime(
+                "\(functionName) requires decoded image backing for material '\(path.utf8String)'"
+            )
+        }
+        guard dimensions.width > 0, dimensions.height > 0 else {
+            throw LuaError.runtime(
+                "\(functionName) received invalid image dimensions for material '\(path.utf8String)'"
+            )
+        }
+        return dimensions
+    }
+
+    private static func resolvedPixel(
+        registry: GMLuaResourceRegistry,
+        path: LuaString,
+        encodedParameters: LuaString?,
+        x: Int,
+        y: Int,
+        functionName: String
+    ) throws -> GMLuaRGBA8 {
+        let dimensions = try requiredDimensions(
+            registry: registry,
+            path: path,
+            encodedParameters: encodedParameters,
+            functionName: functionName
+        )
+        guard x >= 0, y >= 0, x < dimensions.width, y < dimensions.height else {
+            throw LuaError.runtime(
+                "\(functionName) pixel (\(x), \(y)) is outside " +
+                "\(dimensions.width)x\(dimensions.height) material '\(path.utf8String)'"
+            )
+        }
+        guard let pixel = try registry.pixel(
+            path: path,
+            encodedParameters: encodedParameters,
+            x: x,
+            y: y
+        ) else {
+            throw LuaError.runtime(
+                "\(functionName) could not resolve pixel (\(x), \(y)) " +
+                "for material '\(path.utf8String)'"
+            )
+        }
+        return pixel
+    }
+
+    private static func colorValue(
+        _ pixel: GMLuaRGBA8,
+        state: LuaState
+    ) throws -> LuaValue {
+        let constructor = state.getGlobal("Color")
+        switch constructor {
+        case .luaFunction, .nativeFunction:
+            return try state.call(
+                constructor,
+                arguments: [
+                    .number(Double(pixel.red)),
+                    .number(Double(pixel.green)),
+                    .number(Double(pixel.blue)),
+                    .number(Double(pixel.alpha))
+                ]
+            ).first ?? .nilValue
+        default:
+            throw LuaError.runtime("Color constructor is unavailable")
+        }
+    }
+
+    private static func materialSource(
+        _ texture: GMLuaTextureDescriptor,
+        functionName: String
+    ) throws -> (path: LuaString, encodedParameters: LuaString?) {
+        switch texture.kind {
+        case let .materialBaseTexture(path, encodedParameters):
+            return (path, encodedParameters)
+        case .screenEffect:
+            throw LuaError.runtime(
+                "\(functionName) requires decoded image backing; screen-effect textures are logical"
+            )
+        case .engineRenderTarget, .renderTarget:
+            throw LuaError.runtime(
+                "\(functionName) requires decoded image backing; render targets are logical"
+            )
+        }
+    }
+
+    private static func asciiCaseInsensitiveEqual(
+        _ value: LuaString,
+        _ expected: String
+    ) -> Bool {
+        let expectedBytes = Array(expected.utf8)
+        guard value.bytes.count == expectedBytes.count else { return false }
+        return zip(value.bytes, expectedBytes).allSatisfy { lhs, rhs in
+            let foldedLHS = (65...90).contains(lhs) ? lhs + 32 : lhs
+            let foldedRHS = (65...90).contains(rhs) ? rhs + 32 : rhs
+            return foldedLHS == foldedRHS
+        }
     }
 }

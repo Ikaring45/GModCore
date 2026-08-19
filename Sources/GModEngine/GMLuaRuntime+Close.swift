@@ -6,7 +6,21 @@ public extension GMLuaRuntime {
     @discardableResult
     func close() -> LuaCloseReport {
         if let netEndpoint, let netTransport {
-            netTransport.detachEndpoint(netEndpoint)
+            if netTransport.isPumpingOnCurrentThread() {
+                return LuaCloseReport(
+                    finalizedUserdataCount: 0,
+                    additionalPasses: 0,
+                    deferredNewFinalizerCount: 0,
+                    errorMessages: [
+                        "GMLuaRuntime.close() rejected during a Lua delivery callback; " +
+                        "close the realm after the host pump returns"
+                    ]
+                )
+            }
+            return netTransport.withExclusiveLifecycleBoundary {
+                netTransport.detachEndpoint(netEndpoint)
+                return state.close()
+            }
         }
         return state.close()
     }
