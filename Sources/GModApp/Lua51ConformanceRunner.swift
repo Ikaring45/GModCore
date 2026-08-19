@@ -211,15 +211,24 @@ enum Lua51ConformanceRunner {
 
     private static func fetchText(url: URL) async throws -> String {
         var request = URLRequest(url: url)
-        request.setValue("GModLua-iPad-Conformance/1.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("GModLua-iPad-Conformance/1.1", forHTTPHeaderField: "User-Agent")
 
         let (data, response) = try await URLSession.shared.data(for: request)
         try validate(response: response, data: data, context: url.lastPathComponent)
 
-        guard let text = String(data: data, encoding: .utf8) else {
-            throw Lua51ConformanceDownloadError.nonUTF8(url.lastPathComponent)
+        // The official Lua 5.1 test corpus is byte-oriented and contains
+        // legacy single-byte source text (for example db.lua). Requiring
+        // UTF-8 here incorrectly rejects valid Lua 5.1 test files before
+        // the Lua runtime even sees them.
+        if let text = String(data: data, encoding: .utf8) {
+            return text
         }
-        return text
+
+        if let text = String(data: data, encoding: .isoLatin1) {
+            return text
+        }
+
+        throw Lua51ConformanceDownloadError.cannotDecode(url.lastPathComponent)
     }
 
     private static func validate(response: URLResponse, data: Data, context: String) throws {
@@ -273,7 +282,16 @@ enum Lua51ConformanceRunner {
 
         guard let url else { throw Lua51ConformanceResourceError.missing(path) }
         do {
-            return try String(contentsOf: url, encoding: .utf8)
+            let data = try Data(contentsOf: url)
+            if let text = String(data: data, encoding: .utf8) {
+                return text
+            }
+            if let text = String(data: data, encoding: .isoLatin1) {
+                return text
+            }
+            throw Lua51ConformanceResourceError.unreadable(path, "unsupported source encoding")
+        } catch let error as Lua51ConformanceResourceError {
+            throw error
         } catch {
             throw Lua51ConformanceResourceError.unreadable(path, String(describing: error))
         }
@@ -299,7 +317,7 @@ enum Lua51ConformanceDownloadError: Error, CustomStringConvertible {
     case invalidResponse(String)
     case http(Int, String, String)
     case invalidDirectoryResponse(String, String)
-    case nonUTF8(String)
+    case cannotDecode(String)
     case missingAllLua
 
     var description: String {
@@ -313,8 +331,8 @@ enum Lua51ConformanceDownloadError: Error, CustomStringConvertible {
             return "HTTP \(status) while fetching \(context): \(shortBody)"
         case let .invalidDirectoryResponse(path, reason):
             return "cannot decode GitHub directory \(path): \(reason)"
-        case let .nonUTF8(path):
-            return "official Lua test is not UTF-8 text: \(path)"
+        case let .cannotDecode(path):
+            return "cannot decode official Lua test source: \(path)"
         case .missingAllLua:
             return "download completed but all.lua was not found"
         }
