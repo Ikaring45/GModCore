@@ -2,94 +2,38 @@ import SwiftUI
 import GModEngine
 import GModMetal
 
-public struct GModMainView:
-    View
-{
+public struct GModMainView: View {
+    @State private var stats = "Starting ARM engine..."
+    @State private var luaLog = "Starting Lua 5.1 comprehensive runtime..."
 
-    @State private var stats =
-        "Starting ARM engine..."
+    public init() {}
 
-    @State private var luaLog =
-        "Starting Lua Phase 2..."
+    public var body: some View {
+        VStack(spacing: 16) {
+            Text("GMod iPad")
+                .font(.largeTitle)
+                .bold()
 
-    public init() {
-    }
+            ScrollView {
+                Text(luaLog)
+                    .font(.system(.caption, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+            .frame(height: 260)
 
-    public var body:
-        some View
-    {
+            Text(stats)
+                .font(.system(.caption, design: .monospaced))
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-        VStack(
-            spacing: 16
-        ) {
-
-            Text(
-                "GMod iPad"
-            )
-            .font(
-                .largeTitle
-            )
-            .bold()
-
-            Text(
-                luaLog
-            )
-            .font(
-                .system(
-                    .body,
-                    design:
-                        .monospaced
-                )
-            )
-            .frame(
-                maxWidth:
-                    .infinity,
-                alignment:
-                    .leading
-            )
-
-            Text(
-                stats
-            )
-            .font(
-                .system(
-                    .body,
-                    design:
-                        .monospaced
-                )
-            )
-            .frame(
-                maxWidth:
-                    .infinity,
-                alignment:
-                    .leading
-            )
-
-            GModMetalView(
-                stats:
-                    $stats
-            )
-            .frame(
-                maxWidth:
-                    .infinity
-            )
-            .frame(
-                height:
-                    420
-            )
-            .clipShape(
-                RoundedRectangle(
-                    cornerRadius:
-                        16
-                )
-            )
+            GModMetalView(stats: $stats)
+                .frame(maxWidth: .infinity)
+                .frame(height: 300)
+                .clipShape(RoundedRectangle(cornerRadius: 16))
         }
         .padding()
         .onAppear {
-
-            luaLog =
-                GMLuaRuntime
-    .phase3SmokeTest()
+            luaLog = GMLuaRuntime.lua51ComprehensiveSmokeTest()
         }
     }
 }
