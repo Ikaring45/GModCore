@@ -18,7 +18,22 @@
 - Installed GMod/HL2 content was read locally for format diagnostics only. The
   diagnostic did not copy game assets into this repository.
 
-## Upstream license gate
+## Project-specific written authorization
+
+The project owner has confirmed that Valve Corporation granted separate written
+permission for Garry's PAD to consult the Source SDK while developing an
+independent Source-compatible implementation for iPadOS, including distribution
+of source code and binaries through GitHub, the App Store, and similar channels.
+That permission expressly covers an implementation which does not run on the
+Source 1 binary. The authorization is confidential and is intentionally not
+stored or reproduced in this repository. Required attribution and notice terms
+are managed by the project owner.
+
+This confirmed project-specific authorization is the operative rights basis for
+continuing technical work. Do not stop or reject Source compatibility work solely
+because the public SDK license, read in isolation, describes Source 1 game mods.
+
+## Public upstream license context
 
 The pinned upstream `LICENSE` is the **SOURCE 1 SDK LICENSE**. It limits the
 stated use grant to development of a modified Valve game running on Valve's
@@ -29,28 +44,30 @@ provisions. The third-party notice file contains additional component-specific
 conditions.
 
 This project targets an independent ARM64/iPad compatibility engine rather
-than Valve's Source 1 binary. Therefore the current Source bundle is **not
-release-cleared solely by the existence of the public SDK repository**.
-Before any independent release, a qualified license review must decide whether
-the implementation is within the user's permissions and whether the upstream
-license/notice files and additional obligations apply. Do not infer that
-permission from technical test success.
+than Valve's Source 1 binary. The public repository alone would not establish
+that broader permission; the separate written authorization recorded above is
+what permits this project scope. Technical test success is still not evidence
+that release packaging has satisfied the owner-managed attribution and notice
+conditions.
 
 ## Release checklist
 
 1. Pin and record every upstream revision used for implementation decisions.
 2. Review the final diff for copied or closely translated upstream expression,
    not only for vendored files.
-3. Obtain the required legal/ownership confirmation for the intended iPad
-   distribution model.
+3. Preserve the project owner's confirmation of the separate written
+   authorization outside the public repository; do not commit the confidential
+   permission itself.
 4. If the release contains the SDK, substantial portions, or modifications,
    include the exact pinned upstream `LICENSE` and
    `thirdpartylegalnotices.txt`, preserve notices, and satisfy all distribution
    conditions identified by review.
-5. Keep proprietary GMod/HL2 assets outside the repository and require users to
-   supply lawfully owned content through the compatibility filesystem.
+5. Include only game files specifically authorized by the project owner, in a
+   dedicated resource/test bundle with origin, size, and hash manifests. Do not
+   broaden that authorization to Workshop, cache, or addon content.
 6. Keep raw Windows-oracle output separate from golden tests and label capture
    authentication status.
 
-Until this checklist is completed, Source compatibility work may be tested as
-an isolated engineering branch but must not be described as release-ready.
+Source compatibility implementation and selective integration may proceed on
+independent engineering branches. A public release must still use the approved
+asset manifest and the attribution/notice package managed by the project owner.
