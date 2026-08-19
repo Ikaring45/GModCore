@@ -25,6 +25,7 @@ public final class GMLuaRuntime {
     public private(set) var chat: GMLuaChat?
     public private(set) var input: GMLuaInput?
     public private(set) var sound: GMLuaSound?
+    public private(set) var languageRegistry: GMLuaLanguageRegistry?
     public private(set) var conVarRegistry: GMLuaConVarRegistry?
     public private(set) var engineConVarCatalog: GMLuaEngineConVarCatalog?
     public private(set) var surfaceCommandState: GMLuaSurfaceCommandState?
@@ -74,6 +75,7 @@ public final class GMLuaRuntime {
         netTransport: GMLuaNetTransport? = nil,
         traceProvider: (any GMLuaTraceProvider)? = nil,
         inputConfiguration: GMLuaInputConfiguration = GMLuaInputConfiguration(),
+        languageConfiguration: GMLuaLanguageConfiguration = .empty,
         cursorWarpSink: GMLuaCursorWarpSink? = nil
     ) {
         self.init(
@@ -90,6 +92,7 @@ public final class GMLuaRuntime {
             netTransport: netTransport,
             traceProvider: traceProvider,
             inputConfiguration: inputConfiguration,
+            languageConfiguration: languageConfiguration,
             cursorWarpSink: cursorWarpSink,
             typeSystemInstaller: { state in
                 try GMLuaTypeSystem.install(
@@ -114,6 +117,7 @@ public final class GMLuaRuntime {
         netTransport: GMLuaNetTransport? = nil,
         traceProvider: (any GMLuaTraceProvider)? = nil,
         inputConfiguration: GMLuaInputConfiguration = GMLuaInputConfiguration(),
+        languageConfiguration: GMLuaLanguageConfiguration = .empty,
         cursorWarpSink: GMLuaCursorWarpSink? = nil,
         typeSystemInstaller: @escaping TypeSystemInstaller
     ) {
@@ -137,6 +141,7 @@ public final class GMLuaRuntime {
             netTransport: netTransport,
             traceProvider: traceProvider,
             inputConfiguration: inputConfiguration,
+            languageConfiguration: languageConfiguration,
             cursorWarpSink: cursorWarpSink
         )
         if let virtualFileSystem {
@@ -197,6 +202,7 @@ public final class GMLuaRuntime {
         netTransport explicitNetTransport: GMLuaNetTransport?,
         traceProvider: (any GMLuaTraceProvider)?,
         inputConfiguration: GMLuaInputConfiguration,
+        languageConfiguration: GMLuaLanguageConfiguration,
         cursorWarpSink: GMLuaCursorWarpSink?
     ) {
         state.setGlobal("SERVER", value: .boolean(realm == .server))
@@ -245,6 +251,11 @@ public final class GMLuaRuntime {
                 cursorWarpSink: cursorWarpSink
             )
             sound = try GMLuaSound.install(into: state, realm: realm)
+            languageRegistry = try GMLuaLanguageRegistry.install(
+                into: state,
+                realm: realm,
+                configuration: languageConfiguration
+            )
             if realm != .menu {
                 if let explicitNetTransport, let networkedGlobalTransport,
                    explicitNetTransport.networkedGlobalTransport !== networkedGlobalTransport {
