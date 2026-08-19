@@ -1,0 +1,268 @@
+{
+	"schema": 1,
+	"filesystem": {
+		"find_files": [
+			"CaseProbe.txt"
+		],
+		"lua_case_probe": "GARRYS_PAD_SOURCE_ORACLE_CASE_OK\n\n",
+		"find_directories": [],
+		"game_case_probe": "GARRYS_PAD_SOURCE_ORACLE_CASE_OK\n\n"
+	},
+	"traces": {
+		"line": {
+			"hit": true,
+			"fraction_left_solid": 0,
+			"all_solid": false,
+			"hit_normal": {
+				"y": 0,
+				"x": -0.9999998807907104,
+				"z": 0
+			},
+			"normal": {
+				"y": 0,
+				"x": 1,
+				"z": 0
+			},
+			"fraction": 0.44105255603790283,
+			"entity_index": 72,
+			"hit_world": false,
+			"contents": 1073741825,
+			"entity_class": "base_anim",
+			"start_solid": false,
+			"hit_pos": {
+				"y": 0,
+				"x": -7.5452728271484375,
+				"z": 256
+			}
+		},
+		"all_inside": {
+			"hit": true,
+			"fraction_left_solid": 0,
+			"all_solid": false,
+			"hit_normal": {
+				"y": 0,
+				"x": 0.9999998807907104,
+				"z": 0
+			},
+			"normal": {
+				"y": 0,
+				"x": -0.9999998807907104,
+				"z": 0
+			},
+			"fraction": 0,
+			"entity_index": 72,
+			"hit_world": false,
+			"contents": 1073741825,
+			"entity_class": "base_anim",
+			"start_solid": true,
+			"hit_pos": {
+				"y": 0,
+				"x": 0,
+				"z": 256
+			}
+		},
+		"hull": {
+			"hit": true,
+			"fraction_left_solid": 0,
+			"all_solid": false,
+			"hit_normal": {
+				"y": 0,
+				"x": -1,
+				"z": 0
+			},
+			"normal": {
+				"y": 0,
+				"x": 1,
+				"z": 0
+			},
+			"fraction": 0.40955841541290283,
+			"entity_index": 72,
+			"hit_world": false,
+			"contents": 1,
+			"entity_class": "base_anim",
+			"start_solid": false,
+			"hit_pos": {
+				"y": 0,
+				"x": -11.576522827148438,
+				"z": 256
+			}
+		},
+		"start_inside": {
+			"hit": true,
+			"fraction_left_solid": 0,
+			"all_solid": false,
+			"hit_normal": {
+				"y": 0,
+				"x": 0.9999998807907104,
+				"z": 0
+			},
+			"normal": {
+				"y": 0,
+				"x": -0.9999998807907104,
+				"z": 0
+			},
+			"fraction": 0,
+			"entity_index": 72,
+			"hit_world": false,
+			"contents": 1073741825,
+			"entity_class": "base_anim",
+			"start_solid": true,
+			"hit_pos": {
+				"y": 0,
+				"x": 0,
+				"z": 256
+			}
+		}
+	},
+	"finish_reason": "sequence-complete",
+	"callback_sequence": [
+		{
+			"cur_time": 1.0199999772012234,
+			"frame_time": 0.014999999664723873,
+			"name": "hook_think",
+			"real_time": 0.3165655732154846
+		},
+		{
+			"cur_time": 1.0199999772012234,
+			"frame_time": 0.014999999664723873,
+			"name": "hook_tick",
+			"real_time": 0.3165655732154846
+		},
+		{
+			"cur_time": 1.0349999768659472,
+			"frame_time": 0.014999999664723873,
+			"name": "hook_think",
+			"real_time": 0.3165655732154846
+		},
+		{
+			"cur_time": 1.0349999768659472,
+			"frame_time": 0.014999999664723873,
+			"name": "hook_tick",
+			"real_time": 0.3165655732154846
+		},
+		{
+			"cur_time": 1.0499999765306711,
+			"frame_time": 0.014999999664723873,
+			"name": "hook_think",
+			"real_time": 0.3165655732154846
+		},
+		{
+			"cur_time": 1.0499999765306711,
+			"frame_time": 0.014999999664723873,
+			"name": "hook_tick",
+			"real_time": 0.3165655732154846
+		},
+		{
+			"cur_time": 1.064999976195395,
+			"frame_time": 0.014999999664723873,
+			"name": "hook_think",
+			"real_time": 0.3165655732154846
+		},
+		{
+			"cur_time": 1.064999976195395,
+			"frame_time": 0.014999999664723873,
+			"name": "hook_tick",
+			"real_time": 0.3165655732154846
+		},
+		{
+			"cur_time": 1.0799999758601189,
+			"frame_time": 0.014999999664723873,
+			"name": "hook_think",
+			"real_time": 0.3165655732154846
+		},
+		{
+			"cur_time": 1.0799999758601189,
+			"frame_time": 0.014999999664723873,
+			"name": "hook_tick",
+			"real_time": 0.3165655732154846
+		},
+		{
+			"cur_time": 1.0949999755248427,
+			"frame_time": 0.014999999664723873,
+			"name": "hook_think",
+			"real_time": 0.3165655732154846
+		},
+		{
+			"cur_time": 1.0949999755248427,
+			"frame_time": 0.014999999664723873,
+			"name": "hook_tick",
+			"real_time": 0.3165655732154846
+		},
+		{
+			"cur_time": 1.1099999751895666,
+			"frame_time": 0.014999999664723873,
+			"name": "hook_think",
+			"real_time": 0.3165655732154846
+		},
+		{
+			"cur_time": 1.1099999751895666,
+			"frame_time": 0.014999999664723873,
+			"name": "hook_tick",
+			"real_time": 0.3165655732154846
+		},
+		{
+			"cur_time": 1.1249999748542905,
+			"frame_time": 0.014999999664723873,
+			"name": "hook_think",
+			"real_time": 0.3165655732154846
+		},
+		{
+			"cur_time": 1.1249999748542905,
+			"frame_time": 0.014999999664723873,
+			"name": "hook_tick",
+			"real_time": 0.3165655732154846
+		},
+		{
+			"cur_time": 1.1399999745190144,
+			"frame_time": 0.014999999664723873,
+			"name": "hook_think",
+			"real_time": 0.3165655732154846
+		}
+	],
+	"material": {
+		"width": 64,
+		"is_error": false,
+		"shader": "VertexLitGeneric",
+		"name": "models/debug/debugwhite",
+		"height": 64
+	},
+	"command_line_enabled": false,
+	"runtime": {
+		"version_string": "2026.08.13",
+		"version": 260813,
+		"is_windows": true,
+		"jit_arch": "x64",
+		"branch": "x86-64",
+		"map": "gm_flatgrass"
+	},
+	"command_line_run_id": "manual",
+	"clock": {
+		"finish_cur_time": 1.1399999745190144,
+		"start_cur_time": 1.0049999775364995,
+		"finish_tick_interval": 0.014999999664723873,
+		"tick_interval": 0.014999999664723873,
+		"frame_time": 0
+	},
+	"entities": {
+		"null_tostring": "[NULL Entity]",
+		"null_class": {
+			"type": "string",
+			"error": "Tried to use a NULL entity!",
+			"ok": false
+		},
+		"world_ent_index": 0,
+		"world_class": "worldspawn",
+		"removed_index": 70,
+		"immediate_index_reuse": false,
+		"null_equals_NULL": true,
+		"null_ent_index": {
+			"type": "number",
+			"error": "0",
+			"ok": true,
+			"value": "0"
+		},
+		"next_index": 71,
+		"world_is_valid": false,
+		"null_is_valid": false
+	}
+}
