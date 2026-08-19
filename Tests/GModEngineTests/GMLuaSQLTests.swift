@@ -62,4 +62,20 @@ final class GMLuaSQLTests: XCTestCase {
             sourceName: "@GMLuaSQLStrictBootstrap.lua"
         )
     }
+
+    #if os(iOS)
+    func testIOSSystemSQLiteLinkAndInitializationContract() throws {
+        // Linking this test is part of the contract: iOS system SQLite does
+        // not export sqlite3_enable_load_extension.
+        let state = LuaState(output: { _ in })
+        try GMLuaSQL.install(into: state)
+        try state.execute(
+            """
+            local rows = sql.Query([[SELECT 1 AS value]])
+            assert(rows[1].value == "1")
+            """,
+            sourceName: "@GMLuaSQLIOSSystemSQLiteContract.lua"
+        )
+    }
+    #endif
 }
