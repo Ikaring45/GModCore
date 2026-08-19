@@ -79,7 +79,7 @@ public final class GModAppRuntimeFactory: @unchecked Sendable {
 
     public func makePlayableSession(
         configuration: GModPlayableSessionConfiguration = .init(),
-        logger: @escaping (_ realm: GMLuaRealm, _ message: String) -> Void
+        logger: @escaping @Sendable (_ realm: GMLuaRealm, _ message: String) -> Void
     ) throws -> GModPlayableSession {
         try GModPlayableSession(
             configuration: configuration,

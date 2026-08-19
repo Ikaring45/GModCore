@@ -30,7 +30,13 @@ public struct GModMainView: View {
     }
 
     public var body: some View {
-        ZStack {
+        // Read the MainActor-isolated StateObject once while constructing the
+        // view. The Metal callback is Sendable and calls the model's explicitly
+        // nonisolated mailbox entry point without reaching back through the
+        // property wrapper from the render thread.
+        let frameTarget = game
+
+        return ZStack {
             Color(red: 0.105, green: 0.11, blue: 0.115)
                 .ignoresSafeArea()
 
@@ -44,8 +50,8 @@ public struct GModMainView: View {
                         stats: $stats,
                         worldScene: game.worldScene,
                         surfaceScene: game.surfaceScene,
-                        onFrame: { request in
-                            game.submitFrame(request)
+                        onFrame: { [frameTarget] request in
+                            frameTarget.submitFrame(request)
                         }
                     )
                     .frame(maxWidth: .infinity)
