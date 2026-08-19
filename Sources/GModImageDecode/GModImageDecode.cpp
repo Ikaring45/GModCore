@@ -265,8 +265,6 @@ int32_t gmod_decode_image_rgba(
         return GMOD_IMAGE_DECODE_PLATFORM_ERROR;
     }
 
-    CGContextTranslateCTM(context, 0.0, (CGFloat)height);
-    CGContextScaleCTM(context, 1.0, -1.0);
     CGContextDrawImage(context, CGRectMake(0.0, 0.0, (CGFloat)width, (CGFloat)height), image);
     CGContextRelease(context);
     CGImageRelease(image);
