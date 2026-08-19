@@ -147,9 +147,33 @@ Assert-True ($commonText -notmatch '\bStop-Process\b') 'Common code still termin
 Assert-True ($commonText -notmatch '\bGet-CimInstance\b') 'Common code still uses CIM as cleanup authority'
 Assert-True ($commonText -notmatch '\bProcessTracker\b') 'Common code still contains the PID tracker'
 
+$runnerExitCodes = @{
+    'Run-SourceOracle.ps1' = [pscustomobject]@{
+        Hex = 'E0450002'
+        Decimal = [uint64]3762618370
+    }
+    'Run-SourceClientOracle.ps1' = [pscustomobject]@{
+        Hex = 'E0450003'
+        Decimal = [uint64]3762618371
+    }
+}
 foreach ($runnerName in @('Run-SourceOracle.ps1', 'Run-SourceClientOracle.ps1')) {
     $runnerPath = Join-Path $toolRoot $runnerName
     $runnerText = Get-Content -Raw -Encoding UTF8 -LiteralPath $runnerPath
+    $exitCodeFixture = $runnerExitCodes[$runnerName]
+    $convertedExitCode = [Convert]::ToUInt32($exitCodeFixture.Hex, 16)
+    Assert-True ($convertedExitCode -is [uint32]) "$runnerName exit code is not UInt32"
+    Assert-True (
+        [uint64]$convertedExitCode -eq $exitCodeFixture.Decimal
+    ) "$runnerName exit code changed value"
+    Assert-True (
+        $runnerText -match (
+            "\[Convert\]::ToUInt32\('" + $exitCodeFixture.Hex + "',\s*16\)"
+        )
+    ) "$runnerName lacks a PowerShell 5.1-safe UInt32 exit-code conversion"
+    Assert-True (
+        $runnerText -notmatch '\[uint32\]\s*0xE045000[23]'
+    ) "$runnerName uses the overflowing PowerShell 5.1 UInt32 hex cast"
     Assert-True ($runnerText -notmatch '\bStart-Process\b') "$runnerName launches outside the Job Object"
     Assert-True ($runnerText -notmatch '\bStop-Process\b') "$runnerName terminates by PID"
     Assert-True ($runnerText -notmatch '\bGet-CimInstance\b') "$runnerName uses CIM as cleanup authority"

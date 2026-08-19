@@ -23,6 +23,7 @@ $runID = [Guid]::NewGuid().ToString('N')
 $gameResult = Join-Path $gameRoot 'data\garryspad_oracle\client_latest.json'
 $resultsRoot = Join-Path $toolRoot 'Results'
 $savedResult = Join-Path $resultsRoot "client-$runID.json"
+$ownedJobExitCode = [Convert]::ToUInt32('E0450003', 16)
 
 if (-not (Test-Path -LiteralPath $gmodExecutable -PathType Leaf)) {
     throw "Garry's Mod executable not found: $gmodExecutable"
@@ -109,7 +110,7 @@ finally {
     $cleanupFailures = [Collections.Generic.List[string]]::new()
     if ($null -ne $ownedJob) {
         try {
-            $ownedJobStopped = $ownedJob.TerminateAndWait(10000, [uint32]0xE0450003)
+            $ownedJobStopped = $ownedJob.TerminateAndWait(10000, $ownedJobExitCode)
             if (-not $ownedJobStopped) {
                 $cleanupFailures.Add('Timed out waiting for the owned GMod Job to stop')
             }
