@@ -96,8 +96,16 @@ enum Lua51ConformanceRunner {
             package.path = "?;./?.lua;" .. package.path
             """#
 
+            // Execute the bootstrap separately. The official all.lua starts
+            // with a Unix shebang (#!../lua), and Lua only treats a shebang
+            // specially when it is the very first line of a chunk.
             try runtime.execute(
-                bootstrap + "\n" + allLua,
+                bootstrap,
+                sourceName: "=(lua51-conformance-bootstrap)"
+            )
+
+            try runtime.execute(
+                allLua,
                 sourceName: "@all.lua"
             )
         } catch {
