@@ -203,6 +203,75 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
         }
     }
 
+    func testGetTableMergedAccessorSurvivesCollectionDuringScriptedControlInit() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: typeSystem)
+
+        try state.execute(
+            """
+            -- Original synthetic reproduction of GMod's scripted-panel shape:
+            -- preserve the engine factory, merge a control table into GetTable,
+            -- then run Init before Prepare.
+            local engineCreate = vgui.Create
+            local controls = {}
+
+            local function addAccessor(target, field, suffix)
+                target["Get" .. suffix] = function(self) return self[field] end
+                target["Set" .. suffix] = function(self, value) self[field] = value end
+            end
+
+            local function register(name, control, base)
+                control.Base = base or "Panel"
+                control.Init = control.Init or function() end
+                controls[name] = control
+                return control
+            end
+
+            local function create(name, parent, instanceName)
+                local control = controls[name]
+                if control then
+                    local panel = assert(create(control.Base, parent, instanceName or name))
+                    for key, value in pairs(control) do
+                        panel:GetTable()[key] = value
+                    end
+                    panel.BaseClass = controls[control.Base]
+                    panel.ClassName = name
+                    if panel.Init then panel:Init() end
+                    panel:Prepare()
+                    return panel
+                end
+                return engineCreate(name, parent, instanceName or name)
+            end
+
+            vgui.Register = register
+            vgui.Create = create
+
+            local SCROLL = {}
+            addAccessor(SCROLL, "hiddenButtons", "HideButtons")
+            function SCROLL:Init()
+                -- Child construction can trigger an automatic collection in the
+                -- real bootstrap. A forced collection makes the root contract
+                -- deterministic without copying any installed control source.
+                collectgarbage("collect")
+                assert(type(self.SetHideButtons) == "function")
+                self:SetHideButtons(false)
+            end
+            register("SyntheticScrollBar", SCROLL, "Panel")
+
+            SYNTHETIC_SCROLL = assert(vgui.Create("SyntheticScrollBar"))
+            assert(SYNTHETIC_SCROLL:GetHideButtons() == false)
+            assert(SYNTHETIC_SCROLL:GetTable().SetHideButtons == SCROLL.SetHideButtons)
+            """,
+            sourceName: "@GMLuaScriptedControlAccessorGCRegression.lua"
+        )
+
+        XCTAssertEqual(registry.livePanelCount, 1)
+    }
+
     func testRegistriesAndPanelIdentityAreStateLocal() throws {
         func makeState() throws -> (LuaState, GMLuaVGUIRegistry) {
             let state = LuaState(output: { _ in })

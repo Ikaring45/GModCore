@@ -786,8 +786,18 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     fileprivate var references: [LuaValue] {
         lock.lock()
         defer { lock.unlock() }
+        let panelValues = Array(panels.values)
+        // Panel userdata only exposes its Lua sidecar through the Swift payload,
+        // which the collector cannot traverse. Original scriptedpanels.lua
+        // merges accessors into GetTable() before Init, so keep every live
+        // sidecar rooted even when child creation collects during that Init.
+        let instanceTables = panelValues.compactMap { value -> LuaValue? in
+            guard let descriptor = panelDescriptor(from: value) else { return nil }
+            return .table(descriptor.instanceTable)
+        }
         return controls.values.map(LuaValue.table)
-            + Array(panels.values)
+            + panelValues
+            + instanceTables
             + [.table(panelMetatable), semanticIndex]
     }
 
