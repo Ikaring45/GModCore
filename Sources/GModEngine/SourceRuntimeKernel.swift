@@ -635,7 +635,7 @@ public final class SourceEntityList {
             if let activeIndex = activeEntryIndices.firstIndex(of: entryIndex) {
                 activeEntryIndices.remove(at: activeIndex)
             }
-            if entryIndex > SourceEntityConstants.maxEdicts {
+            if entryIndex >= SourceEntityConstants.maxEdicts {
                 freeNonNetworkableEntryIndices.append(entryIndex)
             }
             removedCount += 1

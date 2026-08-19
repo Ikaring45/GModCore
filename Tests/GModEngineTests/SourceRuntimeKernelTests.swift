@@ -88,6 +88,29 @@ final class SourceRuntimeKernelTests: XCTestCase {
         XCTAssertTrue(list.entity(for: secondHandle) === second)
     }
 
+    func testMaxEdictsBoundaryReturnsToNonNetworkableFreeList() throws {
+        let list = SourceEntityList(initialSerialNumber: 0)
+        let boundary = SourceEntity(className: "boundary_nonnetworkable")
+        let boundaryHandle = try list.addEntity(
+            boundary,
+            at: SourceEntityConstants.maxEdicts
+        )
+        XCTAssertFalse(boundary.isNetworkable)
+
+        // Exhaust the SDK free-list range so the recycled MAX_EDICTS boundary
+        // is the only available non-networkable slot.
+        for _ in (SourceEntityConstants.maxEdicts + 1)..<(SourceEntityConstants.numEntEntries - 1) {
+            _ = try list.addNonNetworkableEntity(SourceEntity(className: "occupied"))
+        }
+
+        list.markForDeletion(boundaryHandle)
+        XCTAssertEqual(list.cleanupDeleteList(), 1)
+        let replacement = SourceEntity(className: "boundary_replacement")
+        let replacementHandle = try list.addNonNetworkableEntity(replacement)
+        XCTAssertEqual(replacementHandle.entryIndex, SourceEntityConstants.maxEdicts)
+        XCTAssertFalse(replacement.isNetworkable)
+    }
+
     func testServerPhaseOrderAndDeleteCleanupBeforeAndAfterThink() throws {
         var calls: [String] = []
         let list = SourceEntityList()

@@ -101,6 +101,7 @@ public enum SourceVTFError: Error, Sendable, Equatable, CustomStringConvertible 
     case missingImageResource
     case invalidResourceOffset(type: UInt32, offset: Int)
     case arithmeticOverflow(String)
+    case allocationLimitExceeded(context: String, limit: Int, actual: Int)
     case subresourceOutOfRange(mip: Int, frame: Int, face: Int, slice: Int)
 
     public var description: String {
@@ -135,9 +136,38 @@ public enum SourceVTFError: Error, Sendable, Equatable, CustomStringConvertible 
             return "invalid VTF resource 0x\(String(type, radix: 16)) offset \(offset)"
         case let .arithmeticOverflow(context):
             return "VTF integer overflow while calculating \(context)"
+        case let .allocationLimitExceeded(context, limit, actual):
+            return "VTF \(context) requires \(actual) bytes/items; limit is \(limit)"
         case let .subresourceOutOfRange(mip, frame, face, slice):
             return "VTF subresource is out of range (mip \(mip), frame \(frame), face \(face), slice \(slice))"
         }
+    }
+}
+
+/// Per-file limits for allocations driven by untrusted VTF metadata.
+///
+/// The encoded limit bounds the retained input and any individual encoded
+/// subresource copy. Pixel and decoded-byte limits independently bound RGBA8
+/// expansion work so a compact block-compressed texture cannot request an
+/// unexpectedly large allocation.
+public struct SourceVTFAllocationLimits: Sendable, Equatable {
+    public static let `default` = SourceVTFAllocationLimits()
+
+    public let maximumEncodedBytes: Int
+    public let maximumPixelCount: Int
+    public let maximumDecodedBytes: Int
+
+    public init(
+        maximumEncodedBytes: Int = 256 * 1024 * 1024,
+        maximumPixelCount: Int = 64 * 1024 * 1024,
+        maximumDecodedBytes: Int = 256 * 1024 * 1024
+    ) {
+        precondition(maximumEncodedBytes >= 0, "VTF encoded-byte limit cannot be negative")
+        precondition(maximumPixelCount >= 0, "VTF pixel limit cannot be negative")
+        precondition(maximumDecodedBytes >= 0, "VTF decoded-byte limit cannot be negative")
+        self.maximumEncodedBytes = maximumEncodedBytes
+        self.maximumPixelCount = maximumPixelCount
+        self.maximumDecodedBytes = maximumDecodedBytes
     }
 }
 
@@ -243,11 +273,22 @@ public struct SourceVTFFile: Sendable, Equatable {
     public let faceCount: Int
     public let imageDataRange: Range<Int>
     public let lowResolutionDataRange: Range<Int>?
+    public let allocationLimits: SourceVTFAllocationLimits
 
     private let fileData: Data
     private let genericResourceRanges: [UInt32: Range<Int>]
 
-    public init(data: Data) throws {
+    public init(
+        data: Data,
+        allocationLimits: SourceVTFAllocationLimits = .default
+    ) throws {
+        guard data.count <= allocationLimits.maximumEncodedBytes else {
+            throw SourceVTFError.allocationLimitExceeded(
+                context: "encoded file bytes",
+                limit: allocationLimits.maximumEncodedBytes,
+                actual: data.count
+            )
+        }
         let reader = SourceVTFByteReader(data: data)
         try reader.require(end: 16, context: "base header")
         let signature = Array(data.prefix(4))
@@ -524,6 +565,7 @@ public struct SourceVTFFile: Sendable, Equatable {
         faceCount = parsedFaceCount
         imageDataRange = parsedImageOffset..<imageEnd
         lowResolutionDataRange = parsedLowRange
+        self.allocationLimits = allocationLimits
         fileData = data
         genericResourceRanges = resourceRanges
     }
@@ -631,6 +673,32 @@ public struct SourceVTFFile: Sendable, Equatable {
         face: Int = 0,
         slice: Int = 0
     ) throws -> SourceVTFDecodedImage {
+        let decodedWidth = Self.mipDimension(width, level: mipLevel)
+        let decodedHeight = Self.mipDimension(height, level: mipLevel)
+        let pixelCount = try Self.checkedMultiply(
+            decodedWidth,
+            decodedHeight,
+            context: "decoded pixel count"
+        )
+        guard pixelCount <= allocationLimits.maximumPixelCount else {
+            throw SourceVTFError.allocationLimitExceeded(
+                context: "decoded pixel count",
+                limit: allocationLimits.maximumPixelCount,
+                actual: pixelCount
+            )
+        }
+        let rgbaByteCount = try Self.checkedMultiply(
+            pixelCount,
+            4,
+            context: "decoded RGBA8 byte count"
+        )
+        guard rgbaByteCount <= allocationLimits.maximumDecodedBytes else {
+            throw SourceVTFError.allocationLimitExceeded(
+                context: "decoded RGBA8 bytes",
+                limit: allocationLimits.maximumDecodedBytes,
+                actual: rgbaByteCount
+            )
+        }
         let resource = try subresource(
             mipLevel: mipLevel,
             frame: frame,

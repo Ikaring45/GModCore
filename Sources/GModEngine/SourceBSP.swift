@@ -122,9 +122,46 @@ public struct SourceBSPLumpDescriptor: Sendable, Equatable {
     public var isCompressed: Bool { uncompressedSize != 0 }
 }
 
+fileprivate final class SourceBSPStorage: @unchecked Sendable {
+    let data: Data
+
+    init(data: Data) {
+        self.data = data
+    }
+
+    func slice(offset: Int, length: Int) -> Data {
+        let start = data.index(data.startIndex, offsetBy: offset)
+        let end = data.index(start, offsetBy: length)
+        return data[start..<end]
+    }
+}
+
 public struct SourceBSPLump: Sendable, Equatable {
     public let descriptor: SourceBSPLumpDescriptor
-    public let data: Data
+
+    private let storage: SourceBSPStorage
+
+    /// A copy-on-write slice of the original BSP file. Keeping the shared
+    /// backing storage here avoids eagerly copying every lump, including files
+    /// whose descriptors intentionally or maliciously overlap.
+    public var data: Data {
+        storage.slice(offset: descriptor.fileOffset, length: descriptor.fileLength)
+    }
+
+    fileprivate init(descriptor: SourceBSPLumpDescriptor, storage: SourceBSPStorage) {
+        self.descriptor = descriptor
+        self.storage = storage
+    }
+
+    public static func == (lhs: SourceBSPLump, rhs: SourceBSPLump) -> Bool {
+        lhs.descriptor == rhs.descriptor && lhs.data == rhs.data
+    }
+
+    /// Test-visible invariant for the allocation hardening above. This stays
+    /// internal so backing-store identity is not part of the public BSP API.
+    func _sharesBackingStorage(with other: SourceBSPLump) -> Bool {
+        storage === other.storage
+    }
 }
 
 public struct SourceBSPHeader: Sendable, Equatable {
@@ -380,13 +417,11 @@ public struct SourceBSP: Sendable, Equatable {
             mapRevision: mapRevision
         )
 
+        let storage = SourceBSPStorage(data: data)
         var parsedLumps: [SourceBSPLump] = []
         parsedLumps.reserveCapacity(64)
         for descriptor in descriptors {
-            let start = descriptor.fileOffset
-            let end = start + descriptor.fileLength
-            let bytes = data.subdata(in: start..<end)
-            parsedLumps.append(SourceBSPLump(descriptor: descriptor, data: bytes))
+            parsedLumps.append(SourceBSPLump(descriptor: descriptor, storage: storage))
         }
 
         header = parsedHeader
@@ -704,21 +739,11 @@ public struct SourceBSP: Sendable, Equatable {
         let indices = try brushIndicesIntersected(by: ray, headNode: headNode).filter { index in
             UInt32(bitPattern: brushes[index].contents) & mask.rawValue != 0
         }
-        var trace = collisionWorld(brushIndices: indices).trace(
+        return collisionWorld(brushIndices: indices).trace(
             ray,
             mask: mask,
             tolerance: tolerance
         )
-
-        // csurface_t is selected from the entering brush side. The BSP subset
-        // parsed here has the texinfo flags but not the material-system surface
-        // property database, so name/surfaceProps remain the compatibility
-        // defaults while flags retain the on-disk value.
-        if trace.didHit, !trace.startSolid,
-           let surface = surfaceForEnteringPlane(trace.plane, brushIndices: indices) {
-            trace.surface = surface
-        }
-        return trace
     }
 
     private func resolvedHeadNode(_ requested: Int32?) throws -> Int32 {
@@ -809,7 +834,8 @@ public struct SourceBSP: Sendable, Equatable {
         let brush = brushes[brushIndex]
         let start = Int(brush.firstSide)
         let end = start + Int(brush.sideCount)
-        let convertedPlanes = brushSides[start..<end].map { side in
+        let sides = brushSides[start..<end]
+        let convertedPlanes = sides.map { side in
             let plane = planes[Int(side.planeIndex)]
             return SourcePlane(
                 normal: Self.vector(plane.normal),
@@ -817,34 +843,21 @@ public struct SourceBSP: Sendable, Equatable {
                 type: UInt8(truncatingIfNeeded: plane.type)
             )
         }
-        let firstSurface = brushSides[start..<end]
+        let firstSurface = sides
             .first(where: { $0.bevel == 0 })
             .map(surface(for:)) ?? SourceTraceSurface()
+        let planeSurfaces = sides.map { side in
+            // Bevels are collision-only planes; preserve the first real side's
+            // metadata if one becomes the entering clip plane.
+            side.bevel == 0 ? surface(for: side) : firstSurface
+        }
         return SourceConvexBrush(
             planes: convertedPlanes,
             contents: SourceContents(rawValue: UInt32(bitPattern: brush.contents)),
             surface: firstSurface,
-            entityHandle: SourceBaseHandle(entryIndex: 0, serialNumber: 0)
+            entityHandle: SourceBaseHandle(entryIndex: 0, serialNumber: 0),
+            planeSurfaces: planeSurfaces
         )
-    }
-
-    private func surfaceForEnteringPlane(
-        _ tracePlane: SourcePlane,
-        brushIndices: [Int]
-    ) -> SourceTraceSurface? {
-        for brushIndex in brushIndices {
-            let brush = brushes[brushIndex]
-            let start = Int(brush.firstSide)
-            let end = start + Int(brush.sideCount)
-            for side in brushSides[start..<end] where side.bevel == 0 {
-                let plane = planes[Int(side.planeIndex)]
-                if Self.vector(plane.normal) == tracePlane.normal,
-                   plane.distance == tracePlane.distance {
-                    return surface(for: side)
-                }
-            }
-        }
-        return nil
     }
 
     private func surface(for side: SourceBSPBrushSide) -> SourceTraceSurface {

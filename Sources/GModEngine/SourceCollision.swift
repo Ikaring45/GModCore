@@ -288,18 +288,28 @@ public struct SourceConvexBrush: Equatable, Sendable {
     public let contents: SourceContents
     public let surface: SourceTraceSurface
     public let entityHandle: SourceBaseHandle?
+    /// Optional metadata parallel to `planes`. When supplied, the convex
+    /// clipper attaches the surface belonging to the exact entering plane
+    /// instead of inferring it later from floating-point plane equality.
+    public let planeSurfaces: [SourceTraceSurface]?
 
     public init(
         planes: [SourcePlane],
         contents: SourceContents = .solid,
         surface: SourceTraceSurface = SourceTraceSurface(),
-        entityHandle: SourceBaseHandle? = nil
+        entityHandle: SourceBaseHandle? = nil,
+        planeSurfaces: [SourceTraceSurface]? = nil
     ) {
         precondition(!planes.isEmpty, "A Source convex brush needs at least one plane")
+        precondition(
+            planeSurfaces == nil || planeSurfaces?.count == planes.count,
+            "Source convex-brush plane surfaces must parallel its planes"
+        )
         self.planes = planes
         self.contents = contents
         self.surface = surface
         self.entityHandle = entityHandle
+        self.planeSurfaces = planeSurfaces
     }
 }
 
@@ -542,8 +552,9 @@ public struct SourceCollisionWorld: Equatable, Sendable {
         var enterFraction = -Float.greatestFiniteMagnitude
         var leaveFraction = Float(1)
         var enteringPlane = SourcePlane()
+        var enteringPlaneIndex: Int?
 
-        for plane in planes {
+        for (planeIndex, plane) in planes.enumerated() {
             let expandedDistance = plane.distance + supportDistance(
                 extents: ray.extents,
                 normal: plane.normal
@@ -567,6 +578,7 @@ public struct SourceCollisionWorld: Equatable, Sendable {
                 let fraction = numerator / (startDistance - endDistance)
                 if fraction > enterFraction {
                     enterFraction = fraction
+                    enteringPlaneIndex = planeIndex
                     switch primitive {
                     case .axisAlignedBox:
                         // IntersectRayWithBox clips against the explicitly
@@ -613,6 +625,11 @@ public struct SourceCollisionWorld: Equatable, Sendable {
         result.endPosition = ray.actualStart + ray.delta * enterFraction
         result.plane = enteringPlane
         applyMetadata(of: primitive, to: &result)
+        if case let .convexBrush(brush) = primitive,
+           let enteringPlaneIndex,
+           let planeSurfaces = brush.planeSurfaces {
+            result.surface = planeSurfaces[enteringPlaneIndex]
+        }
         return result
     }
 

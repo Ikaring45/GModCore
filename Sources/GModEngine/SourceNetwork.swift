@@ -8,6 +8,10 @@ public enum SourceNetworkEncodingConstants {
     public static let coordinateFractionalBits = 5
     public static let coordinateDenominator = 1 << coordinateFractionalBits
     public static let coordinateResolution = Float(1) / Float(coordinateDenominator)
+    /// Largest magnitude representable by Source's 14-bit integer field.
+    /// The on-wire value stores `integer - 1`, so 2^14 itself is valid. The
+    /// host saturates finite values outside this domain before encoding.
+    public static let maximumCoordinateMagnitude = Float(1 << coordinateIntegerBits)
 
     public static let normalFractionalBits = 11
     public static let normalDenominator = (1 << normalFractionalBits) - 1
@@ -156,7 +160,13 @@ public struct SourceBitWriter: Sendable {
         precondition(angle.isFinite, "Source angle codec requires a finite value")
 
         let shift = UInt32(1) << UInt32(bitCount)
-        let quantized = Int64((Double(angle) / 360.0) * Double(shift))
+        // Reducing first keeps the subsequent integer conversion in a defined
+        // range even for finite Float values far outside Int64. Ordinary values
+        // retain WriteBitAngle's circular wrap; behavior beyond the SDK's safe
+        // conversion domain is an explicit nontrapping host policy, not a claim
+        // about an undefined native float-to-integer conversion.
+        let wrapped = Double(angle).truncatingRemainder(dividingBy: 360.0)
+        let quantized = Int64((wrapped / 360.0) * Double(shift))
         let encoded = UInt32(truncatingIfNeeded: quantized) & (shift - 1)
         writeUnsigned(encoded, bitCount: bitCount)
     }
@@ -166,8 +176,12 @@ public struct SourceBitWriter: Sendable {
     public mutating func writeCoordinate(_ value: Float) {
         precondition(value.isFinite, "Source coordinate codec requires a finite value")
 
-        var integer = Int(abs(value))
-        let fraction = abs(Int(value * Float(SourceNetworkEncodingConstants.coordinateDenominator))) &
+        // Values outside the codec's domain cannot be represented. The host
+        // policy saturates before converting to Int, avoiding Swift's trapping
+        // conversion without claiming a Source wire oracle for invalid input.
+        let magnitude = min(abs(value), SourceNetworkEncodingConstants.maximumCoordinateMagnitude)
+        var integer = Int(magnitude)
+        let fraction = Int(magnitude * Float(SourceNetworkEncodingConstants.coordinateDenominator)) &
             (SourceNetworkEncodingConstants.coordinateDenominator - 1)
         let hasInteger = integer != 0
         let hasFraction = fraction != 0
@@ -210,8 +224,10 @@ public struct SourceBitWriter: Sendable {
         precondition(value.isFinite, "Source normal codec requires a finite value")
 
         writeBit(value <= -SourceNetworkEncodingConstants.normalResolution)
-        let scaled = abs(Int(value * Float(SourceNetworkEncodingConstants.normalDenominator)))
-        let clamped = min(scaled, SourceNetworkEncodingConstants.normalDenominator)
+        // Normals outside [-1, 1] are outside the wire domain. Clamp before the
+        // integer conversion as an explicit nontrapping host policy.
+        let magnitude = min(abs(value), 1)
+        let clamped = Int(magnitude * Float(SourceNetworkEncodingConstants.normalDenominator))
         writeUnsigned(
             UInt32(clamped),
             bitCount: SourceNetworkEncodingConstants.normalFractionalBits

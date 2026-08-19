@@ -244,6 +244,31 @@ final class SourceBSPTests: XCTestCase {
         }
     }
 
+    func testOverlappingLumpRangesShareOneBackingStore() throws {
+        let payload = Data(repeating: 0xA5, count: 4_096)
+        var data = makeBSP(lumps: [
+            63: SyntheticLump(data: payload, version: 0)
+        ])
+        for index in [20, 21] {
+            data.replaceInt32(
+                at: lumpDescriptorOffset(index),
+                with: Int32(SourceBSP.headerByteCount)
+            )
+            data.replaceInt32(
+                at: lumpDescriptorOffset(index) + 4,
+                with: Int32(payload.count)
+            )
+        }
+
+        let bsp = try SourceBSP(data: data)
+
+        XCTAssertEqual(bsp.lumps[20].data, payload)
+        XCTAssertEqual(bsp.lumps[21].data, payload)
+        XCTAssertEqual(bsp.lumps[63].data, payload)
+        XCTAssertTrue(bsp.lumps[20]._sharesBackingStorage(with: bsp.lumps[21]))
+        XCTAssertTrue(bsp.lumps[21]._sharesBackingStorage(with: bsp.lumps[63]))
+    }
+
     func testRejectsMalformedFixedRecordCountsAndUnknownTypedVersions() throws {
         let malformedPlanes = makeBSP(lumps: [
             SourceBSPLumpKind.planes.rawValue: SyntheticLump(
@@ -363,6 +388,25 @@ final class SourceBSPTests: XCTestCase {
 
         XCTAssertEqual(bsp.collisionWorld(mask: .solid).primitives.count, 1)
         XCTAssertTrue(bsp.collisionWorld(mask: .water).primitives.isEmpty)
+    }
+
+    func testWorldTraceCarriesExactEnteringBrushSideSurface() throws {
+        let bsp = try SourceBSP(data: makeSharedPlaneDifferentSurfaceBrushWorldBSP())
+        let hit = try bsp.traceWorld(
+            SourceRay(
+                start: SourceVector3(-10, 0, 0),
+                end: SourceVector3(10, 0, 0)
+            ),
+            mask: .solid
+        )
+
+        XCTAssertTrue(hit.didHitWorld)
+        XCTAssertFalse(hit.startSolid)
+        XCTAssertEqual(hit.plane.normal, SourceVector3(-1, 0, 0))
+        XCTAssertEqual(hit.plane.distance, 2)
+        // Brush 0 has this exact plane too, but the ray misses that brush on Y.
+        // The surface must therefore come from brush 1's entering side.
+        XCTAssertEqual(hit.surface.flags, 0x0202)
     }
 
     func testReferenceValidationRejectsLeafBrushOverflowInvalidPlaneAndNodeCycle() throws {
@@ -614,6 +658,84 @@ private func makeBrushWorldBSP() -> Data {
         SourceBSPLumpKind.models.rawValue: SyntheticLump(data: model, version: 0),
         SourceBSPLumpKind.leafBrushes.rawValue: SyntheticLump(data: leafBrushes, version: 0),
         SourceBSPLumpKind.brushes.rawValue: SyntheticLump(data: brush, version: 0),
+        SourceBSPLumpKind.brushSides.rawValue: SyntheticLump(data: brushSides, version: 0),
+    ])
+}
+
+private func makeSharedPlaneDifferentSurfaceBrushWorldBSP() -> Data {
+    var planes = Data()
+    let definitions: [(Float, Float, Float, Float, Int32)] = [
+        (1, 0, 0, 2, 0),
+        (-1, 0, 0, 2, 0), // entering plane shared by both brushes
+        (0, 1, 0, 7, 1),
+        (0, -1, 0, -5, 1), // brush 0 occupies Y 5...7, so the ray misses it
+        (0, 0, 1, 2, 2),
+        (0, 0, -1, 2, 2),
+        (0, 1, 0, 2, 1),
+        (0, -1, 0, 2, 1),
+    ]
+    for definition in definitions {
+        planes.appendVector3(definition.0, definition.1, definition.2)
+        planes.appendFloat32(definition.3)
+        planes.appendInt32(definition.4)
+    }
+
+    var textureData = Data()
+    textureData.appendVector3(0, 0, 0)
+    textureData.appendInt32(0)
+    textureData.appendInt32(64)
+    textureData.appendInt32(64)
+    textureData.appendInt32(64)
+    textureData.appendInt32(64)
+
+    var textureInfo = Data()
+    for flags in [Int32(0x0101), Int32(0x0202)] {
+        for _ in 0..<16 { textureInfo.appendFloat32(0) }
+        textureInfo.appendInt32(flags)
+        textureInfo.appendInt32(0)
+    }
+
+    let solid = Int32(bitPattern: SourceContents.solid.rawValue)
+    var leaf = makeLeafPrefix(
+        contents: solid,
+        firstLeafBrush: 0,
+        leafBrushCount: 2
+    )
+    leaf.appendUInt16(0)
+
+    var leafBrushes = Data()
+    leafBrushes.appendUInt16(0)
+    leafBrushes.appendUInt16(1)
+
+    var brushes = Data()
+    brushes.appendInt32(0)
+    brushes.appendInt32(6)
+    brushes.appendInt32(solid)
+    brushes.appendInt32(6)
+    brushes.appendInt32(6)
+    brushes.appendInt32(solid)
+
+    var brushSides = Data()
+    for planeIndex in [UInt16(0), 1, 2, 3, 4, 5] {
+        brushSides.appendUInt16(planeIndex)
+        brushSides.appendInt16(0)
+        brushSides.appendInt16(-1)
+        brushSides.appendInt16(0)
+    }
+    for planeIndex in [UInt16(0), 1, 6, 7, 4, 5] {
+        brushSides.appendUInt16(planeIndex)
+        brushSides.appendInt16(1)
+        brushSides.appendInt16(-1)
+        brushSides.appendInt16(0)
+    }
+
+    return makeBSP(lumps: [
+        SourceBSPLumpKind.planes.rawValue: SyntheticLump(data: planes, version: 0),
+        SourceBSPLumpKind.textureData.rawValue: SyntheticLump(data: textureData, version: 0),
+        SourceBSPLumpKind.textureInfo.rawValue: SyntheticLump(data: textureInfo, version: 0),
+        SourceBSPLumpKind.leaves.rawValue: SyntheticLump(data: leaf, version: 1),
+        SourceBSPLumpKind.leafBrushes.rawValue: SyntheticLump(data: leafBrushes, version: 0),
+        SourceBSPLumpKind.brushes.rawValue: SyntheticLump(data: brushes, version: 0),
         SourceBSPLumpKind.brushSides.rawValue: SyntheticLump(data: brushSides, version: 0),
     ])
 }

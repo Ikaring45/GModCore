@@ -248,4 +248,76 @@ struct SourceFileSystemTests {
             as: UTF8.self
         ) == "ok")
     }
+
+    @Test("host containment does not fold case-distinct canonical siblings")
+    func hostProviderRejectsCaseDistinctSymlinkEscape() throws {
+        let parent = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SourceHostProvider-\(UUID().uuidString)", isDirectory: true)
+        let root = parent.appendingPathComponent("Content", isDirectory: true)
+        let caseDistinctSibling = parent.appendingPathComponent("content", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: parent) }
+
+        // Case-insensitive hosts cannot create the adversarial sibling. The
+        // exact-prefix behavior is exercised on case-sensitive CI/hosts.
+        try? FileManager.default.createDirectory(
+            at: caseDistinctSibling,
+            withIntermediateDirectories: false
+        )
+        try Data("outside".utf8).write(
+            to: caseDistinctSibling.appendingPathComponent("secret.txt")
+        )
+        guard !FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("secret.txt").path
+        ) else {
+            return
+        }
+        let link = root.appendingPathComponent("escape", isDirectory: true)
+        do {
+            try FileManager.default.createSymbolicLink(
+                at: link,
+                withDestinationURL: caseDistinctSibling
+            )
+        } catch {
+            // Windows may deny symlink creation unless Developer Mode or the
+            // SeCreateSymbolicLink privilege is enabled.
+            return
+        }
+
+        let provider = try SourceHostDirectoryProvider(rootURL: root)
+        #expect(!provider.fileExists(at: "escape/secret.txt"))
+        #expect(throws: SourceFileSystemError.invalidPath("escape/secret.txt")) {
+            _ = try provider.readFile(at: "escape/secret.txt")
+        }
+    }
+
+    @Test("host containment is revalidated after a symlink target is swapped")
+    func hostProviderRevalidatesSwappedSymlink() throws {
+        let parent = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SourceHostProvider-\(UUID().uuidString)", isDirectory: true)
+        let root = parent.appendingPathComponent("root", isDirectory: true)
+        let inside = root.appendingPathComponent("inside", isDirectory: true)
+        let outside = parent.appendingPathComponent("outside", isDirectory: true)
+        try FileManager.default.createDirectory(at: inside, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        try Data("inside".utf8).write(to: inside.appendingPathComponent("value.txt"))
+        try Data("outside".utf8).write(to: outside.appendingPathComponent("value.txt"))
+        defer { try? FileManager.default.removeItem(at: parent) }
+
+        let link = root.appendingPathComponent("current", isDirectory: true)
+        do {
+            try FileManager.default.createSymbolicLink(at: link, withDestinationURL: inside)
+        } catch {
+            return
+        }
+        let provider = try SourceHostDirectoryProvider(rootURL: root)
+        #expect(String(decoding: try provider.readFile(at: "current/value.txt"), as: UTF8.self) == "inside")
+
+        try FileManager.default.removeItem(at: link)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside)
+        #expect(!provider.fileExists(at: "current/value.txt"))
+        #expect(throws: SourceFileSystemError.invalidPath("current/value.txt")) {
+            _ = try provider.readFile(at: "current/value.txt")
+        }
+    }
 }

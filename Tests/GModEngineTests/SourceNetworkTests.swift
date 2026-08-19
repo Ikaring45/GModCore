@@ -189,6 +189,43 @@ final class SourceNetworkTests: XCTestCase {
         )
     }
 
+    func testOutOfDomainHugeFiniteScalarsUseNontrappingHostPolicy() {
+        let huge = Float.greatestFiniteMagnitude
+
+        var hugeAngle = SourceBitWriter(byteCapacity: 4)
+        hugeAngle.writeAngle(huge, bitCount: 31)
+        let reduced = Float(Double(huge).truncatingRemainder(dividingBy: 360.0))
+        var reducedAngle = SourceBitWriter(byteCapacity: 4)
+        reducedAngle.writeAngle(reduced, bitCount: 31)
+        XCTAssertEqual(hugeAngle.bitsWritten, 31)
+        XCTAssertEqual(hugeAngle.writtenBytes, reducedAngle.writtenBytes)
+
+        for value in [huge, -huge] {
+            var coordinateWriter = SourceBitWriter(byteCapacity: 8)
+            coordinateWriter.writeCoordinate(value)
+            var coordinateReader = SourceBitReader(
+                bytes: coordinateWriter.writtenBytes,
+                bitCount: coordinateWriter.bitsWritten
+            )
+            XCTAssertEqual(
+                coordinateReader.readCoordinate(),
+                value.sign == .minus
+                    ? -SourceNetworkEncodingConstants.maximumCoordinateMagnitude
+                    : SourceNetworkEncodingConstants.maximumCoordinateMagnitude
+            )
+            XCTAssertFalse(coordinateReader.isOverflowed)
+
+            var normalWriter = SourceBitWriter(byteCapacity: 2)
+            normalWriter.writeNormal(value)
+            var normalReader = SourceBitReader(
+                bytes: normalWriter.writtenBytes,
+                bitCount: normalWriter.bitsWritten
+            )
+            XCTAssertEqual(normalReader.readNormal(), value.sign == .minus ? -1 : 1)
+            XCTAssertFalse(normalReader.isOverflowed)
+        }
+    }
+
     func testNetChannelChokeTransmitReceiveAndStaleOrdering() {
         var state = SourceNetChannelSequenceState()
         state.setChoked()

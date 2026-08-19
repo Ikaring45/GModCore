@@ -675,6 +675,91 @@ final class SourceVTFTests: XCTestCase {
         }
     }
 
+    func testEncodedPixelAndDecodedAllocationBudgetsAreIndependent() throws {
+        let data = makeVTF(
+            minor: 3,
+            width: 2,
+            height: 2,
+            format: .rgba8888,
+            imageData: [UInt8](repeating: 0, count: 16)
+        )
+
+        XCTAssertThrowsError(
+            try SourceVTFFile(
+                data: data,
+                allocationLimits: SourceVTFAllocationLimits(
+                    maximumEncodedBytes: data.count - 1
+                )
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? SourceVTFError,
+                .allocationLimitExceeded(
+                    context: "encoded file bytes",
+                    limit: data.count - 1,
+                    actual: data.count
+                )
+            )
+        }
+
+        let pixelLimited = try SourceVTFFile(
+            data: data,
+            allocationLimits: SourceVTFAllocationLimits(maximumPixelCount: 3)
+        )
+        XCTAssertThrowsError(try pixelLimited.decodeRGBA8()) { error in
+            XCTAssertEqual(
+                error as? SourceVTFError,
+                .allocationLimitExceeded(
+                    context: "decoded pixel count",
+                    limit: 3,
+                    actual: 4
+                )
+            )
+        }
+
+        let byteLimited = try SourceVTFFile(
+            data: data,
+            allocationLimits: SourceVTFAllocationLimits(
+                maximumPixelCount: 4,
+                maximumDecodedBytes: 15
+            )
+        )
+        XCTAssertThrowsError(try byteLimited.decodeRGBA8()) { error in
+            XCTAssertEqual(
+                error as? SourceVTFError,
+                .allocationLimitExceeded(
+                    context: "decoded RGBA8 bytes",
+                    limit: 15,
+                    actual: 16
+                )
+            )
+        }
+
+        let compactBC1 = try SourceVTFFile(
+            data: makeVTF(
+                minor: 3,
+                width: 8,
+                height: 8,
+                format: .dxt1,
+                imageData: [UInt8](repeating: 0, count: 32)
+            ),
+            allocationLimits: SourceVTFAllocationLimits(
+                maximumPixelCount: 64,
+                maximumDecodedBytes: 255
+            )
+        )
+        XCTAssertThrowsError(try compactBC1.decodeRGBA8()) { error in
+            XCTAssertEqual(
+                error as? SourceVTFError,
+                .allocationLimitExceeded(
+                    context: "decoded RGBA8 bytes",
+                    limit: 255,
+                    actual: 256
+                )
+            )
+        }
+    }
+
     private func appendSixByteLittleEndian(_ value: UInt64, to bytes: inout [UInt8]) {
         for byte in 0..<6 {
             bytes.append(UInt8(truncatingIfNeeded: value >> UInt64(byte * 8)))

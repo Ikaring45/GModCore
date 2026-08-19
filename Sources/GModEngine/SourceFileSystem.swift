@@ -473,8 +473,14 @@ public final class SourceMemoryFileProvider: SourceFileProvider, @unchecked Send
 /// Read-only host directory adapter. Every component is resolved
 /// case-insensitively inside the configured root so APFS behavior matches the
 /// Windows Source filesystem surface.
+///
+/// Containment is revalidated after resolving every symlink. Foundation does
+/// not expose one portable open-at/no-follow traversal across all supported
+/// hosts, so mounts exposed to concurrently hostile filesystem mutation still
+/// require a platform descriptor-backed provider.
 public final class SourceHostDirectoryProvider: SourceFileProvider, @unchecked Sendable {
     private let rootURL: URL
+    private let hostUsesCaseSensitiveNames: Bool
 
     public init(rootURL: URL) throws {
         let root = rootURL.standardizedFileURL.resolvingSymlinksInPath()
@@ -484,6 +490,16 @@ public final class SourceHostDirectoryProvider: SourceFileProvider, @unchecked S
             throw SourceFileSystemError.notDirectory(root.path)
         }
         self.rootURL = root
+        #if os(Windows)
+        hostUsesCaseSensitiveNames = false
+        #elseif canImport(Darwin)
+        let volumeValues = try? root.resourceValues(
+            forKeys: [.volumeSupportsCaseSensitiveNamesKey]
+        )
+        hostUsesCaseSensitiveNames = volumeValues?.volumeSupportsCaseSensitiveNames ?? true
+        #else
+        hostUsesCaseSensitiveNames = true
+        #endif
     }
 
     public func fileExists(at logicalPath: String) -> Bool {
@@ -555,7 +571,11 @@ public final class SourceHostDirectoryProvider: SourceFileProvider, @unchecked S
                 throw SourceFileSystemError.fileNotFound(rawPath)
             }
             let resolved = selected.standardizedFileURL.resolvingSymlinksInPath()
-            guard Self.isContained(resolved, by: rootURL) else {
+            guard Self.isContained(
+                resolved,
+                by: rootURL,
+                caseSensitive: hostUsesCaseSensitiveNames
+            ) else {
                 throw SourceFileSystemError.invalidPath(rawPath)
             }
             current = resolved
@@ -563,12 +583,24 @@ public final class SourceHostDirectoryProvider: SourceFileProvider, @unchecked S
         return current
     }
 
-    private static func isContained(_ child: URL, by root: URL) -> Bool {
+    private static func isContained(
+        _ child: URL,
+        by root: URL,
+        caseSensitive: Bool
+    ) -> Bool {
         let childComponents = child.pathComponents
         let rootComponents = root.pathComponents
         guard childComponents.count >= rootComponents.count else { return false }
+        // Virtual Source paths are case-insensitive, but containment follows
+        // host identity. Case-insensitive volumes cannot have case-distinct
+        // sibling entries, so accept canonical case-only spelling differences
+        // there. On case-sensitive volumes, compare exactly; folding here would
+        // let `Root` escape into a sibling named `root`.
+        if caseSensitive {
+            return zip(rootComponents, childComponents).allSatisfy(==)
+        }
         return zip(rootComponents, childComponents).allSatisfy { lhs, rhs in
-            SourceSearchPathFileSystem.fold(lhs) == SourceSearchPathFileSystem.fold(rhs)
+            lhs.caseInsensitiveCompare(rhs) == .orderedSame
         }
     }
 }
