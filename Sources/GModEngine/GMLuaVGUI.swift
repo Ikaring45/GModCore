@@ -1,6 +1,57 @@
 import Foundation
 import GModLua
 
+/// Value-only foreground color retained by the logical VGUI host.
+///
+/// Components intentionally remain Lua numbers. The public GLua contract does
+/// not define out-of-range conversion, so this layer does not invent an 8-bit
+/// clamp that could disagree with the native engine.
+public struct GMLuaPanelColorSnapshot: Equatable, Sendable {
+    public let red: Double
+    public let green: Double
+    public let blue: Double
+    public let alpha: Double
+
+    public init(red: Double, green: Double, blue: Double, alpha: Double) {
+        self.red = red
+        self.green = green
+        self.blue = blue
+        self.alpha = alpha
+    }
+}
+
+/// Inspectable logical state for an engine text panel.
+///
+/// This is not a renderer object. Font names are kept independently from the
+/// current `surface` font, matching VGUI's per-panel font selection.
+public struct GMLuaTextPanelStateSnapshot: Equatable, Sendable {
+    public let panelIdentifier: Int
+    public let engineClassName: String
+    public let requestedClassName: String
+    public let text: LuaString
+    public let fontName: LuaString
+    public let foregroundColor: GMLuaPanelColorSnapshot?
+    public let contentAlignment: Int
+
+    public init(
+        panelIdentifier: Int,
+        engineClassName: String,
+        requestedClassName: String,
+        text: LuaString,
+        fontName: LuaString,
+        foregroundColor: GMLuaPanelColorSnapshot?,
+        contentAlignment: Int
+    ) {
+        self.panelIdentifier = panelIdentifier
+        self.engineClassName = engineClassName
+        self.requestedClassName = requestedClassName
+        self.text = text
+        self.fontName = fontName
+        self.foregroundColor = foregroundColor
+        self.contentAlignment = contentAlignment
+    }
+}
+
 private final class GMLuaPanelValue: @unchecked Sendable {
     let identifier: Int
     let engineClassName: String
@@ -20,6 +71,12 @@ private final class GMLuaPanelValue: @unchecked Sendable {
     var paintBackgroundEnabled = true
     var paintBorderEnabled = true
     var zPosition = 0.0
+    var isLayoutInvalidated = false
+    var isPerformingLayout = false
+    var text = LuaString(bytes: [])
+    var fontName = LuaString("Default")
+    var foregroundColor: GMLuaPanelColorSnapshot?
+    var contentAlignment = 5
 
     init(
         identifier: Int,
@@ -56,6 +113,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     private var panels: [Int: LuaValue] = [:]
     private var nextPanelIdentifier = 1
     private var semanticIndex: LuaValue = .nilValue
+    private var completedLayoutPasses: UInt64 = 0
 
     fileprivate init(
         state: LuaState,
@@ -81,9 +139,55 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         }
     }
 
+    /// Number of live logical panels waiting for the host's next VGUI frame
+    /// boundary. This does not imply that UIKit or renderer layout exists.
+    public var pendingLayoutCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return panels.values.reduce(into: 0) { count, value in
+            guard let descriptor = panelDescriptor(from: value),
+                  descriptor.isLayoutInvalidated,
+                  GMLuaTypeSystem.typedObject(from: value)?.isValid == true else { return }
+            count += 1
+        }
+    }
+
+    /// Successful logical `PerformLayout` passes dispatched by this registry.
+    /// Platform view layout remains outside this pure Swift compatibility layer.
+    public var completedLayoutPassCount: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return completedLayoutPasses
+    }
+
+    /// Stable value snapshots for live Label/TextEntry/RichText controls.
+    public var textPanelStateSnapshots: [GMLuaTextPanelStateSnapshot] {
+        lock.lock()
+        defer { lock.unlock() }
+        return panels.keys.sorted().compactMap { identifier in
+            guard let value = panels[identifier],
+                  let descriptor = panelDescriptor(from: value),
+                  isTextEngineClass(descriptor.engineClassName),
+                  GMLuaTypeSystem.typedObject(from: value)?.isValid == true else { return nil }
+            return GMLuaTextPanelStateSnapshot(
+                panelIdentifier: descriptor.identifier,
+                engineClassName: descriptor.engineClassName,
+                requestedClassName: descriptor.requestedClassName,
+                text: descriptor.text,
+                fontName: descriptor.fontName,
+                foregroundColor: descriptor.foregroundColor,
+                contentAlignment: descriptor.contentAlignment
+            )
+        }
+    }
+
     /// `false` until the iPad view/renderer bridge is connected. The registry
     /// is still useful for loading and executing the original Derma Lua graph.
     public let hasPlatformViewBacking = false
+
+    /// Text state is logical only until a UIKit/CoreText/Metal bridge consumes
+    /// the snapshots above.
+    public let hasPlatformTextBacking = false
 
     fileprivate var references: [LuaValue] {
         lock.lock()
@@ -300,6 +404,102 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
                 pending.append(childIdentifier)
             }
         }
+    }
+
+    fileprivate func invalidateLayout(identifier: Int, layoutNow: Bool) throws {
+        let shouldPerformImmediately: Bool
+        lock.lock()
+        guard let value = panels[identifier],
+              let descriptor = panelDescriptor(from: value),
+              GMLuaTypeSystem.typedObject(from: value)?.isValid == true else {
+            lock.unlock()
+            throw LuaError.runtime("invalid Panel")
+        }
+        descriptor.isLayoutInvalidated = true
+        shouldPerformImmediately = layoutNow && !descriptor.isPerformingLayout
+        lock.unlock()
+
+        if shouldPerformImmediately {
+            _ = try performLayout(identifier: identifier)
+        }
+    }
+
+    /// Dispatches deferred Lua `PerformLayout` hooks at a host-selected VGUI
+    /// frame boundary. Each panel present at the start is visited at most once;
+    /// a hook that invalidates itself remains pending for a later boundary.
+    ///
+    /// This advances logical Lua layout only. It does not claim UIKit, docking,
+    /// clipping, hit-testing, or renderer-backed geometry is implemented.
+    @discardableResult
+    public func performPendingLayouts(maxLayouts: Int = .max) throws -> Int {
+        guard maxLayouts > 0 else { return 0 }
+
+        lock.lock()
+        let identifiers = panels.keys.sorted().filter { identifier in
+            guard let value = panels[identifier],
+                  let descriptor = panelDescriptor(from: value) else { return false }
+            return descriptor.isLayoutInvalidated &&
+                !descriptor.isPerformingLayout &&
+                GMLuaTypeSystem.typedObject(from: value)?.isValid == true
+        }
+        lock.unlock()
+
+        var performed = 0
+        for identifier in identifiers.prefix(maxLayouts) {
+            if try performLayout(identifier: identifier) {
+                performed += 1
+            }
+        }
+        return performed
+    }
+
+    private func performLayout(identifier: Int) throws -> Bool {
+        let value: LuaValue
+        let descriptor: GMLuaPanelValue
+
+        lock.lock()
+        guard let storedValue = panels[identifier],
+              let storedDescriptor = panelDescriptor(from: storedValue),
+              storedDescriptor.isLayoutInvalidated,
+              !storedDescriptor.isPerformingLayout,
+              GMLuaTypeSystem.typedObject(from: storedValue)?.isValid == true else {
+            lock.unlock()
+            return false
+        }
+        value = storedValue
+        descriptor = storedDescriptor
+        descriptor.isLayoutInvalidated = false
+        descriptor.isPerformingLayout = true
+        lock.unlock()
+
+        var succeeded = false
+        defer {
+            lock.lock()
+            descriptor.isPerformingLayout = false
+            if succeeded {
+                completedLayoutPasses &+= 1
+            } else if panels[identifier] != nil,
+                      GMLuaTypeSystem.typedObject(from: value)?.isValid == true {
+                descriptor.isLayoutInvalidated = true
+            }
+            lock.unlock()
+        }
+
+        let callback = try state.call(
+            semanticIndex,
+            arguments: [.table(descriptor.instanceTable), .string("PerformLayout")]
+        ).first ?? .nilValue
+        if case .luaFunction = callback {
+            _ = try state.call(callback, arguments: [
+                value, .number(descriptor.width), .number(descriptor.height)
+            ])
+        } else if case .nativeFunction = callback {
+            _ = try state.call(callback, arguments: [
+                value, .number(descriptor.width), .number(descriptor.height)
+            ])
+        }
+        succeeded = true
+        return true
     }
 
     fileprivate func allPanels() -> [LuaValue] {
@@ -629,6 +829,91 @@ public enum GMLuaVGUI {
                     .number(panel.width), .number(panel.height)
                 ]
             }),
+            ("InvalidateLayout", { arguments in
+                let panel = try requiredPanel(arguments, "InvalidateLayout")
+                let layoutNow = try optionalBoolean(
+                    arguments,
+                    1,
+                    false,
+                    "InvalidateLayout"
+                )
+                try registry.invalidateLayout(
+                    identifier: panel.identifier,
+                    layoutNow: layoutNow
+                )
+                return []
+            }),
+            ("SetText", { arguments in
+                let panel = try requiredTextPanel(arguments, "SetText")
+                let supplied = try requiredLuaString(arguments, 1, "SetText")
+                if panel.engineClassName == "Label" {
+                    panel.text = LuaString(bytes: Array(supplied.bytes.prefix(1_023)))
+                    try registry.invalidateLayout(identifier: panel.identifier, layoutNow: false)
+                } else {
+                    panel.text = supplied
+                }
+                return []
+            }),
+            ("GetText", { arguments in
+                let panel = try requiredTextPanel(arguments, "GetText")
+                let text: LuaString
+                if panel.engineClassName == "TextEntry" {
+                    text = panel.text
+                } else {
+                    text = LuaString(bytes: Array(panel.text.bytes.prefix(1_023)))
+                }
+                return [.string(text)]
+            }),
+            ("GetValue", { arguments in
+                let panel = try requiredPanel(arguments, "GetValue")
+                guard panel.engineClassName == "Label" || panel.engineClassName == "TextEntry" else {
+                    throw unsupportedPanelMethod(panel, "GetValue")
+                }
+                return [.string(LuaString(bytes: Array(panel.text.bytes.prefix(8_092))))]
+            }),
+            ("SetFontInternal", { arguments in
+                let panel = try requiredTextPanel(arguments, "SetFontInternal")
+                panel.fontName = try requiredLuaString(arguments, 1, "SetFontInternal")
+                return []
+            }),
+            ("GetFont", { arguments in
+                let panel = try requiredTextPanel(arguments, "GetFont")
+                return [.string(panel.fontName)]
+            }),
+            ("SetFGColor", { arguments in
+                let panel = try requiredTextPanel(arguments, "SetFGColor")
+                panel.foregroundColor = try requiredPanelColor(
+                    arguments,
+                    state: state,
+                    function: "SetFGColor"
+                )
+                return []
+            }),
+            ("GetFGColor", { arguments in
+                let panel = try requiredTextPanel(arguments, "GetFGColor")
+                guard let color = panel.foregroundColor else {
+                    throw LuaError.runtime(
+                        "Panel:GetFGColor has no logical scheme color before ApplySchemeSettings"
+                    )
+                }
+                return [try makeColorValue(color, state: state)]
+            }),
+            ("SetContentAlignment", { arguments in
+                let panel = try requiredLabel(arguments, "SetContentAlignment")
+                let alignment = try requiredInteger(arguments, 1, "SetContentAlignment")
+                guard (1...9).contains(alignment) else {
+                    throw LuaError.runtime(
+                        "bad argument #1 to 'SetContentAlignment' (alignment 1 through 9 expected)"
+                    )
+                }
+                panel.contentAlignment = alignment
+                try registry.invalidateLayout(identifier: panel.identifier, layoutNow: false)
+                return []
+            }),
+            ("GetContentAlignment", { arguments in
+                let panel = try requiredLabel(arguments, "GetContentAlignment")
+                return [.number(Double(panel.contentAlignment))]
+            }),
             ("SetVisible", { arguments in
                 let panel = try requiredPanel(arguments, "SetVisible")
                 panel.isVisible = try requiredBoolean(arguments, 1, "SetVisible")
@@ -756,17 +1041,115 @@ private func requiredPanel(
     return descriptor
 }
 
-private func requiredString(
+private func isTextEngineClass(_ className: String) -> Bool {
+    className == "Label" || className == "TextEntry" || className == "RichText"
+}
+
+private func unsupportedPanelMethod(_ panel: GMLuaPanelValue, _ method: String) -> LuaError {
+    LuaError.runtime(
+        "Panel:\(method) is not implemented by engine class '\(panel.engineClassName)'"
+    )
+}
+
+private func requiredTextPanel(
+    _ arguments: [LuaValue],
+    _ method: String
+) throws -> GMLuaPanelValue {
+    let panel = try requiredPanel(arguments, method)
+    guard isTextEngineClass(panel.engineClassName) else {
+        throw unsupportedPanelMethod(panel, method)
+    }
+    return panel
+}
+
+private func requiredLabel(
+    _ arguments: [LuaValue],
+    _ method: String
+) throws -> GMLuaPanelValue {
+    let panel = try requiredPanel(arguments, method)
+    guard panel.engineClassName == "Label" else {
+        throw unsupportedPanelMethod(panel, method)
+    }
+    return panel
+}
+
+private func requiredLuaString(
     _ arguments: [LuaValue],
     _ index: Int,
     _ function: String
-) throws -> String {
+) throws -> LuaString {
     guard arguments.indices.contains(index), case let .string(value) = arguments[index] else {
         throw LuaError.runtime(
             "bad argument #\(index + 1) to '\(function)' (string expected)"
         )
     }
-    return value.utf8String
+    return value
+}
+
+private func requiredPanelColor(
+    _ arguments: [LuaValue],
+    state: LuaState,
+    function: String
+) throws -> GMLuaPanelColorSnapshot {
+    if arguments.indices.contains(1), case let .table(table) = arguments[1] {
+        func component(_ name: String) throws -> Double {
+            let value = try state.rawTableValue(for: .string(LuaString(name)), in: table)
+            guard case let .number(number) = value, number.isFinite else {
+                throw LuaError.runtime(
+                    "bad argument #1 to '\(function)' (Color table with finite \(name) expected)"
+                )
+            }
+            return number
+        }
+        return try GMLuaPanelColorSnapshot(
+            red: component("r"),
+            green: component("g"),
+            blue: component("b"),
+            alpha: component("a")
+        )
+    }
+
+    return GMLuaPanelColorSnapshot(
+        red: try requiredNumber(arguments, 1, function),
+        green: try requiredNumber(arguments, 2, function),
+        blue: try requiredNumber(arguments, 3, function),
+        alpha: try requiredNumber(arguments, 4, function)
+    )
+}
+
+private func makeColorValue(
+    _ color: GMLuaPanelColorSnapshot,
+    state: LuaState
+) throws -> LuaValue {
+    let arguments: [LuaValue] = [
+        .number(color.red), .number(color.green),
+        .number(color.blue), .number(color.alpha)
+    ]
+    let constructor = state.getGlobal("Color")
+    if case .luaFunction = constructor {
+        if let value = try state.call(constructor, arguments: arguments).first, !isNil(value) {
+            return value
+        }
+    } else if case .nativeFunction = constructor,
+              let value = try state.call(constructor, arguments: arguments).first,
+              !isNil(value) {
+        return value
+    }
+
+    let table = LuaTable()
+    try state.setRawTableValue(.number(color.red), for: .string("r"), in: table)
+    try state.setRawTableValue(.number(color.green), for: .string("g"), in: table)
+    try state.setRawTableValue(.number(color.blue), for: .string("b"), in: table)
+    try state.setRawTableValue(.number(color.alpha), for: .string("a"), in: table)
+    return .table(table)
+}
+
+private func requiredString(
+    _ arguments: [LuaValue],
+    _ index: Int,
+    _ function: String
+) throws -> String {
+    try requiredLuaString(arguments, index, function).utf8String
 }
 
 private func optionalString(
@@ -815,6 +1198,16 @@ private func requiredBoolean(
         throw LuaError.runtime("bad argument #\(index) to '\(function)' (boolean expected)")
     }
     return value
+}
+
+private func optionalBoolean(
+    _ arguments: [LuaValue],
+    _ index: Int,
+    _ fallback: Bool,
+    _ function: String
+) throws -> Bool {
+    guard arguments.indices.contains(index), !isNil(arguments[index]) else { return fallback }
+    return try requiredBoolean(arguments, index, function)
 }
 
 private func set(

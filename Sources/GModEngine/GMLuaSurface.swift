@@ -494,12 +494,16 @@ public enum GMLuaSurface {
             return defaultValue
         case let .number(value):
             let truncated = value.rounded(.towardZero)
-            guard truncated.isFinite,
-                  truncated >= Double(Int.min),
-                  truncated <= Double(Int.max) else {
+            guard truncated.isFinite else {
                 throw LuaError.runtime("FontData.\(name) must be a finite integer")
             }
-            return min(max(Int(truncated), range.lowerBound), range.upperBound)
+            // Clamp in Double space before converting so very large finite
+            // Lua numbers cannot overflow Swift's fixed-width Int.
+            let clamped = min(
+                max(truncated, Double(range.lowerBound)),
+                Double(range.upperBound)
+            )
+            return Int(clamped)
         default:
             throw LuaError.runtime("FontData.\(name) must be a number")
         }

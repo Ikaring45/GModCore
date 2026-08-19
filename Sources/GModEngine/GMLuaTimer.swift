@@ -503,7 +503,9 @@ public enum GMLuaTimer {
         function: String
     ) throws -> Int {
         let value = try number(arguments, index: index, function: function).rounded(.towardZero)
-        guard value >= Double(Int.min), value <= Double(Int.max) else {
+        let lowerBoundInclusive = Double(Int.min)
+        let upperBoundExclusive = -lowerBoundInclusive
+        guard value >= lowerBoundInclusive, value < upperBoundExclusive else {
             throw LuaError.runtime("bad argument #\(index + 1) to '\(function)' (integer out of range)")
         }
         return Int(value)

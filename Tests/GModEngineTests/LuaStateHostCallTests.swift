@@ -2,6 +2,15 @@ import XCTest
 import GModLua
 
 final class LuaStateHostCallTests: XCTestCase {
+    func testNumberPrintableDoesNotTrapAtInt64UpperBoundary() {
+        let boundary = LuaValue.number(9_223_372_036_854_775_808.0).printable
+        XCTAssertFalse(boundary.isEmpty)
+        XCTAssertEqual(
+            LuaValue.number(-9_223_372_036_854_775_808.0).printable,
+            "-9223372036854775808"
+        )
+    }
+
     func testHostCallPreservesMultipleResultsAndCallableMetamethods() throws {
         let state = LuaState(output: { _ in })
         let values = try state.executeReturningValues(

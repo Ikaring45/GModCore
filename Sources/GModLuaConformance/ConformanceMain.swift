@@ -848,13 +848,40 @@ enum GModLuaConformanceMain {
             "[GLUA][HOST] engineGames=headless-conformance-fixture " +
                 "mountableGames=0 source=explicit-empty-snapshot"
         )
+        // Client language is normally an engine-owned ConVar established
+        // before Lua begins. The headless runner supplies one explicit value;
+        // ordinary runtimes still leave unknown engine ConVars absent.
+        let engineConVarCatalog = try GMLuaEngineConVarCatalog(
+            descriptors: realm == .server ? [] : [
+                GMLuaEngineConVarDescriptor(
+                    name: "gmod_language",
+                    defaultValue: "en"
+                )
+            ]
+        )
+        logger(
+            "[GLUA][HOST] engineConVars=headless-conformance-fixture " +
+                (realm == .server
+                    ? "entries=0"
+                    : "entries=1 names=gmod_language value=en")
+        )
+        // The headless process has no keyboard, mouse, or touch adapter. An
+        // explicitly empty configuration lets Lua take its own fallback paths
+        // without inventing desktop key bindings or pressed input.
+        let inputConfiguration = GMLuaInputConfiguration()
+        logger(
+            "[GLUA][HOST] input=headless-conformance-fixture " +
+                "bindings=0 buttonNames=0 pressed=0 cursor=0,0"
+        )
         let runtime = GMLuaRuntime(
             realm: realm,
             logger: logger,
             virtualFileSystem: mounted,
             bootstrapMode: bootstrapMode,
             gameEnvironmentConfiguration: gameEnvironmentConfiguration,
-            engineConfiguration: engineConfiguration
+            engineConfiguration: engineConfiguration,
+            engineConVarCatalog: engineConVarCatalog,
+            inputConfiguration: inputConfiguration
         )
         // The desktop conformance process has no Source console. Connect one
         // deliberately narrow engine fixture so TTT's mandatory friendly-fire

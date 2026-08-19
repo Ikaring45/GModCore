@@ -1,20 +1,173 @@
 import Foundation
 import GModLua
 
+/// Immutable host description of a ConVar that exists before Lua starts.
+///
+/// Engine-owned entries deliberately stay opt-in: the embedding host supplies
+/// the exact catalog for its process, and unknown names remain unknown to Lua.
+public struct GMLuaEngineConVarDescriptor: Sendable, Equatable {
+    public let name: String
+    public let defaultValue: String
+    public let initialValue: String
+    public let flags: Int64
+    public let helpText: String
+    public let minimum: Double?
+    public let maximum: Double?
+
+    public init(
+        name: String,
+        defaultValue: String,
+        initialValue: String? = nil,
+        flags: Int64 = 0,
+        helpText: String = "",
+        minimum: Double? = nil,
+        maximum: Double? = nil
+    ) {
+        self.name = name
+        self.defaultValue = defaultValue
+        self.initialValue = initialValue ?? defaultValue
+        self.flags = flags
+        self.helpText = helpText
+        self.minimum = minimum
+        self.maximum = maximum
+    }
+}
+
+public enum GMLuaEngineConVarCatalogError: Error, Equatable, Sendable {
+    case emptyName
+    case invalidBounds(name: String)
+}
+
+private final class GMLuaConVarCurrentValue: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: String
+
+    init(_ value: String) {
+        storage = value
+    }
+
+    var value: String {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage
+        }
+        set {
+            lock.lock()
+            storage = newValue
+            lock.unlock()
+        }
+    }
+}
+
+private final class GMLuaEngineConVarEntry: @unchecked Sendable {
+    let descriptor: GMLuaEngineConVarDescriptor
+    let currentValue: GMLuaConVarCurrentValue
+
+    init(descriptor: GMLuaEngineConVarDescriptor) {
+        self.descriptor = descriptor
+        currentValue = GMLuaConVarCurrentValue(
+            boundedConVarString(
+                descriptor.initialValue,
+                minimum: descriptor.minimum,
+                maximum: descriptor.maximum
+            )
+        )
+    }
+}
+
+/// Host-owned catalog installed into a Lua state alongside Lua-created ConVars.
+///
+/// A catalog may be shared by multiple states. Host updates are immediately
+/// visible through every installed ConVar object backed by that catalog. It is
+/// intentionally only an in-process value source; persistence and replication
+/// are separate engine services.
+public final class GMLuaEngineConVarCatalog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entries: [String: GMLuaEngineConVarEntry] = [:]
+
+    public init() {}
+
+    public convenience init(
+        descriptors: [GMLuaEngineConVarDescriptor]
+    ) throws {
+        self.init()
+        for descriptor in descriptors {
+            _ = try define(descriptor)
+        }
+    }
+
+    /// Defines one engine-owned ConVar. Case-insensitive duplicates preserve
+    /// the first definition and return false.
+    @discardableResult
+    public func define(_ descriptor: GMLuaEngineConVarDescriptor) throws -> Bool {
+        let key = Self.normalizedName(descriptor.name)
+        guard !key.isEmpty else {
+            throw GMLuaEngineConVarCatalogError.emptyName
+        }
+        if let minimum = descriptor.minimum,
+           let maximum = descriptor.maximum,
+           minimum > maximum {
+            throw GMLuaEngineConVarCatalogError.invalidBounds(name: descriptor.name)
+        }
+
+        lock.lock()
+        defer { lock.unlock() }
+        guard entries[key] == nil else { return false }
+        entries[key] = GMLuaEngineConVarEntry(descriptor: descriptor)
+        return true
+    }
+
+    public func contains(_ name: String) -> Bool {
+        entry(for: name) != nil
+    }
+
+    public func currentValue(for name: String) -> String? {
+        entry(for: name)?.currentValue.value
+    }
+
+    /// Updates an existing engine-owned value. Unknown names are not created.
+    @discardableResult
+    public func setCurrentValue(_ value: String, for name: String) -> Bool {
+        guard let entry = entry(for: name) else { return false }
+        entry.currentValue.value = boundedConVarString(
+            value,
+            minimum: entry.descriptor.minimum,
+            maximum: entry.descriptor.maximum
+        )
+        return true
+    }
+
+    private func entry(for name: String) -> GMLuaEngineConVarEntry? {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries[Self.normalizedName(name)]
+    }
+
+    fileprivate var snapshot: [GMLuaEngineConVarEntry] {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries.keys.sorted().compactMap { entries[$0] }
+    }
+
+    private static func normalizedName(_ value: String) -> String {
+        value.lowercased()
+    }
+}
+
 /// Mutable payload for a GLua `ConVar` userdata.
 ///
-/// This models Lua-created variables only. Persistence, replication, command
-/// conflicts and engine-owned variables belong to the future engine console
-/// service rather than being pretended by this in-memory substrate.
+/// Persistence and replication belong to engine services rather than being
+/// pretended by this in-memory substrate.
 private final class GMLuaConVarValue: @unchecked Sendable {
-    private let lock = NSLock()
     let name: String
     let defaultValue: String
-    private var valueStorage: String
+    private let currentValue: GMLuaConVarCurrentValue
     let flags: Int64
     let helpText: String
     let minimum: Double?
     let maximum: Double?
+    let isEngineOwned: Bool
 
     init(
         name: String,
@@ -23,36 +176,31 @@ private final class GMLuaConVarValue: @unchecked Sendable {
         flags: Int64,
         helpText: String,
         minimum: Double?,
-        maximum: Double?
+        maximum: Double?,
+        isEngineOwned: Bool = false,
+        sharedCurrentValue: GMLuaConVarCurrentValue? = nil
     ) {
         self.name = name
         self.defaultValue = defaultValue
-        self.valueStorage = value
+        currentValue = sharedCurrentValue ?? GMLuaConVarCurrentValue(value)
         self.flags = flags
         self.helpText = helpText
         self.minimum = minimum
         self.maximum = maximum
+        self.isEngineOwned = isEngineOwned
     }
 
     var value: String {
-        get {
-            lock.lock()
-            defer { lock.unlock() }
-            return valueStorage
-        }
-        set {
-            lock.lock()
-            valueStorage = newValue
-            lock.unlock()
-        }
+        get { currentValue.value }
+        set { currentValue.value = newValue }
     }
 }
 
 /// State-local registry shared by the ConVar bindings and console dispatcher.
 ///
-/// The public read methods let an embedding host inspect Lua-owned variables
+/// The public read methods let an embedding host inspect installed variables
 /// without exposing their userdata payload. Mutations from Lua console input
-/// stay internal so engine-owned variables are never invented in this store.
+/// stay internal so engine-owned values remain under their catalog owner.
 public final class GMLuaConVarRegistry: @unchecked Sendable {
     private let lock = NSLock()
     private var values: [String: LuaValue] = [:]
@@ -82,7 +230,8 @@ public final class GMLuaConVarRegistry: @unchecked Sendable {
     func setConsoleValue(_ value: String, for name: String) -> Bool {
         guard let luaValue = luaValue(for: name),
               let conVar = GMLuaTypeSystem.typedObject(from: luaValue)?.payload
-                as? GMLuaConVarValue else {
+                as? GMLuaConVarValue,
+              !conVar.isEngineOwned else {
             return false
         }
         conVar.value = GMLuaConVar.boundedString(value, for: conVar)
@@ -145,7 +294,8 @@ public enum GMLuaConVar {
     public static func install(
         into state: LuaState,
         typeSystem: GMLuaTypeSystem,
-        realm: GMLuaRealm = .server
+        realm: GMLuaRealm = .server,
+        engineCatalog: GMLuaEngineConVarCatalog = GMLuaEngineConVarCatalog()
     ) throws -> GMLuaConVarRegistry {
         guard let metatable = typeSystem.metatable(named: "ConVar") else {
             throw LuaError.runtime("GLua ConVar metatable was not installed")
@@ -158,6 +308,23 @@ public enum GMLuaConVar {
 
         for (name, value) in flagConstants {
             state.setGlobal(name, value: .number(Double(value)))
+        }
+
+        for entry in engineCatalog.snapshot {
+            let descriptor = entry.descriptor
+            let payload = GMLuaConVarValue(
+                name: descriptor.name,
+                defaultValue: descriptor.defaultValue,
+                value: entry.currentValue.value,
+                flags: descriptor.flags,
+                helpText: descriptor.helpText,
+                minimum: descriptor.minimum,
+                maximum: descriptor.maximum,
+                isEngineOwned: true,
+                sharedCurrentValue: entry.currentValue
+            )
+            let value = try typeSystem.makeObject(metaName: "ConVar", payload: payload)
+            _ = store.insertIfAbsent(value, for: descriptor.name)
         }
 
         func installMethod(
@@ -516,9 +683,14 @@ public enum GMLuaConVar {
         function: String,
         index: Int
     ) throws -> Int64 {
+        // `Double(Int64.max)` rounds up to exactly 2^63. An inclusive upper
+        // comparison therefore admits 2^63 and makes Swift's Int64
+        // conversion trap the process. Use the exact, exclusive 2^63 bound.
+        let int64UpperBoundExclusive = 9_223_372_036_854_775_808.0
+        let int64LowerBoundInclusive = -9_223_372_036_854_775_808.0
         guard value.isFinite,
-              value >= Double(Int64.min),
-              value <= Double(Int64.max) else {
+              value >= int64LowerBoundInclusive,
+              value < int64UpperBoundExclusive else {
             throw LuaError.runtime(
                 "bad argument #\(index + 1) to '\(function)' (finite bitflag expected)"
             )
@@ -609,15 +781,29 @@ public enum GMLuaConVar {
         _ value: String,
         for conVar: GMLuaConVarValue
     ) -> String {
-        guard let parsed = Double(value.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-            return value
-        }
-        let result = bounded(parsed, for: conVar)
-        return result == parsed ? value : LuaValue.number(result).printable
+        boundedConVarString(
+            value,
+            minimum: conVar.minimum,
+            maximum: conVar.maximum
+        )
     }
 
     private static func isNil(_ value: LuaValue) -> Bool {
         if case .nilValue = value { return true }
         return false
     }
+}
+
+private func boundedConVarString(
+    _ value: String,
+    minimum: Double?,
+    maximum: Double?
+) -> String {
+    guard let parsed = Double(value.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+        return value
+    }
+    var result = parsed
+    if let minimum { result = max(minimum, result) }
+    if let maximum { result = min(maximum, result) }
+    return result == parsed ? value : LuaValue.number(result).printable
 }

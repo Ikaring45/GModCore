@@ -113,13 +113,23 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
             try consoleString(values, index: $0, function: "RunConsoleCommand")
         }
 
-        // Lua-owned ConVars are the only variables this runtime can mutate
-        // without consulting a real engine host. Source's console setter uses
-        // the first argument and a no-argument invocation is only a query.
-        if conVars.contains(command) {
-            if let value = arguments.first {
-                _ = conVars.setConsoleValue(value, for: command)
-            }
+        // Lua-owned ConVars are the only variables this runtime can handle
+        // without consulting a real engine host. Engine-owned catalog entries
+        // deliberately reject `setConsoleValue`; both their setter and query
+        // forms must therefore continue to the host handler below.
+        //
+        // A no-argument Lua-owned invocation is only a query. Reapplying its
+        // already-bounded value is an observable no-op that lets the registry
+        // make the same ownership decision without exposing userdata payloads.
+        let handledLuaConVar: Bool
+        if let value = arguments.first {
+            handledLuaConVar = conVars.setConsoleValue(value, for: command)
+        } else if let currentValue = conVars.stringValue(for: command) {
+            handledLuaConVar = conVars.setConsoleValue(currentValue, for: command)
+        } else {
+            handledLuaConVar = false
+        }
+        if handledLuaConVar {
             return []
         }
 

@@ -18,6 +18,12 @@ final class GMLuaConsoleCommandTests: XCTestCase {
             defer { lock.unlock() }
             return storage.first
         }
+
+        var values: [GMLuaConsoleCommandInvocation] {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage
+        }
     }
 
     func testRunConsoleCommandMutatesOnlyLuaOwnedConVarsAndReturnsNothing() throws {
@@ -102,6 +108,75 @@ final class GMLuaConsoleCommandTests: XCTestCase {
         ) { error in
             XCTAssertTrue(GMLuaRuntime.describe(error).contains("no console host is connected"))
         }
+    }
+
+    func testEngineOwnedConVarSetterAndQueryFallThroughToHost() throws {
+        let catalog = try GMLuaEngineConVarCatalog(descriptors: [
+            GMLuaEngineConVarDescriptor(name: "gmod_language", defaultValue: "en")
+        ])
+        let runtime = GMLuaRuntime(
+            realm: .client,
+            logger: { _ in },
+            bootstrapMode: .strict,
+            engineConVarCatalog: catalog
+        )
+        defer { _ = runtime.close() }
+        let dispatcher = try XCTUnwrap(runtime.consoleCommandDispatcher)
+        let invocations = InvocationRecorder()
+
+        dispatcher.connectHost { invocation in
+            invocations.append(invocation)
+            guard invocation.command.lowercased() == "gmod_language" else {
+                return .unhandled
+            }
+            if let value = invocation.arguments.first {
+                _ = catalog.setCurrentValue(value, for: invocation.command)
+            }
+            return .handled
+        }
+
+        try runtime.execute(
+            """
+            local local_value = CreateConVar("gpad_local_value", "1")
+            RunConsoleCommand("GPAD_LOCAL_VALUE", "2")
+            assert(local_value:GetString() == "2")
+            RunConsoleCommand("gpad_local_value")
+
+            RunConsoleCommand("GMOD_LANGUAGE", "ja")
+            assert(GetConVar("gmod_language"):GetString() == "ja")
+            RunConsoleCommand("gmod_language")
+            """,
+            sourceName: "=(engine ConVar host console dispatch)"
+        )
+
+        XCTAssertThrowsError(
+            try runtime.execute(
+                "RunConsoleCommand('not_catalogued', 'value')",
+                sourceName: "=(unknown console command remains explicit)"
+            )
+        ) { error in
+            XCTAssertTrue(GMLuaRuntime.describe(error).contains(
+                "host did not recognize engine command 'not_catalogued'"
+            ))
+        }
+        XCTAssertEqual(invocations.values, [
+            GMLuaConsoleCommandInvocation(
+                realm: .client,
+                command: "GMOD_LANGUAGE",
+                arguments: ["ja"]
+            ),
+            GMLuaConsoleCommandInvocation(
+                realm: .client,
+                command: "gmod_language",
+                arguments: []
+            ),
+            GMLuaConsoleCommandInvocation(
+                realm: .client,
+                command: "not_catalogued",
+                arguments: ["value"]
+            )
+        ])
+        XCTAssertEqual(catalog.currentValue(for: "gmod_language"), "ja")
     }
 
     func testServerLuaCommandsDispatchThroughConcommandRunWithNullCaller() throws {

@@ -88,18 +88,23 @@ final class GMLuaSurfaceTests: XCTestCase {
             """
             surface.CreateFont("RangeFont", { size = 1, blursize = 999 })
             surface.CreateFont("rangefont", { size = 999, blursize = -4 })
+            surface.CreateFont("HugeFiniteFont", { size = 9223372036854775808 })
             """,
             sourceName: "@GMLuaSurfaceFontRanges.lua"
         )
         let firstDescriptor = try XCTUnwrap(
             firstCommands.fontDescriptor(named: "RANGEFONT")
         )
-        XCTAssertEqual(firstCommands.customFontCount, 1)
+        let hugeDescriptor = try XCTUnwrap(
+            firstCommands.fontDescriptor(named: "HugeFiniteFont")
+        )
+        XCTAssertEqual(firstCommands.customFontCount, 2)
         XCTAssertEqual(firstDescriptor.font, "Arial")
         XCTAssertEqual(firstDescriptor.size, 255)
         XCTAssertEqual(firstDescriptor.weight, 500)
         XCTAssertEqual(firstDescriptor.blurSize, 0)
         XCTAssertTrue(firstDescriptor.antialias)
+        XCTAssertEqual(hugeDescriptor.size, 255)
 
         let secondState = LuaState(output: { _ in })
         let secondCommands = try GMLuaSurface.install(into: secondState)

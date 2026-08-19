@@ -22,6 +22,11 @@ public final class GMLuaRuntime {
     let state: LuaState
     private(set) var typeSystem: GMLuaTypeSystem?
     public private(set) var entityRegistry: GMLuaEntityRegistry?
+    public private(set) var chat: GMLuaChat?
+    public private(set) var input: GMLuaInput?
+    public private(set) var sound: GMLuaSound?
+    public private(set) var conVarRegistry: GMLuaConVarRegistry?
+    public private(set) var engineConVarCatalog: GMLuaEngineConVarCatalog?
     public private(set) var surfaceCommandState: GMLuaSurfaceCommandState?
     public private(set) var resourceRegistry: GMLuaResourceRegistry?
     public private(set) var gamemodeLoader: GMLuaGamemodeLoader?
@@ -33,12 +38,14 @@ public final class GMLuaRuntime {
     public private(set) var gameEnvironment: GMLuaGameEnvironment?
     public private(set) var engineRegistry: GMLuaEngineRegistry?
     public private(set) var consoleCommandDispatcher: GMLuaConsoleCommandDispatcher?
+    public private(set) var networkedGlobals: GMLuaNetworkedGlobals?
+    public private(set) var netTransport: GMLuaNetTransport?
+    public private(set) var netEndpoint: GMLuaNetEndpoint?
     private let logger: (String) -> Void
     private let fileLoader: ((String) throws -> String)?
     private let virtualFileSystem: LuaVirtualFileSystem?
     private var includedFileStorage: [String] = []
     private var clientLuaFileStorage: [String] = []
-    private var networkStringStorage: [String] = []
     private var compatibilityGapStorage: [String] = []
     private var bootstrapInstallationError: Error?
 
@@ -47,7 +54,9 @@ public final class GMLuaRuntime {
     public var consoleCommands: [String] {
         consoleCommandDispatcher?.registeredCommands ?? []
     }
-    public var networkStrings: [String] { networkStringStorage }
+    public var networkStrings: [String] {
+        networkedGlobals?.transport.pooledNetworkStrings ?? []
+    }
     public var compatibilityGaps: [String] { compatibilityGapStorage }
 
     public convenience init(
@@ -58,7 +67,12 @@ public final class GMLuaRuntime {
         bootstrapMode: GMLuaBootstrapMode = .strict,
         initialViewport: GMLuaViewportSize = .logicalDesktopDefault,
         gameEnvironmentConfiguration: GMLuaGameEnvironmentConfiguration? = nil,
-        engineConfiguration: GMLuaEngineConfiguration? = nil
+        engineConfiguration: GMLuaEngineConfiguration? = nil,
+        engineConVarCatalog: GMLuaEngineConVarCatalog? = nil,
+        networkedGlobalTransport: GMLuaNetworkedGlobalTransport? = nil,
+        netTransport: GMLuaNetTransport? = nil,
+        inputConfiguration: GMLuaInputConfiguration = GMLuaInputConfiguration(),
+        cursorWarpSink: GMLuaCursorWarpSink? = nil
     ) {
         self.init(
             realm: realm,
@@ -69,6 +83,11 @@ public final class GMLuaRuntime {
             initialViewport: initialViewport,
             gameEnvironmentConfiguration: gameEnvironmentConfiguration,
             engineConfiguration: engineConfiguration,
+            engineConVarCatalog: engineConVarCatalog,
+            networkedGlobalTransport: networkedGlobalTransport,
+            netTransport: netTransport,
+            inputConfiguration: inputConfiguration,
+            cursorWarpSink: cursorWarpSink,
             typeSystemInstaller: { state in
                 try GMLuaTypeSystem.install(
                     into: state,
@@ -87,6 +106,11 @@ public final class GMLuaRuntime {
         initialViewport: GMLuaViewportSize = .logicalDesktopDefault,
         gameEnvironmentConfiguration: GMLuaGameEnvironmentConfiguration? = nil,
         engineConfiguration: GMLuaEngineConfiguration? = nil,
+        engineConVarCatalog: GMLuaEngineConVarCatalog? = nil,
+        networkedGlobalTransport: GMLuaNetworkedGlobalTransport? = nil,
+        netTransport: GMLuaNetTransport? = nil,
+        inputConfiguration: GMLuaInputConfiguration = GMLuaInputConfiguration(),
+        cursorWarpSink: GMLuaCursorWarpSink? = nil,
         typeSystemInstaller: @escaping TypeSystemInstaller
     ) {
         self.realm = realm
@@ -103,7 +127,12 @@ public final class GMLuaRuntime {
             typeSystemInstaller: typeSystemInstaller,
             initialViewport: initialViewport,
             gameEnvironmentConfiguration: gameEnvironmentConfiguration,
-            engineConfiguration: engineConfiguration
+            engineConfiguration: engineConfiguration,
+            engineConVarCatalog: engineConVarCatalog,
+            networkedGlobalTransport: networkedGlobalTransport,
+            netTransport: netTransport,
+            inputConfiguration: inputConfiguration,
+            cursorWarpSink: cursorWarpSink
         )
         if let virtualFileSystem {
             gamemodeLoader = GMLuaGamemodeLoader(
@@ -157,7 +186,12 @@ public final class GMLuaRuntime {
         typeSystemInstaller: TypeSystemInstaller,
         initialViewport: GMLuaViewportSize,
         gameEnvironmentConfiguration: GMLuaGameEnvironmentConfiguration?,
-        engineConfiguration: GMLuaEngineConfiguration?
+        engineConfiguration: GMLuaEngineConfiguration?,
+        engineConVarCatalog explicitEngineConVarCatalog: GMLuaEngineConVarCatalog?,
+        networkedGlobalTransport: GMLuaNetworkedGlobalTransport?,
+        netTransport explicitNetTransport: GMLuaNetTransport?,
+        inputConfiguration: GMLuaInputConfiguration,
+        cursorWarpSink: GMLuaCursorWarpSink?
     ) {
         state.setGlobal("SERVER", value: .boolean(realm == .server))
         // Garry's Mod menu Lua has the client-side API surface as well as its
@@ -166,6 +200,7 @@ public final class GMLuaRuntime {
         state.setGlobal("CLIENT", value: .boolean(realm != .server))
         state.setGlobal("MENU", value: .boolean(realm == .menu))
         state.setGlobal("MENU_DLL", value: .boolean(realm == .menu))
+        state.setGlobal("__gmod_network_realm", value: .boolean(realm != .menu))
         state.setGlobal("__gmod_discovery", value: .boolean(bootstrapMode == .discovery))
         GMLuaAnimationEnums.install(into: state)
         GMLuaNPCEnums.install(into: state, realm: realm)
@@ -180,19 +215,62 @@ public final class GMLuaRuntime {
                 into: state,
                 typeSystem: installedTypeSystem
             )
-            entityRegistry = try GMLuaEntityRegistry.install(
+            let installedEntityRegistry = try GMLuaEntityRegistry.install(
                 into: state,
                 typeSystem: installedTypeSystem
             )
-            let conVarRegistry = try GMLuaConVar.install(
+            entityRegistry = installedEntityRegistry
+            chat = try GMLuaChat.install(
+                into: state,
+                realm: realm,
+                entityRegistry: installedEntityRegistry
+            )
+            input = try GMLuaInput.install(
+                into: state,
+                realm: realm,
+                configuration: inputConfiguration,
+                cursorWarpSink: cursorWarpSink
+            )
+            sound = try GMLuaSound.install(into: state, realm: realm)
+            if realm != .menu {
+                if let explicitNetTransport, let networkedGlobalTransport,
+                   explicitNetTransport.networkedGlobalTransport !== networkedGlobalTransport {
+                    throw LuaError.runtime(
+                        "netTransport and networkedGlobalTransport must share the same NetworkString pool"
+                    )
+                }
+                let installedNetworkedGlobals = GMLuaNetworkedGlobals.install(
+                    into: state,
+                    realm: realm,
+                    typeSystem: installedTypeSystem,
+                    entityRegistry: installedEntityRegistry,
+                    transport: explicitNetTransport?.networkedGlobalTransport
+                        ?? networkedGlobalTransport
+                )
+                networkedGlobals = installedNetworkedGlobals
+                let installedNetTransport = explicitNetTransport ?? GMLuaNetTransport(
+                    networkedGlobalTransport: installedNetworkedGlobals.transport
+                )
+                netTransport = installedNetTransport
+                netEndpoint = try installedNetTransport.installEndpoint(
+                    into: state,
+                    realm: realm
+                )
+            }
+            let installedEngineConVarCatalog = explicitEngineConVarCatalog
+                ?? GMLuaEngineConVarCatalog()
+            engineConVarCatalog = installedEngineConVarCatalog
+            let installedConVarRegistry = try GMLuaConVar.install(
                 into: state,
                 typeSystem: installedTypeSystem,
-                realm: realm
+                realm: realm,
+                engineCatalog: installedEngineConVarCatalog
             )
+            conVarRegistry = installedConVarRegistry
             let installedConsoleDispatcher = GMLuaConsoleCommandDispatcher(
                 state: state,
                 realm: realm,
-                conVars: conVarRegistry
+                conVars: installedConVarRegistry
             )
             installedConsoleDispatcher.installBindings()
             consoleCommandDispatcher = installedConsoleDispatcher
@@ -325,31 +403,37 @@ public final class GMLuaRuntime {
             self.logger("[\(self.realm.rawValue)][Lua][ERROR] " + arguments.map(\.printable).joined())
             return []
         }
-        state.register("__gmod_AddNetworkString") { [unowned self] arguments in
-            guard let first = arguments.first, case let .string(name) = first else {
-                throw LuaError.runtime("bad argument #1 to 'util.AddNetworkString' (string expected)")
+        if realm == .server {
+            state.register("__gmod_AddNetworkString") { [unowned self] arguments in
+                guard let first = arguments.first, case let .string(name) = first else {
+                    throw LuaError.runtime("bad argument #1 to 'util.AddNetworkString' (string expected)")
+                }
+                guard let globals = self.networkedGlobals else {
+                    throw LuaError.runtime("networked globals transport is unavailable")
+                }
+                let identifier = try globals.addNetworkString(name)
+                return [.number(Double(identifier))]
             }
-            let value = name.utf8String
-            if let existing = self.networkStringStorage.firstIndex(of: value) {
-                return [.number(Double(existing + 1))]
-            }
-            self.networkStringStorage.append(value)
-            return [.number(Double(self.networkStringStorage.count))]
         }
         state.register("__gmod_NetworkStringToID") { [unowned self] arguments in
             guard let first = arguments.first, case let .string(name) = first,
-                  let index = self.networkStringStorage.firstIndex(of: name.utf8String) else {
+                  let globals = self.networkedGlobals else {
                 return [.number(0)]
             }
-            return [.number(Double(index + 1))]
+            return [.number(Double(globals.networkStringID(for: name)))]
         }
         state.register("__gmod_NetworkIDToString") { [unowned self] arguments in
-            guard let first = arguments.first, case let .number(rawIndex) = first else {
+            guard let first = arguments.first, case let .number(rawIndex) = first,
+                  rawIndex.isFinite,
+                  rawIndex.rounded(.towardZero) >= 1,
+                  rawIndex.rounded(.towardZero) <= Double(GMLuaNetworkedGlobalTransport.maximumSlots) else {
                 return [.nilValue]
             }
-            let index = Int(rawIndex) - 1
-            guard self.networkStringStorage.indices.contains(index) else { return [.nilValue] }
-            return [.string(LuaString(self.networkStringStorage[index]))]
+            let identifier = Int(rawIndex.rounded(.towardZero))
+            guard let value = self.networkedGlobals?.networkString(for: identifier) else {
+                return [.nilValue]
+            }
+            return [.string(value)]
         }
         state.register("__gmod_KeyValuesToTable") { [unowned self] arguments in
             guard let first = arguments.first, case let .string(source) = first else {
@@ -424,12 +508,35 @@ public final class GMLuaRuntime {
             function gmod.GetGamemode() return GAMEMODE end
 
             util = util or {}
-            util.AddNetworkString = __gmod_AddNetworkString
-            util.NetworkStringToID = __gmod_NetworkStringToID
-            util.NetworkIDToString = __gmod_NetworkIDToString
+            if __gmod_network_realm then
+                if SERVER then util.AddNetworkString = __gmod_AddNetworkString end
+                util.NetworkStringToID = __gmod_NetworkStringToID
+                util.NetworkIDToString = __gmod_NetworkIDToString
+            end
             util.KeyValuesToTable = __gmod_KeyValuesToTable
             util.KeyValuesToTablePreserveOrder = __gmod_KeyValuesToTablePreserveOrder
-            net = net or {}
+            if __gmod_network_realm then
+                net = net or {}
+                net.Start = __gmod_net_Start
+                net.Abort = __gmod_net_Abort
+                net.WriteBit = __gmod_net_WriteBit
+                net.ReadBit = __gmod_net_ReadBit
+                net.WriteUInt = __gmod_net_WriteUInt
+                net.ReadUInt = __gmod_net_ReadUInt
+                net.WriteInt = __gmod_net_WriteInt
+                net.ReadInt = __gmod_net_ReadInt
+                net.WriteFloat = __gmod_net_WriteFloat
+                net.ReadFloat = __gmod_net_ReadFloat
+                net.WriteString = __gmod_net_WriteString
+                net.ReadString = __gmod_net_ReadString
+                net.WriteData = __gmod_net_WriteData
+                net.ReadData = __gmod_net_ReadData
+                net.ReadHeader = __gmod_net_ReadHeader
+                net.Broadcast = __gmod_net_Broadcast
+                net.SendToServer = __gmod_net_SendToServer
+                net.BytesWritten = __gmod_net_BytesWritten
+                net.BytesLeft = __gmod_net_BytesLeft
+            end
             game = game or {}
             file = file or {}
             system = system or {}

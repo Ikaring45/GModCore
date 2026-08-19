@@ -4,6 +4,121 @@ import GModEngine
 import GModLua
 
 final class GMLuaVGUIRegistryTests: XCTestCase {
+    func testLogicalEngineLabelStateRunsRealSchemeAndPreservesLuaStringBytes() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: typeSystem)
+        let fixtureURL = try XCTUnwrap(
+            Bundle.module.url(
+                forResource: "GLuaLabelEngineControlRegression",
+                withExtension: "lua",
+                subdirectory: "Fixtures"
+            ) ?? Bundle.module.url(
+                forResource: "GLuaLabelEngineControlRegression",
+                withExtension: "lua"
+            )
+        )
+
+        try state.execute(
+            String(contentsOf: fixtureURL, encoding: .utf8),
+            sourceName: "@GLuaLabelEngineControlRegression.lua"
+        )
+
+        guard case .boolean(true) = state.getGlobal(
+            "GLUA_LABEL_ENGINE_CONTROL_REGRESSION_READY"
+        ) else {
+            return XCTFail("logical engine Label fixture did not reach its ready sentinel")
+        }
+        XCTAssertEqual(registry.pendingLayoutCount, 1)
+        XCTAssertEqual(try registry.performPendingLayouts(), 1)
+
+        let snapshots = registry.textPanelStateSnapshots
+        XCTAssertEqual(snapshots.count, 3)
+        let label = try XCTUnwrap(
+            snapshots.first(where: { $0.requestedClassName == "FixtureLabel" })
+        )
+        XCTAssertEqual(label.engineClassName, "Label")
+        XCTAssertEqual(label.fontName, LuaString("DermaDefault"))
+        XCTAssertEqual(label.text.count, 1_023)
+        XCTAssertEqual(label.foregroundColor, GMLuaPanelColorSnapshot(
+            red: 12,
+            green: 34,
+            blue: 56,
+            alpha: 78
+        ))
+        XCTAssertEqual(label.contentAlignment, 9)
+
+        let textEntry = try XCTUnwrap(
+            snapshots.first(where: { $0.engineClassName == "TextEntry" })
+        )
+        XCTAssertEqual(textEntry.text.count, 8_201)
+        XCTAssertEqual(textEntry.text.bytes.last, 255)
+        XCTAssertEqual(textEntry.fontName, LuaString("EntryFont"))
+
+        XCTAssertFalse(registry.hasPlatformTextBacking)
+        try state.execute(
+            "assert(FIXTURE_LABEL.LayoutCalls == 1 and FIXTURE_LABEL.SchemeCalls == 2)",
+            sourceName: "@GLuaLabelEngineControlLayoutCheckpoint.lua"
+        )
+    }
+
+    func testLogicalLayoutInvalidationDefersOrDispatchesPerformLayoutExactly() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: typeSystem)
+        let fixtureURL = try XCTUnwrap(
+            Bundle.module.url(
+                forResource: "GLuaPanelLayoutInvalidationRegression",
+                withExtension: "lua",
+                subdirectory: "Fixtures"
+            ) ?? Bundle.module.url(
+                forResource: "GLuaPanelLayoutInvalidationRegression",
+                withExtension: "lua"
+            )
+        )
+
+        try state.execute(
+            String(contentsOf: fixtureURL, encoding: .utf8),
+            sourceName: "@GLuaPanelLayoutInvalidationRegression.lua"
+        )
+
+        guard case .boolean(true) = state.getGlobal(
+            "GLUA_PANEL_LAYOUT_INVALIDATION_FIXTURE_READY"
+        ) else {
+            return XCTFail("logical layout invalidation fixture did not reach its ready sentinel")
+        }
+        XCTAssertEqual(registry.pendingLayoutCount, 2)
+        XCTAssertEqual(registry.completedLayoutPassCount, 2)
+
+        XCTAssertEqual(try registry.performPendingLayouts(maxLayouts: 1), 1)
+        XCTAssertEqual(registry.pendingLayoutCount, 1)
+        try state.execute(
+            """
+            assert(DEFERRED_LAYOUT_PANEL.LayoutCalls == 1)
+            assert(DEFERRED_LAYOUT_PANEL.LastLayoutWidth == 120)
+            assert(DEFERRED_LAYOUT_PANEL.LastLayoutHeight == 40)
+            assert(REQUEUED_LAYOUT_PANEL.LayoutCalls == 1)
+            """,
+            sourceName: "@GLuaPanelLayoutInvalidationDeferredCheckpoint.lua"
+        )
+
+        XCTAssertEqual(try registry.performPendingLayouts(), 1)
+        XCTAssertEqual(registry.pendingLayoutCount, 0)
+        XCTAssertEqual(registry.completedLayoutPassCount, 4)
+        try state.execute(
+            "assert(REQUEUED_LAYOUT_PANEL.LayoutCalls == 2)",
+            sourceName: "@GLuaPanelLayoutInvalidationRequeueCheckpoint.lua"
+        )
+        XCTAssertEqual(try registry.performPendingLayouts(), 0)
+        XCTAssertFalse(registry.hasPlatformViewBacking)
+    }
+
     func testLogicalEnginePanelStateSupportsScriptedDPanelBase() throws {
         let state = LuaState(output: { _ in })
         let typeSystem = try GMLuaTypeSystem.install(

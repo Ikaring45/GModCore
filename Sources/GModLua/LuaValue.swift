@@ -108,9 +108,11 @@ extension LuaValue {
         case let .boolean(value):
             return value ? "true" : "false"
         case let .number(value):
+            let int64UpperBoundExclusive = 9_223_372_036_854_775_808.0
+            let int64LowerBoundInclusive = -9_223_372_036_854_775_808.0
             if value.isFinite,
-               value >= Double(Int64.min),
-               value <= Double(Int64.max),
+               value >= int64LowerBoundInclusive,
+               value < int64UpperBoundExclusive,
                value.rounded(.towardZero) == value {
                 return String(Int64(value))
             }

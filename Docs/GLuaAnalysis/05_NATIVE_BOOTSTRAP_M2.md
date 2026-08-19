@@ -158,6 +158,13 @@ The following results are reproduced from the current native implementation:
 | SERVER TTT load/registration | PASS | Base chain, 14 language files, 59 includes, 60 client files, 34 commands, 0 gaps |
 | SERVER TTT modeled startup | FAIL at known boundary | reaches `Initialize`; `gamemodes/terrortown/gamemode/init.lua:199` calls the unimplemented network-global `SetGlobalFloat` API |
 
+M3 realm audit correction: the two MENU rows above were diagnostics that ran
+the gameplay `init.lua`/Sandbox paths with a menu state. They are preserved as
+the historical M2 measurements but are not valid MENU startup evidence. The
+realm-correct gate is `lua/includes/init_menu.lua`; M3 completes it
+with 23 includes, zero gaps, and does not expose gameplay `net`, Entity, or
+Player APIs.
+
 Final 0.1.43 packaging verification also passes 89/89 Swift tests, the official
 Lua 5.1 suite with GC enabled (exit 0, 38 chunk loads, 85.70 seconds), the
 259/259 installed-GMod parse gate, the Engine strict-concurrency build, and

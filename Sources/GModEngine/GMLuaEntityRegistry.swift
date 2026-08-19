@@ -76,6 +76,23 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
         return value
     }
 
+    /// Reduces a state-local Entity userdata to the engine identity that is
+    /// valid on the network transport. The receiving realm resolves that
+    /// index through its own canonical registry.
+    func networkIndex(from value: LuaValue, function: String) throws -> Int {
+        guard let object = GMLuaTypeSystem.typedObject(from: value),
+              ["Entity", "Player", "Weapon", "Vehicle"].contains(object.metaName) else {
+            throw LuaError.runtime(
+                "bad argument #2 to '\(function)' (Entity expected, got \(value.typeName))"
+            )
+        }
+        guard object.isValid else { return -1 }
+        guard let payload = object.payload as? GMLuaEntityValue else {
+            throw LuaError.runtime("\(function) received an unregistered engine object")
+        }
+        return payload.index
+    }
+
     public var registeredCount: Int {
         lock.lock()
         defer { lock.unlock() }
@@ -225,9 +242,11 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
                 "bad argument #1 to '\(function)' (number expected, got \(first.typeName))"
             )
         }
+        let lowerBoundInclusive = Double(Int.min)
+        let upperBoundExclusive = -lowerBoundInclusive
         guard number.isFinite,
-              number >= Double(Int.min),
-              number <= Double(Int.max) else {
+              number >= lowerBoundInclusive,
+              number < upperBoundExclusive else {
             throw LuaError.runtime("bad argument #1 to '\(function)' (finite entity index expected)")
         }
         return Int(number.rounded(.towardZero))

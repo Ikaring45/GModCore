@@ -111,6 +111,7 @@ final class GMLuaTimerTests: XCTestCase {
 
             assert(not pcall(timer.Create, {}, 1, 1, function() end))
             assert(not pcall(timer.Create, "x", 0 / 0, 1, function() end))
+            assert(not pcall(timer.Create, "x", 1, 9223372036854775808, function() end))
             assert(not pcall(timer.Create, "x", 1, 1, {}))
             """,
             sourceName: "@TimerAdjust.lua"

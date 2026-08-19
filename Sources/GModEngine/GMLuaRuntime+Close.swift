@@ -5,7 +5,10 @@ public extension GMLuaRuntime {
     /// realm so reachable userdata receive Lua 5.1 close-time finalization.
     @discardableResult
     func close() -> LuaCloseReport {
-        state.close()
+        if let netEndpoint, let netTransport {
+            netTransport.detachEndpoint(netEndpoint)
+        }
+        return state.close()
     }
 
     var isClosed: Bool { state.isClosed }

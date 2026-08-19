@@ -30,27 +30,48 @@ No skipped or unfinished feature is reported as a pass. See
 [`LUA51_CONFORMANCE_STATUS.md`](LUA51_CONFORMANCE_STATUS.md) for the exact
 verification boundary.
 
-The GLua M2 milestone also replaces the early bootstrap placeholders with
-native Vector/Angle, ConVar, Entity identity, timer, file/preset, logical
-resource/surface, VGUI, Derma, game/engine host-state, and console-command
-layers. Strict mode completes the real `lua/includes/init.lua` in SERVER,
-CLIENT, and MENU. The modeled SERVER and CLIENT Sandbox startup stages now run
-Base, realm-correct loose autorun, Sandbox, and the three lifecycle hook
-dispatches in one Lua state; CLIENT also runs the engine-invoked VGUI bootstrap
-before Base. Addon mounting, CLIENT player connection, engine entity readiness,
-renderer/physics/network transport, and complete Entity/Panel behavior remain
-explicitly outside that result.
+The native GLua bootstrap now includes M3's host-owned realm-networking
+substrate. A shared byte-preserving NetworkString pool backs the legacy
+`SetGlobal*`/`GetGlobal*` family and net message names. A deterministic
+one-SERVER/many-CLIENT session implements queued SERVER broadcast, explicit
+host pumping, bit/number/Float32/string/data codecs, and read cursors. CLIENT
+gains logical `chat.AddText`; CLIENT/MENU gain host-fed input bindings/state;
+every realm can receive explicitly host-populated engine ConVars and use a
+logical named-sound registry; and CLIENT/MENU panels gain native layout
+invalidation plus logical Label text/font/foreground/alignment controls. Net
+and network-global APIs remain SERVER/CLIENT-only. These are native
+compatibility contracts, not simulated desktop networking, rendered text, or
+audio playback.
 
-The 0.1.43 packaging snapshot passes 89/89 Swift tests, the GC-enabled official
-Lua 5.1 sequence (exit 0, 38 chunk loads, two classified skips, 85.70 seconds),
-and the 259/259 installed-GMod parser gate. These are separate results: parsing
-a corpus file does not claim that every engine API it calls is implemented.
+Strict mode completes the real `lua/includes/init.lua` in SERVER/CLIENT and
+the realm-correct `lua/includes/init_menu.lua` in MENU (23 includes, zero
+gaps). M3 advances strict SERVER TTT modeled startup through Base,
+realm-correct loose autorun, TTT, and all three currently modeled lifecycle
+hook dispatches, exiting 0 through `InitPostEntity`. Strict CLIENT Sandbox
+modeled startup also exits 0. Strict CLIENT TTT reaches `InitPostEntity` after
+177 includes, with `cl_voice.lua` as its last include, then stops precisely at
+`lua/vgui/DLabel.lua:127`: the default Derma skin and its `Colours` table have
+not yet been constructed. Addon mounting, CLIENT player connection, live
+entity readiness, `net.Send`, a real `net.SendToServer` player path, automatic
+global resend scheduling, renderer/physics/Source assets, and complete
+Entity/Panel/Derma behavior remain explicit boundaries.
 
-Strict installed-tree measurements complete core init with 27 SERVER, 42
-CLIENT, and 42 MENU includes. Isolated CLIENT/MENU Sandbox loading reaches 101
-includes, and SERVER TTT registration reaches 59. TTT's full modeled startup is
-still a separate failing boundary: `SetGlobalFloat` is first required at
-`gamemodes/terrortown/gamemode/init.lua:199` during `Initialize`.
+The 0.1.44 packaging snapshot passes 135/135 Swift tests and the Engine target
+under complete strict-concurrency checking. Its GC-enabled official Lua 5.1
+run exits 0 through `final OK`, with 38 chunk loads, two classified skips, and
+an elapsed time of 88.39 seconds. The installed-GMod parser gate passes 259/259
+files; the deliberately independent-file load diagnostic reaches 26/259.
+These are separate results: parsing a corpus file does not claim that every
+engine API it calls is implemented.
+
+The current installed-tree checkpoint completes core init with 27 SERVER and
+42 CLIENT includes, plus 23 MENU includes through `init_menu.lua`. Isolated
+CLIENT Sandbox loading reaches 101 includes, and SERVER TTT registration
+reaches 59. The new M3 checkpoint removes the former TTT `SetGlobalFloat`
+startup blocker: strict SERVER TTT now exits 0 through all stages represented
+by the modeled startup harness. Strict CLIENT TTT is measured separately and
+reaches the default-Derma-skin boundary reported above and in the 0.1.44
+release notes.
 
 ## Verified native path
 
@@ -117,6 +138,7 @@ copied Garry's Mod Lua corpus or proprietary assets:
 - [`Docs/GLuaAnalysis/03_GAMEMODES_CORPUS.md`](Docs/GLuaAnalysis/03_GAMEMODES_CORPUS.md)
 - [`Docs/GLuaAnalysis/04_RUNTIME_M1_IMPLEMENTATION.md`](Docs/GLuaAnalysis/04_RUNTIME_M1_IMPLEMENTATION.md)
 - [`Docs/GLuaAnalysis/05_NATIVE_BOOTSTRAP_M2.md`](Docs/GLuaAnalysis/05_NATIVE_BOOTSTRAP_M2.md)
+- [`Docs/GLuaAnalysis/06_REALM_NETWORKING_M3.md`](Docs/GLuaAnalysis/06_REALM_NETWORKING_M3.md)
 - [`GMOD_BOOT_SEQUENCE.md`](GMOD_BOOT_SEQUENCE.md)
 - [`Tests/GModCorpus/README.md`](Tests/GModCorpus/README.md)
 
@@ -125,7 +147,7 @@ all loose `lua/autorun` files, Sandbox including the nested Spawnmenu/VGUI
 loader tree, and TTT as a large compatibility corpus. The harness reads a
 legally installed local game directory and records hashes and diagnostics; it
 does not redistribute those files. Its parser gate passes 259/259 files; its
-independent-file load diagnostic reaches 24/259 without shared bootstrap state,
+independent-file load diagnostic reaches 26/259 without shared bootstrap state,
 so that diagnostic is not presented as whole-corpus runtime compatibility.
 
 ## Compatibility roadmap

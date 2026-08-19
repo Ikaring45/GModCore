@@ -4,6 +4,17 @@ import XCTest
 import GModLua
 
 final class GMLuaEntityRegistryTests: XCTestCase {
+    func testEntityIndexRejectsIntOverflowWithoutTrapping() throws {
+        let runtime = GMLuaRuntime(realm: .server, logger: { _ in })
+        try runtime.execute(
+            """
+            local ok, err = pcall(Entity, 9223372036854775808)
+            assert(not ok and string.find(err, "finite entity index expected", 1, true))
+            """,
+            sourceName: "@GMLuaEntityIndexRangeRegression.lua"
+        )
+    }
+
     func testNativeRegistryIdentityEnumerationAndInvalidationRegression() throws {
         let fixtureURL = try XCTUnwrap(
             Bundle.module.url(

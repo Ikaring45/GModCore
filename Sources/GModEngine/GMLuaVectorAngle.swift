@@ -908,6 +908,44 @@ public enum GMLuaVectorAngle {
         return payload
     }
 
+    /// Copies a Lua Vector into transport-safe scalar components. Network
+    /// registries must never retain state-local userdata or its mutable
+    /// payload across realm boundaries.
+    static func networkVectorComponents(
+        from value: LuaValue,
+        function: String
+    ) throws -> (Double, Double, Double) {
+        let payload = try vectorPayload(value, function: function)
+        return (payload.x, payload.y, payload.z)
+    }
+
+    /// Copies a Lua Angle into transport-safe scalar components.
+    static func networkAngleComponents(
+        from value: LuaValue,
+        function: String
+    ) throws -> (Double, Double, Double) {
+        let payload = try anglePayload(value, function: function)
+        return (payload.pitch, payload.yaw, payload.roll)
+    }
+
+    static func makeNetworkVector(
+        _ x: Double,
+        _ y: Double,
+        _ z: Double,
+        typeSystem: GMLuaTypeSystem
+    ) throws -> LuaValue {
+        try makeVector(x, y, z, typeSystem: typeSystem)
+    }
+
+    static func makeNetworkAngle(
+        _ pitch: Double,
+        _ yaw: Double,
+        _ roll: Double,
+        typeSystem: GMLuaTypeSystem
+    ) throws -> LuaValue {
+        try makeAngle(pitch, yaw, roll, typeSystem: typeSystem)
+    }
+
     private static func makeVector(
         _ x: Double,
         _ y: Double,

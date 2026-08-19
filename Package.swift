@@ -59,9 +59,9 @@ var targets: [Target] = [
     )
 ]
 
-#if !os(Windows)
+#if !os(Windows) && !os(Linux)
 // Metal and the SwiftUI application are Apple-only. Keeping them out of the
-// Windows manifest graph lets the native conformance runner and XCTest suite
+// non-Apple manifest graph lets the native conformance runner and XCTest suite
 // build without requiring unavailable Apple frameworks.
 products.insert(
     .library(
