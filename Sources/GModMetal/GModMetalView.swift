@@ -115,11 +115,17 @@ public struct GModMetalView:
             device: device
         )
 
-        view.colorPixelFormat =
+        let colorPixelFormat: MTLPixelFormat =
             .bgra8Unorm
 
-        view.depthStencilPixelFormat =
+        let depthPixelFormat: MTLPixelFormat =
             .depth32Float
+
+        view.colorPixelFormat =
+            colorPixelFormat
+
+        view.depthStencilPixelFormat =
+            depthPixelFormat
 
         view.clearDepth = 1.0
 
@@ -142,8 +148,9 @@ public struct GModMetalView:
             false
 
         context.coordinator.setup(
-            view: view,
-            device: device
+            device: device,
+            colorPixelFormat: colorPixelFormat,
+            depthPixelFormat: depthPixelFormat
         )
 
         view.delegate =
@@ -173,8 +180,20 @@ public struct GModMetalView:
         MTKViewDelegate
     {
 
-        private var stats:
-            Binding<String>
+        @MainActor
+        private final class StatsSink {
+            private var stats: Binding<String>
+
+            init(stats: Binding<String>) {
+                self.stats = stats
+            }
+
+            func publish(_ message: String) {
+                stats.wrappedValue = message
+            }
+        }
+
+        private let statsSink: StatsSink
 
         private let onFrame:
             @Sendable (GModMetalFrameRequest) -> Void
@@ -387,13 +406,14 @@ public struct GModMetalView:
         private var deviceName =
             "Unknown GPU"
 
+        @MainActor
         init(
             stats: Binding<String>,
             worldScene: GModMetalWorldScene?,
             surfaceScene: GModMetalSurfaceScene? = nil,
             onFrame: @escaping @Sendable (GModMetalFrameRequest) -> Void
         ) {
-            self.stats = stats
+            statsSink = StatsSink(stats: stats)
             self.onFrame = onFrame
             if let worldScene {
                 pendingWorldScene = .replace(worldScene)
@@ -408,8 +428,9 @@ public struct GModMetalView:
         }
 
         func setup(
-            view: MTKView,
-            device: MTLDevice
+            device: MTLDevice,
+            colorPixelFormat: MTLPixelFormat,
+            depthPixelFormat: MTLPixelFormat
         ) {
 
             deviceName =
@@ -502,10 +523,10 @@ public struct GModMetalView:
                 triangleDescriptor
                     .colorAttachments[0]
                     .pixelFormat =
-                        view.colorPixelFormat
+                        colorPixelFormat
 
                 triangleDescriptor.depthAttachmentPixelFormat =
-                    view.depthStencilPixelFormat
+                    depthPixelFormat
 
                 trianglePipeline =
                     try device
@@ -526,10 +547,10 @@ public struct GModMetalView:
                 worldDescriptor
                     .colorAttachments[0]
                     .pixelFormat =
-                        view.colorPixelFormat
+                        colorPixelFormat
 
                 worldDescriptor.depthAttachmentPixelFormat =
-                    view.depthStencilPixelFormat
+                    depthPixelFormat
 
                 worldPipeline =
                     try device
@@ -542,8 +563,8 @@ public struct GModMetalView:
                     Self.makeSurfacePipelineDescriptor(
                         vertexFunction: surfaceVertexFunction,
                         fragmentFunction: surfaceSolidFragmentFunction,
-                        colorPixelFormat: view.colorPixelFormat,
-                        depthPixelFormat: view.depthStencilPixelFormat
+                        colorPixelFormat: colorPixelFormat,
+                        depthPixelFormat: depthPixelFormat
                     )
 
                 surfaceSolidPipeline =
@@ -555,8 +576,8 @@ public struct GModMetalView:
                     Self.makeSurfacePipelineDescriptor(
                         vertexFunction: surfaceVertexFunction,
                         fragmentFunction: surfaceTexturedFragmentFunction,
-                        colorPixelFormat: view.colorPixelFormat,
-                        depthPixelFormat: view.depthStencilPixelFormat
+                        colorPixelFormat: colorPixelFormat,
+                        depthPixelFormat: depthPixelFormat
                     )
 
                 surfaceTexturedPipeline =
@@ -1139,7 +1160,7 @@ public struct GModMetalView:
                 SIMD2<Float>(-0.68, -0.60),
                 SIMD2<Float>(0.68, -0.60)
             ]
-            var vertices = sourceVertices.map { vertex in
+            let vertices = sourceVertices.map { vertex in
                 SIMD2<Float>(
                     vertex.x * cosine - vertex.y * sine,
                     vertex.x * sine + vertex.y * cosine
@@ -1656,11 +1677,8 @@ public struct GModMetalView:
             _ message: String
         ) {
 
-            DispatchQueue.main.async {
-
-                self.stats
-                    .wrappedValue =
-                        message
+            DispatchQueue.main.async { [statsSink] in
+                statsSink.publish(message)
             }
         }
 
