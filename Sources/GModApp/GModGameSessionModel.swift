@@ -213,8 +213,9 @@ final class GModGameSessionModel: ObservableObject {
     @Published private(set) var pointerMoveCoalescedCount = 0
     @Published private(set) var isInputSuspended = false
     let pointerCapability =
-        "SwiftUI single-touch; stock DButton enabled/capture callbacks active; " +
-        "hover/wheel/keyboard and UIKit touchesCancelled bridge pending"
+        "UIKit single-touch with native cancellation; " +
+        "stock DButton enabled/capture callbacks active; " +
+        "hover/wheel/keyboard pending"
 
     private let lane: GModPlayableSessionLane
     private let logSink: (String) -> Void
@@ -475,7 +476,8 @@ final class GModGameSessionModel: ObservableObject {
                     pointerStatus = isInputSuspended
                         ? "VGUI input suspended"
                         : replacement
-                        ? "Single-touch VGUI; hover/wheel/keyboard/native cancel pending"
+                        ? "Single-touch VGUI; native cancel active; " +
+                            "hover/wheel/keyboard pending"
                         : "VGUI pointer idle"
                     surfaceStatus = replacement
                         ? "Spawn Menu open; awaiting VGUI frame"
@@ -506,7 +508,7 @@ final class GModGameSessionModel: ObservableObject {
         }
     }
 
-    /// Maps a value-only SwiftUI location into the last rendered VGUI
+    /// Maps a value-only host touch location into the last rendered VGUI
     /// viewport. The bounded mailbox preserves press/release ordering and
     /// coalesces move samples before crossing the session actor boundary.
     func submitSpawnMenuPointer(
@@ -898,7 +900,8 @@ final class GModGameSessionModel: ObservableObject {
         )
         pointerMailbox.setEnabled(isSpawnMenuOpen)
         pointerStatus = isSpawnMenuOpen
-            ? "Single-touch VGUI; hover/wheel/keyboard/native cancel pending"
+            ? "Single-touch VGUI; native cancel active; " +
+                "hover/wheel/keyboard pending"
             : "VGUI pointer idle"
     }
 

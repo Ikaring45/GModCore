@@ -436,11 +436,9 @@ public struct GModMainView: View {
     }
 }
 
-/// SwiftUI exposes a bounded single-touch location and begin/move/end phases,
-/// which are forwarded without synthesizing VGUI clicks. The Engine now owns
-/// stock DButton enabled-state and mouse-capture callback behavior. Hover,
-/// wheel, multi-touch identity, host keyboard insertion, and UIKit's native
-/// touchesCancelled path still require a dedicated UIView input bridge.
+/// The UIKit bridge forwards one identified touch, including the native
+/// touchesCancelled terminal phase, without synthesizing VGUI clicks. The
+/// Engine owns stock DButton enabled-state and mouse-capture callbacks.
 private struct GModSpawnMenuPointerSurface: View {
     typealias Handler = (
         _ x: Double,
@@ -452,60 +450,21 @@ private struct GModSpawnMenuPointerSurface: View {
     ) -> Void
 
     let onPointer: Handler
-    @State private var isTracking = false
 
     var body: some View {
-        GeometryReader { geometry in
-            Color.clear
-                .contentShape(Rectangle())
-                .gesture(
-                    DragGesture(minimumDistance: 0, coordinateSpace: .local)
-                        .onChanged { value in
-                            let timestamp = Date().timeIntervalSinceReferenceDate
-                            if !isTracking {
-                                isTracking = true
-                                send(
-                                    value.startLocation,
-                                    size: geometry.size,
-                                    phase: .began,
-                                    timestamp: timestamp
-                                )
-                            }
-                            send(
-                                value.location,
-                                size: geometry.size,
-                                phase: .moved,
-                                timestamp: timestamp
-                            )
-                        }
-                        .onEnded { value in
-                            send(
-                                value.location,
-                                size: geometry.size,
-                                phase: .ended,
-                                timestamp: Date().timeIntervalSinceReferenceDate
-                            )
-                            isTracking = false
-                        }
-                )
+        GModTouchInputBridge { sample in
+            onPointer(
+                sample.x,
+                sample.y,
+                sample.viewWidth,
+                sample.viewHeight,
+                sample.phase,
+                sample.timestamp
+            )
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .contentShape(Rectangle())
         .accessibilityLabel("Spawn Menu single-touch pointer surface")
-    }
-
-    private func send(
-        _ location: CGPoint,
-        size: CGSize,
-        phase: GMLuaPointerPhase,
-        timestamp: TimeInterval
-    ) {
-        onPointer(
-            Double(location.x),
-            Double(location.y),
-            Double(size.width),
-            Double(size.height),
-            phase,
-            timestamp
-        )
     }
 }
 
@@ -527,14 +486,14 @@ private struct GModButtonStyle: ButtonStyle {
 
 private struct GModTouchJoystick: View {
     let onChange: (_ forward: Float, _ side: Float) -> Void
-    @State private var knobOffset = CGSize.zero
+    @State private var touchState = GModJoystickTouchState()
 
     var body: some View {
         GeometryReader { geometry in
-            let radius = Swift.max(
+            let radius = Double(Swift.max(
                 1,
                 Swift.min(geometry.size.width, geometry.size.height) * 0.5 - 18
-            )
+            ))
             ZStack {
                 Circle()
                     .fill(Color.black.opacity(0.34))
@@ -542,41 +501,37 @@ private struct GModTouchJoystick: View {
                 Circle()
                     .fill(Color.white.opacity(0.62))
                     .frame(width: 38, height: 38)
-                    .offset(knobOffset)
+                    .offset(
+                        x: CGFloat(touchState.output.offsetX),
+                        y: CGFloat(touchState.output.offsetY)
+                    )
+                GModTouchInputBridge { sample in
+                    handleTouch(sample, radius: radius)
+                }
+                .contentShape(Circle())
             }
             .contentShape(Circle())
-            .gesture(
-                DragGesture(minimumDistance: 0, coordinateSpace: .local)
-                    .onChanged { value in
-                        let center = CGPoint(
-                            x: geometry.size.width * 0.5,
-                            y: geometry.size.height * 0.5
-                        )
-                        var dx = value.location.x - center.x
-                        var dy = value.location.y - center.y
-                        let length = (dx * dx + dy * dy).squareRoot()
-                        if length > radius {
-                            let scale = radius / length
-                            dx *= scale
-                            dy *= scale
-                        }
-                        knobOffset = CGSize(width: dx, height: dy)
-                        onChange(Float(-dy / radius), Float(dx / radius))
-                    }
-                    .onEnded { _ in
-                        knobOffset = .zero
-                        onChange(0, 0)
-                    }
-            )
         }
         .frame(width: 122, height: 122)
         .accessibilityLabel("Movement joystick")
+    }
+
+    private func handleTouch(
+        _ sample: GModTouchSample,
+        radius: Double
+    ) {
+        var replacement = touchState
+        guard let output = replacement.consume(sample, radius: radius) else {
+            return
+        }
+        touchState = replacement
+        onChange(output.forward, output.side)
     }
 }
 
 private struct GModTouchLookPad: View {
     let onDelta: (_ deltaX: Float, _ deltaY: Float) -> Void
-    @State private var priorTranslation: CGSize?
+    @State private var touchState = GModLookTouchState()
 
     var body: some View {
         ZStack {
@@ -589,23 +544,21 @@ private struct GModTouchLookPad: View {
             Image(systemName: "viewfinder")
                 .font(.system(size: 28, weight: .light))
                 .foregroundColor(Color.white.opacity(0.62))
+            GModTouchInputBridge { sample in
+                handleTouch(sample)
+            }
         }
         .frame(width: 150, height: 112)
         .contentShape(Rectangle())
-        .gesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { value in
-                    let prior = priorTranslation ?? value.translation
-                    onDelta(
-                        Float(value.translation.width - prior.width),
-                        Float(value.translation.height - prior.height)
-                    )
-                    priorTranslation = value.translation
-                }
-                .onEnded { _ in
-                    priorTranslation = nil
-                }
-        )
         .accessibilityLabel("Look control")
+    }
+
+    private func handleTouch(_ sample: GModTouchSample) {
+        var replacement = touchState
+        let delta = replacement.consume(sample)
+        touchState = replacement
+        if let delta {
+            onDelta(delta.x, delta.y)
+        }
     }
 }
