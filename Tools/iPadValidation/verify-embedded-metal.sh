@@ -72,8 +72,10 @@ if missing_functions:
 
 normalized_swift = re.sub(r"\s+", " ", swift_source)
 required_pipeline_contract = {
-    "view.colorPixelFormat = .bgra8Unorm",
-    "view.depthStencilPixelFormat = .depth32Float",
+    "let colorPixelFormat: MTLPixelFormat = .bgra8Unorm",
+    "let depthPixelFormat: MTLPixelFormat = .depth32Float",
+    "view.colorPixelFormat = colorPixelFormat",
+    "view.depthStencilPixelFormat = depthPixelFormat",
     "color.isBlendingEnabled = true",
     "color.rgbBlendOperation = .add",
     "color.alphaBlendOperation = .add",
