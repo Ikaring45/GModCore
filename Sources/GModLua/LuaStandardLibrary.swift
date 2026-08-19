@@ -1273,27 +1273,35 @@ extension LuaState {
         native("clock") { _ in [.number(ProcessInfo.processInfo.systemUptime - clockOrigin)] }
         native("difftime") { [.number(try self.requireNumber($0, 0, "difftime") - self.requireNumber($0, 1, "difftime"))] }
         native("time") { args in
-            if args.isEmpty || self.isNil(args[0]) { return [.number(Date().timeIntervalSince1970)] }
+            if args.isEmpty || self.isNil(args[0]) {
+                return [.number(Date().timeIntervalSince1970.rounded(.towardZero))]
+            }
             guard case let .table(table) = args[0] else { throw LuaError.runtime("bad argument #1 to 'time' (table expected)") }
+
             var components = DateComponents()
-            components.year = Int(self.numberOrDefault(table.rawValue(forString: "year"), 1970))
-            components.month = Int(self.numberOrDefault(table.rawValue(forString: "month"), 1))
-            components.day = Int(self.numberOrDefault(table.rawValue(forString: "day"), 1))
-            components.hour = Int(self.numberOrDefault(table.rawValue(forString: "hour"), 12))
-            components.minute = Int(self.numberOrDefault(table.rawValue(forString: "min"), 0))
-            components.second = Int(self.numberOrDefault(table.rawValue(forString: "sec"), 0))
-            guard let date = Calendar.current.date(from: components) else { return [.nilValue] }
-            return [.number(date.timeIntervalSince1970)]
+            components.second = try self.luaOSDateComponent(table, named: "sec", defaultValue: 0)
+            components.minute = try self.luaOSDateComponent(table, named: "min", defaultValue: 0)
+            components.hour = try self.luaOSDateComponent(table, named: "hour", defaultValue: 12)
+            components.day = try self.luaOSDateComponent(table, named: "day")
+            components.month = try self.luaOSDateComponent(table, named: "month")
+            components.year = try self.luaOSDateComponent(table, named: "year")
+
+            let isDSTValue = try self.luaOSDateField(table, named: "isdst")
+            let requestedDST = self.isNil(isDSTValue) ? nil : isDSTValue.isTruthy
+            guard let date = self.luaOSLocalDate(
+                from: components,
+                requestedDaylightSavingTime: requestedDST
+            ) else { return [.nilValue] }
+            return [.number(date.timeIntervalSince1970.rounded(.towardZero))]
         }
         native("date") { args in
             let format = args.isEmpty ? "%c" : try self.stringFromValue(args[0])
             let timestamp = args.count > 1 ? try self.numberFromValue(args[1]) : Date().timeIntervalSince1970
             let utc = format.first == "!"
             let cleanFormat = utc ? String(format.dropFirst()) : format
-            let date = Date(timeIntervalSince1970: timestamp)
+            let date = Date(timeIntervalSince1970: timestamp.rounded(.towardZero))
             if cleanFormat == "*t" {
-                var calendar = Calendar.current
-                if utc { calendar.timeZone = TimeZone(secondsFromGMT: 0)! }
+                let calendar = self.luaOSCalendar(utc: utc)
                 let comps = calendar.dateComponents([.year,.month,.day,.hour,.minute,.second,.weekday], from: date)
                 let table = LuaTable()
                 table.rawSetValue(.number(Double(comps.year ?? 0)), forString: "year")
@@ -1303,7 +1311,14 @@ extension LuaState {
                 table.rawSetValue(.number(Double(comps.minute ?? 0)), forString: "min")
                 table.rawSetValue(.number(Double(comps.second ?? 0)), forString: "sec")
                 table.rawSetValue(.number(Double(comps.weekday ?? 0)), forString: "wday")
-                table.rawSetValue(.boolean(false), forString: "isdst")
+                table.rawSetValue(
+                    .number(Double(calendar.ordinality(of: .day, in: .year, for: date) ?? 0)),
+                    forString: "yday"
+                )
+                table.rawSetValue(
+                    .boolean(calendar.timeZone.isDaylightSavingTime(for: date)),
+                    forString: "isdst"
+                )
                 return [.table(table)]
             }
             return [.string(LuaString(self.strftimeLike(cleanFormat, date: date, utc: utc)))]
@@ -2094,15 +2109,93 @@ extension LuaState {
 
     func estimatedMemoryKilobytes() -> Double { garbageCollector.memoryKilobytes() }
 
-    func numberOrDefault(_ value: LuaValue, _ fallback: Double) -> Double {
-        (try? numberFromValue(value)) ?? fallback
+    func luaOSCalendar(utc: Bool) -> Calendar {
+        luaOSCalendar(timeZone: utc ? TimeZone(secondsFromGMT: 0)! : TimeZone.current)
+    }
+
+    func luaOSCalendar(timeZone: TimeZone) -> Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = Locale(identifier: "en_US_POSIX")
+        calendar.timeZone = timeZone
+        return calendar
+    }
+
+    func luaOSDateField(_ table: LuaTable, named name: String) throws -> LuaValue {
+        try getTableValue(
+            table: table,
+            receiver: .table(table),
+            key: .string(LuaString(name)),
+            depth: 0
+        )
+    }
+
+    func luaOSDateComponent(
+        _ table: LuaTable,
+        named name: String,
+        defaultValue: Int? = nil
+    ) throws -> Int {
+        let value = try luaOSDateField(table, named: name)
+        guard let number = coerceNumber(value) else {
+            guard let defaultValue else {
+                throw LuaError.runtime("field '\(name)' missing in date table")
+            }
+            return defaultValue
+        }
+
+        guard number.isFinite,
+              number >= Double(Int32.min),
+              number <= Double(Int32.max) else {
+            throw LuaError.runtime("field '\(name)' is out of range")
+        }
+        return Int(number)
+    }
+
+    func luaOSLocalDate(
+        from components: DateComponents,
+        requestedDaylightSavingTime: Bool?,
+        timeZone: TimeZone = .current
+    ) -> Date? {
+        let localCalendar = luaOSCalendar(timeZone: timeZone)
+        guard let inferredDate = localCalendar.date(from: components) else { return nil }
+        guard let requestedDaylightSavingTime else { return inferredDate }
+
+        guard let requestedOffset = luaOSGMTOffset(
+            matchingDaylightSavingTime: requestedDaylightSavingTime,
+            in: timeZone,
+            around: inferredDate
+        ) else {
+            // Zones without the requested state have no alternate UTC offset;
+            // mktime normalizes the flag back to the zone's only valid state.
+            return inferredDate
+        }
+
+        let utcCalendar = luaOSCalendar(utc: true)
+        guard let wallClockAsUTC = utcCalendar.date(from: components) else { return nil }
+        return wallClockAsUTC.addingTimeInterval(-Double(requestedOffset))
+    }
+
+    func luaOSGMTOffset(
+        matchingDaylightSavingTime requestedState: Bool,
+        in timeZone: TimeZone,
+        around date: Date
+    ) -> Int? {
+        for distance in 0...370 {
+            let directions = distance == 0 ? [0] : [-1, 1]
+            for direction in directions {
+                let probe = date.addingTimeInterval(Double(distance * direction) * 86_400)
+                if timeZone.isDaylightSavingTime(for: probe) == requestedState {
+                    return timeZone.secondsFromGMT(for: probe)
+                }
+            }
+        }
+        return nil
     }
 
     func strftimeLike(_ format: String, date: Date, utc: Bool) -> String {
-        var calendar = Calendar.current
-        if utc { calendar.timeZone = TimeZone(secondsFromGMT: 0)! }
+        let calendar = luaOSCalendar(utc: utc)
         let formatter = DateFormatter()
         formatter.calendar = calendar
+        formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = calendar.timeZone
         // Common Lua/C strftime tokens. Unknown tokens are preserved.
         var result = format
