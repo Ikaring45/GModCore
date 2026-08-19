@@ -60,10 +60,41 @@ public final class GMLuaTimerScheduler: @unchecked Sendable {
         }
 
         lock.lock()
-        currentTimeStorage += delta
+        let targetTime = currentTimeStorage + delta
+        guard targetTime.isFinite else {
+            lock.unlock()
+            throw LuaError.runtime("timer advance target must be finite")
+        }
+        currentTimeStorage = targetTime
         entries = entries.filter { !$0.value.removeOnNextTick }
         lock.unlock()
 
+        return dispatchDueTimers()
+    }
+
+    /// Moves CurTime to an absolute host simulation timestamp. This is internal
+    /// because relative advancement remains the public standalone scheduler
+    /// contract; Source adapters use the absolute seam to avoid accumulating a
+    /// Double approximation of Source's Float globals.
+    @discardableResult
+    func advance(to targetTime: Double) throws -> [GMLuaTimerFailure] {
+        guard targetTime.isFinite else {
+            throw LuaError.runtime("timer advance target must be finite")
+        }
+
+        lock.lock()
+        guard targetTime >= currentTimeStorage else {
+            lock.unlock()
+            throw LuaError.runtime("timer absolute time cannot move backwards")
+        }
+        currentTimeStorage = targetTime
+        entries = entries.filter { !$0.value.removeOnNextTick }
+        lock.unlock()
+
+        return dispatchDueTimers()
+    }
+
+    private func dispatchDueTimers() -> [GMLuaTimerFailure] {
         var failures: [GMLuaTimerFailure] = []
         var dispatchCount = 0
         while dispatchCount < 100_000 {

@@ -1,6 +1,11 @@
 import Foundation
 import GModLua
 
+/// Opaque ownership identity for one Source runtime adapter's realm mirrors.
+/// Object identity, rather than handle equality, prevents independent kernels
+/// that happen to allocate the same packed handle from sharing cleanup rights.
+final class GMLuaSourceMirrorOwner: @unchecked Sendable {}
+
 public enum GMLuaEntityKind: String, Sendable {
     case entity = "Entity"
     case player = "Player"
@@ -13,6 +18,8 @@ private final class GMLuaEntityValue: @unchecked Sendable {
     let kind: GMLuaEntityKind
     let generation: UInt64
     let userID: Int?
+    let semanticValidity: Bool
+    let sourceOwner: GMLuaSourceMirrorOwner?
     var className: String
     var luaTable: LuaTable? = LuaTable()
 
@@ -21,12 +28,16 @@ private final class GMLuaEntityValue: @unchecked Sendable {
         kind: GMLuaEntityKind,
         generation: UInt64,
         userID: Int?,
+        semanticValidity: Bool,
+        sourceOwner: GMLuaSourceMirrorOwner?,
         className: String
     ) {
         self.index = index
         self.kind = kind
         self.generation = generation
         self.userID = userID
+        self.semanticValidity = semanticValidity
+        self.sourceOwner = sourceOwner
         self.className = className
     }
 }
@@ -69,6 +80,9 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
             kind: kind,
             generation: 0,
             userID: kind == .player ? index : nil,
+            semanticValidity: true,
+            sourceOwner: nil,
+            replaceExisting: true,
             className: className
         )
     }
@@ -85,6 +99,56 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
             kind: .player,
             generation: generation,
             userID: userID,
+            semanticValidity: true,
+            sourceOwner: nil,
+            replaceExisting: true,
+            className: className
+        )
+    }
+
+    /// Registers one Source-owned identity without replacing a legacy or
+    /// SharedSession-owned userdata at the same entity index. Re-registering
+    /// the exact identity is idempotent so transactional realm attachment can
+    /// safely retry after a host-side interruption.
+    @discardableResult
+    func registerSourceMirror(
+        owner: GMLuaSourceMirrorOwner,
+        identity: GMLuaSourceEntityIdentity,
+        kind: GMLuaEntityKind,
+        userID: Int?,
+        semanticValidity: Bool,
+        className: String
+    ) throws -> LuaValue {
+        lock.lock()
+        if let existing = values[identity.index],
+           let object = GMLuaTypeSystem.typedObject(from: existing),
+           object.isValid,
+           let payload = object.payload as? GMLuaEntityValue,
+           payload.generation == identity.generation,
+           payload.kind == kind,
+           payload.userID == userID,
+           payload.semanticValidity == semanticValidity,
+           payload.sourceOwner === owner,
+           payload.className == className {
+            lock.unlock()
+            return existing
+        }
+        if values[identity.index] != nil {
+            lock.unlock()
+            throw LuaError.runtime(
+                "entity index \(identity.index) is owned by another mirror generation"
+            )
+        }
+        lock.unlock()
+
+        return try register(
+            index: identity.index,
+            kind: kind,
+            generation: identity.generation,
+            userID: userID,
+            semanticValidity: semanticValidity,
+            sourceOwner: owner,
+            replaceExisting: false,
             className: className
         )
     }
@@ -94,6 +158,9 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
         kind: GMLuaEntityKind,
         generation: UInt64,
         userID: Int?,
+        semanticValidity: Bool,
+        sourceOwner: GMLuaSourceMirrorOwner?,
+        replaceExisting: Bool,
         className: String
     ) throws -> LuaValue {
         guard index >= 0 else {
@@ -109,10 +176,18 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
             kind: kind,
             generation: generation,
             userID: userID,
+            semanticValidity: semanticValidity,
+            sourceOwner: sourceOwner,
             className: className
         )
         let value = try typeSystem.makeObject(metaName: kind.rawValue, payload: payload)
         lock.lock()
+        if !replaceExisting, values[index] != nil {
+            lock.unlock()
+            throw LuaError.runtime(
+                "entity index \(index) is owned by another mirror generation"
+            )
+        }
         if let userID,
            let mapped = playerIdentityByUserID[userID],
            mapped.index != index {
@@ -169,6 +244,59 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
             }
         }
         lock.unlock()
+    }
+
+    /// Removes only the exact Source handle generation. A stale cleanup or
+    /// rollback can therefore never invalidate a later occupant of the slot.
+    func unregisterSourceMirror(
+        owner: GMLuaSourceMirrorOwner,
+        identity: GMLuaSourceEntityIdentity
+    ) {
+        lock.lock()
+        let current = values[identity.index]
+        let payload = current
+            .flatMap(GMLuaTypeSystem.typedObject(from:))?
+            .payload as? GMLuaEntityValue
+        if payload?.sourceOwner === owner,
+           payload?.generation == identity.generation {
+            let removed = values.removeValue(forKey: identity.index)
+            GMLuaTypeSystem.typedObject(from: removed ?? .nilValue)?.isValid = false
+            payload?.luaTable = nil
+            if let payload { removePlayerUserIDMapping(for: payload) }
+            if localPlayerIdentity?.index == identity.index,
+               localPlayerIdentity?.generation == identity.generation {
+                localPlayerIdentity = nil
+            }
+        }
+        lock.unlock()
+    }
+
+    /// Returns the current canonical Source identity for a realm-local value.
+    /// Lifetime validity and GLua semantic validity are deliberately separate:
+    /// the world entity has a live identity even though `world:IsValid()` is
+    /// false in Garry's Mod.
+    func sourceMirrorIdentity(for value: LuaValue) -> GMLuaSourceEntityIdentity? {
+        guard case let .userdata(userdata) = value,
+              let object = GMLuaTypeSystem.typedObject(from: value),
+              object.isValid,
+              let payload = object.payload as? GMLuaEntityValue,
+              payload.sourceOwner != nil,
+              payload.generation <= UInt64(UInt32.max) else { return nil }
+        lock.lock()
+        defer { lock.unlock() }
+        guard case let .userdata(canonical)? = values[payload.index],
+              canonical === userdata else { return nil }
+        return GMLuaSourceEntityIdentity(
+            handle: SourceBaseHandle.unsafeFromIndex(UInt32(truncatingIfNeeded: payload.generation))
+        )
+    }
+
+    func sourceMirrorIdentity(at index: Int) -> GMLuaSourceEntityIdentity? {
+        lock.lock()
+        let value = values[index]
+        lock.unlock()
+        guard let value else { return nil }
+        return sourceMirrorIdentity(for: value)
     }
 
     public func entity(at index: Int) -> LuaValue {
@@ -446,6 +574,36 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
                     in: metatable
                 )
             }
+        }
+
+        // Typed-object lifetime validity answers whether this userdata still
+        // names the canonical slot occupant. GLua semantic validity is a
+        // separate property: Entity(0) is the canonical world userdata and is
+        // distinct from NULL, but world:IsValid() is false.
+        let entityIsValid = entityNativeFunction("Entity:IsValid") { arguments in
+            guard let value = arguments.first,
+                  let object = GMLuaTypeSystem.typedObject(from: value),
+                  entityMetatableNames.contains(object.metaName) else {
+                throw LuaError.runtime(
+                    "bad self to 'Entity:IsValid' " +
+                    "(Entity expected, got \(arguments.first?.typeName ?? "no value"))"
+                )
+            }
+            guard object.isValid else { return [.boolean(false)] }
+            guard let payload = object.payload as? GMLuaEntityValue else {
+                // Preserve the native type ABI for host-created typed objects
+                // that are not members of this Entity registry.
+                return [.boolean(true)]
+            }
+            return [.boolean(payload.semanticValidity)]
+        }
+        for metatableName in entityMetatableNames {
+            guard let metatable = typeSystem.metatable(named: metatableName) else { continue }
+            try state.setRawTableValue(
+                entityIsValid,
+                for: .string("IsValid"),
+                in: metatable
+            )
         }
 
         let getTable = entityNativeFunction("Entity:GetTable") { arguments in

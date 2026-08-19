@@ -154,6 +154,52 @@ final class SourceRuntimeKernelTests: XCTestCase {
         XCTAssertEqual(list.pendingDeletionCount, 0)
     }
 
+    func testCleanupRemovalCallbackReportsEachExactServerPhaseWithCapturedHandle() throws {
+        let list = SourceEntityList(initialSerialNumber: 9)
+        let beforeFrame = SourceEntity(className: "before_frame")
+        let duringHooks = SourceEntity(className: "during_hooks")
+        let duringPhysics = KernelRecordingEntity(
+            label: "during_physics",
+            simulates: true,
+            log: { _ in }
+        )
+        let beforeHandle = try list.addNetworkableEntity(beforeFrame, at: 70)
+        let hookHandle = try list.addNetworkableEntity(duringHooks, at: 71)
+        let physicsHandle = try list.addNetworkableEntity(duringPhysics, at: 72)
+        list.markForDeletion(beforeHandle)
+        duringPhysics.onSimulation = { [unowned list, unowned duringPhysics] in
+            list.markForDeletion(duringPhysics)
+        }
+
+        let kernel = SourceRuntimeKernel(entityList: list)
+        var currentPhase: SourceServerPhase?
+        var removalPhaseByHandle: [SourceBaseHandle: SourceServerPhase] = [:]
+        kernel.runServerTick(
+            onAddonHook: { phase in
+                if phase == .think { list.markForDeletion(hookHandle) }
+            },
+            onEntityRemoved: { capturedHandle, entity in
+                XCTAssertFalse(entity.refHandle.isValid)
+                removalPhaseByHandle[capturedHandle] = currentPhase
+            },
+            onPhase: { currentPhase = $0 }
+        )
+
+        XCTAssertEqual(
+            removalPhaseByHandle[beforeHandle],
+            .cleanupDeleteListOutsideServerFrame
+        )
+        XCTAssertEqual(
+            removalPhaseByHandle[hookHandle],
+            .physicsRunThinkFunctionsCleanup
+        )
+        XCTAssertEqual(
+            removalPhaseByHandle[physicsHandle],
+            .cleanupDeleteListAfterEntityThink
+        )
+        XCTAssertEqual(removalPhaseByHandle.count, 3)
+    }
+
     func testSimulationUsesStableSnapshotAndScheduledThinkChoice() throws {
         var calls: [String] = []
         let list = SourceEntityList()

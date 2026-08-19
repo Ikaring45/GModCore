@@ -617,6 +617,17 @@ public final class SourceEntityList {
     /// queued handle can never remove a later occupant of a reused slot.
     @discardableResult
     public func cleanupDeleteList() -> Int {
+        cleanupDeleteList(onRemove: { _, _ in })
+    }
+
+    /// Deletes the pending list and reports each removal at the exact cleanup
+    /// boundary. The captured pre-invalidation handle lets a host tear down an
+    /// external mirror by generation instead of accidentally removing a later
+    /// occupant that reused the same entity index.
+    @discardableResult
+    func cleanupDeleteList(
+        onRemove: (_ capturedHandle: SourceBaseHandle, _ entity: SourceEntity) -> Void
+    ) -> Int {
         let deleting = pendingDeletion
         pendingDeletion.removeAll(keepingCapacity: true)
         pendingDeletionSet.removeAll(keepingCapacity: true)
@@ -639,6 +650,7 @@ public final class SourceEntityList {
                 freeNonNetworkableEntryIndices.append(entryIndex)
             }
             removedCount += 1
+            onRemove(handle, entity)
         }
         return removedCount
     }
@@ -741,6 +753,7 @@ public final class SourceRuntimeKernel {
     /// separate Source contract and is intentionally not conflated with this one.
     public func runServerTick(
         onAddonHook: ((SourceAddonHookPhase) -> Void)? = nil,
+        onEntityRemoved: ((SourceBaseHandle, SourceEntity) -> Void)? = nil,
         onPhase: ((SourceServerPhase) -> Void)? = nil
     ) {
         globals.beginServerTick()
@@ -748,7 +761,7 @@ public final class SourceRuntimeKernel {
         lastAddonHookTrace.removeAll(keepingCapacity: true)
 
         perform(.cleanupDeleteListOutsideServerFrame, onPhase: onPhase) {
-            entityList.cleanupDeleteList()
+            entityList.cleanupDeleteList(onRemove: onEntityRemoved ?? { _, _ in })
         }
         perform(.frameUpdatePreEntityThink, onPhase: onPhase)
         perform(.gameStartFrame, onPhase: onPhase) {
@@ -759,7 +772,7 @@ public final class SourceRuntimeKernel {
         }
 
         perform(.physicsRunThinkFunctionsCleanup, onPhase: onPhase) {
-            entityList.cleanupDeleteList()
+            entityList.cleanupDeleteList(onRemove: onEntityRemoved ?? { _, _ in })
         }
 
         let simulationSnapshot = entityList.simulationSnapshot(currentTick: globals.tickCount)
@@ -776,7 +789,7 @@ public final class SourceRuntimeKernel {
         perform(.frameUpdatePostEntityThink, onPhase: onPhase)
         perform(.serviceEventQueue, onPhase: onPhase)
         perform(.cleanupDeleteListAfterEntityThink, onPhase: onPhase) {
-            entityList.cleanupDeleteList()
+            entityList.cleanupDeleteList(onRemove: onEntityRemoved ?? { _, _ in })
         }
         perform(.updateAllClientData, onPhase: onPhase)
         perform(.endGameFrame, onPhase: onPhase)
