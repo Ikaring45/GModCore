@@ -59,7 +59,7 @@ public struct GModMainView: View {
                     .foregroundColor(.white)
             }
 
-            Text("Console")
+            Text("Garry's PAD Console")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundColor(Color(white: 0.93))
 
@@ -113,18 +113,31 @@ public struct GModMainView: View {
 
     private var consoleLog: some View {
         ScrollViewReader { proxy in
-            ScrollView([.vertical, .horizontal]) {
+            ScrollView(.vertical) {
                 LazyVStack(alignment: .leading, spacing: 1) {
                     ForEach(console.visibleLines) { line in
                         Text(line.text.isEmpty ? " " : line.text)
                             .font(.system(size: 10.5, design: .monospaced))
                             .foregroundColor(color(for: line.kind))
+                            .multilineTextAlignment(.leading)
+                            .frame(
+                                maxWidth: .infinity,
+                                alignment: .leading
+                            )
+                            .fixedSize(
+                                horizontal: false,
+                                vertical: true
+                            )
                             .textSelection(.enabled)
                             .id(line.id)
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(7)
+                .frame(
+                    maxWidth: .infinity,
+                    alignment: .leading
+                )
+                .padding(.horizontal, 7)
+                .padding(.vertical, 6)
             }
             .background(Color(red: 0.105, green: 0.11, blue: 0.115))
             .onChange(of: console.lines.count) { _ in
