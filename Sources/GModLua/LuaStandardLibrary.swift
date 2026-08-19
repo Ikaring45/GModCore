@@ -337,26 +337,25 @@ extension LuaState {
             guard let first = arguments.first, case let .string(sourceBytes) = first else {
                 throw LuaError.runtime("bad argument #1 to 'loadstring' (string expected)")
             }
-            if let dumped = self.dumpRegistry[sourceBytes] { return [.luaFunction(dumped)] }
-            guard let decodedSource = LuaSourceDecoder.decode(Data(sourceBytes.bytes)) else {
-                return [.nilValue, .string("cannot decode Lua source")]
+            let sourceName: String?
+            if arguments.indices.contains(1), !self.isNil(arguments[1]) {
+                sourceName = try self.stringFromValue(arguments[1])
+            } else {
+                sourceName = nil
             }
-            let sourceName = try self.optionalStringArgument(
-                arguments,
-                at: 1,
-                defaultValue: decodedSource
-            )
-            do {
-                let function = try self.compile(decodedSource, sourceName: sourceName)
-                function.environmentTable = self.currentThreadEnvironmentTable
-                return [.luaFunction(function)]
-            } catch {
-                return [.nilValue, self.errorValue(error)]
-            }
+            return self.loadChunk(sourceBytes, sourceName: sourceName)
         }
 
         register("load") { [unowned self] arguments in
-            guard let reader = arguments.first else { throw LuaError.runtime("bad argument #1 to 'load' (function expected)") }
+            guard let reader = arguments.first else {
+                throw LuaError.runtime("bad argument #1 to 'load' (function expected)")
+            }
+            switch reader {
+            case .luaFunction, .nativeFunction:
+                break
+            default:
+                throw LuaError.runtime("bad argument #1 to 'load' (function expected)")
+            }
             let chunkName = try self.optionalStringArgument(
                 arguments,
                 at: 1,
@@ -364,25 +363,74 @@ extension LuaState {
             )
             var bytes: [UInt8] = []
             while true {
-                let results = try self.callValue(reader, arguments: [])
+                let results: [LuaValue]
+                let previousFailureFrames = self.failureFramesForCurrentThread()
+                do {
+                    results = try self.callValue(reader, arguments: [])
+                } catch {
+                    // lua_load runs its reader inside the protected parser.
+                    // Reader failures therefore become load's nil/error
+                    // results instead of escaping as an error from load.
+                    let error = self.errorValue(error)
+                    self.restoreFailureFramesForCurrentThread(previousFailureFrames)
+                    return [.nilValue, error]
+                }
                 let value = results.first ?? .nilValue
                 if case .nilValue = value { break }
-                guard case let .string(piece) = value else {
+                let piece: LuaString
+                switch value {
+                case let .string(string):
+                    piece = string
+                case .number:
+                    // lua_isstring accepts numbers and lua_tolstring performs
+                    // this coercion in Lua 5.1's generic reader.
+                    piece = try self.luaStringBytes(value)
+                default:
                     return [.nilValue, .string("reader function must return a string")]
                 }
+                // Lua 5.1's ZIO treats a zero-length reader buffer as EOF.
+                // This is also how the official suite's byte-at-a-time
+                // reader terminates: string.sub returns "" past the end.
                 if piece.isEmpty { break }
                 bytes.append(contentsOf: piece.bytes)
-            }
-            do {
-                guard let decodedSource = LuaSourceDecoder.decode(Data(bytes)) else {
+
+                let collected = LuaString(bytes: bytes)
+                if dumpedFunction(matchingPrefixOf: collected) != nil {
+                    return loadChunk(collected, sourceName: chunkName)
+                }
+                if dumpRegistry.keys.contains(where: {
+                    collected.count < $0.count && $0.bytes.starts(with: collected.bytes)
+                }) {
+                    continue
+                }
+
+                guard let source = LuaSourceDecoder.decode(Data(bytes)) else {
                     return [.nilValue, .string("cannot decode Lua source")]
                 }
-                let function = try self.compile(decodedSource, sourceName: chunkName)
-                function.environmentTable = self.currentThreadEnvironmentTable
-                return [.luaFunction(function)]
-            } catch {
-                return [.nilValue, self.errorValue(error)]
+                do {
+                    // This is a compatibility probe over all bytes collected so
+                    // far, not a streaming parser. It exists only to reproduce
+                    // lua_load's observable reader-call stopping behavior.
+                    _ = try parseRawSourceChunk(source)
+                } catch {
+                    // Lua's parser pulls reader buffers on demand and stops
+                    // without draining the callback after a definitive syntax
+                    // error. A token at the current buffer boundary may still
+                    // need more bytes (for example the official suite's first
+                    // `*` byte needs one-token lookahead), so only return once
+                    // the error can no longer be completed by another piece.
+                    if readerSyntaxErrorNeedsMoreInput(error, source: source) {
+                        continue
+                    }
+                    let diagnostic = syntaxDiagnostic(
+                        for: error,
+                        source: source,
+                        sourceName: chunkName
+                    )
+                    return [.nilValue, errorValue(diagnostic)]
+                }
             }
+            return self.loadChunk(LuaString(bytes: bytes), sourceName: chunkName)
         }
 
         register("loadfile") { [unowned self] arguments in
@@ -648,8 +696,14 @@ extension LuaState {
         }, debugName: "package.seeall")
         package.rawSetValue(.nativeFunction(seeall), forString: "seeall")
 
-        package.rawSetValue(.nativeFunction(LuaNativeFunctionBox({ _ in
-            [.nilValue, .string("dynamic libraries are unavailable on this platform")]
+        package.rawSetValue(.nativeFunction(LuaNativeFunctionBox({ [unowned self] args in
+            _ = try self.requireLuaString(args, 0, "loadlib")
+            _ = try self.requireLuaString(args, 1, "loadlib")
+            return [
+                .nilValue,
+                .string("dynamic libraries not enabled; check your Lua installation"),
+                .string("absent")
+            ]
         }, debugName: "package.loadlib")), forString: "loadlib")
     }
 
@@ -859,9 +913,11 @@ extension LuaState {
             }
             self.dumpSerial &+= 1
             var bytes: [UInt8] = [0x1B] + Array("GModLua51\0".utf8)
+            var nonce = self.dumpRegistryNonce.uuid
+            withUnsafeBytes(of: &nonce) { bytes += $0 }
             withUnsafeBytes(of: self.dumpSerial.littleEndian) { bytes += $0 }
             let key = LuaString(bytes: bytes)
-            self.dumpRegistry[key] = function
+            self.dumpRegistry[key] = LuaDumpedFunction(function)
             return [.string(key)]
         }
 
@@ -869,6 +925,148 @@ extension LuaState {
         let stringMetatable = LuaTable()
         stringMetatable.rawSetValue(.table(string), forString: "__index")
         setPrimitiveMetatable(typeName: "string", table: stringMetatable)
+    }
+
+    private func loadChunk(_ bytes: LuaString, sourceName: String?) -> [LuaValue] {
+        if let dumped = dumpedFunction(matchingPrefixOf: bytes) {
+            let function = dumped.instantiate(
+                environmentTable: currentThreadEnvironmentTable
+            )
+            garbageCollector.adopt(.luaFunction(function))
+            return [.luaFunction(function)]
+        }
+
+        guard let decodedSource = LuaSourceDecoder.decode(Data(bytes.bytes)) else {
+            return [.nilValue, .string("cannot decode Lua source")]
+        }
+        do {
+            let function = try compile(
+                decodedSource,
+                sourceName: sourceName ?? decodedSource
+            )
+            function.environmentTable = currentThreadEnvironmentTable
+            return [.luaFunction(function)]
+        } catch {
+            return [.nilValue, errorValue(error)]
+        }
+    }
+
+    private func dumpedFunction(matchingPrefixOf bytes: LuaString) -> LuaDumpedFunction? {
+        dumpRegistry.first { entry in
+            bytes.count >= entry.key.count && bytes.bytes.starts(with: entry.key.bytes)
+        }?.value
+    }
+
+    private func readerSyntaxErrorNeedsMoreInput(
+        _ error: Error,
+        source: String
+    ) -> Bool {
+        let line: Int
+        let column: Int
+        let message: String
+        let isLexerError: Bool
+        switch error {
+        case let LuaError.lexer(errorLine, errorColumn, errorMessage):
+            line = errorLine
+            column = errorColumn
+            message = errorMessage
+            isLexerError = true
+        case let LuaError.parser(errorLine, errorColumn, errorMessage):
+            line = errorLine
+            column = errorColumn
+            message = errorMessage
+            isLexerError = false
+        default:
+            return false
+        }
+
+        let normalized = source
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\n\r", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let lines = normalized.split(separator: "\n", omittingEmptySubsequences: false)
+        guard line >= 1, line <= lines.count else {
+            return false
+        }
+        let characters = Array(lines[line - 1])
+        let start = max(0, column - 1)
+
+        if isLexerError {
+            // These scanners reached the current buffer boundary while inside
+            // a token. Quoted strings need extra inspection because Lua allows
+            // a backslash-escaped physical line ending inside the token.
+            if message == "unfinished long string/comment" ||
+                message == "unfinished block comment" {
+                return true
+            }
+            if message == "unfinished string" {
+                guard line < lines.count else { return true }
+
+                // The lexer reports the opening quote's line for both cases.
+                // A raw newline is definitive, while a backslash-escaped line
+                // ending is part of a valid quoted string and may be followed
+                // by the closing quote in a later reader piece.
+                for lineIndex in (line - 1)..<(lines.count - 1) {
+                    let lineCharacters = Array(lines[lineIndex])
+                    let relevantCharacters = lineIndex == line - 1
+                        ? Array(lineCharacters.dropFirst(start + 1))
+                        : lineCharacters
+                    let trailingBackslashes = relevantCharacters
+                        .reversed()
+                        .prefix { $0 == "\\" }
+                        .count
+                    if trailingBackslashes.isMultiple(of: 2) {
+                        return false
+                    }
+                }
+                return true
+            }
+
+            guard line == lines.count, start < characters.count else {
+                return false
+            }
+            let remainder = String(characters[start...]).lowercased()
+            switch message {
+            case "malformed number":
+                return remainder.hasSuffix("e") ||
+                    remainder.hasSuffix("e+") ||
+                    remainder.hasSuffix("e-") ||
+                    remainder.hasSuffix("0x")
+            case "expected '&' after '&'":
+                return remainder == "&"
+            case "expected '|' after '|'":
+                return remainder == "|"
+            case "unexpected '~'":
+                return remainder == "~"
+            default:
+                return false
+            }
+        }
+
+        let near = sourceTokenNear(source, line: line, column: column)
+        if near == "<eof>" {
+            return true
+        }
+        guard line == lines.count, start < characters.count else {
+            return false
+        }
+
+        let remainder = String(characters[start...])
+        if near == "[" {
+            if remainder.first == "[" &&
+                remainder.dropFirst().allSatisfy({ $0 == "=" }) {
+                return true
+            }
+        }
+        if near == "." && (remainder == "." || remainder == "..") {
+            return true
+        }
+        if near == "/" && remainder == "/" {
+            return true
+        }
+
+        let tokenEnd = min(characters.count, start + near.count)
+        return tokenEnd == characters.count
     }
 
     // MARK: - Table
@@ -1847,7 +2045,7 @@ extension LuaState {
                 if let precision, value.count > precision { value = Array(value.prefix(precision)) }
                 rendered = padded(value, width: width, leftAligned: leftAligned)
             case 113: // q
-                rendered = Array(quoteLuaString(try luaStringBytes(argument)).utf8)
+                rendered = quoteLuaString(try luaStringBytes(argument))
             case 99: // c
                 let value = [UInt8(truncatingIfNeeded: Int(try numberFromValue(argument)))]
                 rendered = padded(value, width: width, leftAligned: leftAligned)
@@ -1865,20 +2063,17 @@ extension LuaState {
         return LuaString(bytes: output)
     }
 
-    func quoteLuaString(_ value: LuaString) -> String {
-        var result = "\""
+    func quoteLuaString(_ value: LuaString) -> [UInt8] {
+        var result: [UInt8] = [34]
         for byte in value.bytes {
             switch byte {
-            case 34: result += "\\\""
-            case 92: result += "\\\\"
-            case 10: result += "\\n"
-            case 13: result += "\\r"
-            case 0: result += "\\000"
-            case 32...126: result.append(Character(UnicodeScalar(byte)))
-            default: result += String(format: "\\%03d", Int(byte))
+            case 34, 92, 10: result += [92, byte]
+            case 13: result += [92, 114]
+            case 0: result += [92, 48, 48, 48]
+            default: result.append(byte)
             }
         }
-        result += "\""
+        result.append(34)
         return result
     }
 
