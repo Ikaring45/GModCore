@@ -14,7 +14,11 @@ var targets: [Target] = [
         name: "GModGameAssets",
         path: "Sources/GModGameAssets",
         resources: [
-            .copy("Resources")
+            .copy("Resources/ClientContent"),
+            .copy("Resources/Maps"),
+            .copy("Resources/GModClientContentManifest.json"),
+            .copy("Resources/GModGameAssetManifest.json"),
+            .copy("Resources/GModSourceMaterialAllowlist.json")
         ]
     ),
 
