@@ -46,7 +46,7 @@ public struct GMLuaStartupStageRecord: Sendable, Equatable {
     }
 }
 
-public struct GMLuaStartupReport: Equatable {
+public struct GMLuaStartupReport: Sendable, Equatable {
     public let realm: GMLuaRealm
     public let targetGamemode: String
     public let baseReport: GMLuaGamemodeLoadReport

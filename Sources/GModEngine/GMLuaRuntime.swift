@@ -43,6 +43,7 @@ public final class GMLuaRuntime {
     public private(set) var netTransport: GMLuaNetTransport?
     public private(set) var netEndpoint: GMLuaNetEndpoint?
     public private(set) var traceBridge: GMLuaTraceBridge?
+    public private(set) var systemTimeSource: (any GMLuaSystemTimeSource)?
     private let logger: (String) -> Void
     private let fileLoader: ((String) throws -> String)?
     private let virtualFileSystem: LuaVirtualFileSystem?
@@ -75,6 +76,7 @@ public final class GMLuaRuntime {
         networkedGlobalTransport: GMLuaNetworkedGlobalTransport? = nil,
         netTransport: GMLuaNetTransport? = nil,
         traceProvider: (any GMLuaTraceProvider)? = nil,
+        systemTimeSource: any GMLuaSystemTimeSource = GMLuaMonotonicSystemTimeSource.process,
         inputConfiguration: GMLuaInputConfiguration = GMLuaInputConfiguration(),
         languageConfiguration: GMLuaLanguageConfiguration = .empty,
         cursorWarpSink: GMLuaCursorWarpSink? = nil
@@ -93,6 +95,7 @@ public final class GMLuaRuntime {
             networkedGlobalTransport: networkedGlobalTransport,
             netTransport: netTransport,
             traceProvider: traceProvider,
+            systemTimeSource: systemTimeSource,
             inputConfiguration: inputConfiguration,
             languageConfiguration: languageConfiguration,
             cursorWarpSink: cursorWarpSink,
@@ -119,6 +122,7 @@ public final class GMLuaRuntime {
         networkedGlobalTransport: GMLuaNetworkedGlobalTransport? = nil,
         netTransport: GMLuaNetTransport? = nil,
         traceProvider: (any GMLuaTraceProvider)? = nil,
+        systemTimeSource: any GMLuaSystemTimeSource = GMLuaMonotonicSystemTimeSource.process,
         inputConfiguration: GMLuaInputConfiguration = GMLuaInputConfiguration(),
         languageConfiguration: GMLuaLanguageConfiguration = .empty,
         cursorWarpSink: GMLuaCursorWarpSink? = nil,
@@ -144,6 +148,7 @@ public final class GMLuaRuntime {
             networkedGlobalTransport: networkedGlobalTransport,
             netTransport: netTransport,
             traceProvider: traceProvider,
+            systemTimeSource: systemTimeSource,
             inputConfiguration: inputConfiguration,
             languageConfiguration: languageConfiguration,
             cursorWarpSink: cursorWarpSink
@@ -206,6 +211,7 @@ public final class GMLuaRuntime {
         networkedGlobalTransport: GMLuaNetworkedGlobalTransport?,
         netTransport explicitNetTransport: GMLuaNetTransport?,
         traceProvider: (any GMLuaTraceProvider)?,
+        systemTimeSource: any GMLuaSystemTimeSource,
         inputConfiguration: GMLuaInputConfiguration,
         languageConfiguration: GMLuaLanguageConfiguration,
         cursorWarpSink: GMLuaCursorWarpSink?
@@ -221,6 +227,10 @@ public final class GMLuaRuntime {
         state.setGlobal("__gmod_discovery", value: .boolean(bootstrapMode == .discovery))
         GMLuaAnimationEnums.install(into: state)
         GMLuaNPCEnums.install(into: state, realm: realm)
+        self.systemTimeSource = GMLuaSystemTime.install(
+            into: state,
+            source: systemTimeSource
+        )
 
         do {
             // Install only GMod's native type/metatable ABI here. The real

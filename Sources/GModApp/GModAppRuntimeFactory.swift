@@ -1,4 +1,5 @@
 import GModEngine
+import GModGameSession
 
 /// Production construction seam shared by the server console runtime and the
 /// retained client surface runtime. Keeping one measurer here prevents the App
@@ -38,5 +39,20 @@ public final class GModAppRuntimeFactory: @unchecked Sendable {
             initialViewport: initialViewport,
             textMeasurer: textMeasurer
         )
+    }
+
+    public func makePlayableSession(
+        configuration: GModPlayableSessionConfiguration = .init(),
+        logger: @escaping (_ realm: GMLuaRealm, _ message: String) -> Void
+    ) throws -> GModPlayableSession {
+        try GModPlayableSession(
+            configuration: configuration,
+            textMeasurer: textMeasurer,
+            logger: logger
+        )
+    }
+
+    public func makePlayableSessionLane() -> GModPlayableSessionLane {
+        GModPlayableSessionLane(textMeasurer: textMeasurer)
     }
 }

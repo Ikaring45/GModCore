@@ -51,6 +51,16 @@ var targets: [Target] = [
         ]
     ),
 
+    .target(
+        name: "GModGameSession",
+        dependencies: [
+            "GModEngine",
+            "GModGameAssets",
+            "GModLua"
+        ],
+        path: "Sources/GModGameSession"
+    ),
+
     .executableTarget(
         name: "GModLuaConformance",
         dependencies: [
@@ -73,7 +83,8 @@ var targets: [Target] = [
         dependencies: [
             "GModEngine",
             "GModLua",
-            "GModGameAssets"
+            "GModGameAssets",
+            "GModGameSession"
         ],
         path: "Tests/GModEngineTests",
         resources: [
@@ -110,7 +121,8 @@ targets.insert(
                 "GModEngine",
                 "GModLua",
                 "GModMetal",
-                "GModGameAssets"
+                "GModGameAssets",
+                "GModGameSession"
             ],
             path: "Sources/GModApp",
             resources: [

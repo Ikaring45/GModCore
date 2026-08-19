@@ -1,14 +1,32 @@
 import SwiftUI
+import Foundation
 import GModEngine
+import GModGameAssets
 import GModMetal
 
 public struct GModMainView: View {
-    @StateObject private var console = GModConsoleModel()
+    @StateObject private var console: GModConsoleModel
+    @StateObject private var game: GModGameSessionModel
     @State private var stats = "Starting ARM engine..."
     @State private var isRunning = false
     @State private var resultLabel = "READY"
+    @State private var showConsole = false
 
-    public init() {}
+    public init() {
+        let factory = GModAppRuntimeFactory()
+        let consoleModel = GModConsoleModel(runtimeFactory: factory)
+        _console = StateObject(
+            wrappedValue: consoleModel
+        )
+        _game = StateObject(
+            wrappedValue: GModGameSessionModel(
+                runtimeFactory: factory,
+                logSink: { [weak consoleModel] line in
+                    consoleModel?.append(line)
+                }
+            )
+        )
+    }
 
     public var body: some View {
         ZStack {
@@ -16,26 +34,51 @@ public struct GModMainView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 10) {
-                consoleWindow
-                    .frame(minHeight: 360)
-
                 rendererHeader
 
-                GModMetalView(
-                    stats: $stats,
-                    onSimulationTicks: { ticks in
-                        Task { @MainActor in
-                            console.advanceSimulation(ticks: ticks)
+                gameControls
+
+                ZStack(alignment: .bottom) {
+                    GModMetalView(
+                        stats: $stats,
+                        worldScene: game.worldScene,
+                        onFrame: { request in
+                            game.submitFrame(request)
                         }
-                    }
-                )
+                    )
                     .frame(maxWidth: .infinity)
-                    .frame(height: 250)
+                    .frame(maxHeight: .infinity)
                     .background(Color.black)
                     .overlay(
                         Rectangle()
                             .stroke(Color(red: 0.30, green: 0.31, blue: 0.32), lineWidth: 1)
                     )
+
+                    HStack(alignment: .bottom) {
+                        GModTouchJoystick { forward, side in
+                            game.setMovementAxes(
+                                forward: forward,
+                                side: side
+                            )
+                        }
+
+                        Spacer(minLength: 40)
+
+                        GModTouchLookPad { deltaX, deltaY in
+                            game.adjustLook(deltaX: deltaX, deltaY: deltaY)
+                        }
+                    }
+                    .padding(18)
+                    .opacity(game.isReady ? 1 : 0.35)
+                    .allowsHitTesting(game.isReady)
+                }
+                .frame(minHeight: 320)
+
+                if showConsole {
+                    consoleWindow
+                        .frame(height: 310)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
             }
             .padding(14)
         }
@@ -71,7 +114,7 @@ public struct GModMainView: View {
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundColor(Color(white: 0.93))
 
-            Text("Lua 5.1 CORE / SERVER")
+            Text(game.isReady ? "ACTIVE SANDBOX / SERVER" : "Lua 5.1 CORE / SERVER")
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundColor(Color(white: 0.62))
 
@@ -168,11 +211,11 @@ public struct GModMainView: View {
                 .background(Color(white: 0.94))
                 .overlay(Rectangle().stroke(Color(white: 0.34), lineWidth: 1))
                 .onSubmit {
-                    console.submit()
+                    submitConsole()
                 }
 
             Button("Submit") {
-                console.submit()
+                submitConsole()
             }
             .buttonStyle(GModButtonStyle())
         }
@@ -192,6 +235,56 @@ public struct GModMainView: View {
                 .font(.system(size: 9.5, design: .monospaced))
                 .foregroundColor(Color(white: 0.67))
                 .lineLimit(1)
+        }
+        .padding(.horizontal, 4)
+    }
+
+    private var gameControls: some View {
+        HStack(spacing: 8) {
+            Button("gm_construct") {
+                game.start(map: .construct)
+            }
+            .buttonStyle(GModButtonStyle())
+            .disabled(game.isStarting)
+
+            Button("gm_flatgrass") {
+                game.start(map: .flatgrass)
+            }
+            .buttonStyle(GModButtonStyle())
+            .disabled(game.isStarting)
+
+            Text(game.status)
+                .font(.system(size: 9.5, design: .monospaced))
+                .foregroundColor(
+                    game.isReady
+                        ? Color(red: 0.48, green: 0.95, blue: 0.50)
+                        : Color(white: 0.72)
+                )
+                .lineLimit(1)
+
+            Button(showConsole ? "Hide Console" : "Console") {
+                withAnimation(.easeInOut(duration: 0.16)) {
+                    showConsole.toggle()
+                }
+            }
+            .buttonStyle(GModButtonStyle())
+
+            Spacer(minLength: 0)
+
+            Text("tick \(game.fixedTickCount) / net \(game.lastDeliveredMessages)")
+                .font(.system(size: 9.5, design: .monospaced))
+                .foregroundColor(Color(white: 0.66))
+
+            Text(
+                String(
+                    format: "pos %.1f %.1f %.1f",
+                    game.playerOrigin.x,
+                    game.playerOrigin.y,
+                    game.playerOrigin.z
+                )
+            )
+            .font(.system(size: 9.5, design: .monospaced))
+            .foregroundColor(Color(white: 0.66))
         }
         .padding(.horizontal, 4)
     }
@@ -243,6 +336,17 @@ public struct GModMainView: View {
             }
         }
     }
+
+    private func submitConsole() {
+        guard game.isReady else {
+            console.submit()
+            return
+        }
+        guard let submission = console.takeSubmission() else { return }
+        if case let .source(source) = submission {
+            game.executeActiveServer(source)
+        }
+    }
 }
 
 private struct GModButtonStyle: ButtonStyle {
@@ -258,5 +362,90 @@ private struct GModButtonStyle: ButtonStyle {
                     : Color(white: 0.84)
             )
             .overlay(Rectangle().stroke(Color(white: 0.35), lineWidth: 1))
+    }
+}
+
+private struct GModTouchJoystick: View {
+    let onChange: (_ forward: Float, _ side: Float) -> Void
+    @State private var knobOffset = CGSize.zero
+
+    var body: some View {
+        GeometryReader { geometry in
+            let radius = Swift.max(
+                1,
+                Swift.min(geometry.size.width, geometry.size.height) * 0.5 - 18
+            )
+            ZStack {
+                Circle()
+                    .fill(Color.black.opacity(0.34))
+                    .overlay(Circle().stroke(Color.white.opacity(0.55), lineWidth: 1.5))
+                Circle()
+                    .fill(Color.white.opacity(0.62))
+                    .frame(width: 38, height: 38)
+                    .offset(knobOffset)
+            }
+            .contentShape(Circle())
+            .gesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .local)
+                    .onChanged { value in
+                        let center = CGPoint(
+                            x: geometry.size.width * 0.5,
+                            y: geometry.size.height * 0.5
+                        )
+                        var dx = value.location.x - center.x
+                        var dy = value.location.y - center.y
+                        let length = (dx * dx + dy * dy).squareRoot()
+                        if length > radius {
+                            let scale = radius / length
+                            dx *= scale
+                            dy *= scale
+                        }
+                        knobOffset = CGSize(width: dx, height: dy)
+                        onChange(Float(-dy / radius), Float(dx / radius))
+                    }
+                    .onEnded { _ in
+                        knobOffset = .zero
+                        onChange(0, 0)
+                    }
+            )
+        }
+        .frame(width: 122, height: 122)
+        .accessibilityLabel("Movement joystick")
+    }
+}
+
+private struct GModTouchLookPad: View {
+    let onDelta: (_ deltaX: Float, _ deltaY: Float) -> Void
+    @State private var priorTranslation: CGSize?
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 14)
+                .fill(Color.black.opacity(0.24))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14)
+                        .stroke(Color.white.opacity(0.42), lineWidth: 1.5)
+                )
+            Image(systemName: "viewfinder")
+                .font(.system(size: 28, weight: .light))
+                .foregroundColor(Color.white.opacity(0.62))
+        }
+        .frame(width: 150, height: 112)
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { value in
+                    let prior = priorTranslation ?? value.translation
+                    onDelta(
+                        Float(value.translation.width - prior.width),
+                        Float(value.translation.height - prior.height)
+                    )
+                    priorTranslation = value.translation
+                }
+                .onEnded { _ in
+                    priorTranslation = nil
+                }
+        )
+        .accessibilityLabel("Look control")
     }
 }

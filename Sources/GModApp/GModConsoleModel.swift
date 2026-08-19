@@ -4,6 +4,10 @@ import GModEngine
 
 @MainActor
 final class GModConsoleModel: ObservableObject {
+    enum Submission {
+        case clear
+        case source(String)
+    }
     struct Line: Identifiable, Equatable {
         enum Kind {
             case normal
@@ -40,8 +44,7 @@ final class GModConsoleModel: ObservableObject {
         )
     }()
 
-    init() {
-        let factory = GModAppRuntimeFactory()
+    init(runtimeFactory factory: GModAppRuntimeFactory = GModAppRuntimeFactory()) {
         runtimeFactory = factory
         clientSurfaceRuntime = factory.makeRuntime(
             realm: .client,
@@ -122,28 +125,31 @@ final class GModConsoleModel: ObservableObject {
     }
 
     func submit() {
-        let raw = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !raw.isEmpty else { return }
-        input = ""
-        appendCommand(raw)
-
-        if raw.caseInsensitiveCompare("clear") == .orderedSame {
-            clear()
-            return
-        }
-
-        let source: String
-        if raw.hasPrefix("lua_run ") {
-            source = String(raw.dropFirst("lua_run ".count))
-        } else {
-            source = raw
-        }
+        guard let submission = takeSubmission() else { return }
+        guard case let .source(source) = submission else { return }
 
         do {
             try runtime.execute(source, sourceName: "=Console")
         } catch {
             append("[ERROR] \(error)")
         }
+    }
+
+    func takeSubmission() -> Submission? {
+        let raw = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return nil }
+        input = ""
+        appendCommand(raw)
+
+        if raw.caseInsensitiveCompare("clear") == .orderedSame {
+            clear()
+            return .clear
+        }
+
+        if raw.hasPrefix("lua_run ") {
+            return .source(String(raw.dropFirst("lua_run ".count)))
+        }
+        return .source(raw)
     }
 
     func advanceSimulation(ticks: Int) {
