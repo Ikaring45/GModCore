@@ -258,12 +258,17 @@ struct SourceFileSystemTests {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: parent) }
 
-        // Case-insensitive hosts cannot create the adversarial sibling. The
-        // exact-prefix behavior is exercised on case-sensitive CI/hosts.
+        // Case-insensitive or restricted hosts may reject this operation (or
+        // report success without materializing a second directory entry). The
+        // exact-prefix behavior is exercised only when both spellings exist.
         try? FileManager.default.createDirectory(
             at: caseDistinctSibling,
             withIntermediateDirectories: false
         )
+        let siblingNames = try FileManager.default.contentsOfDirectory(atPath: parent.path)
+        guard siblingNames.contains("Content"), siblingNames.contains("content") else {
+            return
+        }
         try Data("outside".utf8).write(
             to: caseDistinctSibling.appendingPathComponent("secret.txt")
         )
