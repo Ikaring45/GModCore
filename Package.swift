@@ -108,13 +108,28 @@ targets.insert(
             name: "GModApp",
             dependencies: [
                 "GModEngine",
+                "GModLua",
                 "GModMetal",
                 "GModGameAssets"
             ],
             path: "Sources/GModApp",
             resources: [
                 .process("Resources")
+            ],
+            linkerSettings: [
+                .linkedFramework("CoreGraphics"),
+                .linkedFramework("CoreText")
             ]
+        ),
+
+        .testTarget(
+            name: "GModAppTests",
+            dependencies: [
+                "GModApp",
+                "GModEngine",
+                "GModLua"
+            ],
+            path: "Tests/GModAppTests"
         )
     ],
     at: 2

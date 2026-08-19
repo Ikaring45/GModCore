@@ -68,6 +68,7 @@ public final class GMLuaRuntime {
         virtualFileSystem: LuaVirtualFileSystem? = nil,
         bootstrapMode: GMLuaBootstrapMode = .strict,
         initialViewport: GMLuaViewportSize = .logicalDesktopDefault,
+        textMeasurer: (any GMLuaTextMeasurer)? = nil,
         gameEnvironmentConfiguration: GMLuaGameEnvironmentConfiguration? = nil,
         engineConfiguration: GMLuaEngineConfiguration? = nil,
         engineConVarCatalog: GMLuaEngineConVarCatalog? = nil,
@@ -85,6 +86,7 @@ public final class GMLuaRuntime {
             virtualFileSystem: virtualFileSystem,
             bootstrapMode: bootstrapMode,
             initialViewport: initialViewport,
+            textMeasurer: textMeasurer,
             gameEnvironmentConfiguration: gameEnvironmentConfiguration,
             engineConfiguration: engineConfiguration,
             engineConVarCatalog: engineConVarCatalog,
@@ -110,6 +112,7 @@ public final class GMLuaRuntime {
         virtualFileSystem: LuaVirtualFileSystem? = nil,
         bootstrapMode: GMLuaBootstrapMode = .strict,
         initialViewport: GMLuaViewportSize = .logicalDesktopDefault,
+        textMeasurer: (any GMLuaTextMeasurer)? = nil,
         gameEnvironmentConfiguration: GMLuaGameEnvironmentConfiguration? = nil,
         engineConfiguration: GMLuaEngineConfiguration? = nil,
         engineConVarCatalog: GMLuaEngineConVarCatalog? = nil,
@@ -134,6 +137,7 @@ public final class GMLuaRuntime {
         installGLuaBootstrapSurface(
             typeSystemInstaller: typeSystemInstaller,
             initialViewport: initialViewport,
+            textMeasurer: textMeasurer,
             gameEnvironmentConfiguration: gameEnvironmentConfiguration,
             engineConfiguration: engineConfiguration,
             engineConVarCatalog: engineConVarCatalog,
@@ -195,6 +199,7 @@ public final class GMLuaRuntime {
     private func installGLuaBootstrapSurface(
         typeSystemInstaller: TypeSystemInstaller,
         initialViewport: GMLuaViewportSize,
+        textMeasurer: (any GMLuaTextMeasurer)?,
         gameEnvironmentConfiguration: GMLuaGameEnvironmentConfiguration?,
         engineConfiguration: GMLuaEngineConfiguration?,
         engineConVarCatalog explicitEngineConVarCatalog: GMLuaEngineConVarCatalog?,
@@ -327,7 +332,10 @@ public final class GMLuaRuntime {
                     initialViewport: initialViewport
                 )
                 screenMetrics = installedScreenMetrics
-                let installedSurfaceCommandState = try GMLuaSurface.install(into: state)
+                let installedSurfaceCommandState = try GMLuaSurface.install(
+                    into: state,
+                    textMeasurer: textMeasurer ?? GMLuaLogicalTextMeasurer()
+                )
                 surfaceCommandState = installedSurfaceCommandState
                 let installedVGUIRegistry = try GMLuaVGUI.install(
                     into: state,

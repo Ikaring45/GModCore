@@ -126,6 +126,38 @@ public struct GMLuaLogicalTextMeasurer: GMLuaTextMeasurer {
     }
 }
 
+/// Converts Source's `FontData.size` contract (font tall in pixels) to and
+/// from platform text metrics. Apple text APIs consume point sizes, whose
+/// ascent/descent/leading total is not generally equal to that point size.
+public enum GMLuaSourceFontTallMetrics {
+    public static func scaledPointSize(
+        unscaledPointSize: Double,
+        unscaledLineHeight: Double,
+        requestedTall: Int
+    ) -> Double {
+        let tall = Double(max(1, requestedTall))
+        guard unscaledPointSize.isFinite,
+              unscaledPointSize > 0,
+              unscaledLineHeight.isFinite,
+              unscaledLineHeight > 0 else {
+            return tall
+        }
+        let scaled = unscaledPointSize * tall / unscaledLineHeight
+        return scaled.isFinite && scaled > 0 ? scaled : tall
+    }
+
+    public static func exactTextHeight(
+        lineCount: Int,
+        requestedTall: Int
+    ) -> Int {
+        let normalizedLineCount = max(1, lineCount)
+        let normalizedTall = max(1, requestedTall)
+        let (height, overflow) = normalizedLineCount
+            .multipliedReportingOverflow(by: normalizedTall)
+        return overflow ? Int.max : height
+    }
+}
+
 /// State retained by the client/menu portion of GLua's `surface` API.
 ///
 /// Texture IDs and fonts are logical descriptors only. Resolving VMT/VTF

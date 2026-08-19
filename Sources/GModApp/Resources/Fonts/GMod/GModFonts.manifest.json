@@ -1,0 +1,375 @@
+{
+  "formatVersion": 1,
+  "scope": "Project-authorized copies of font files shipped in the base Garry's Mod install.",
+  "exclusions": [
+    "garrysmod/cache",
+    "garrysmod/cache/workshop",
+    "garrysmod/addons",
+    "all non-font game assets"
+  ],
+  "sourceAliasCount": 30,
+  "bundledFileCount": 28,
+  "bundledByteCount": 3336964,
+  "entries": [
+    {
+      "sourceAlias": "sourceengine/resource/boxrocket.ttf",
+      "bundleFile": "boxrocket.ttf",
+      "byteCount": 55464,
+      "sha256": "83110e5dba6b8cade754dd577d29e918937669a35fb316111634aa0c60347403",
+      "fontNames": {
+        "family": "BoxRocket",
+        "subfamily": "Regular",
+        "full": "BoxRocket",
+        "postScript": "BoxRocket"
+      }
+    },
+    {
+      "sourceAlias": "sourceengine/resource/hl2crosshairs.ttf",
+      "bundleFile": "hl2crosshairs.ttf",
+      "byteCount": 4000,
+      "sha256": "752a4357752d4d48e0780265de380ea876c3e51b20de968bdc848fc71eb5a635",
+      "fontNames": {
+        "family": "HL2cross",
+        "subfamily": "Regular",
+        "full": "HL2cross",
+        "postScript": "HL2cross"
+      }
+    },
+    {
+      "sourceAlias": "sourceengine/resource/halflife2.ttf",
+      "bundleFile": "halflife2.ttf",
+      "byteCount": 92796,
+      "sha256": "c09544b387a15cfbc8d43765716ee69f89bbb6f0bb6d95409ec98282daac07e8",
+      "fontNames": {
+        "family": "HalfLife2",
+        "subfamily": "Regular",
+        "full": "HalfLife2",
+        "postScript": "HalfLife2"
+      }
+    },
+    {
+      "sourceAlias": "sourceengine/resource/hl2ep2.ttf",
+      "bundleFile": "hl2ep2.ttf",
+      "byteCount": 5032,
+      "sha256": "01cb485a68c33bd055ec31b1f5e272f0a3ba33eba5cfdc527f6083de33656816",
+      "fontNames": {
+        "family": "HL2EP2",
+        "subfamily": "HL2EP2",
+        "full": "HL2EP2",
+        "postScript": "HL2EP2"
+      }
+    },
+    {
+      "sourceAlias": "sourceengine/resource/marlett.ttf",
+      "bundleFile": "marlett.ttf",
+      "byteCount": 6136,
+      "sha256": "3b6192eca4451835f4d634b0b6b0841da321ec65c1f3f1aa22d186da45787b9c",
+      "fontNames": {
+        "family": "Marlett",
+        "subfamily": "Regular",
+        "full": "Marlett",
+        "postScript": "marlett"
+      }
+    },
+    {
+      "sourceAlias": "garrysmod/resource/HL2MP.ttf",
+      "bundleFile": "HL2MP.ttf",
+      "byteCount": 16148,
+      "sha256": "30c6e21a96127c1470403274cf76ec31994fbaacf3788e99938450eb0819cc97",
+      "fontNames": {
+        "family": "HL2MP",
+        "subfamily": "Regular",
+        "full": "HL2MP",
+        "postScript": "HL2MP"
+      }
+    },
+    {
+      "sourceAlias": "garrysmod/resource/HL2crosshairs.ttf",
+      "bundleFile": "hl2crosshairs.ttf",
+      "byteCount": 4000,
+      "sha256": "752a4357752d4d48e0780265de380ea876c3e51b20de968bdc848fc71eb5a635",
+      "fontNames": {
+        "family": "HL2cross",
+        "subfamily": "Regular",
+        "full": "HL2cross",
+        "postScript": "HL2cross"
+      }
+    },
+    {
+      "sourceAlias": "garrysmod/resource/HALFLIFE2.ttf",
+      "bundleFile": "halflife2.ttf",
+      "byteCount": 92796,
+      "sha256": "c09544b387a15cfbc8d43765716ee69f89bbb6f0bb6d95409ec98282daac07e8",
+      "fontNames": {
+        "family": "HalfLife2",
+        "subfamily": "Regular",
+        "full": "HalfLife2",
+        "postScript": "HalfLife2"
+      }
+    },
+    {
+      "sourceAlias": "garrysmod/resource/fonts/Roboto-ThinItalic.ttf",
+      "bundleFile": "Roboto-ThinItalic.ttf",
+      "byteCount": 125884,
+      "sha256": "55031ef14f6c49947255ab6e0ef7112938cb1ecb903f85553ddc7842422a5841",
+      "fontNames": {
+        "family": "Roboto Th",
+        "subfamily": "Italic",
+        "full": "Roboto Thin Italic",
+        "postScript": "Roboto-ThinItalic"
+      }
+    },
+    {
+      "sourceAlias": "garrysmod/resource/fonts/Roboto-Thin.ttf",
+      "bundleFile": "Roboto-Thin.ttf",
+      "byteCount": 122512,
+      "sha256": "2843669daf030733f6b7c541a98ebbff5ce5c2d8cbae423bd8d278a36e169399",
+      "fontNames": {
+        "family": "Roboto Th",
+        "subfamily": "Regular",
+        "full": "Roboto Thin",
+        "postScript": "Roboto-Thin"
+      }
+    },
+    {
+      "sourceAlias": "garrysmod/resource/fonts/Roboto-Regular.ttf",
+      "bundleFile": "Roboto-Regular.ttf",
+      "byteCount": 158604,
+      "sha256": "16466ef65064e6f3885a6d2806b8949ac1ac38b524dd0cf8fc96565eb4cc28e8",
+      "fontNames": {
+        "family": "Roboto",
+        "subfamily": "Regular",
+        "full": "Roboto Regular",
+        "postScript": "Roboto-Regular"
+      }
+    },
+    {
+      "sourceAlias": "garrysmod/resource/fonts/Roboto-MediumItalic.ttf",
+      "bundleFile": "Roboto-MediumItalic.ttf",
+      "byteCount": 163940,
+      "sha256": "27f4345bc02f3cdec1522bfeae70aced6bdf217d40878108cfe2baa535d04fa4",
+      "fontNames": {
+        "family": "Roboto Lt",
+        "subfamily": "Bold Italic",
+        "full": "Roboto Medium Italic",
+        "postScript": "Roboto-MediumItalic"
+      }
+    },
+    {
+      "sourceAlias": "garrysmod/resource/fonts/Roboto-Medium.ttf",
+      "bundleFile": "Roboto-Medium.ttf",
+      "byteCount": 160696,
+      "sha256": "02868d6a7e80d4e7836b6263dd50d26a63e923a1223c9e027aad6dc2501c27cc",
+      "fontNames": {
+        "family": "Roboto Lt",
+        "subfamily": "Regular",
+        "full": "Roboto Medium",
+        "postScript": "Roboto-Medium"
+      }
+    },
+    {
+      "sourceAlias": "garrysmod/resource/fonts/Roboto-LightItalic.ttf",
+      "bundleFile": "Roboto-LightItalic.ttf",
+      "byteCount": 163248,
+      "sha256": "709ab3c8feaa5640b3a14493e1c2d27509df5aa5d14b8b86bd431ab60ac53a69",
+      "fontNames": {
+        "family": "Roboto Lt",
+        "subfamily": "Italic",
+        "full": "Roboto Light Italic",
+        "postScript": "Roboto-LightItalic"
+      }
+    },
+    {
+      "sourceAlias": "garrysmod/resource/fonts/Roboto-Light.ttf",
+      "bundleFile": "Roboto-Light.ttf",
+      "byteCount": 162636,
+      "sha256": "94df4e4976db8ddaec27f8e8c33eef912e744fb200ca09051794b38e5a502fc0",
+      "fontNames": {
+        "family": "Roboto Lt",
+        "subfamily": "Regular",
+        "full": "Roboto Light",
+        "postScript": "Roboto-Light"
+      }
+    },
+    {
+      "sourceAlias": "garrysmod/resource/fonts/Roboto-Italic.ttf",
+      "bundleFile": "Roboto-Italic.ttf",
+      "byteCount": 160736,
+      "sha256": "470123c6fb5d6c0005431c0f5390742497c55087361a7636b7e82eb35635ded7",
+      "fontNames": {
+        "family": "Roboto",
+        "subfamily": "Italic",
+        "full": "Roboto Italic",
+        "postScript": "Roboto-Italic"
+      }
+    },
+    {
+      "sourceAlias": "garrysmod/resource/fonts/Roboto-CondensedItalic.ttf",
+      "bundleFile": "Roboto-CondensedItalic.ttf",
+      "byteCount": 161792,
+      "sha256": "c2d5ec131c1a767138d09f77383b4bf68051c02164dd83e4b6c58feb25c473ed",
+      "fontNames": {
+        "family": "Roboto Cn",
+        "subfamily": "Italic",
+        "full": "Roboto Condensed Italic",
+        "postScript": "Roboto-CondensedItalic"
+      }
+    },
+    {
+      "sourceAlias": "garrysmod/resource/fonts/Roboto-Condensed.ttf",
+      "bundleFile": "Roboto-Condensed.ttf",
+      "byteCount": 158284,
+      "sha256": "2efe5301b93d1e4aa90fed89f766a88be1b80be64873f853c1b6e089cab19fea",
+      "fontNames": {
+        "family": "Roboto Cn",
+        "subfamily": "Regular",
+        "full": "Roboto Condensed",
+        "postScript": "Roboto-Condensed"
+      }
+    },
+    {
+      "sourceAlias": "garrysmod/resource/fonts/Roboto-BoldItalic.ttf",
+      "bundleFile": "Roboto-BoldItalic.ttf",
+      "byteCount": 165864,
+      "sha256": "165a6d02fd8973703787feeef5319b7fd8cb3f665a3c1e702ef0ca49701547c9",
+      "fontNames": {
+        "family": "Roboto",
+        "subfamily": "Bold Italic",
+        "full": "Roboto Bold Italic",
+        "postScript": "Roboto-BoldItalic"
+      }
+    },
+    {
+      "sourceAlias": "garrysmod/resource/fonts/Roboto-BoldCondensedItalic.ttf",
+      "bundleFile": "Roboto-BoldCondensedItalic.ttf",
+      "byteCount": 163584,
+      "sha256": "1117eab9f490123cf8a656fa936a4c9a7e4918b88ae576d64d3d79507096f7b9",
+      "fontNames": {
+        "family": "Roboto Cn",
+        "subfamily": "Bold Italic",
+        "full": "Roboto Bold Condensed Italic",
+        "postScript": "Roboto-BoldCondensedItalic"
+      }
+    },
+    {
+      "sourceAlias": "garrysmod/resource/fonts/Roboto-BoldCondensed.ttf",
+      "bundleFile": "Roboto-BoldCondensed.ttf",
+      "byteCount": 161308,
+      "sha256": "2c9245c0246a9c745793c7eaa9cc1fc964a12570009031ea0223115bec6e9426",
+      "fontNames": {
+        "family": "Roboto Cn",
+        "subfamily": "Bold",
+        "full": "Roboto Bold Condensed",
+        "postScript": "Roboto-BoldCondensed"
+      }
+    },
+    {
+      "sourceAlias": "garrysmod/resource/fonts/Roboto-Bold.ttf",
+      "bundleFile": "Roboto-Bold.ttf",
+      "byteCount": 163448,
+      "sha256": "24571503140760240924dcd1238f77e7cd0454c0d8b0793990cefa2fad71471f",
+      "fontNames": {
+        "family": "Roboto",
+        "subfamily": "Bold",
+        "full": "Roboto Bold",
+        "postScript": "Roboto-Bold"
+      }
+    },
+    {
+      "sourceAlias": "garrysmod/resource/fonts/Roboto-BlackItalic.ttf",
+      "bundleFile": "Roboto-BlackItalic.ttf",
+      "byteCount": 166320,
+      "sha256": "5e7928c14bbddea37ec9ba2453f00bd8f4d73c42c20528e42abc5b89d2732db1",
+      "fontNames": {
+        "family": "Roboto Bk",
+        "subfamily": "Bold Italic",
+        "full": "Roboto Black Italic",
+        "postScript": "Roboto-BlackItalic"
+      }
+    },
+    {
+      "sourceAlias": "garrysmod/resource/fonts/Roboto-Black.ttf",
+      "bundleFile": "Roboto-Black.ttf",
+      "byteCount": 164936,
+      "sha256": "c78ce438e9d91ea8c16341aaf2c6cf07f9c347eb1130bd922796ad4fb78fe885",
+      "fontNames": {
+        "family": "Roboto Bk",
+        "subfamily": "Bold",
+        "full": "Roboto Black",
+        "postScript": "Roboto-Black"
+      }
+    },
+    {
+      "sourceAlias": "garrysmod/resource/fonts/PTMono-Regular.ttf",
+      "bundleFile": "PTMono-Regular.ttf",
+      "byteCount": 169480,
+      "sha256": "51b98478119b183da968d15ed172f9d0ce491e1f89f0d62b1aa230bac35dcb46",
+      "fontNames": {
+        "family": "PT Mono",
+        "subfamily": "Regular",
+        "full": "PT Mono",
+        "postScript": "PTMono-Regular"
+      }
+    },
+    {
+      "sourceAlias": "garrysmod/resource/fonts/cstrike.ttf",
+      "bundleFile": "cstrike.ttf",
+      "byteCount": 129332,
+      "sha256": "1ff5eaa2ec551f84b2e9040397e4debcd9ffd60e486cf05095777e24ccaa2bbe",
+      "fontNames": {
+        "family": "Counter-Strike",
+        "subfamily": "Regular",
+        "full": "Counter-Strike",
+        "postScript": "Counter-Strike"
+      }
+    },
+    {
+      "sourceAlias": "garrysmod/resource/fonts/csd.ttf",
+      "bundleFile": "csd.ttf",
+      "byteCount": 44188,
+      "sha256": "891d3622cae4e89f2be7485d1f8d391e8f8e418ca55720e3a5643c39bd7b7a0f",
+      "fontNames": {
+        "family": "csd",
+        "subfamily": "Regular",
+        "full": "csd",
+        "postScript": "csd"
+      }
+    },
+    {
+      "sourceAlias": "garrysmod/resource/fonts/cs.ttf",
+      "bundleFile": "cs.ttf",
+      "byteCount": 115464,
+      "sha256": "b926723a1e14c891354f1a536b9be2c8b33510441b2ccb72d1a5a78a40125816",
+      "fontNames": {
+        "family": "cs",
+        "subfamily": "Regular",
+        "full": "cs",
+        "postScript": "cs"
+      }
+    },
+    {
+      "sourceAlias": "garrysmod/resource/fonts/coolvetica.ttf",
+      "bundleFile": "coolvetica.ttf",
+      "byteCount": 42264,
+      "sha256": "3bc32081bddfd57b892752f3e92fa01ca99a144b0ca5d57f1e3fa16c7d34f7a0",
+      "fontNames": {
+        "family": "Coolvetica",
+        "subfamily": "Regular",
+        "full": "Coolvetica",
+        "postScript": "Coolvetica"
+      }
+    },
+    {
+      "sourceAlias": "garrysmod/resource/fonts/akbar.ttf",
+      "bundleFile": "akbar.ttf",
+      "byteCount": 132868,
+      "sha256": "3c01621d9d2486d32a1dc3f97b9992f6a97bf3bc1f6cfe4c573ece0d2b26254c",
+      "fontNames": {
+        "family": "Akbar",
+        "subfamily": "Plain",
+        "full": "Akbar",
+        "postScript": "AkbarPlain"
+      }
+    }
+  ]
+}

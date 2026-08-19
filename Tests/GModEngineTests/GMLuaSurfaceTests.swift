@@ -151,6 +151,104 @@ final class GMLuaSurfaceTests: XCTestCase {
         XCTAssertEqual(commands.textMeasurementFidelity, .platformGlyphMetrics)
     }
 
+    func testSourceFontTallMetricScalingIsPlatformIndependentAndExactPerLine() {
+        XCTAssertEqual(
+            GMLuaSourceFontTallMetrics.scaledPointSize(
+                unscaledPointSize: 13,
+                unscaledLineHeight: 15.6,
+                requestedTall: 13
+            ),
+            10.833_333_333_333_334,
+            accuracy: 0.000_000_000_001
+        )
+        XCTAssertEqual(
+            GMLuaSourceFontTallMetrics.scaledPointSize(
+                unscaledPointSize: .nan,
+                unscaledLineHeight: 0,
+                requestedTall: 20
+            ),
+            20
+        )
+        XCTAssertEqual(
+            GMLuaSourceFontTallMetrics.exactTextHeight(
+                lineCount: 0,
+                requestedTall: 13
+            ),
+            13
+        )
+        XCTAssertEqual(
+            GMLuaSourceFontTallMetrics.exactTextHeight(
+                lineCount: 2,
+                requestedTall: 13
+            ),
+            26
+        )
+        XCTAssertEqual(
+            GMLuaSourceFontTallMetrics.exactTextHeight(
+                lineCount: 2,
+                requestedTall: 20
+            ),
+            40
+        )
+    }
+
+    func testRuntimeForwardsInjectedTextMeasurerToSurfaceAndVGUI() throws {
+        struct RuntimeProbeMeasurer: GMLuaTextMeasurer {
+            let fidelity = GMLuaTextMeasurementFidelity.platformGlyphMetrics
+
+            func measure(
+                _ text: LuaString,
+                using font: GMLuaFontDescriptor
+            ) -> GMLuaTextMeasurement {
+                GMLuaTextMeasurement(
+                    width: text.count * 10 + font.size,
+                    height: font.size + 3
+                )
+            }
+        }
+
+        let runtime = GMLuaRuntime(
+            realm: .client,
+            logger: { _ in },
+            textMeasurer: RuntimeProbeMeasurer()
+        )
+        try runtime.execute(
+            """
+            surface.CreateFont("RuntimeProbe", { size = 20 })
+            surface.SetFont("RuntimeProbe")
+            RUNTIME_SURFACE_W, RUNTIME_SURFACE_H = surface.GetTextSize("abc")
+
+            local label = assert(vgui.Create("Label"))
+            label:SetFontInternal("RuntimeProbe")
+            label:SetText("abcd")
+            RUNTIME_LABEL_W, RUNTIME_LABEL_H = label:GetContentSize()
+            """,
+            sourceName: "@GMLuaRuntimeInjectedTextMeasurer.lua"
+        )
+        let values = try runtime.executeReturningValues(
+            """
+            return RUNTIME_SURFACE_W, RUNTIME_SURFACE_H,
+                   RUNTIME_LABEL_W, RUNTIME_LABEL_H
+            """,
+            sourceName: "@GMLuaRuntimeInjectedTextMeasurerResults.lua"
+        )
+        guard values.count == 4,
+              case let .number(surfaceWidth) = values[0],
+              case let .number(surfaceHeight) = values[1],
+              case let .number(labelWidth) = values[2],
+              case let .number(labelHeight) = values[3] else {
+            return XCTFail("runtime probe metrics were not numeric")
+        }
+        XCTAssertEqual(surfaceWidth, 50)
+        XCTAssertEqual(surfaceHeight, 23)
+        XCTAssertEqual(labelWidth, 60)
+        XCTAssertEqual(labelHeight, 23)
+        XCTAssertEqual(
+            try XCTUnwrap(runtime.surfaceCommandState).textMeasurementFidelity,
+            .platformGlyphMetrics
+        )
+    }
+
     func testRuntimeInstallsSurfaceOnlyInClientCapableRealms() throws {
         for realm in [GMLuaRealm.client, .menu] {
             let runtime = GMLuaRuntime(

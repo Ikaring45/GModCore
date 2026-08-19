@@ -25,9 +25,12 @@ final class GModConsoleModel: ObservableObject {
     ]
     @Published var input = ""
     @Published var removeContaining = ""
+    @Published private(set) var fontRegistrationReport: GModBundledFontRegistrationReport?
 
+    private let runtimeFactory: GModAppRuntimeFactory
+    private let clientSurfaceRuntime: GMLuaRuntime
     private lazy var runtime: GMLuaRuntime = {
-        GMLuaRuntime(
+        runtimeFactory.makeRuntime(
             realm: .server,
             logger: { [weak self] message in
                 Task { @MainActor in
@@ -36,6 +39,50 @@ final class GModConsoleModel: ObservableObject {
             }
         )
     }()
+
+    init() {
+        let factory = GModAppRuntimeFactory()
+        runtimeFactory = factory
+        clientSurfaceRuntime = factory.makeRuntime(
+            realm: .client,
+            logger: { _ in }
+        )
+        fontRegistrationReport = factory.fontRegistrationReport
+
+        if let report = factory.fontRegistrationReport {
+            let summary = "[FONT] bundled=\(report.bundledFileCount) " +
+                "registered=\(report.registeredFileCount) " +
+                "already=\(report.alreadyRegisteredFileCount) " +
+                "failed=\(report.failures.count)"
+            lines.append(
+                Line(
+                    text: summary,
+                    kind: report.succeeded ? .success : .warning
+                )
+            )
+            for failure in report.failures {
+                lines.append(
+                    Line(
+                        text: "[FONT][WARN] \(failure.bundleFile): \(failure.message)",
+                        kind: .warning
+                    )
+                )
+            }
+        }
+        if let fidelity = clientSurfaceRuntime.surfaceCommandState?
+            .textMeasurementFidelity {
+            lines.append(
+                Line(
+                    text: "[FONT] CLIENT surface measurement=\(fidelity.rawValue)",
+                    kind: .info
+                )
+            )
+        }
+    }
+
+    var clientSurfaceMeasurementFidelity: GMLuaTextMeasurementFidelity? {
+        clientSurfaceRuntime.surfaceCommandState?.textMeasurementFidelity
+    }
 
     var visibleLines: [Line] {
         let filter = removeContaining.trimmingCharacters(in: .whitespacesAndNewlines)
