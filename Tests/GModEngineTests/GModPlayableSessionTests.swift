@@ -1,9 +1,131 @@
 import XCTest
 import GModEngine
 import GModGameAssets
-import GModGameSession
+@testable import GModGameSession
+
+private struct UnsupportedContentsPlayableWalkProvider:
+    SourceWorldWalkCollisionProvider
+{
+    let contents: SourceContents
+
+    func traceWorldWalk(
+        _ ray: SourceRay,
+        mask _: SourceContents
+    ) throws -> SourceGameTrace {
+        SourceGameTrace(ray: ray)
+    }
+
+    func worldWalkPointContents(
+        at _: SourceVector3,
+        mask _: SourceContents
+    ) throws -> SourceContents {
+        contents
+    }
+}
 
 final class GModPlayableSessionTests: XCTestCase {
+    func testWaterAndLadderRejectMovementButAdvanceBothRealmClocks() throws {
+        let cases: [(SourceContents, SourceWorldWalkUnsupportedFeature)] = [
+            (.water, .water),
+            (.ladder, .ladder),
+        ]
+
+        for (contents, feature) in cases {
+            let session = try GModPlayableSession(
+                configuration: GModPlayableSessionConfiguration(
+                    map: .construct
+                ),
+                textMeasurer: nil,
+                logger: { _, _ in },
+                worldWalkCollisionProvider:
+                    UnsupportedContentsPlayableWalkProvider(
+                        contents: contents
+                    )
+            )
+            let stateBeforeTick = session.playerWalkState
+            let serverTimeBefore = try XCTUnwrap(
+                session.serverRuntime.timerScheduler
+            ).currentTime
+            let clientTimeBefore = try XCTUnwrap(
+                session.clientRuntime.timerScheduler
+            ).currentTime
+
+            let report = try session.runFixedTick(
+                movementInput: GModPlayableMovementInput(
+                    forwardMove: 200,
+                    buttons: [.forward]
+                )
+            )
+
+            guard case let .rejected(rejection) = report.movement else {
+                _ = try? session.close()
+                return XCTFail("\(feature) was reported as a successful move")
+            }
+            XCTAssertEqual(rejection.commandNumber, 1)
+            XCTAssertEqual(rejection.reason, .feature(feature))
+            XCTAssertEqual(rejection.preservedState, stateBeforeTick)
+            XCTAssertEqual(report.movement.state, stateBeforeTick)
+            XCTAssertEqual(session.playerWalkState, stateBeforeTick)
+            XCTAssertEqual(report.server.kind, .serverFixedTick)
+            XCTAssertEqual(report.client.kind, .clientFixedTick)
+            XCTAssertEqual(session.sourceAdapter.serverGlobals.tickCount, 1)
+            let oneTick = Double(SourceGlobalVars.intervalPerTick)
+            XCTAssertEqual(
+                try XCTUnwrap(session.serverRuntime.timerScheduler).currentTime,
+                serverTimeBefore + oneTick
+            )
+            XCTAssertEqual(
+                try XCTUnwrap(session.clientRuntime.timerScheduler).currentTime,
+                clientTimeBefore + oneTick
+            )
+            XCTAssertFalse(session.isClosed)
+            _ = try session.close()
+        }
+    }
+
+    func testNonFiniteMovementRemainsFatalAfterRecoverableRejection() throws {
+        let session = try GModPlayableSession(
+            configuration: GModPlayableSessionConfiguration(map: .construct),
+            textMeasurer: nil,
+            logger: { _, _ in },
+            worldWalkCollisionProvider:
+                UnsupportedContentsPlayableWalkProvider(contents: .water)
+        )
+        defer { _ = try? session.close() }
+
+        let preservedState = session.playerWalkState
+        let rejected = try session.runFixedTick()
+        XCTAssertEqual(
+            rejected.movement.rejection?.reason,
+            .feature(.water)
+        )
+        let serverTimeAfterRejection = try XCTUnwrap(
+            session.serverRuntime.timerScheduler
+        ).currentTime
+        let clientTimeAfterRejection = try XCTUnwrap(
+            session.clientRuntime.timerScheduler
+        ).currentTime
+
+        XCTAssertThrowsError(try session.runFixedTick(
+            movementInput: GModPlayableMovementInput(forwardMove: .nan)
+        )) { error in
+            XCTAssertEqual(
+                error as? SourceWorldWalkError,
+                .nonFinite("command forwardMove")
+            )
+        }
+        XCTAssertEqual(session.playerWalkState, preservedState)
+        XCTAssertEqual(session.sourceAdapter.serverGlobals.tickCount, 1)
+        XCTAssertEqual(
+            try XCTUnwrap(session.serverRuntime.timerScheduler).currentTime,
+            serverTimeAfterRejection
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(session.clientRuntime.timerScheduler).currentTime,
+            clientTimeAfterRejection
+        )
+    }
+
     func testConstructStartsPairedSandboxAndRunsMapTraceViewportAndTicks() throws {
         let session = try GModPlayableSession(
             configuration: GModPlayableSessionConfiguration(

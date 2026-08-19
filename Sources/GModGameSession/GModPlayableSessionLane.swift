@@ -83,6 +83,12 @@ public struct GModPlayableHostFrameReport: Sendable, Equatable {
     public var actionFailures: [GMLuaForwardedConsoleCommandFailure] {
         fixedTicks.flatMap(\.actionFailures)
     }
+
+    /// Unsupported movement capabilities rejected without claiming a
+    /// successful walk step. Invariant failures still throw from the lane.
+    public var movementRejections: [GModPlayableMovementRejection] {
+        fixedTicks.compactMap { $0.movement.rejection }
+    }
 }
 
 public enum GModPlayableSessionLaneError: Error, Sendable, Equatable,
@@ -118,6 +124,8 @@ public enum GModPlayableSessionLaneError: Error, Sendable, Equatable,
 /// runtime, userdata, BSP provider, or transport endpoint crosses the actor.
 public actor GModPlayableSessionLane {
     private let textMeasurer: (any GMLuaTextMeasurer)?
+    private let worldWalkCollisionProvider:
+        (any SourceWorldWalkCollisionProvider)?
     private var session: GModPlayableSession?
     private var generation: UInt64 = 0
     private var pointerEpoch: UInt64 = 0
@@ -127,6 +135,18 @@ public actor GModPlayableSessionLane {
 
     public init(textMeasurer: (any GMLuaTextMeasurer)? = nil) {
         self.textMeasurer = textMeasurer
+        worldWalkCollisionProvider = nil
+    }
+
+    /// Internal deterministic seam; the app-facing initializer always uses
+    /// collision from the selected bundled BSP.
+    init(
+        textMeasurer: (any GMLuaTextMeasurer)? = nil,
+        worldWalkCollisionProvider:
+            any SourceWorldWalkCollisionProvider
+    ) {
+        self.textMeasurer = textMeasurer
+        self.worldWalkCollisionProvider = worldWalkCollisionProvider
     }
 
     @discardableResult
@@ -149,7 +169,8 @@ public actor GModPlayableSessionLane {
         let replacement = try GModPlayableSession(
             configuration: configuration,
             textMeasurer: textMeasurer,
-            logger: logger
+            logger: logger,
+            worldWalkCollisionProvider: worldWalkCollisionProvider
         )
         session = replacement
         return GModPlayableSessionSnapshot(

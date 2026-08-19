@@ -49,8 +49,45 @@ public struct GModPlayableSessionStartupReport: Sendable, Equatable {
     public let deliveredMessages: Int
 }
 
+public struct GModPlayableMovementRejection: Equatable, Sendable {
+    public let commandNumber: Int32
+    public let reason: SourceWorldWalkUnsupportedReason
+    public let preservedState: SourceWorldWalkState
+
+    public init(
+        commandNumber: Int32,
+        reason: SourceWorldWalkUnsupportedReason,
+        preservedState: SourceWorldWalkState
+    ) {
+        self.commandNumber = commandNumber
+        self.reason = reason
+        self.preservedState = preservedState
+    }
+}
+
+/// An honest, value-semantic movement result. A rejected command is not
+/// represented as a zero-distance successful `SourceWorldWalkTick`.
+public enum GModPlayableMovementResult: Equatable, Sendable {
+    case advanced(SourceWorldWalkTick)
+    case rejected(GModPlayableMovementRejection)
+
+    public var state: SourceWorldWalkState {
+        switch self {
+        case let .advanced(tick):
+            return tick.state
+        case let .rejected(rejection):
+            return rejection.preservedState
+        }
+    }
+
+    public var rejection: GModPlayableMovementRejection? {
+        guard case let .rejected(rejection) = self else { return nil }
+        return rejection
+    }
+}
+
 public struct GModPlayableFixedTickReport: Equatable, Sendable {
-    public let movement: SourceWorldWalkTick
+    public let movement: GModPlayableMovementResult
     public let server: GMLuaSourceRuntimeRunReport
     public let client: GMLuaSourceRuntimeRunReport
     public let deliveredMessages: Int
@@ -149,13 +186,33 @@ public final class GModPlayableSession {
     private var nextCommandNumber: Int32 = 1
     private var closedStorage = false
 
-    public init(
+    public convenience init(
         configuration: GModPlayableSessionConfiguration = .init(),
         textMeasurer: (any GMLuaTextMeasurer)? = nil,
         logger: @escaping @Sendable (
             _ realm: GMLuaRealm,
             _ message: String
         ) -> Void = { _, _ in }
+    ) throws {
+        try self.init(
+            configuration: configuration,
+            textMeasurer: textMeasurer,
+            logger: logger,
+            worldWalkCollisionProvider: nil
+        )
+    }
+
+    /// Internal construction seam for deterministic host-boundary tests. The
+    /// shipped app always uses the bundled BSP provider selected below.
+    init(
+        configuration: GModPlayableSessionConfiguration,
+        textMeasurer: (any GMLuaTextMeasurer)?,
+        logger: @escaping @Sendable (
+            _ realm: GMLuaRealm,
+            _ message: String
+        ) -> Void,
+        worldWalkCollisionProvider:
+            (any SourceWorldWalkCollisionProvider)?
     ) throws {
         let trimmedGamemode = configuration.gamemodeName
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -301,9 +358,8 @@ public final class GModPlayableSession {
             worldIdentity = sourceWorldIdentity
             spawnPoint = loadedSpawn
             worldWalkSolver = SourceWorldWalkSolver(
-                collisionProvider: SourceBSPWorldWalkCollisionProvider(
-                    bsp: loadedBSP
-                )
+                collisionProvider: worldWalkCollisionProvider ??
+                    SourceBSPWorldWalkCollisionProvider(bsp: loadedBSP)
             )
             playerWalkState = SourceWorldWalkState(
                 origin: loadedSpawn.origin,
@@ -357,18 +413,33 @@ public final class GModPlayableSession {
     ) throws -> GModPlayableFixedTickReport {
         try ensureOpen()
         let commandNumber = nextCommandNumber
-        let movement = try worldWalkSolver.simulate(
-            state: playerWalkState,
-            command: SourceUserCommand(
-                commandNumber: commandNumber,
-                tickCount: commandNumber,
-                viewAngles: movementInput.viewAngles ?? playerWalkState.viewAngles,
-                forwardMove: movementInput.forwardMove,
-                sideMove: movementInput.sideMove,
-                buttons: movementInput.buttons
-            )
+        let stateBeforeMovement = playerWalkState
+        let command = SourceUserCommand(
+            commandNumber: commandNumber,
+            tickCount: commandNumber,
+            viewAngles: movementInput.viewAngles ?? stateBeforeMovement.viewAngles,
+            forwardMove: movementInput.forwardMove,
+            sideMove: movementInput.sideMove,
+            buttons: movementInput.buttons
         )
-        playerWalkState = movement.state
+        let movement: GModPlayableMovementResult
+        do {
+            let tick = try worldWalkSolver.simulate(
+                state: stateBeforeMovement,
+                command: command
+            )
+            playerWalkState = tick.state
+            movement = .advanced(tick)
+        } catch let error as SourceWorldWalkError {
+            guard let reason = error.recoverableUnsupportedReason else {
+                throw error
+            }
+            movement = .rejected(GModPlayableMovementRejection(
+                commandNumber: commandNumber,
+                reason: reason,
+                preservedState: stateBeforeMovement
+            ))
+        }
         nextCommandNumber &+= 1
         try updateCurrentPlayerInputButtons(movementInput.buttons)
         let serverReport = try sourceAdapter.runServerFixedTick()

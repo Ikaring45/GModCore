@@ -3,6 +3,25 @@ import XCTest
 import GModEngine
 
 final class GModGameSessionModelSupportTests: XCTestCase {
+    func testUnsupportedMovementDiagnosticNeverClaimsSuccess() {
+        let water = GModGameMovementDiagnostic(
+            commandNumber: 12,
+            reason: .feature(.water)
+        )
+        XCTAssertTrue(water.status.contains("Movement blocked"))
+        XCTAssertTrue(water.status.contains("water"))
+        XCTAssertTrue(water.status.contains("state preserved"))
+        XCTAssertTrue(water.logMessage.contains("command 12 rejected"))
+        XCTAssertFalse(water.status.localizedCaseInsensitiveContains("success"))
+
+        let dynamic = GModGameMovementDiagnostic(
+            commandNumber: 13,
+            reason: .dynamicEntityCollision(entityIndex: 7)
+        )
+        XCTAssertTrue(dynamic.status.contains("index 7"))
+        XCTAssertTrue(dynamic.logMessage.contains("rejected"))
+    }
+
     func testPointerMappingUsesLogicalPointsAndViewportOnly() throws {
         let mapped = try XCTUnwrap(GModGamePointerCoordinateMapper.map(
             x: 405,

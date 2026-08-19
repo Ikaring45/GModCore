@@ -2,7 +2,89 @@ import XCTest
 @testable import GModEngine
 @testable import GModGameSession
 
+private struct UnsupportedContentsLaneWalkProvider:
+    SourceWorldWalkCollisionProvider
+{
+    let contents: SourceContents
+
+    func traceWorldWalk(
+        _ ray: SourceRay,
+        mask _: SourceContents
+    ) throws -> SourceGameTrace {
+        SourceGameTrace(ray: ray)
+    }
+
+    func worldWalkPointContents(
+        at _: SourceVector3,
+        mask _: SourceContents
+    ) throws -> SourceContents {
+        contents
+    }
+}
+
 final class GModPlayableSessionLaneTests: XCTestCase {
+    func testUnsupportedMovementIsReportedWhileLaneAndRealmTimeContinue() async throws {
+        let lane = GModPlayableSessionLane(
+            worldWalkCollisionProvider:
+                UnsupportedContentsLaneWalkProvider(contents: .ladder)
+        )
+        let snapshot = try await lane.start(
+            configuration: GModPlayableSessionConfiguration(map: .construct)
+        )
+
+        let first = try await lane.runHostFrame(
+            fixedTickCount: 2,
+            renderClientFrame: true,
+            movementInput: GModPlayableMovementInput(
+                forwardMove: 200,
+                buttons: [.forward]
+            ),
+            expectedGeneration: snapshot.generation,
+            expectedInputEpoch: snapshot.inputEpoch
+        )
+        XCTAssertEqual(first.fixedTicks.count, 2)
+        XCTAssertEqual(first.movementRejections.map(\.commandNumber), [1, 2])
+        XCTAssertTrue(first.movementRejections.allSatisfy {
+            $0.reason == .feature(.ladder) &&
+                $0.preservedState == snapshot.playerWalkState
+        })
+        XCTAssertTrue(first.fixedTicks.allSatisfy {
+            if case .rejected = $0.movement { return true }
+            return false
+        })
+        XCTAssertEqual(first.playerWalkState, snapshot.playerWalkState)
+        XCTAssertEqual(first.clientFrame?.kind, .clientFrame)
+        try await lane.execute(
+            "assert(math.abs(CurTime() - 0.03) < 0.000001)",
+            expectedGeneration: snapshot.generation
+        )
+        try await lane.execute(
+            "assert(math.abs(CurTime() - 0.03) < 0.000001)",
+            realm: .client,
+            expectedGeneration: snapshot.generation
+        )
+
+        let later = try await lane.runHostFrame(
+            fixedTickCount: 1,
+            renderClientFrame: true,
+            expectedGeneration: snapshot.generation,
+            expectedInputEpoch: snapshot.inputEpoch
+        )
+        XCTAssertEqual(later.movementRejections.map(\.commandNumber), [3])
+        XCTAssertEqual(later.playerWalkState, snapshot.playerWalkState)
+        XCTAssertEqual(later.clientFrame?.kind, .clientFrame)
+        try await lane.execute(
+            "assert(math.abs(CurTime() - 0.045) < 0.000001)",
+            expectedGeneration: snapshot.generation
+        )
+        try await lane.execute(
+            "assert(math.abs(CurTime() - 0.045) < 0.000001)",
+            realm: .client,
+            expectedGeneration: snapshot.generation
+        )
+        _ = try await lane.close()
+    }
+
     func testSpawnActionFailureIsAValueInHostFrameAndLaneRemainsUsable() async throws {
         let lane = GModPlayableSessionLane()
         let snapshot = try await lane.start(

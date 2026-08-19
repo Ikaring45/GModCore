@@ -17,6 +17,23 @@ private struct GModSurfaceBuildResult: Sendable {
     let failure: String?
 }
 
+struct GModGameMovementDiagnostic: Equatable, Sendable {
+    let status: String
+    let logMessage: String
+
+    init(
+        commandNumber: Int32,
+        reason: SourceWorldWalkUnsupportedReason
+    ) {
+        status =
+            "Movement blocked at command \(commandNumber): \(reason); " +
+            "state preserved"
+        logMessage =
+            "[GAME][MOVEMENT] command \(commandNumber) rejected: " +
+            "\(reason); state preserved"
+    }
+}
+
 /// Lock-protected one-slot mailbox between MTKView's render callback and the
 /// serialized game actor. Slow Lua frames coalesce rather than creating an
 /// unbounded queue of MainActor tasks.
@@ -183,6 +200,7 @@ final class GModGameSessionModel: ObservableObject {
     @Published private(set) var lastDeliveredMessages = 0
     @Published private(set) var recentLogs: [String] = []
     @Published private(set) var playerOrigin = SourceVector3.zero
+    @Published private(set) var movementStatus = "Movement idle"
     @Published private(set) var viewAngles = SourceQAngle.zero
     @Published private(set) var worldScene: GModMetalWorldScene?
     @Published private(set) var surfaceScene: GModMetalSurfaceScene?
@@ -216,6 +234,8 @@ final class GModGameSessionModel: ObservableObject {
     private var inputSuspensionInFlight = false
     private var lastSurfaceFailure: String?
     private var lastPointerFailure: String?
+    private var lastMovementRejectionReason:
+        SourceWorldWalkUnsupportedReason?
 
     init(
         runtimeFactory: GModAppRuntimeFactory,
@@ -249,8 +269,10 @@ final class GModGameSessionModel: ObservableObject {
         pointerStatus = "VGUI pointer idle"
         pointerQueueDropCount = 0
         pointerMoveCoalescedCount = 0
+        movementStatus = "Movement loading…"
         lastSurfaceFailure = nil
         lastPointerFailure = nil
+        lastMovementRejectionReason = nil
         sessionGeneration &+= 1
         let requestedGeneration = sessionGeneration
         laneGeneration = nil
@@ -284,6 +306,7 @@ final class GModGameSessionModel: ObservableObject {
                 fixedTickCount = 0
                 lastDeliveredMessages = snapshot.startup.deliveredMessages
                 playerOrigin = snapshot.playerWalkState.origin
+                movementStatus = "Movement ready"
                 viewAngles = snapshot.playerWalkState.viewAngles
                 forwardAxis = 0
                 sideAxis = 0
@@ -306,6 +329,7 @@ final class GModGameSessionModel: ObservableObject {
                 guard requestedGeneration == sessionGeneration else { return }
                 activeMap = nil
                 isReady = false
+                movementStatus = "Movement unavailable"
                 status = "START FAILED: \(GMLuaRuntime.describe(error))"
                 appendLog(status)
             }
@@ -565,6 +589,7 @@ final class GModGameSessionModel: ObservableObject {
             fixedTickCount &+= UInt64(report.fixedTicks.count)
             lastDeliveredMessages = report.deliveredMessages
             playerOrigin = report.playerWalkState.origin
+            reportMovementResults(report.fixedTicks)
             publishCameraScene()
             for tick in report.fixedTicks {
                 reportFailures(tick.server)
@@ -760,6 +785,33 @@ final class GModGameSessionModel: ObservableObject {
         }
     }
 
+    /// Keeps an unsupported movement capability visible without turning the
+    /// successfully advanced SERVER/CLIENT host frame into an app failure.
+    func reportMovementResults(_ reports: [GModPlayableFixedTickReport]) {
+        guard let last = reports.last else { return }
+        for rejection in reports.compactMap({ $0.movement.rejection }) {
+            let diagnostic = GModGameMovementDiagnostic(
+                commandNumber: rejection.commandNumber,
+                reason: rejection.reason
+            )
+            if rejection.reason != lastMovementRejectionReason {
+                appendLog(diagnostic.logMessage)
+            }
+            lastMovementRejectionReason = rejection.reason
+        }
+
+        switch last.movement {
+        case .advanced:
+            movementStatus = "Movement active"
+            lastMovementRejectionReason = nil
+        case let .rejected(rejection):
+            movementStatus = GModGameMovementDiagnostic(
+                commandNumber: rejection.commandNumber,
+                reason: rejection.reason
+            ).status
+        }
+    }
+
     private func failRuntime(_ error: Error) {
         isReady = false
         invalidateSurfaceRequests()
@@ -773,6 +825,8 @@ final class GModGameSessionModel: ObservableObject {
         isSpawnMenuOpen = false
         isSpawnMenuTransitioning = false
         lastPointerFailure = nil
+        lastMovementRejectionReason = nil
+        movementStatus = "Movement stopped"
         status = "RUNTIME FAILED: \(GMLuaRuntime.describe(error))"
         appendLog(status)
     }

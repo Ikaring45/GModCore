@@ -92,6 +92,33 @@ private struct FractionZeroGroundProvider: SourceWorldWalkCollisionProvider {
 final class SourceWorldWalkTests: XCTestCase {
     private let worldHandle = SourceBaseHandle(entryIndex: 0, serialNumber: 0)
 
+    func testRecoverableClassificationIncludesOnlyExplicitUnsupportedErrors() {
+        for feature in SourceWorldWalkUnsupportedFeature.allCases {
+            XCTAssertEqual(
+                SourceWorldWalkError.unsupported(feature)
+                    .recoverableUnsupportedReason,
+                .feature(feature)
+            )
+        }
+        XCTAssertEqual(
+            SourceWorldWalkError.unsupportedDynamicEntity(7)
+                .recoverableUnsupportedReason,
+            .dynamicEntityCollision(entityIndex: 7)
+        )
+
+        let fatalErrors: [SourceWorldWalkError] = [
+            .nonFinite("velocity.x"),
+            .invalidConfiguration("frameTime"),
+            .embeddedInWorld(allSolid: false),
+            .embeddedInWorld(allSolid: true),
+            .hitMissingWorldIdentity,
+            .inconsistentTrace("HitPos"),
+        ]
+        for error in fatalErrors {
+            XCTAssertNil(error.recoverableUnsupportedReason)
+        }
+    }
+
     func testStandingHullGroundWalkUsesExistingFloatEquationsAndSnapsToFloor() throws {
         let solver = makeSolver(world: floorWorld(), maximumSpeed: 200)
         let initial = SourceWorldWalkState(

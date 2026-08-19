@@ -349,9 +349,18 @@ public struct GModMainView: View {
 
             Spacer(minLength: 0)
 
-            Text("tick \(game.fixedTickCount) / net \(game.lastDeliveredMessages)")
-                .font(.system(size: 9.5, design: .monospaced))
-                .foregroundColor(Color(white: 0.66))
+            VStack(alignment: .trailing, spacing: 1) {
+                Text("tick \(game.fixedTickCount) / net \(game.lastDeliveredMessages)")
+                Text(game.movementStatus)
+                    .foregroundColor(
+                        game.movementStatus.hasPrefix("Movement blocked")
+                            ? Color(red: 1.0, green: 0.72, blue: 0.24)
+                            : Color(white: 0.66)
+                    )
+            }
+            .font(.system(size: 9.5, design: .monospaced))
+            .foregroundColor(Color(white: 0.66))
+            .lineLimit(1)
 
             Text(
                 String(

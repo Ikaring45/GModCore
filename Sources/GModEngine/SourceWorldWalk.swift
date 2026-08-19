@@ -65,7 +65,28 @@ public enum SourceWorldWalkUnsupportedFeature: String, CaseIterable, Equatable, 
     case nonWalkMoveType
 }
 
-public enum SourceWorldWalkError: Error, Equatable, CustomStringConvertible {
+/// Value-only classification for capability misses that a host may reject
+/// transactionally while continuing the surrounding SERVER/CLIENT clock.
+/// It deliberately excludes malformed state, configuration, and trace errors.
+public enum SourceWorldWalkUnsupportedReason: Equatable, Sendable {
+    case feature(SourceWorldWalkUnsupportedFeature)
+    case dynamicEntityCollision(entityIndex: Int)
+}
+
+extension SourceWorldWalkUnsupportedReason: CustomStringConvertible {
+    public var description: String {
+        switch self {
+        case let .feature(feature):
+            return "unsupported Source world-walk feature \(feature.rawValue)"
+        case let .dynamicEntityCollision(entityIndex):
+            return "unsupported Source dynamic-entity collision at index \(entityIndex)"
+        }
+    }
+}
+
+public enum SourceWorldWalkError: Error, Equatable, Sendable,
+    CustomStringConvertible
+{
     case unsupported(SourceWorldWalkUnsupportedFeature)
     case unsupportedDynamicEntity(Int)
     case nonFinite(String)
@@ -73,6 +94,21 @@ public enum SourceWorldWalkError: Error, Equatable, CustomStringConvertible {
     case embeddedInWorld(allSolid: Bool)
     case hitMissingWorldIdentity
     case inconsistentTrace(String)
+
+    /// The complete, explicit subset that a playable host can represent as a
+    /// non-fatal movement rejection. Every other error remains an invariant
+    /// failure and must escape the host boundary.
+    public var recoverableUnsupportedReason: SourceWorldWalkUnsupportedReason? {
+        switch self {
+        case let .unsupported(feature):
+            return .feature(feature)
+        case let .unsupportedDynamicEntity(index):
+            return .dynamicEntityCollision(entityIndex: index)
+        case .nonFinite, .invalidConfiguration, .embeddedInWorld,
+             .hitMissingWorldIdentity, .inconsistentTrace:
+            return nil
+        }
+    }
 
     public var description: String {
         switch self {
