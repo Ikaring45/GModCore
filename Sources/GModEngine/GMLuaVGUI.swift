@@ -20,6 +20,20 @@ public struct GMLuaPanelColorSnapshot: Equatable, Sendable {
     }
 }
 
+/// Value-only copy of `Panel:SetExpensiveShadow` state for Label controls.
+/// A distance of zero retains the supplied color but disables shadow drawing;
+/// that disable meaning is inferred from the stock DCategoryHeader closed-state
+/// call site rather than from a separately documented getter contract.
+public struct GMLuaTextShadowSnapshot: Equatable, Sendable {
+    public let distance: Double
+    public let color: GMLuaPanelColorSnapshot
+
+    public init(distance: Double, color: GMLuaPanelColorSnapshot) {
+        self.distance = distance
+        self.color = color
+    }
+}
+
 /// Inspectable logical state for an engine text panel.
 ///
 /// This is not a renderer object. Font names are kept independently from the
@@ -32,6 +46,10 @@ public struct GMLuaTextPanelStateSnapshot: Equatable, Sendable {
     public let fontName: LuaString
     public let foregroundColor: GMLuaPanelColorSnapshot?
     public let contentAlignment: Int
+    public let allowsNonASCIICharacters: Bool
+    public let textInsetX: Int
+    public let textInsetY: Int
+    public let expensiveShadow: GMLuaTextShadowSnapshot?
 
     public init(
         panelIdentifier: Int,
@@ -40,7 +58,11 @@ public struct GMLuaTextPanelStateSnapshot: Equatable, Sendable {
         text: LuaString,
         fontName: LuaString,
         foregroundColor: GMLuaPanelColorSnapshot?,
-        contentAlignment: Int
+        contentAlignment: Int,
+        allowsNonASCIICharacters: Bool,
+        textInsetX: Int = 0,
+        textInsetY: Int = 0,
+        expensiveShadow: GMLuaTextShadowSnapshot? = nil
     ) {
         self.panelIdentifier = panelIdentifier
         self.engineClassName = engineClassName
@@ -49,6 +71,10 @@ public struct GMLuaTextPanelStateSnapshot: Equatable, Sendable {
         self.fontName = fontName
         self.foregroundColor = foregroundColor
         self.contentAlignment = contentAlignment
+        self.allowsNonASCIICharacters = allowsNonASCIICharacters
+        self.textInsetX = textInsetX
+        self.textInsetY = textInsetY
+        self.expensiveShadow = expensiveShadow
     }
 }
 
@@ -108,6 +134,12 @@ public struct GMLuaPanelRenderSnapshot: Equatable, Sendable {
     public let alpha: Double
     public let mouseInputEnabled: Bool
     public let keyboardInputEnabled: Bool
+    /// Raw `Panel:IsPopup` state. Popup tier ordering is applied by the
+    /// registry before this value-only snapshot is emitted.
+    public let isPopup: Bool
+    /// Whether this panel permits the host to pass the same pointer through
+    /// to the world. This value alone never synthesizes a world attack.
+    public let worldClicker: Bool
     public let cursorName: String
     public let drawOnTop: Bool
     public let drawOnTopOrder: UInt64?
@@ -115,6 +147,9 @@ public struct GMLuaPanelRenderSnapshot: Equatable, Sendable {
     public let fontName: LuaString
     public let foregroundColor: GMLuaPanelColorSnapshot?
     public let contentAlignment: Int
+    public let textInsetX: Int
+    public let textInsetY: Int
+    public let expensiveShadow: GMLuaTextShadowSnapshot?
     public let imageName: LuaString?
 }
 
@@ -128,6 +163,11 @@ public enum GMLuaPointerPhase: Sendable, Equatable {
 
 public struct GMLuaPointerDispatchResult: Sendable, Equatable {
     public let hitPanelIdentifier: Int?
+    /// Effective WorldClicker state from the hit panel through its ancestor
+    /// chain. Hosts can use it with `hitPanelIdentifier` to decide pass-through;
+    /// dispatch itself does not create a world command or attack. Panel render
+    /// snapshots and `Panel:IsWorldClicker` continue to expose raw local state.
+    public let worldClicker: Bool
     public let callbackNames: [String]
     public let clicked: Bool
     public let doubleClicked: Bool
@@ -147,13 +187,17 @@ private final class GMLuaPanelValue: @unchecked Sendable {
     var height = 0.0
     var alpha = 255.0
     var isVisible = true
+    var isEnabled = true
     var mouseInputEnabled = true
     var keyboardInputEnabled = true
+    var isPopup = false
+    var isWorldClicker = false
     var cursorName = "none"
     var drawOnTopOrder: UInt64?
     var paintBackgroundEnabled = true
     var paintBorderEnabled = true
     var zPosition = 0.0
+    var siblingOrder: Int
     var isLayoutInvalidated = false
     var isPerformingLayout = false
     var text = LuaString(bytes: [])
@@ -162,6 +206,8 @@ private final class GMLuaPanelValue: @unchecked Sendable {
     var textInsetY = 0
     var foregroundColor: GMLuaPanelColorSnapshot?
     var contentAlignment = 5
+    var allowsNonASCIICharacters = false
+    var expensiveShadow: GMLuaTextShadowSnapshot?
     var dock = GMLuaPanelDock.none
     var dockMargin = (left: 0.0, top: 0.0, right: 0.0, bottom: 0.0)
     var dockPadding = (left: 0.0, top: 0.0, right: 0.0, bottom: 0.0)
@@ -180,7 +226,24 @@ private final class GMLuaPanelValue: @unchecked Sendable {
         self.requestedClassName = requestedClassName
         self.name = name
         self.parentIdentifier = parentIdentifier
+        siblingOrder = identifier
     }
+}
+
+/// One ordering contract shared by drawing, hit testing and docking.
+/// `SetDrawOnTop` remains a separate paint-only final pass.
+private func panelComesBefore(
+    _ first: GMLuaPanelValue,
+    _ second: GMLuaPanelValue
+) -> Bool {
+    if first.isPopup != second.isPopup { return !first.isPopup }
+    if first.zPosition != second.zPosition {
+        return first.zPosition < second.zPosition
+    }
+    if first.siblingOrder != second.siblingOrder {
+        return first.siblingOrder < second.siblingOrder
+    }
+    return first.identifier < second.identifier
 }
 
 /// State-local registry for native Panel identity and the Lua VGUI factory.
@@ -210,6 +273,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     private var textBridgeAttached = false
     private var hoveredPanelIdentifier: Int?
     private var pressedPanelIdentifier: Int?
+    private var mouseCapturePanelIdentifier: Int?
     private var focusedPanelIdentifier: Int?
     private var latestDrawOnTopOrder: UInt64 = 0
 
@@ -320,7 +384,11 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
                 text: descriptor.text,
                 fontName: descriptor.fontName,
                 foregroundColor: descriptor.foregroundColor,
-                contentAlignment: descriptor.contentAlignment
+                contentAlignment: descriptor.contentAlignment,
+                allowsNonASCIICharacters: descriptor.allowsNonASCIICharacters,
+                textInsetX: descriptor.textInsetX,
+                textInsetY: descriptor.textInsetY,
+                expensiveShadow: descriptor.expensiveShadow
             )
         }
     }
@@ -372,8 +440,176 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         descriptor.drawOnTopOrder = latestDrawOnTopOrder
     }
 
+    fileprivate func moveToStackEdge(identifier: Int, front: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let value = panels[identifier],
+              let target = panelDescriptor(from: value),
+              GMLuaTypeSystem.typedObject(from: value)?.isValid == true else {
+            return
+        }
+        moveToStackEdgeLocked(target, front: front)
+    }
+
+    fileprivate func makePopup(identifier: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let value = panels[identifier],
+              let panel = panelDescriptor(from: value),
+              GMLuaTypeSystem.typedObject(from: value)?.isValid == true else {
+            return
+        }
+        panel.mouseInputEnabled = true
+        panel.keyboardInputEnabled = true
+        panel.isPopup = true
+        moveToStackEdgeLocked(panel, front: true)
+        focusedPanelIdentifier = identifier
+    }
+
+    /// Moves within one parent and one popup tier. The target adopts the
+    /// tier's boundary ZPos, then siblingOrder breaks that boundary tie. This
+    /// preserves `GetZPos`, paint order and dock order as one coherent state.
+    private func moveToStackEdgeLocked(
+        _ target: GMLuaPanelValue,
+        front: Bool
+    ) {
+        let peers = panels.values.compactMap { value -> GMLuaPanelValue? in
+            guard let panel = panelDescriptor(from: value),
+                  panel.parentIdentifier == target.parentIdentifier,
+                  panel.isPopup == target.isPopup,
+                  GMLuaTypeSystem.typedObject(from: value)?.isValid == true else {
+                return nil
+            }
+            return panel
+        }
+        guard peers.count > 1 else { return }
+
+        let orderedPeers = peers.sorted(by: panelComesBefore)
+        let remaining = orderedPeers.filter { $0.identifier != target.identifier }
+        guard let boundary = front
+                ? remaining.map(\.zPosition).max()
+                : remaining.map(\.zPosition).min() else {
+            return
+        }
+        target.zPosition = boundary
+        let reordered = front ? remaining + [target] : [target] + remaining
+        for (order, panel) in reordered.enumerated() {
+            panel.siblingOrder = order
+        }
+    }
+
+    /// Resolves the native dock graph without executing Lua. Top-level panels
+    /// dock against VGUI's implicit world panel, represented here by the live
+    /// viewport rather than by a fabricated Lua parent.
+    private func resolveNativeDocking(viewportWidth: Int, viewportHeight: Int) {
+        guard viewportWidth > 0, viewportHeight > 0 else { return }
+        lock.lock()
+        defer { lock.unlock() }
+
+        let live = panels.compactMap { (identifier, value) -> (Int, GMLuaPanelValue)? in
+            guard let descriptor = panelDescriptor(from: value),
+                  GMLuaTypeSystem.typedObject(from: value)?.isValid == true else { return nil }
+            return (identifier, descriptor)
+        }
+        applyNativeDockingLocked(
+            descriptors: Dictionary(uniqueKeysWithValues: live),
+            viewport: GMLuaPanelRect(
+                x: 0,
+                y: 0,
+                width: Double(viewportWidth),
+                height: Double(viewportHeight)
+            )
+        )
+    }
+
+    /// Must be called while `lock` is held. Hidden panels do not consume dock
+    /// space, while alpha-zero panels do, matching the child docking contract.
+    private func applyNativeDockingLocked(
+        descriptors: [Int: GMLuaPanelValue],
+        viewport: GMLuaPanelRect
+    ) {
+        func childrenForDocking(of parent: Int?) -> [GMLuaPanelValue] {
+            descriptors.values
+                .filter { $0.parentIdentifier == parent && $0.isVisible }
+                .sorted(by: panelComesBefore)
+        }
+
+        func dock(_ panel: GMLuaPanelValue, into available: inout GMLuaPanelRect) {
+            let margin = panel.dockMargin
+            switch panel.dock {
+            case .none:
+                break
+            case .top:
+                panel.x = available.x + margin.left
+                panel.y = available.y + margin.top
+                panel.width = max(0, available.width - margin.left - margin.right)
+                available = GMLuaPanelRect(
+                    x: available.x,
+                    y: panel.y + panel.height + margin.bottom,
+                    width: available.width,
+                    height: max(0, available.height - panel.height - margin.top - margin.bottom)
+                )
+            case .bottom:
+                panel.x = available.x + margin.left
+                panel.y = available.y + available.height - panel.height - margin.bottom
+                panel.width = max(0, available.width - margin.left - margin.right)
+                available = GMLuaPanelRect(
+                    x: available.x,
+                    y: available.y,
+                    width: available.width,
+                    height: max(0, available.height - panel.height - margin.top - margin.bottom)
+                )
+            case .left:
+                panel.x = available.x + margin.left
+                panel.y = available.y + margin.top
+                panel.height = max(0, available.height - margin.top - margin.bottom)
+                available = GMLuaPanelRect(
+                    x: panel.x + panel.width + margin.right,
+                    y: available.y,
+                    width: max(0, available.width - panel.width - margin.left - margin.right),
+                    height: available.height
+                )
+            case .right:
+                panel.x = available.x + available.width - panel.width - margin.right
+                panel.y = available.y + margin.top
+                panel.height = max(0, available.height - margin.top - margin.bottom)
+                available = GMLuaPanelRect(
+                    x: available.x,
+                    y: available.y,
+                    width: max(0, available.width - panel.width - margin.left - margin.right),
+                    height: available.height
+                )
+            case .fill:
+                panel.x = available.x + margin.left
+                panel.y = available.y + margin.top
+                panel.width = max(0, available.width - margin.left - margin.right)
+                panel.height = max(0, available.height - margin.top - margin.bottom)
+            }
+        }
+
+        func applyChildDocking(to parent: GMLuaPanelValue) {
+            var available = GMLuaPanelRect(
+                x: parent.dockPadding.left,
+                y: parent.dockPadding.top,
+                width: max(0, parent.width - parent.dockPadding.left - parent.dockPadding.right),
+                height: max(0, parent.height - parent.dockPadding.top - parent.dockPadding.bottom)
+            )
+            for child in childrenForDocking(of: parent.identifier) {
+                dock(child, into: &available)
+                applyChildDocking(to: child)
+            }
+        }
+
+        var worldPanelAvailable = viewport
+        for root in childrenForDocking(of: nil) {
+            dock(root, into: &worldPanelAvailable)
+            applyChildDocking(to: root)
+        }
+    }
+
     /// Applies native docking and returns a stable back-to-front draw tree.
-    /// Coordinates are physical drawable pixels, matching ScrW/ScrH.
+    /// Coordinates are logical host points, matching the ScrW/ScrH values
+    /// supplied by the app independently from Retina drawable scale.
     public func renderTree(viewportWidth: Int, viewportHeight: Int) -> [GMLuaPanelRenderSnapshot] {
         renderTree(
             viewportWidth: viewportWidth,
@@ -398,97 +634,19 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         }
         let descriptors = Dictionary(uniqueKeysWithValues: live)
 
-        func childrenForDrawing(of parent: Int?) -> [GMLuaPanelValue] {
-            descriptors.values
-                .filter { $0.parentIdentifier == parent && $0.isVisible && $0.alpha > 0 }
-                .sorted {
-                    if $0.zPosition != $1.zPosition { return $0.zPosition < $1.zPosition }
-                    return $0.identifier < $1.identifier
-                }
-        }
-
-        // Source/VGUI uses ZPos for both paint and dock order. Alpha is only a
-        // paint multiplier: a fully transparent docked panel still consumes
-        // layout space until it is hidden or removed.
-        func childrenForDocking(of parent: Int?) -> [GMLuaPanelValue] {
-            descriptors.values
-                .filter { $0.parentIdentifier == parent && $0.isVisible }
-                .sorted {
-                    if $0.zPosition != $1.zPosition { return $0.zPosition < $1.zPosition }
-                    return $0.identifier < $1.identifier
-                }
-        }
-
-        func applyDocking(to parent: GMLuaPanelValue) {
-            var available = GMLuaPanelRect(
-                x: parent.dockPadding.left,
-                y: parent.dockPadding.top,
-                width: max(0, parent.width - parent.dockPadding.left - parent.dockPadding.right),
-                height: max(0, parent.height - parent.dockPadding.top - parent.dockPadding.bottom)
-            )
-            for child in childrenForDocking(of: parent.identifier) {
-                let margin = child.dockMargin
-                switch child.dock {
-                case .none:
-                    break
-                case .top:
-                    child.x = available.x + margin.left
-                    child.y = available.y + margin.top
-                    child.width = max(0, available.width - margin.left - margin.right)
-                    available = GMLuaPanelRect(
-                        x: available.x,
-                        y: child.y + child.height + margin.bottom,
-                        width: available.width,
-                        height: max(0, available.height - child.height - margin.top - margin.bottom)
-                    )
-                case .bottom:
-                    child.x = available.x + margin.left
-                    child.y = available.y + available.height - child.height - margin.bottom
-                    child.width = max(0, available.width - margin.left - margin.right)
-                    available = GMLuaPanelRect(
-                        x: available.x,
-                        y: available.y,
-                        width: available.width,
-                        height: max(0, available.height - child.height - margin.top - margin.bottom)
-                    )
-                case .left:
-                    child.x = available.x + margin.left
-                    child.y = available.y + margin.top
-                    child.height = max(0, available.height - margin.top - margin.bottom)
-                    available = GMLuaPanelRect(
-                        x: child.x + child.width + margin.right,
-                        y: available.y,
-                        width: max(0, available.width - child.width - margin.left - margin.right),
-                        height: available.height
-                    )
-                case .right:
-                    child.x = available.x + available.width - child.width - margin.right
-                    child.y = available.y + margin.top
-                    child.height = max(0, available.height - margin.top - margin.bottom)
-                    available = GMLuaPanelRect(
-                        x: available.x,
-                        y: available.y,
-                        width: max(0, available.width - child.width - margin.left - margin.right),
-                        height: available.height
-                    )
-                case .fill:
-                    child.x = available.x + margin.left
-                    child.y = available.y + margin.top
-                    child.width = max(0, available.width - margin.left - margin.right)
-                    child.height = max(0, available.height - margin.top - margin.bottom)
-                }
-                applyDocking(to: child)
-            }
-        }
-
-        for root in childrenForDocking(of: nil) { applyDocking(to: root) }
-
         let viewport = GMLuaPanelRect(
             x: 0,
             y: 0,
             width: Double(viewportWidth),
             height: Double(viewportHeight)
         )
+        applyNativeDockingLocked(descriptors: descriptors, viewport: viewport)
+
+        func childrenForDrawing(of parent: Int?) -> [GMLuaPanelValue] {
+            descriptors.values
+                .filter { $0.parentIdentifier == parent && $0.isVisible && $0.alpha > 0 }
+                .sorted(by: panelComesBefore)
+        }
         var result: [GMLuaPanelRenderSnapshot] = []
         func append(
             _ panel: GMLuaPanelValue,
@@ -519,6 +677,8 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
                 alpha: effectiveAlpha,
                 mouseInputEnabled: panel.mouseInputEnabled,
                 keyboardInputEnabled: panel.keyboardInputEnabled,
+                isPopup: panel.isPopup,
+                worldClicker: panel.isWorldClicker,
                 cursorName: panel.cursorName,
                 drawOnTop: effectiveDrawOnTopOrder != nil,
                 drawOnTopOrder: effectiveDrawOnTopOrder,
@@ -526,6 +686,9 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
                 fontName: panel.fontName,
                 foregroundColor: panel.foregroundColor,
                 contentAlignment: panel.contentAlignment,
+                textInsetX: panel.textInsetX,
+                textInsetY: panel.textInsetY,
+                expensiveShadow: panel.expensiveShadow,
                 imageName: panel.imageName
             ))
             let childClip = panel.clipsChildren ? ownClip : ancestorClip
@@ -587,30 +750,64 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
             $0.mouseInputEnabled && $0.clipRect.contains(x: x, y: y)
         }
         let hitIdentifier = hit?.identifier
+        let treeByIdentifier = Dictionary(
+            uniqueKeysWithValues: tree.map { ($0.identifier, $0) }
+        )
+        var effectiveWorldClicker = false
+        var worldClickerCandidate = hitIdentifier
+        var visitedWorldClickerPanels: Set<Int> = []
+        while let identifier = worldClickerCandidate,
+              visitedWorldClickerPanels.insert(identifier).inserted,
+              let panel = treeByIdentifier[identifier] {
+            if panel.worldClicker {
+                effectiveWorldClicker = true
+                break
+            }
+            worldClickerCandidate = panel.parentIdentifier
+        }
         var callbacks: [String] = []
 
         let previousHover: Int?
+        let nextHover = phase == .cancelled ? nil : hitIdentifier
         lock.lock()
         previousHover = hoveredPanelIdentifier
-        hoveredPanelIdentifier = hitIdentifier
+        hoveredPanelIdentifier = nextHover
         lock.unlock()
-        if previousHover != hitIdentifier {
+
+        // `Hovered` is an engine-maintained field read directly by the stock
+        // DLabel/DButton release path. Update the Lua sidecars before cursor
+        // callbacks and before OnMouseReleased, including the cancellation
+        // transition which must never be interpreted as a click.
+        if previousHover != nextHover, let previousHover {
+            try setPanelHovered(identifier: previousHover, hovered: false)
+        }
+        if let nextHover {
+            try setPanelHovered(identifier: nextHover, hovered: true)
+        }
+        if previousHover != nextHover {
             if let previousHover,
                try callPanelMethod(identifier: previousHover, name: "OnCursorExited") {
                 callbacks.append("OnCursorExited")
             }
-            if let hitIdentifier,
-               try callPanelMethod(identifier: hitIdentifier, name: "OnCursorEntered") {
+            if let nextHover,
+               try callPanelMethod(identifier: nextHover, name: "OnCursorEntered") {
                 callbacks.append("OnCursorEntered")
             }
         }
 
         switch phase {
         case .moved:
-            if let hitIdentifier,
-               try callPanelMethod(identifier: hitIdentifier, name: "OnCursorMoved", arguments: [
-                    .number(x - (hit?.frame.x ?? 0)),
-                    .number(y - (hit?.frame.y ?? 0))
+            lock.lock()
+            let captured = mouseCapturePanelIdentifier
+            lock.unlock()
+            let targetIdentifier = captured ?? hitIdentifier
+            let targetFrame = targetIdentifier.flatMap { identifier in
+                tree.first(where: { $0.identifier == identifier })?.frame
+            }
+            if let targetIdentifier,
+               try callPanelMethod(identifier: targetIdentifier, name: "OnCursorMoved", arguments: [
+                    .number(x - (targetFrame?.x ?? 0)),
+                    .number(y - (targetFrame?.y ?? 0))
                ]) {
                 callbacks.append("OnCursorMoved")
             }
@@ -628,27 +825,34 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
                 callbacks.append("OnMousePressed")
             }
         case .ended:
-            let pressed: Int?
+            let releaseTarget: Int?
             lock.lock()
-            pressed = pressedPanelIdentifier
+            releaseTarget = mouseCapturePanelIdentifier ?? pressedPanelIdentifier
             pressedPanelIdentifier = nil
             lock.unlock()
-            if let pressed,
+            if let releaseTarget,
                try callPanelMethod(
-                    identifier: pressed,
+                    identifier: releaseTarget,
                     name: "OnMouseReleased",
                     arguments: [.number(107)]
                ) {
                 callbacks.append("OnMouseReleased")
             }
         case .cancelled:
+            let releaseTarget: Int?
             lock.lock()
-            let pressed = pressedPanelIdentifier
+            releaseTarget = mouseCapturePanelIdentifier ?? pressedPanelIdentifier
             pressedPanelIdentifier = nil
+            mouseCapturePanelIdentifier = nil
             lock.unlock()
-            if let pressed,
+            if let releaseTarget {
+                // Lua may transfer capture to a panel other than the last hit.
+                // Keep cancellation non-clicking for that sidecar as well.
+                try setPanelHovered(identifier: releaseTarget, hovered: false)
+            }
+            if let releaseTarget,
                try callPanelMethod(
-                    identifier: pressed,
+                    identifier: releaseTarget,
                     name: "OnMouseReleased",
                     arguments: [.number(107)]
                ) {
@@ -666,12 +870,31 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         }
         return GMLuaPointerDispatchResult(
             hitPanelIdentifier: hitIdentifier,
+            worldClicker: effectiveWorldClicker,
             callbackNames: callbacks,
             // The host only delivers raw pointer callbacks. Scripted controls
             // decide whether a release is a click/double-click; synthesizing
             // DoClick here would run it twice for shipped DLabel controls.
             clicked: false,
             doubleClicked: false
+        )
+    }
+
+    private func setPanelHovered(identifier: Int, hovered: Bool) throws {
+        let descriptor: GMLuaPanelValue?
+        lock.lock()
+        if let value = panels[identifier],
+           GMLuaTypeSystem.typedObject(from: value)?.isValid == true {
+            descriptor = panelDescriptor(from: value)
+        } else {
+            descriptor = nil
+        }
+        lock.unlock()
+        guard let descriptor else { return }
+        try state.setRawTableValue(
+            .boolean(hovered),
+            for: .string("Hovered"),
+            in: descriptor.instanceTable
         )
     }
 
@@ -683,6 +906,10 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         viewportWidth: Int,
         viewportHeight: Int
     ) throws -> GMLuaSurfaceFrameSnapshot {
+        // Native VGUI resolves Dock against the implicit world panel before
+        // Lua PerformLayout. A second resolution after Lua layout captures any
+        // size/dock changes the callbacks made before the final tree is built.
+        resolveNativeDocking(viewportWidth: viewportWidth, viewportHeight: viewportHeight)
         _ = try performPendingLayouts()
         let tree = renderTree(viewportWidth: viewportWidth, viewportHeight: viewportHeight)
         surface.beginFrame(viewportWidth: viewportWidth, viewportHeight: viewportHeight)
@@ -725,6 +952,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         let identifier: Int?
         let value: LuaValue?
         let descriptor: GMLuaPanelValue?
+        var changed = false
         lock.lock()
         identifier = focusedPanelIdentifier
         value = identifier.flatMap { panels[$0] }
@@ -732,13 +960,26 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         if let descriptor,
            descriptor.engineClassName == "TextEntry",
            descriptor.keyboardInputEnabled {
-            descriptor.text = LuaString(bytes: descriptor.text.bytes + Array(text.utf8))
+            let supplied = Array(text.utf8)
+            // Host UITextInput batching policy: when the native TextEntry is
+            // restricted, preserve the US-ASCII subsequence of a mixed Swift
+            // String. The public API documents the character restriction but
+            // does not specify native mixed-paste aggregation behavior.
+            let accepted = descriptor.allowsNonASCIICharacters
+                ? supplied
+                : supplied.filter { $0 <= 0x7f }
+            if !accepted.isEmpty {
+                descriptor.text = LuaString(bytes: descriptor.text.bytes + accepted)
+                changed = true
+            }
         }
         lock.unlock()
         guard let identifier, let descriptor,
               descriptor.engineClassName == "TextEntry",
               descriptor.keyboardInputEnabled else { return nil }
-        _ = try callPanelMethod(identifier: identifier, name: "OnTextChanged")
+        if changed {
+            _ = try callPanelMethod(identifier: identifier, name: "OnTextChanged")
+        }
         return identifier
     }
 
@@ -909,6 +1150,23 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         lock.lock()
         let identifiers = descendantIdentifiers(of: identifier)
         let removed = identifiers.compactMap { panels.removeValue(forKey: $0) }
+        let removedIdentifiers = Set(identifiers)
+        if let hoveredPanelIdentifier,
+           removedIdentifiers.contains(hoveredPanelIdentifier) {
+            self.hoveredPanelIdentifier = nil
+        }
+        if let pressedPanelIdentifier,
+           removedIdentifiers.contains(pressedPanelIdentifier) {
+            self.pressedPanelIdentifier = nil
+        }
+        if let mouseCapturePanelIdentifier,
+           removedIdentifiers.contains(mouseCapturePanelIdentifier) {
+            self.mouseCapturePanelIdentifier = nil
+        }
+        if let focusedPanelIdentifier,
+           removedIdentifiers.contains(focusedPanelIdentifier) {
+            self.focusedPanelIdentifier = nil
+        }
         lock.unlock()
         for value in removed {
             GMLuaTypeSystem.typedObject(from: value)?.isValid = false
@@ -981,6 +1239,25 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         }
     }
 
+    /// Returns the documented VGUI child extent: the farthest direct child's
+    /// lower-right corner measured from the parent's upper-left corner.
+    /// Docking and margins affect this only after layout has updated the
+    /// child's stored position and size; they are not extra extent here.
+    fileprivate func childrenSize(of identifier: Int) -> (width: Double, height: Double) {
+        lock.lock()
+        defer { lock.unlock() }
+        var width = 0.0
+        var height = 0.0
+        for value in panels.values {
+            guard let child = panelDescriptor(from: value),
+                  child.parentIdentifier == identifier,
+                  GMLuaTypeSystem.typedObject(from: value)?.isValid == true else { continue }
+            width = max(width, child.x + child.width)
+            height = max(height, child.y + child.height)
+        }
+        return (width, height)
+    }
+
     fileprivate func hasParent(identifier: Int, ancestorIdentifier: Int) -> Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -1020,6 +1297,17 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return focusedPanelIdentifier == identifier
+    }
+
+    fileprivate func setMouseCapture(identifier: Int, captured: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard panels[identifier] != nil else { return }
+        if captured {
+            mouseCapturePanelIdentifier = identifier
+        } else if mouseCapturePanelIdentifier == identifier {
+            mouseCapturePanelIdentifier = nil
+        }
     }
 
     fileprivate func invalidateLayout(identifier: Int, layoutNow: Bool) throws {
@@ -1457,6 +1745,31 @@ public enum GMLuaVGUI {
                 let panel = try requiredPanel(arguments, "GetSize")
                 return [.number(panel.width), .number(panel.height)]
             }),
+            ("ChildrenSize", { arguments in
+                let panel = try requiredPanel(arguments, "ChildrenSize")
+                let size = registry.childrenSize(of: panel.identifier)
+                return [.number(size.width), .number(size.height)]
+            }),
+            ("SizeToChildren", { arguments in
+                let panel = try requiredPanel(arguments, "SizeToChildren")
+                let sizeWidth = try optionalBoolean(
+                    arguments,
+                    1,
+                    false,
+                    "SizeToChildren"
+                )
+                let sizeHeight = try optionalBoolean(
+                    arguments,
+                    2,
+                    false,
+                    "SizeToChildren"
+                )
+                guard sizeWidth || sizeHeight else { return [] }
+                let childSize = registry.childrenSize(of: panel.identifier)
+                if sizeWidth { panel.width = floor(childSize.width) }
+                if sizeHeight { panel.height = floor(childSize.height) }
+                return []
+            }),
             ("GetWide", { arguments in
                 [.number(try requiredPanel(arguments, "GetWide").width)]
             }),
@@ -1566,6 +1879,30 @@ public enum GMLuaVGUI {
                 }
                 return [.string(LuaString(bytes: Array(panel.text.bytes.prefix(8_092))))]
             }),
+            ("SetAllowNonAsciiCharacters", { arguments in
+                let panel = try requiredTextEntry(arguments, "SetAllowNonAsciiCharacters")
+                panel.allowsNonASCIICharacters = try requiredBoolean(
+                    arguments,
+                    1,
+                    "SetAllowNonAsciiCharacters"
+                )
+                return []
+            }),
+            ("SetExpensiveShadow", { arguments in
+                let panel = try requiredLabel(arguments, "SetExpensiveShadow")
+                let distance = try requiredNumber(arguments, 1, "SetExpensiveShadow")
+                let color = try requiredPanelColorTable(
+                    arguments,
+                    index: 2,
+                    state: state,
+                    function: "SetExpensiveShadow"
+                )
+                panel.expensiveShadow = GMLuaTextShadowSnapshot(
+                    distance: distance,
+                    color: color
+                )
+                return []
+            }),
             ("SetFontInternal", { arguments in
                 let panel = try requiredTextPanel(arguments, "SetFontInternal")
                 panel.fontName = try requiredLuaString(arguments, 1, "SetFontInternal")
@@ -1658,6 +1995,14 @@ public enum GMLuaVGUI {
             ("IsVisible", { arguments in
                 [.boolean(try requiredPanel(arguments, "IsVisible").isVisible)]
             }),
+            ("SetEnabled", { arguments in
+                let panel = try requiredPanel(arguments, "SetEnabled")
+                panel.isEnabled = try requiredBoolean(arguments, 1, "SetEnabled")
+                return []
+            }),
+            ("IsEnabled", { arguments in
+                [.boolean(try requiredPanel(arguments, "IsEnabled").isEnabled)]
+            }),
             ("SetAlpha", { arguments in
                 let panel = try requiredPanel(arguments, "SetAlpha")
                 let alpha = try requiredNumber(arguments, 1, "SetAlpha")
@@ -1678,6 +2023,22 @@ public enum GMLuaVGUI {
             }),
             ("IsMouseInputEnabled", { arguments in
                 [.boolean(try requiredPanel(arguments, "IsMouseInputEnabled").mouseInputEnabled)]
+            }),
+            ("SetWorldClicker", { arguments in
+                let panel = try requiredPanel(arguments, "SetWorldClicker")
+                panel.isWorldClicker = try requiredBoolean(arguments, 1, "SetWorldClicker")
+                return []
+            }),
+            ("IsWorldClicker", { arguments in
+                [.boolean(try requiredPanel(arguments, "IsWorldClicker").isWorldClicker)]
+            }),
+            ("MouseCapture", { arguments in
+                let panel = try requiredPanel(arguments, "MouseCapture")
+                registry.setMouseCapture(
+                    identifier: panel.identifier,
+                    captured: try requiredBoolean(arguments, 1, "MouseCapture")
+                )
+                return []
             }),
             ("SetKeyboardInputEnabled", { arguments in
                 let panel = try requiredPanel(arguments, "SetKeyboardInputEnabled")
@@ -1724,9 +2085,20 @@ public enum GMLuaVGUI {
             }),
             ("MakePopup", { arguments in
                 let panel = try requiredPanel(arguments, "MakePopup")
-                panel.mouseInputEnabled = true
-                panel.keyboardInputEnabled = true
-                registry.focus(identifier: panel.identifier)
+                registry.makePopup(identifier: panel.identifier)
+                return []
+            }),
+            ("IsPopup", { arguments in
+                [.boolean(try requiredPanel(arguments, "IsPopup").isPopup)]
+            }),
+            ("MoveToBack", { arguments in
+                let panel = try requiredPanel(arguments, "MoveToBack")
+                registry.moveToStackEdge(identifier: panel.identifier, front: false)
+                return []
+            }),
+            ("MoveToFront", { arguments in
+                let panel = try requiredPanel(arguments, "MoveToFront")
+                registry.moveToStackEdge(identifier: panel.identifier, front: true)
                 return []
             }),
             ("SetPaintBackgroundEnabled", { arguments in
@@ -1850,6 +2222,17 @@ private func requiredLabel(
     return panel
 }
 
+private func requiredTextEntry(
+    _ arguments: [LuaValue],
+    _ method: String
+) throws -> GMLuaPanelValue {
+    let panel = try requiredPanel(arguments, method)
+    guard panel.engineClassName == "TextEntry" else {
+        throw unsupportedPanelMethod(panel, method)
+    }
+    return panel
+}
+
 private func requiredLuaString(
     _ arguments: [LuaValue],
     _ index: Int,
@@ -1891,6 +2274,37 @@ private func requiredPanelColor(
         green: try requiredNumber(arguments, 2, function),
         blue: try requiredNumber(arguments, 3, function),
         alpha: try requiredNumber(arguments, 4, function)
+    )
+}
+
+private func requiredPanelColorTable(
+    _ arguments: [LuaValue],
+    index: Int,
+    state: LuaState,
+    function: String
+) throws -> GMLuaPanelColorSnapshot {
+    guard arguments.indices.contains(index), case let .table(table) = arguments[index] else {
+        throw LuaError.runtime(
+            "bad argument #\(index) to '\(function)' (Color table expected)"
+        )
+    }
+
+    func component(_ name: String) throws -> Double {
+        let value = try state.rawTableValue(for: .string(LuaString(name)), in: table)
+        guard case let .number(number) = value, number.isFinite else {
+            throw LuaError.runtime(
+                "bad argument #\(index) to '\(function)' " +
+                    "(Color table with finite \(name) expected)"
+            )
+        }
+        return number
+    }
+
+    return try GMLuaPanelColorSnapshot(
+        red: component("r"),
+        green: component("g"),
+        blue: component("b"),
+        alpha: component("a")
     )
 }
 

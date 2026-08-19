@@ -1,6 +1,7 @@
 import Foundation
 import XCTest
 import GModEngine
+import GModGameAssets
 import GModLua
 
 final class GMLuaVGUIRegistryTests: XCTestCase {
@@ -448,6 +449,149 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
         XCTAssertTrue(tree.allSatisfy { !$0.drawOnTop && $0.drawOnTopOrder == nil })
     }
 
+    func testMoveToStackEdgesReordersTopLevelAndSiblingDocking() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: typeSystem)
+        try state.execute(
+            """
+            vgui.Register("TopFirst", {}, "Panel")
+            vgui.Register("TopSecond", {}, "Panel")
+            vgui.Register("TopThird", {}, "Panel")
+            vgui.Register("DockFirst", {}, "Panel")
+            vgui.Register("DockSecond", {}, "Panel")
+            vgui.Register("DockThird", {}, "Panel")
+
+            TOP_FIRST = vgui.Create("TopFirst")
+            TOP_SECOND = vgui.Create("TopSecond")
+            TOP_THIRD = vgui.Create("TopThird")
+            for _, panel in ipairs({ TOP_FIRST, TOP_SECOND, TOP_THIRD }) do
+                panel:SetSize(100, 100)
+            end
+            TOP_SECOND:MoveToBack()
+            TOP_FIRST:MoveToFront()
+
+            DOCK_ROOT = vgui.Create("Panel")
+            DOCK_ROOT:SetPos(120, 0)
+            DOCK_ROOT:SetSize(100, 100)
+            DOCK_FIRST = vgui.Create("DockFirst", DOCK_ROOT)
+            DOCK_SECOND = vgui.Create("DockSecond", DOCK_ROOT)
+            DOCK_THIRD = vgui.Create("DockThird", DOCK_ROOT)
+            for _, panel in ipairs({ DOCK_FIRST, DOCK_SECOND, DOCK_THIRD }) do
+                panel:SetTall(10)
+                panel:Dock(TOP)
+            end
+            DOCK_THIRD:MoveToBack()
+            """,
+            sourceName: "@GMLuaMoveToStackEdgesRegression.lua"
+        )
+
+        var tree = registry.renderTree(viewportWidth: 220, viewportHeight: 100)
+        XCTAssertEqual(
+            tree.filter { $0.parentIdentifier == nil && $0.frame.x == 0 }
+                .map(\.requestedClassName),
+            ["TopSecond", "TopThird", "TopFirst"]
+        )
+        let docked = tree.filter { $0.parentIdentifier != nil }
+        XCTAssertEqual(
+            docked.map(\.requestedClassName),
+            ["DockThird", "DockFirst", "DockSecond"]
+        )
+        XCTAssertEqual(docked.map(\.frame.y), [0, 10, 20])
+
+        try state.execute(
+            "DOCK_THIRD:MoveToFront()",
+            sourceName: "@GMLuaMoveDockedPanelToFrontRegression.lua"
+        )
+        tree = registry.renderTree(viewportWidth: 220, viewportHeight: 100)
+        let movedDocked = tree.filter { $0.parentIdentifier != nil }
+        XCTAssertEqual(
+            movedDocked.map(\.requestedClassName),
+            ["DockFirst", "DockSecond", "DockThird"]
+        )
+        XCTAssertEqual(movedDocked.map(\.frame.y), [0, 10, 20])
+    }
+
+    func testPopupTierStaysAheadOfNonPopupAcrossStackMovesAndHitTesting() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: typeSystem)
+        try state.execute(
+            """
+            local function control()
+                return {
+                    OnMousePressed = function(self) POPUP_HIT = self:GetName() end
+                }
+            end
+            vgui.Register("StackNormalFirst", control(), "Panel")
+            vgui.Register("StackNormalSecond", control(), "Panel")
+            vgui.Register("StackPopupFirst", control(), "EditablePanel")
+            vgui.Register("StackPopupSecond", control(), "EditablePanel")
+
+            NORMAL_FIRST = vgui.Create("StackNormalFirst", nil, "normal-first")
+            POPUP_FIRST = vgui.Create("StackPopupFirst", nil, "popup-first")
+            NORMAL_SECOND = vgui.Create("StackNormalSecond", nil, "normal-second")
+            POPUP_SECOND = vgui.Create("StackPopupSecond", nil, "popup-second")
+            for _, panel in ipairs({
+                NORMAL_FIRST, POPUP_FIRST, NORMAL_SECOND, POPUP_SECOND
+            }) do
+                panel:SetSize(100, 100)
+            end
+            POPUP_FIRST:SetMouseInputEnabled(false)
+            POPUP_FIRST:SetKeyboardInputEnabled(false)
+            POPUP_FIRST:MakePopup()
+            POPUP_SECOND:MakePopup()
+            assert(POPUP_FIRST:IsPopup() and POPUP_SECOND:IsPopup())
+            assert(POPUP_FIRST:IsMouseInputEnabled())
+            assert(POPUP_FIRST:IsKeyboardInputEnabled())
+            assert(not NORMAL_FIRST:IsPopup())
+
+            POPUP_FIRST:MoveToBack()
+            NORMAL_SECOND:MoveToFront()
+            """,
+            sourceName: "@GMLuaPopupTierRegression.lua"
+        )
+
+        var tree = registry.renderTree(viewportWidth: 100, viewportHeight: 100)
+        XCTAssertEqual(
+            tree.map(\.requestedClassName),
+            ["StackNormalFirst", "StackNormalSecond", "StackPopupFirst", "StackPopupSecond"]
+        )
+        XCTAssertEqual(tree.map(\.isPopup), [false, false, true, true])
+        _ = try registry.dispatchPointerEvent(
+            x: 10, y: 10, phase: .began, timestamp: 1,
+            viewportWidth: 100, viewportHeight: 100
+        )
+        try state.execute(
+            "assert(POPUP_HIT == 'popup-second')",
+            sourceName: "@GMLuaPopupTierBackHitRegression.lua"
+        )
+
+        try state.execute(
+            "POPUP_FIRST:MoveToFront()",
+            sourceName: "@GMLuaPopupTierFrontRegression.lua"
+        )
+        tree = registry.renderTree(viewportWidth: 100, viewportHeight: 100)
+        XCTAssertEqual(
+            tree.map(\.requestedClassName),
+            ["StackNormalFirst", "StackNormalSecond", "StackPopupSecond", "StackPopupFirst"]
+        )
+        _ = try registry.dispatchPointerEvent(
+            x: 10, y: 10, phase: .began, timestamp: 2,
+            viewportWidth: 100, viewportHeight: 100
+        )
+        try state.execute(
+            "assert(POPUP_HIT == 'popup-first')",
+            sourceName: "@GMLuaPopupTierFrontHitRegression.lua"
+        )
+    }
+
     func testLabelInsetsAndNoWrapContentSizeUseSharedNamedSurfaceMeasurement() throws {
         struct LabelOracleMeasurer: GMLuaTextMeasurer {
             let fidelity = GMLuaTextMeasurementFidelity.platformGlyphMetrics
@@ -721,6 +865,254 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
         XCTAssertFalse(tree.contains(where: { $0.alpha == 0 }))
     }
 
+    func testTopLevelDockingUsesImplicitWorldPanelAndVisibilityAlphaRules() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: typeSystem)
+        try state.execute(
+            """
+            ROOT_TOP = vgui.Create("Panel")
+            ROOT_TOP:SetTall(20)
+            ROOT_TOP:Dock(TOP)
+            ROOT_TOP:SetZPos(1)
+
+            ROOT_HIDDEN_TOP = vgui.Create("Panel")
+            ROOT_HIDDEN_TOP:SetTall(40)
+            ROOT_HIDDEN_TOP:Dock(TOP)
+            ROOT_HIDDEN_TOP:SetZPos(2)
+            ROOT_HIDDEN_TOP:SetVisible(false)
+
+            ROOT_TRANSPARENT_BOTTOM = vgui.Create("Panel")
+            ROOT_TRANSPARENT_BOTTOM:SetTall(30)
+            ROOT_TRANSPARENT_BOTTOM:Dock(BOTTOM)
+            ROOT_TRANSPARENT_BOTTOM:SetZPos(3)
+            ROOT_TRANSPARENT_BOTTOM:SetAlpha(0)
+
+            ROOT_ABSOLUTE = vgui.Create("Panel")
+            ROOT_ABSOLUTE:SetPos(7, 8)
+            ROOT_ABSOLUTE:SetSize(11, 12)
+            ROOT_ABSOLUTE:SetZPos(4)
+            assert(ROOT_ABSOLUTE:GetDock() == NODOCK)
+
+            ROOT_FILL = vgui.Create("EditablePanel")
+            ROOT_FILL:Dock(FILL)
+            ROOT_FILL:SetZPos(5)
+            ROOT_FILL:MakePopup()
+            """,
+            sourceName: "@GMLuaTopLevelWorldPanelDockRegression.lua"
+        )
+
+        let tree = registry.renderTree(viewportWidth: 300, viewportHeight: 200)
+        XCTAssertEqual(tree.count, 3)
+        let top = try XCTUnwrap(tree.first(where: {
+            !$0.isPopup && $0.frame.height == 20 && $0.frame.width == 300
+        }))
+        XCTAssertEqual(top.frame, GMLuaPanelRect(x: 0, y: 0, width: 300, height: 20))
+        let absolute = try XCTUnwrap(tree.first(where: { $0.frame.width == 11 }))
+        XCTAssertEqual(absolute.frame, GMLuaPanelRect(x: 7, y: 8, width: 11, height: 12))
+        let fill = try XCTUnwrap(tree.first(where: { $0.isPopup }))
+        XCTAssertEqual(fill.frame, GMLuaPanelRect(x: 0, y: 20, width: 300, height: 150))
+        XCTAssertEqual(tree.last?.identifier, fill.identifier)
+        // The hidden TOP root consumes no space. The alpha-zero BOTTOM root
+        // consumes 30 pixels but is omitted from the renderer-facing tree.
+        XCTAssertFalse(tree.contains(where: { $0.alpha == 0 }))
+    }
+
+    func testRenderFrameDocksRootBeforeLuaLayoutAndReappliesAfterLayout() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let surface = try GMLuaSurface.install(into: state)
+        let registry = try GMLuaVGUI.install(
+            into: state,
+            typeSystem: typeSystem,
+            surfaceCommandState: surface
+        )
+        try state.execute(
+            """
+            local PROBE = {}
+            function PROBE:Init()
+                self.Child = vgui.Create("Panel", self)
+            end
+            function PROBE:PerformLayout(width, height)
+                ROOT_LAYOUT_CALLS = (ROOT_LAYOUT_CALLS or 0) + 1
+                ROOT_LAYOUT_WIDTH = self:GetWide()
+                ROOT_LAYOUT_HEIGHT = self:GetTall()
+                ROOT_LAYOUT_ARGUMENT_WIDTH = width
+                ROOT_LAYOUT_ARGUMENT_HEIGHT = height
+                self.Child:SetTall(25)
+                self.Child:Dock(BOTTOM)
+            end
+            vgui.Register("RootDockLayoutProbe", PROBE, "Panel")
+
+            ROOT_LAYOUT = vgui.Create("RootDockLayoutProbe")
+            ROOT_LAYOUT:Dock(FILL)
+            ROOT_LAYOUT:InvalidateLayout()
+            """,
+            sourceName: "@GMLuaRootDockBeforeLayoutRegression.lua"
+        )
+        XCTAssertEqual(registry.pendingLayoutCount, 1)
+
+        _ = try registry.renderFrame(
+            surface: surface,
+            viewportWidth: 320,
+            viewportHeight: 180
+        )
+        try state.execute(
+            """
+            assert(ROOT_LAYOUT_CALLS == 1)
+            assert(ROOT_LAYOUT_WIDTH == 320 and ROOT_LAYOUT_HEIGHT == 180)
+            assert(ROOT_LAYOUT_ARGUMENT_WIDTH == 320 and ROOT_LAYOUT_ARGUMENT_HEIGHT == 180)
+            """,
+            sourceName: "@GMLuaRootDockLayoutObservedViewport.lua"
+        )
+
+        let tree = registry.renderTree(viewportWidth: 320, viewportHeight: 180)
+        let root = try XCTUnwrap(tree.first(where: {
+            $0.requestedClassName == "RootDockLayoutProbe"
+        }))
+        XCTAssertEqual(root.frame, GMLuaPanelRect(x: 0, y: 0, width: 320, height: 180))
+        let child = try XCTUnwrap(tree.first(where: {
+            $0.parentIdentifier == root.identifier
+        }))
+        XCTAssertEqual(child.frame, GMLuaPanelRect(x: 0, y: 155, width: 320, height: 25))
+    }
+
+    func testSizeToChildrenUsesDirectChildLowerRightBoundsAndBooleanDefaults() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        _ = try GMLuaVGUI.install(into: state, typeSystem: typeSystem)
+        try state.execute(
+            """
+            local parent = vgui.Create("Panel")
+            parent:SetSize(320, 240)
+
+            local first = vgui.Create("Panel", parent)
+            first:SetPos(10, 20)
+            first:SetSize(30, 40)
+
+            local farthest = vgui.Create("Panel", parent)
+            farthest:SetPos(70, 15)
+            farthest:SetSize(50, 100)
+
+            -- Only direct children define the parent extent.
+            local grandchild = vgui.Create("Panel", first)
+            grandchild:SetPos(500, 600)
+            grandchild:SetSize(20, 30)
+
+            local childWide, childTall = parent:ChildrenSize()
+            assert(childWide == 120 and childTall == 115)
+
+            -- Both flags default to false, so the documented no-argument call
+            -- is a no-op.
+            parent:SizeToChildren()
+            assert(parent:GetWide() == 320 and parent:GetTall() == 240)
+
+            parent:SizeToChildren(false, true)
+            assert(parent:GetWide() == 320 and parent:GetTall() == 115)
+
+            parent:SetSize(320, 240)
+            parent:SizeToChildren(true, false)
+            assert(parent:GetWide() == 120 and parent:GetTall() == 240)
+
+            parent:SetSize(320, 240)
+            parent:SizeToChildren(true, true)
+            assert(parent:GetWide() == 120 and parent:GetTall() == 115)
+
+            parent:SetSize(320, 240)
+            parent:SizeToChildren(nil, true)
+            assert(parent:GetWide() == 320 and parent:GetTall() == 115)
+
+            local okWidth = pcall(parent.SizeToChildren, parent, 1, true)
+            local okHeight = pcall(parent.SizeToChildren, parent, true, 1)
+            assert(okWidth == false and okHeight == false)
+            """,
+            sourceName: "@GMLuaPanelSizeToChildrenRegression.lua"
+        )
+    }
+
+    func testStockShapedContextMenuExposesWorldClickerWithoutSynthesizingWorldInput() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: typeSystem)
+        try state.execute(
+            """
+            -- Exact pointer-relevant shape of Sandbox ContextMenu:Init. The
+            -- stock control sets this on its EditablePanel before adding UI.
+            local CONTEXT = {}
+            function CONTEXT:Init()
+                self:SetWorldClicker(true)
+            end
+            vgui.Register("StockShapedContextMenu", CONTEXT, "EditablePanel")
+
+            CONTEXT_PANEL = vgui.Create("StockShapedContextMenu")
+            CONTEXT_PANEL:SetSize(200, 100)
+            CONTEXT_CHILD = vgui.Create("Panel", CONTEXT_PANEL)
+            CONTEXT_CHILD:SetSize(200, 100)
+
+            ORDINARY_PANEL = vgui.Create("Panel")
+            ORDINARY_PANEL:SetPos(300, 0)
+            ORDINARY_PANEL:SetSize(200, 100)
+
+            assert(CONTEXT_PANEL:IsWorldClicker())
+            assert(not CONTEXT_CHILD:IsWorldClicker())
+            assert(not ORDINARY_PANEL:IsWorldClicker())
+            assert(pcall(ORDINARY_PANEL.SetWorldClicker, ORDINARY_PANEL, 1) == false)
+            """,
+            sourceName: "@GMLuaStockShapedContextMenuWorldClicker.lua"
+        )
+
+        let tree = registry.renderTree(viewportWidth: 810, viewportHeight: 1_080)
+        let contextSnapshot = try XCTUnwrap(tree.first(where: {
+            $0.requestedClassName == "StockShapedContextMenu"
+        }))
+        XCTAssertTrue(contextSnapshot.worldClicker)
+        XCTAssertFalse(try XCTUnwrap(tree.first(where: {
+            $0.parentIdentifier == contextSnapshot.identifier
+        })).worldClicker)
+        XCTAssertFalse(try XCTUnwrap(tree.first(where: {
+            $0.requestedClassName == "Panel" && $0.frame.x == 300
+        })).worldClicker)
+
+        let contextHit = try registry.dispatchPointerEvent(
+            x: 50, y: 50, phase: .began, timestamp: 1,
+            viewportWidth: 810, viewportHeight: 1_080
+        )
+        XCTAssertNotNil(contextHit.hitPanelIdentifier)
+        XCTAssertNotEqual(contextHit.hitPanelIdentifier, contextSnapshot.identifier)
+        // Pointer pass-through is effective across the hit panel's ancestor
+        // chain, while each render snapshot and IsWorldClicker stays raw.
+        XCTAssertTrue(contextHit.worldClicker)
+        XCTAssertFalse(contextHit.clicked)
+
+        let ordinaryHit = try registry.dispatchPointerEvent(
+            x: 350, y: 50, phase: .began, timestamp: 2,
+            viewportWidth: 810, viewportHeight: 1_080
+        )
+        XCTAssertNotNil(ordinaryHit.hitPanelIdentifier)
+        XCTAssertFalse(ordinaryHit.worldClicker)
+        XCTAssertFalse(ordinaryHit.clicked)
+
+        let worldOnly = try registry.dispatchPointerEvent(
+            x: 700, y: 900, phase: .began, timestamp: 3,
+            viewportWidth: 810, viewportHeight: 1_080
+        )
+        XCTAssertNil(worldOnly.hitPanelIdentifier)
+        XCTAssertFalse(worldOnly.worldClicker)
+        XCTAssertFalse(worldOnly.clicked)
+    }
+
     func testTouchDispatchRoutesRawCallbacksOnceAndTextEntryOnlySignalsTextChanged() throws {
         let state = LuaState(output: { _ in })
         let typeSystem = try GMLuaTypeSystem.install(
@@ -750,6 +1142,7 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
             ENTRY = vgui.Create("TextEntry", ROOT)
             ENTRY:SetPos(100, 320)
             ENTRY:SetSize(300, 50)
+            ENTRY:SetAllowNonAsciiCharacters(true)
             function ENTRY:OnTextChanged() TEXT_CHANGED = (TEXT_CHANGED or 0) + 1 end
             function ENTRY:OnValueChange(value) VALUE_CHANGED = (VALUE_CHANGED or 0) + 1 end
             """,
@@ -784,6 +1177,355 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
             """,
             sourceName: "@GMLuaPanelInputCheckpoint.lua"
         )
+    }
+
+    func testBundledStockDButtonOwnsClickDecisionAcrossCaptureHoverAndCancellation() throws {
+        let fileSystem = try GMLuaHostDirectoryFileSystem(
+            rootURL: GModGameAssets.clientContentRootURL(),
+            writable: false
+        )
+        let sharedSession = GMLuaSharedSession()
+        let server = GMLuaRuntime(
+            realm: .server,
+            logger: { _ in },
+            bootstrapMode: .strict,
+            netTransport: sharedSession.netTransport
+        )
+        let runtime = GMLuaRuntime(
+            realm: .client,
+            logger: { _ in },
+            virtualFileSystem: fileSystem,
+            bootstrapMode: .strict,
+            initialViewport: GMLuaViewportSize(width: 810, height: 1_080),
+            netTransport: sharedSession.netTransport
+        )
+        try sharedSession.connect(server: server, client: runtime)
+        defer {
+            try? sharedSession.disconnect(client: runtime)
+            _ = runtime.close()
+            _ = server.close()
+        }
+        try runtime.loadFile("lua/includes/init.lua")
+        try runtime.loadFile("lua/derma/init.lua")
+        try runtime.loadFile("lua/vgui/dlabel.lua")
+        try runtime.loadFile("lua/vgui/dbutton.lua")
+
+        let registry = try XCTUnwrap(runtime.vguiRegistry)
+        try runtime.execute(
+            """
+            -- Both methods below must come from the bundled panel extensions;
+            -- the host deliberately does not synthesize DragMousePress/Release.
+            local panelMeta = FindMetaTable("Panel")
+            assert(type(panelMeta.DragMousePress) == "function")
+            assert(type(panelMeta.DragMouseRelease) == "function")
+            assert(IsValid(LocalPlayer()) and LocalPlayer():IsPlayer())
+
+            -- Skin rendering is outside this pointer test. Keep the exact
+            -- bundled DLabel pointer methods while preventing its unrelated
+            -- scheme hook from requiring an Apple image-backed material.
+            DLabel.ApplySchemeSettings = function() end
+
+            local native = vgui.Create("Panel")
+            assert(native:IsEnabled())
+            native:SetEnabled(false)
+            assert(not native:IsEnabled())
+            native:SetEnabled(true)
+            assert(native:IsEnabled())
+
+            ROOT = vgui.Create("Panel")
+            ROOT:SetSize(810, 1080)
+            STOCK_BUTTON = vgui.Create("DButton", ROOT)
+            STOCK_BUTTON:SetPos(100, 200)
+            STOCK_BUTTON:SetSize(240, 80)
+            STOCK_BUTTON:SetDoubleClickingEnabled(false)
+            STOCK_BUTTON.DoClick = function(self)
+                STOCK_CLICK_COUNT = (STOCK_CLICK_COUNT or 0) + 1
+            end
+            STOCK_BUTTON.OnCursorMoved = function(self, x, y)
+                STOCK_CAPTURED_MOVE_COUNT = (STOCK_CAPTURED_MOVE_COUNT or 0) + 1
+            end
+            """,
+            sourceName: "@GMLuaBundledStockDButtonPointerSetup.lua"
+        )
+        let buttonIdentifier = try XCTUnwrap(
+            registry.renderTree(viewportWidth: 810, viewportHeight: 1_080)
+                .first(where: { $0.requestedClassName == "DButton" })?
+                .identifier
+        )
+
+        // A complete inside tap is decided by the bundled DLabel release path,
+        // so the host reports only raw callbacks and DoClick runs exactly once.
+        let insideBegan = try registry.dispatchPointerEvent(
+            x: 120, y: 220, phase: .began, timestamp: 1,
+            viewportWidth: 810, viewportHeight: 1_080
+        )
+        XCTAssertEqual(insideBegan.callbackNames, ["OnCursorEntered", "OnMousePressed"])
+        try runtime.execute(
+            "assert(STOCK_BUTTON.Hovered and STOCK_BUTTON.Depressed)",
+            sourceName: "@GMLuaBundledStockDButtonInsidePress.lua"
+        )
+        let insideEnded = try registry.dispatchPointerEvent(
+            x: 120, y: 220, phase: .ended, timestamp: 1.1,
+            viewportWidth: 810, viewportHeight: 1_080
+        )
+        XCTAssertEqual(insideEnded.callbackNames, ["OnMouseReleased"])
+        XCTAssertFalse(insideEnded.clicked)
+        try runtime.execute(
+            "assert(STOCK_CLICK_COUNT == 1 and not STOCK_BUTTON.Depressed)",
+            sourceName: "@GMLuaBundledStockDButtonInsideRelease.lua"
+        )
+
+        // DLabel captured on press: movement continues to reach it outside,
+        // while hit-based Hovered is already false and the outside release is
+        // therefore not a click. Its MouseCapture(false) clears host capture.
+        _ = try registry.dispatchPointerEvent(
+            x: 120, y: 220, phase: .began, timestamp: 2,
+            viewportWidth: 810, viewportHeight: 1_080
+        )
+        let capturedMove = try registry.dispatchPointerEvent(
+            x: 700, y: 900, phase: .moved, timestamp: 2.1,
+            viewportWidth: 810, viewportHeight: 1_080
+        )
+        XCTAssertNotNil(capturedMove.hitPanelIdentifier)
+        XCTAssertNotEqual(capturedMove.hitPanelIdentifier, buttonIdentifier)
+        XCTAssertTrue(capturedMove.callbackNames.contains("OnCursorExited"))
+        XCTAssertTrue(capturedMove.callbackNames.contains("OnCursorMoved"))
+        _ = try registry.dispatchPointerEvent(
+            x: 700, y: 900, phase: .ended, timestamp: 2.2,
+            viewportWidth: 810, viewportHeight: 1_080
+        )
+        let moveAfterRelease = try registry.dispatchPointerEvent(
+            x: 700, y: 900, phase: .moved, timestamp: 2.3,
+            viewportWidth: 810, viewportHeight: 1_080
+        )
+        XCTAssertFalse(moveAfterRelease.callbackNames.contains("OnCursorMoved"))
+        try runtime.execute(
+            """
+            assert(STOCK_CLICK_COUNT == 1)
+            assert(STOCK_CAPTURED_MOVE_COUNT == 1)
+            assert(not STOCK_BUTTON.Hovered and not STOCK_BUTTON.Depressed)
+            """,
+            sourceName: "@GMLuaBundledStockDButtonOutsideRelease.lua"
+        )
+
+        // Cancellation releases capture before the stock callback and forces
+        // Hovered false, even when the cancellation coordinate is still inside.
+        _ = try registry.dispatchPointerEvent(
+            x: 120, y: 220, phase: .began, timestamp: 3,
+            viewportWidth: 810, viewportHeight: 1_080
+        )
+        _ = try registry.dispatchPointerEvent(
+            x: 120, y: 220, phase: .cancelled, timestamp: 3.1,
+            viewportWidth: 810, viewportHeight: 1_080
+        )
+        _ = try registry.dispatchPointerEvent(
+            x: 700, y: 900, phase: .moved, timestamp: 3.2,
+            viewportWidth: 810, viewportHeight: 1_080
+        )
+        try runtime.execute(
+            """
+            assert(STOCK_CLICK_COUNT == 1)
+            assert(STOCK_CAPTURED_MOVE_COUNT == 1)
+            assert(not STOCK_BUTTON.Hovered and not STOCK_BUTTON.Depressed)
+            """,
+            sourceName: "@GMLuaBundledStockDButtonCancellation.lua"
+        )
+
+        // The bundled DLabel refuses the press before depressing or capturing
+        // a disabled DButton, so it cannot click on release.
+        try runtime.execute(
+            "STOCK_BUTTON:SetEnabled(false)",
+            sourceName: "@GMLuaBundledStockDButtonDisable.lua"
+        )
+        _ = try registry.dispatchPointerEvent(
+            x: 120, y: 220, phase: .began, timestamp: 4,
+            viewportWidth: 810, viewportHeight: 1_080
+        )
+        _ = try registry.dispatchPointerEvent(
+            x: 120, y: 220, phase: .ended, timestamp: 4.1,
+            viewportWidth: 810, viewportHeight: 1_080
+        )
+        try runtime.execute(
+            "assert(STOCK_CLICK_COUNT == 1 and not STOCK_BUTTON.Depressed)",
+            sourceName: "@GMLuaBundledStockDButtonDisabledRelease.lua"
+        )
+    }
+
+    func testTextEntryNonASCIIStateMatchesStockInitializationAndHostInputPolicy() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: typeSystem)
+        try state.execute(
+            """
+            -- Source-shaped minimum of the original DTextEntry:Init path.
+            local DTextEntry = {}
+            function DTextEntry:Init()
+                self:SetAllowNonAsciiCharacters(true)
+            end
+            vgui.Register("StockShapedDTextEntry", DTextEntry, "TextEntry")
+
+            RESTRICTED_ENTRY = vgui.Create("TextEntry")
+            STOCK_SHAPED_ENTRY = vgui.Create("StockShapedDTextEntry")
+            function RESTRICTED_ENTRY:OnTextChanged()
+                RESTRICTED_CHANGES = (RESTRICTED_CHANGES or 0) + 1
+            end
+            function STOCK_SHAPED_ENTRY:OnTextChanged()
+                STOCK_SHAPED_CHANGES = (STOCK_SHAPED_CHANGES or 0) + 1
+            end
+
+            local panel = vgui.Create("Panel")
+            local okPanel = pcall(
+                panel.SetAllowNonAsciiCharacters,
+                panel,
+                true
+            )
+            local okType = pcall(
+                RESTRICTED_ENTRY.SetAllowNonAsciiCharacters,
+                RESTRICTED_ENTRY,
+                1
+            )
+            assert(okPanel == false and okType == false)
+            """,
+            sourceName: "@GMLuaDTextEntryNonASCIIInitialization.lua"
+        )
+
+        let initialSnapshots = registry.textPanelStateSnapshots
+        XCTAssertFalse(try XCTUnwrap(initialSnapshots.first(where: {
+            $0.requestedClassName == "TextEntry"
+        })).allowsNonASCIICharacters)
+        XCTAssertTrue(try XCTUnwrap(initialSnapshots.first(where: {
+            $0.requestedClassName == "StockShapedDTextEntry"
+        })).allowsNonASCIICharacters)
+
+        try state.execute(
+            "RESTRICTED_ENTRY:RequestFocus()",
+            sourceName: "@GMLuaRestrictedTextEntryFocus.lua"
+        )
+        // This mixed-batch split is the explicit host insertText policy. The
+        // public GMod API does not specify native mixed-paste aggregation.
+        XCTAssertNotNil(try registry.insertText("AテBéC"))
+        XCTAssertNotNil(try registry.insertText("日本"))
+        try state.execute(
+            """
+            assert(RESTRICTED_ENTRY:GetValue() == "ABC")
+            assert(RESTRICTED_CHANGES == 1)
+            RESTRICTED_ENTRY:SetAllowNonAsciiCharacters(true)
+            """,
+            sourceName: "@GMLuaRestrictedTextEntryCheckpoint.lua"
+        )
+        XCTAssertNotNil(try registry.insertText("日本"))
+
+        try state.execute(
+            "STOCK_SHAPED_ENTRY:RequestFocus()",
+            sourceName: "@GMLuaStockShapedTextEntryFocus.lua"
+        )
+        XCTAssertNotNil(try registry.insertText("テスト"))
+        try state.execute(
+            """
+            assert(RESTRICTED_ENTRY:GetValue() == "ABC日本")
+            assert(RESTRICTED_CHANGES == 2)
+            assert(STOCK_SHAPED_ENTRY:GetValue() == "テスト")
+            assert(STOCK_SHAPED_CHANGES == 1)
+            """,
+            sourceName: "@GMLuaDTextEntryNonASCIICheckpoint.lua"
+        )
+    }
+
+    func testExpensiveShadowStoresLabelStateAndEmitsShadowBeforeMainText() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let surface = try GMLuaSurface.install(into: state)
+        let registry = try GMLuaVGUI.install(
+            into: state,
+            typeSystem: typeSystem,
+            surfaceCommandState: surface
+        )
+        try state.execute(
+            """
+            -- Minimal source-shaped Color value and DCategoryHeader shadow path.
+            function Color(r, g, b, a)
+                return { r = r, g = g, b = b, a = a }
+            end
+
+            ROOT = vgui.Create("Panel")
+            ROOT:SetSize(200, 100)
+            ROOT:SetAlpha(128)
+
+            HEADER = vgui.Create("Label", ROOT)
+            HEADER:SetSize(120, 30)
+            HEADER:SetAlpha(128)
+            HEADER:SetText("Sandbox")
+            HEADER:SetFGColor(220, 230, 240, 200)
+
+            local supplied = Color(10, 20, 30, 100)
+            HEADER:SetExpensiveShadow(2, supplied)
+            supplied.r, supplied.g, supplied.b, supplied.a = 1, 2, 3, 4
+
+            local plain = vgui.Create("Panel")
+            assert(pcall(plain.SetExpensiveShadow, plain, 1, Color(0, 0, 0, 100)) == false)
+            assert(pcall(HEADER.SetExpensiveShadow, HEADER, 1, 0, 0, 0, 100) == false)
+            """,
+            sourceName: "@GMLuaLabelExpensiveShadowRegression.lua"
+        )
+
+        let stateSnapshot = try XCTUnwrap(registry.textPanelStateSnapshots.first(where: {
+            $0.requestedClassName == "Label" && $0.text == LuaString("Sandbox")
+        }))
+        XCTAssertEqual(stateSnapshot.expensiveShadow, GMLuaTextShadowSnapshot(
+            distance: 2,
+            color: GMLuaPanelColorSnapshot(red: 10, green: 20, blue: 30, alpha: 100)
+        ))
+
+        let activeFrame = try registry.renderFrame(
+            surface: surface,
+            viewportWidth: 200,
+            viewportHeight: 100
+        )
+        XCTAssertEqual(activeFrame.commands.count, 2)
+        guard case let .text(shadowText, shadowPosition, shadowFont, shadowColor, shadowClip) =
+                activeFrame.commands[0],
+              case let .text(mainText, mainPosition, mainFont, mainColor, mainClip) =
+                activeFrame.commands[1] else {
+            return XCTFail("Label shadow and main text commands were not emitted in order")
+        }
+        XCTAssertEqual(shadowText, mainText)
+        XCTAssertEqual(shadowFont, mainFont)
+        XCTAssertEqual(shadowPosition.x, mainPosition.x + 2)
+        XCTAssertEqual(shadowPosition.y, mainPosition.y + 2)
+        XCTAssertEqual(shadowColor.red, 10)
+        XCTAssertEqual(shadowColor.green, 20)
+        XCTAssertEqual(shadowColor.blue, 30)
+        let cumulativeAlpha = 128.0 * 128.0 / 255.0
+        XCTAssertEqual(shadowColor.alpha, 100.0 * cumulativeAlpha / 255.0, accuracy: 0.000_001)
+        XCTAssertEqual(mainColor.alpha, 200.0 * cumulativeAlpha / 255.0, accuracy: 0.000_001)
+        XCTAssertEqual(shadowClip, mainClip)
+
+        try state.execute(
+            "HEADER:SetExpensiveShadow(0, Color(40, 50, 60, 70))",
+            sourceName: "@GMLuaLabelExpensiveShadowDisabled.lua"
+        )
+        let disabledState = try XCTUnwrap(registry.textPanelStateSnapshots.first(where: {
+            $0.text == LuaString("Sandbox")
+        })?.expensiveShadow)
+        XCTAssertEqual(disabledState.distance, 0)
+        XCTAssertEqual(disabledState.color, GMLuaPanelColorSnapshot(
+            red: 40,
+            green: 50,
+            blue: 60,
+            alpha: 70
+        ))
+        let disabledFrame = try registry.renderFrame(
+            surface: surface,
+            viewportWidth: 200,
+            viewportHeight: 100
+        )
+        XCTAssertEqual(disabledFrame.commands.count, 1)
     }
 
     func testRootCenterUsesCurrentRuntimeViewportAndDirectRegistryFailsExplicitly() throws {

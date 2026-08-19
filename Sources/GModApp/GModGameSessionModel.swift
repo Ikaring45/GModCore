@@ -6,10 +6,15 @@ import GModGameSession
 import GModMetal
 
 private struct GModGameFrameBatch: Sendable {
-    let generation: UInt64
+    let token: GModGameFrameToken
     let fixedTickCount: Int
     let viewport: GMLuaViewportSize
     let movementInput: GModPlayableMovementInput
+}
+
+private struct GModSurfaceBuildResult: Sendable {
+    let scene: GModMetalSurfaceScene?
+    let failure: String?
 }
 
 /// Lock-protected one-slot mailbox between MTKView's render callback and the
@@ -20,23 +25,30 @@ private final class GModGameFrameMailbox: @unchecked Sendable {
 
     private let lock = NSLock()
     private var enabled = false
-    private var generation: UInt64 = 0
+    private var token: GModGameFrameToken?
     private var drainScheduled = false
     private var pendingTicks = 0
     private var pendingViewport = GMLuaViewportSize.logicalDesktopDefault
     private var movementInput = GModPlayableMovementInput.idle
     private var hasPendingFrame = false
 
-    func setEnabled(_ replacement: Bool, generation: UInt64? = nil) {
+    func disable() {
         lock.lock()
-        enabled = replacement
-        if let generation {
-            self.generation = generation
-        }
-        if !replacement {
+        enabled = false
+        pendingTicks = 0
+        hasPendingFrame = false
+        lock.unlock()
+    }
+
+    func enable(token replacement: GModGameFrameToken) {
+        lock.lock()
+        if token != replacement {
+            // Never relabel a frame admitted under an older input boundary.
             pendingTicks = 0
             hasPendingFrame = false
         }
+        token = replacement
+        enabled = true
         lock.unlock()
     }
 
@@ -84,12 +96,12 @@ private final class GModGameFrameMailbox: @unchecked Sendable {
     private func takePendingBatch() -> GModGameFrameBatch? {
         lock.lock()
         defer { lock.unlock() }
-        guard enabled, hasPendingFrame else {
+        guard enabled, hasPendingFrame, let token else {
             drainScheduled = false
             return nil
         }
         let batch = GModGameFrameBatch(
-            generation: generation,
+            token: token,
             fixedTickCount: pendingTicks,
             viewport: pendingViewport,
             movementInput: movementInput
@@ -97,6 +109,67 @@ private final class GModGameFrameMailbox: @unchecked Sendable {
         pendingTicks = 0
         hasPendingFrame = false
         return batch
+    }
+}
+
+/// A bounded, single-drain input lane for SwiftUI pointer samples. Consecutive
+/// moves are coalesced, while began/ended/cancelled samples retain ordering.
+/// This keeps a 120 Hz touch stream from spawning an unbounded number of Tasks.
+private final class GModGamePointerMailbox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var enabled = false
+    private var drainScheduled = false
+    private var queue = GModGamePointerPendingQueue()
+
+    func setEnabled(_ replacement: Bool) {
+        lock.lock()
+        enabled = replacement
+        if !replacement {
+            queue = GModGamePointerPendingQueue(capacity: queue.capacity)
+        }
+        lock.unlock()
+    }
+
+    func submit(
+        _ sample: GModGamePointerSample,
+        consume: @escaping @Sendable (GModGamePointerSample) async -> Void
+    ) -> GModGamePointerQueueSubmission {
+        lock.lock()
+        guard enabled else {
+            lock.unlock()
+            return GModGamePointerQueueSubmission(
+                acceptedSample: false,
+                droppedSampleCount: 0,
+                coalescedMoveCount: 0
+            )
+        }
+
+        let submission = queue.enqueue(sample)
+
+        let shouldSchedule = !drainScheduled
+        if shouldSchedule {
+            drainScheduled = true
+        }
+        lock.unlock()
+
+        if shouldSchedule {
+            Task {
+                while let next = self.takePendingSample() {
+                    await consume(next)
+                }
+            }
+        }
+        return submission
+    }
+
+    private func takePendingSample() -> GModGamePointerSample? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard enabled, !queue.samples.isEmpty else {
+            drainScheduled = false
+            return nil
+        }
+        return queue.popFirst()
     }
 }
 
@@ -112,20 +185,45 @@ final class GModGameSessionModel: ObservableObject {
     @Published private(set) var playerOrigin = SourceVector3.zero
     @Published private(set) var viewAngles = SourceQAngle.zero
     @Published private(set) var worldScene: GModMetalWorldScene?
+    @Published private(set) var surfaceScene: GModMetalSurfaceScene?
+    @Published private(set) var surfaceDiagnostics: GModMetalSurfaceDiagnostics?
+    @Published private(set) var surfaceStatus = "VGUI surface idle"
+    @Published private(set) var isSpawnMenuOpen = false
+    @Published private(set) var isSpawnMenuTransitioning = false
+    @Published private(set) var pointerStatus = "VGUI pointer idle"
+    @Published private(set) var pointerQueueDropCount = 0
+    @Published private(set) var pointerMoveCoalescedCount = 0
+    @Published private(set) var isInputSuspended = false
+    let pointerCapability =
+        "SwiftUI single-touch; stock DButton enabled/capture callbacks active; " +
+        "hover/wheel/keyboard and UIKit touchesCancelled bridge pending"
 
     private let lane: GModPlayableSessionLane
     private let logSink: (String) -> Void
     private nonisolated let frameMailbox = GModGameFrameMailbox()
+    private nonisolated let pointerMailbox = GModGamePointerMailbox()
+    private nonisolated let surfaceTextureResolver:
+        GModMetalSurfaceSourceMaterialResolver
+    private nonisolated let surfaceTextRasterizer:
+        GModMetalCoreTextRasterizer
     private var forwardAxis: Float = 0
     private var sideAxis: Float = 0
     private var sessionGeneration: UInt64 = 0
     private var laneGeneration: UInt64?
+    private var pointerEpoch: UInt64?
+    private var inputEpoch: UInt64?
+    private var surfaceRequestRevision: UInt64 = 0
+    private var inputSuspensionInFlight = false
+    private var lastSurfaceFailure: String?
+    private var lastPointerFailure: String?
 
     init(
         runtimeFactory: GModAppRuntimeFactory,
         logSink: @escaping (String) -> Void = { _ in }
     ) {
         lane = runtimeFactory.makePlayableSessionLane()
+        surfaceTextureResolver = runtimeFactory.surfaceTextureResolver
+        surfaceTextRasterizer = runtimeFactory.surfaceTextRasterizer
         self.logSink = logSink
     }
 
@@ -138,14 +236,28 @@ final class GModGameSessionModel: ObservableObject {
 
     func start(map: GModBundledMap) {
         guard !isStarting else { return }
+        invalidateSurfaceRequests()
         isStarting = true
         isReady = false
         activeMap = nil
         worldScene = nil
+        surfaceScene = nil
+        surfaceDiagnostics = nil
+        surfaceStatus = "VGUI surface loading…"
+        isSpawnMenuOpen = false
+        isSpawnMenuTransitioning = false
+        pointerStatus = "VGUI pointer idle"
+        pointerQueueDropCount = 0
+        pointerMoveCoalescedCount = 0
+        lastSurfaceFailure = nil
+        lastPointerFailure = nil
         sessionGeneration &+= 1
         let requestedGeneration = sessionGeneration
         laneGeneration = nil
-        frameMailbox.setEnabled(false)
+        pointerEpoch = nil
+        inputEpoch = nil
+        frameMailbox.disable()
+        pointerMailbox.setEnabled(false)
         status = "Loading \(map.rawValue) / Sandbox…"
 
         Task { [weak self] in
@@ -166,6 +278,8 @@ final class GModGameSessionModel: ObservableObject {
                 guard requestedGeneration == sessionGeneration else { return }
                 activeMap = map
                 laneGeneration = snapshot.generation
+                pointerEpoch = snapshot.pointerEpoch
+                inputEpoch = snapshot.inputEpoch
                 isReady = true
                 fixedTickCount = 0
                 lastDeliveredMessages = snapshot.startup.deliveredMessages
@@ -180,12 +294,14 @@ final class GModGameSessionModel: ObservableObject {
                     playerOrigin: playerOrigin,
                     viewAngles: viewAngles
                 )
+                surfaceStatus = "VGUI surface awaiting first client frame"
                 let spawn = snapshot.startup.spawnPoint.origin
                 status = "READY \(map.rawValue) spawn=(\(spawn.x), \(spawn.y), \(spawn.z))"
-                frameMailbox.setEnabled(
-                    true,
-                    generation: requestedGeneration
-                )
+                if isInputSuspended {
+                    beginInputSuspensionIfPossible()
+                } else {
+                    activateInputIfPossible()
+                }
             } catch {
                 guard requestedGeneration == sessionGeneration else { return }
                 activeMap = nil
@@ -231,12 +347,14 @@ final class GModGameSessionModel: ObservableObject {
     }
 
     func setMovementAxes(forward: Float, side: Float) {
+        guard !isInputSuspended else { return }
         forwardAxis = Swift.max(-1, Swift.min(1, forward))
         sideAxis = Swift.max(-1, Swift.min(1, side))
         publishMovementInput()
     }
 
     func adjustLook(deltaX: Float, deltaY: Float) {
+        guard !isInputSuspended else { return }
         let sensitivity: Float = 0.12
         var yaw = viewAngles.yaw + deltaX * sensitivity
         yaw.formTruncatingRemainder(dividingBy: 360)
@@ -252,21 +370,198 @@ final class GModGameSessionModel: ObservableObject {
         publishCameraScene()
     }
 
-    private func consumeFrame(_ batch: GModGameFrameBatch) async {
+    /// Idempotently closes every host-input path before the app loses active
+    /// execution. The lane boundary clears the realm-visible button word and
+    /// advances its pointer and frame epochs after cancelling a gesture once.
+    func suspendInput() {
+        guard !isInputSuspended else { return }
+        isInputSuspended = true
+        forwardAxis = 0
+        sideAxis = 0
+        publishMovementInput()
+        invalidateSurfaceRequests()
+        frameMailbox.disable()
+        pointerMailbox.setEnabled(false)
+        pointerStatus = "VGUI input suspended"
+        beginInputSuspensionIfPossible()
+    }
+
+    /// Re-enables mailboxes only after an in-flight actor suspension has
+    /// advanced both input epochs. This prevents a quick inactive/active bounce
+    /// from admitting new pointer or frame work under an epoch being retired.
+    func resumeInput() {
+        guard isInputSuspended else { return }
+        isInputSuspended = false
+        activateInputIfPossible()
+    }
+
+    func toggleSpawnMenu() {
+        setSpawnMenuOpen(!isSpawnMenuOpen)
+    }
+
+    func setSpawnMenuOpen(_ replacement: Bool) {
         guard isReady,
-              batch.generation == sessionGeneration,
-              let activeLaneGeneration = laneGeneration else {
+              !isInputSuspended,
+              !isSpawnMenuTransitioning,
+              replacement != isSpawnMenuOpen,
+              let requestedLaneGeneration = laneGeneration,
+              let requestedPointerEpoch = pointerEpoch,
+              let requestedInputEpoch = inputEpoch else {
             return
         }
-        let activeGeneration = batch.generation
+        let requestedGeneration = sessionGeneration
+        invalidateSurfaceRequests()
+        isSpawnMenuTransitioning = true
+        frameMailbox.disable()
+        if replacement {
+            forwardAxis = 0
+            sideAxis = 0
+            publishMovementInput()
+        } else {
+            pointerMailbox.setEnabled(false)
+        }
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let boundary = try await lane.setSpawnMenuOpen(
+                    replacement,
+                    cancelActivePointer: !replacement,
+                    cancellationTimestamp: Date().timeIntervalSinceReferenceDate,
+                    expectedGeneration: requestedLaneGeneration,
+                    expectedPointerEpoch: requestedPointerEpoch,
+                    expectedInputEpoch: requestedInputEpoch
+                )
+                guard requestedGeneration == sessionGeneration, isReady else {
+                    return
+                }
+                pointerEpoch = boundary.pointerEpoch
+                inputEpoch = boundary.inputEpoch
+                reportPointerCancellationFailure(boundary.cancellationFailure)
+                if let lifecycleFailure = boundary.lifecycleFailure {
+                    appendLog(
+                        "[CLIENT][VGUI] Spawn Menu transition failed: " +
+                            lifecycleFailure
+                    )
+                } else {
+                    isSpawnMenuOpen = replacement
+                    pointerMailbox.setEnabled(
+                        replacement && !isInputSuspended
+                    )
+                    pointerStatus = isInputSuspended
+                        ? "VGUI input suspended"
+                        : replacement
+                        ? "Single-touch VGUI; hover/wheel/keyboard/native cancel pending"
+                        : "VGUI pointer idle"
+                    surfaceStatus = replacement
+                        ? "Spawn Menu open; awaiting VGUI frame"
+                        : "Spawn Menu closed; awaiting VGUI frame"
+                    if !replacement {
+                        surfaceScene = nil
+                        surfaceDiagnostics = nil
+                    }
+                }
+            } catch {
+                guard requestedGeneration == sessionGeneration else { return }
+                if isSpawnMenuOpen && !isInputSuspended {
+                    pointerMailbox.setEnabled(true)
+                }
+                appendLog(
+                    "[CLIENT][VGUI] Spawn Menu transition failed: " +
+                        GMLuaRuntime.describe(error)
+                )
+            }
+            if requestedGeneration == sessionGeneration {
+                isSpawnMenuTransitioning = false
+                if isInputSuspended {
+                    beginInputSuspensionIfPossible()
+                } else {
+                    activateInputIfPossible()
+                }
+            }
+        }
+    }
+
+    /// Maps a value-only SwiftUI location into the last rendered VGUI
+    /// viewport. The bounded mailbox preserves press/release ordering and
+    /// coalesces move samples before crossing the session actor boundary.
+    func submitSpawnMenuPointer(
+        x: Double,
+        y: Double,
+        viewWidth: Double,
+        viewHeight: Double,
+        phase: GMLuaPointerPhase,
+        timestamp: TimeInterval
+    ) {
+        guard isReady, !isInputSuspended,
+              isSpawnMenuOpen, !isSpawnMenuTransitioning,
+              let laneGeneration,
+              let pointerEpoch,
+              let surfaceScene,
+              timestamp.isFinite else {
+            return
+        }
+        guard let mapped = GModGamePointerCoordinateMapper.map(
+            x: x,
+            y: y,
+            viewWidth: viewWidth,
+            viewHeight: viewHeight,
+            viewportWidth: surfaceScene.viewportWidth,
+            viewportHeight: surfaceScene.viewportHeight
+        ) else { return }
+
+        let submission = pointerMailbox.submit(
+            GModGamePointerSample(
+                generation: GModGameSessionGenerationToken(
+                    application: sessionGeneration,
+                    lane: laneGeneration
+                ),
+                pointerEpoch: pointerEpoch,
+                x: mapped.x,
+                y: mapped.y,
+                phase: phase,
+                timestamp: timestamp
+            )
+        ) { [weak self] sample in
+            await self?.consumePointer(sample)
+        }
+        pointerQueueDropCount += submission.droppedSampleCount
+        pointerMoveCoalescedCount += submission.coalescedMoveCount
+    }
+
+    private func consumeFrame(_ batch: GModGameFrameBatch) async {
+        guard isReady, !isInputSuspended,
+              !inputSuspensionInFlight, !isSpawnMenuTransitioning,
+              batch.token.matches(
+                  application: sessionGeneration,
+                  lane: laneGeneration,
+                  inputEpoch: inputEpoch
+              ) else {
+            return
+        }
+        let activeToken = batch.token
         do {
             let report = try await lane.runHostFrame(
                 fixedTickCount: batch.fixedTickCount,
+                // Keep this false until the strict Sandbox VGUI slice can
+                // guarantee that Paint failures are represented in the host
+                // report. Today VGUI is requested separately below so a Lua
+                // UI failure cannot discard an already-advanced world frame.
+                renderClientVGUIFrame: false,
                 viewport: batch.viewport,
                 movementInput: batch.movementInput,
-                expectedGeneration: activeLaneGeneration
+                expectedGeneration: activeToken.generation.lane,
+                expectedInputEpoch: activeToken.inputEpoch
             )
-            guard isReady, activeGeneration == sessionGeneration else { return }
+            guard isReady, !isInputSuspended,
+                  !inputSuspensionInFlight, !isSpawnMenuTransitioning,
+                  activeToken.matches(
+                      application: sessionGeneration,
+                      lane: laneGeneration,
+                      inputEpoch: inputEpoch
+                  ) else {
+                return
+            }
             fixedTickCount &+= UInt64(report.fixedTicks.count)
             lastDeliveredMessages = report.deliveredMessages
             playerOrigin = report.playerWalkState.origin
@@ -275,12 +570,178 @@ final class GModGameSessionModel: ObservableObject {
                 reportFailures(tick.server)
                 reportFailures(tick.client)
             }
+            for failure in report.actionFailures {
+                appendLog(
+                    "[SERVER][console:\(failure.command)] Action failed: " +
+                        failure.message
+                )
+            }
             if let clientFrame = report.clientFrame {
                 reportFailures(clientFrame)
             }
+            guard !isSpawnMenuTransitioning else { return }
+            let surfaceToken = beginSurfaceRequest(
+                applicationGeneration: activeToken.generation.application,
+                laneGeneration: activeToken.generation.lane
+            )
+            do {
+                let snapshot = try await lane.renderClientVGUIFrame(
+                    expectedGeneration: activeToken.generation.lane
+                )
+                await buildAndPublishSurfaceScene(
+                    snapshot,
+                    token: surfaceToken
+                )
+            } catch {
+                guard isReady, surfaceToken.matches(
+                    application: sessionGeneration,
+                    lane: laneGeneration,
+                    requestRevision: surfaceRequestRevision,
+                    spawnMenuOpen: isSpawnMenuOpen
+                ) else {
+                    return
+                }
+                publishSurfaceFailure(
+                    "live VGUI render failed: \(GMLuaRuntime.describe(error))"
+                )
+            }
         } catch {
-            if activeGeneration == sessionGeneration {
+            if isReady, !isInputSuspended,
+               !inputSuspensionInFlight, !isSpawnMenuTransitioning,
+               activeToken.matches(
+                   application: sessionGeneration,
+                   lane: laneGeneration,
+                   inputEpoch: inputEpoch
+               ) {
                 failRuntime(error)
+            }
+        }
+    }
+
+    private func buildAndPublishSurfaceScene(
+        _ snapshot: GMLuaSurfaceFrameSnapshot,
+        token: GModSurfacePublicationToken
+    ) async {
+        let resolver = surfaceTextureResolver
+        let rasterizer = surfaceTextRasterizer
+        let build = await Task.detached(priority: .userInitiated) {
+            do {
+                return GModSurfaceBuildResult(
+                    scene: try GModMetalSurfaceScene(
+                        snapshot: snapshot,
+                        textureResolver: resolver,
+                        textRasterizer: rasterizer
+                    ),
+                    failure: nil
+                )
+            } catch {
+                return GModSurfaceBuildResult(
+                    scene: nil,
+                    failure: String(describing: error)
+                )
+            }
+        }.value
+
+        guard isReady,
+              token.matches(
+                application: sessionGeneration,
+                lane: laneGeneration,
+                requestRevision: surfaceRequestRevision,
+                spawnMenuOpen: isSpawnMenuOpen
+              ) else {
+            return
+        }
+        if let scene = build.scene {
+            surfaceScene = scene
+            surfaceDiagnostics = scene.diagnostics
+            let diagnostics = scene.diagnostics
+            surfaceStatus =
+                "VGUI \(diagnostics.resolvedCommandCount)/" +
+                "\(diagnostics.snapshotCommandCount) resolved; " +
+                "\(diagnostics.unresolvedCommands.count) unresolved; " +
+                "dropped capture " +
+                "\(diagnostics.captureDiagnostics.droppedCommandCount), " +
+                "scene \(diagnostics.droppedSnapshotCommandCount)"
+            lastSurfaceFailure = nil
+        } else if let failure = build.failure {
+            publishSurfaceFailure("surface build failed: \(failure)")
+        }
+    }
+
+    /// Retains the last complete immutable scene on a transient UI failure.
+    /// The world renderer therefore continues and diagnostics remain visible.
+    private func publishSurfaceFailure(_ failure: String) {
+        surfaceStatus = "VGUI unavailable: \(failure)"
+        if lastSurfaceFailure != failure {
+            lastSurfaceFailure = failure
+            appendLog("[CLIENT][VGUI] \(failure)")
+        }
+    }
+
+    private func beginSurfaceRequest(
+        applicationGeneration: UInt64,
+        laneGeneration: UInt64
+    ) -> GModSurfacePublicationToken {
+        surfaceRequestRevision &+= 1
+        return GModSurfacePublicationToken(
+            generation: GModGameSessionGenerationToken(
+                application: applicationGeneration,
+                lane: laneGeneration
+            ),
+            requestRevision: surfaceRequestRevision,
+            spawnMenuOpen: isSpawnMenuOpen
+        )
+    }
+
+    private func invalidateSurfaceRequests() {
+        surfaceRequestRevision &+= 1
+    }
+
+    private func consumePointer(_ sample: GModGamePointerSample) async {
+        guard isReady, !isInputSuspended,
+              isSpawnMenuOpen, !isSpawnMenuTransitioning,
+              sample.pointerEpoch == pointerEpoch,
+              sample.generation.matches(
+                application: sessionGeneration,
+                lane: laneGeneration
+              ) else {
+            return
+        }
+        do {
+            let result = try await lane.dispatchClientVGUIPointerEvent(
+                x: sample.x,
+                y: sample.y,
+                phase: sample.phase,
+                timestamp: sample.timestamp,
+                expectedGeneration: sample.generation.lane,
+                expectedPointerEpoch: sample.pointerEpoch
+            )
+            guard isReady, !isInputSuspended,
+                  isSpawnMenuOpen, !isSpawnMenuTransitioning,
+                  sample.pointerEpoch == pointerEpoch,
+                  sample.generation.matches(
+                    application: sessionGeneration,
+                    lane: laneGeneration
+                  ) else {
+                return
+            }
+            let panel = result.hitPanelIdentifier.map(String.init) ?? "none"
+            pointerStatus =
+                "VGUI pointer panel=\(panel) callbacks=" +
+                "\(result.callbackNames.count)"
+            lastPointerFailure = nil
+        } catch {
+            guard sample.generation.application == sessionGeneration,
+                  sample.pointerEpoch == pointerEpoch else {
+                return
+            }
+            pointerStatus = "VGUI pointer dispatch failed"
+            let failure = GMLuaRuntime.describe(error)
+            if lastPointerFailure != failure {
+                lastPointerFailure = failure
+                appendLog(
+                    "[CLIENT][VGUI] Pointer dispatch failed: \(failure)"
+                )
             }
         }
     }
@@ -301,10 +762,95 @@ final class GModGameSessionModel: ObservableObject {
 
     private func failRuntime(_ error: Error) {
         isReady = false
-        frameMailbox.setEnabled(false)
+        invalidateSurfaceRequests()
+        frameMailbox.disable()
+        pointerMailbox.setEnabled(false)
+        pointerEpoch = nil
+        inputEpoch = nil
         worldScene = nil
+        surfaceScene = nil
+        surfaceDiagnostics = nil
+        isSpawnMenuOpen = false
+        isSpawnMenuTransitioning = false
+        lastPointerFailure = nil
         status = "RUNTIME FAILED: \(GMLuaRuntime.describe(error))"
         appendLog(status)
+    }
+
+    private func beginInputSuspensionIfPossible() {
+        guard isInputSuspended,
+              !inputSuspensionInFlight,
+              isReady,
+              !isSpawnMenuTransitioning,
+              let requestedLaneGeneration = laneGeneration,
+              let requestedPointerEpoch = pointerEpoch,
+              let requestedInputEpoch = inputEpoch else {
+            return
+        }
+        inputSuspensionInFlight = true
+        let requestedGeneration = sessionGeneration
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let boundary = try await lane.suspendInput(
+                    cancellationTimestamp: Date().timeIntervalSinceReferenceDate,
+                    expectedGeneration: requestedLaneGeneration,
+                    expectedPointerEpoch: requestedPointerEpoch,
+                    expectedInputEpoch: requestedInputEpoch
+                )
+                if requestedGeneration == sessionGeneration,
+                   requestedLaneGeneration == laneGeneration {
+                    pointerEpoch = boundary.pointerEpoch
+                    inputEpoch = boundary.inputEpoch
+                    reportPointerCancellationFailure(
+                        boundary.cancellationFailure
+                    )
+                }
+            } catch {
+                if requestedGeneration == sessionGeneration {
+                    appendLog(
+                        "[CLIENT][INPUT] Suspension failed: " +
+                            GMLuaRuntime.describe(error)
+                    )
+                }
+            }
+            inputSuspensionInFlight = false
+            if isInputSuspended {
+                pointerMailbox.setEnabled(false)
+                frameMailbox.disable()
+            } else {
+                activateInputIfPossible()
+            }
+        }
+    }
+
+    private func activateInputIfPossible() {
+        guard isReady,
+              !isInputSuspended,
+              !inputSuspensionInFlight,
+              !isSpawnMenuTransitioning,
+              let laneGeneration,
+              let inputEpoch else {
+            return
+        }
+        frameMailbox.enable(
+            token: GModGameFrameToken(
+                generation: GModGameSessionGenerationToken(
+                    application: sessionGeneration,
+                    lane: laneGeneration
+                ),
+                inputEpoch: inputEpoch
+            )
+        )
+        pointerMailbox.setEnabled(isSpawnMenuOpen)
+        pointerStatus = isSpawnMenuOpen
+            ? "Single-touch VGUI; hover/wheel/keyboard/native cancel pending"
+            : "VGUI pointer idle"
+    }
+
+    private func reportPointerCancellationFailure(_ failure: String?) {
+        guard let failure else { return }
+        appendLog("[CLIENT][INPUT] Pointer cancellation callback failed: \(failure)")
     }
 
     private func publishMovementInput() {

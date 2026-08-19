@@ -186,6 +186,41 @@ public struct GMLuaSourceBSPTraceProvider: GMLuaTraceProvider, Sendable {
 /// is available before a world is connected, but such calls fail explicitly;
 /// the runtime does not manufacture a successful miss during map loading.
 public enum GMLuaUtilTrace {
+    private static let signedContentsConstants: [(String, SourceContents)] = [
+        ("CONTENTS_EMPTY", .empty),
+        ("CONTENTS_SOLID", .solid),
+        ("CONTENTS_WINDOW", .window),
+        ("CONTENTS_AUX", .auxiliary),
+        ("CONTENTS_GRATE", .grate),
+        ("CONTENTS_SLIME", .slime),
+        ("CONTENTS_WATER", .water),
+        ("CONTENTS_BLOCKLOS", .blockLineOfSight),
+        ("CONTENTS_OPAQUE", .opaque),
+        ("CONTENTS_TESTFOGVOLUME", .testFogVolume),
+        ("CONTENTS_UNUSED", .unused),
+        ("CONTENTS_UNUSED6", .unused6),
+        ("CONTENTS_TEAM1", .team1),
+        ("CONTENTS_TEAM2", .team2),
+        ("CONTENTS_IGNORE_NODRAW_OPAQUE", .ignoreNoDrawOpaque),
+        ("CONTENTS_MOVEABLE", .moveable),
+        ("CONTENTS_AREAPORTAL", .areaPortal),
+        ("CONTENTS_PLAYERCLIP", .playerClip),
+        ("CONTENTS_MONSTERCLIP", .monsterClip),
+        ("CONTENTS_CURRENT_0", .current0),
+        ("CONTENTS_CURRENT_90", .current90),
+        ("CONTENTS_CURRENT_180", .current180),
+        ("CONTENTS_CURRENT_270", .current270),
+        ("CONTENTS_CURRENT_UP", .currentUp),
+        ("CONTENTS_CURRENT_DOWN", .currentDown),
+        ("CONTENTS_ORIGIN", .origin),
+        ("CONTENTS_MONSTER", .monster),
+        ("CONTENTS_DEBRIS", .debris),
+        ("CONTENTS_DETAIL", .detail),
+        ("CONTENTS_TRANSLUCENT", .translucent),
+        ("CONTENTS_LADDER", .ladder),
+        ("CONTENTS_HITBOX", .hitbox),
+    ]
+
     private static let signedMaskConstants: [(String, SourceContents)] = [
         ("MASK_ALL", SourceMasks.all),
         ("MASK_SOLID", SourceMasks.solid),
@@ -245,7 +280,7 @@ public enum GMLuaUtilTrace {
         )
         state.setGlobal("util", value: .table(utilTable))
 
-        for (name, mask) in signedMaskConstants {
+        for (name, mask) in signedContentsConstants + signedMaskConstants {
             state.setGlobal(
                 name,
                 value: .number(Double(Int32(bitPattern: mask.rawValue)))

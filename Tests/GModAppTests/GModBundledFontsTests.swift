@@ -5,6 +5,27 @@ import GModEngine
 import GModLua
 
 final class GModBundledFontsTests: XCTestCase {
+    func testRuntimeFactoriesShareProcessSurfaceCachesAndResolveBundledPNG()
+        throws
+    {
+        let first = GModAppRuntimeFactory()
+        let second = GModAppRuntimeFactory()
+
+        XCTAssertTrue(
+            first.surfaceTextureResolver === second.surfaceTextureResolver
+        )
+        XCTAssertTrue(
+            first.surfaceTextRasterizer === second.surfaceTextRasterizer
+        )
+        let bitmap = try XCTUnwrap(
+            first.surfaceTextureResolver.resolveSurfaceTexture(
+                named: "widgets/arrow.png"
+            )
+        )
+        XCTAssertGreaterThan(bitmap.width, 0)
+        XCTAssertGreaterThan(bitmap.height, 0)
+    }
+
     func testProductionRuntimeFactoryDrivesClientSurfaceButNotServerSurface() throws {
         struct ProbeMeasurer: GMLuaTextMeasurer {
             let fidelity = GMLuaTextMeasurementFidelity.platformGlyphMetrics
@@ -84,6 +105,57 @@ final class GModBundledFontsTests: XCTestCase {
                 $0.bundleFile == "Roboto-Regular.ttf"
             } ?? true
         )
+    }
+
+    func testStockDermaTahomaUsesTheSameBundledFallbackForLayoutAndPixels()
+        throws
+    {
+        let factory = GModAppRuntimeFactory()
+        let regular = try XCTUnwrap(
+            GModBundledFontRegistry.shared.resolvedPostScriptName(
+                requestedName: "Tahoma",
+                weight: 500,
+                italic: false
+            )
+        )
+        let bold = try XCTUnwrap(
+            GModBundledFontRegistry.shared.resolvedPostScriptName(
+                requestedName: "Tahoma",
+                weight: 800,
+                italic: false
+            )
+        )
+        XCTAssertTrue(regular.hasPrefix("Roboto-"))
+        XCTAssertTrue(bold.hasPrefix("Roboto-"))
+
+        let client = factory.makeRuntime(realm: .client, logger: { _ in })
+        try client.execute(
+            """
+            surface.CreateFont("DermaFallbackRegular", {
+                font = "Tahoma", size = 13, weight = 500, extended = true
+            })
+            surface.CreateFont("DermaFallbackBold", {
+                font = "Tahoma", size = 13, weight = 800, extended = true
+            })
+            """,
+            sourceName: "@GModDermaTahomaFallback.lua"
+        )
+        let surface = try XCTUnwrap(client.surfaceCommandState)
+        for name in ["DermaFallbackRegular", "DermaFallbackBold"] {
+            let descriptor = try XCTUnwrap(surface.fontDescriptor(named: name))
+            let bitmap = try XCTUnwrap(
+                factory.surfaceTextRasterizer.rasterizeSurfaceText(
+                    "Sandbox",
+                    font: descriptor
+                )
+            )
+            XCTAssertEqual(bitmap.height, 13)
+            XCTAssertGreaterThan(bitmap.width, 0)
+            XCTAssertTrue(
+                stride(from: 3, to: bitmap.premultipliedRGBA8.count, by: 4)
+                    .contains { bitmap.premultipliedRGBA8[$0] > 0 }
+            )
+        }
     }
 
     func testRegistrationReportDistinguishesRegisteredAlreadyAndFailureAndCaches() {

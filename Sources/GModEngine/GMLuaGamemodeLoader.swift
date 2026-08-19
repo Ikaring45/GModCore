@@ -84,6 +84,8 @@ public final class GMLuaGamemodeLoader {
     private let fileSystem: LuaVirtualFileSystem
     private var records: [String: Record] = [:]
     private var registrationOrder: [String] = []
+    private var activeGamemodeTable: LuaTable?
+    private var activeGamemodeName: String?
 
     public init(runtime: GMLuaRuntime, fileSystem: LuaVirtualFileSystem) {
         self.runtime = runtime
@@ -94,6 +96,9 @@ public final class GMLuaGamemodeLoader {
 
     public func gamemode(named rawName: String) -> LuaValue? {
         guard let name = try? Self.normalizedName(rawName) else { return nil }
+        if name == activeGamemodeName, let activeGamemodeTable {
+            return .table(activeGamemodeTable)
+        }
         return records[name]?.value
     }
 
@@ -131,6 +136,7 @@ public final class GMLuaGamemodeLoader {
         let previousGM = state.getGlobal("GM")
         let previousGamemode = state.getGlobal("GAMEMODE")
         let previousGamemodeName = state.getGlobal("GAMEMODE_NAME")
+        let previousActiveName = activeGamemodeName
 
         do {
             var stack: [String] = []
@@ -145,6 +151,18 @@ public final class GMLuaGamemodeLoader {
                     registrationCountBefore: registrationCountBefore,
                     runtime: runtime
                 )
+                guard let registered = records[manifest.name] else {
+                    throw GMLuaGamemodeLoaderError.invalidManifest(
+                        name: manifest.name,
+                        path: manifest.path,
+                        reason: "successful registration produced no gamemode record"
+                    )
+                }
+                try activate(
+                    registered,
+                    named: manifest.name,
+                    state: state
+                )
             }
 
             guard let final = records[name] else {
@@ -154,9 +172,9 @@ public final class GMLuaGamemodeLoader {
                     reason: "validated hierarchy did not produce a registered gamemode"
                 )
             }
-            state.setGlobal("GM", value: final.value)
-            state.setGlobal("GAMEMODE", value: final.value)
-            state.setGlobal("GAMEMODE_NAME", value: .string(LuaString(name)))
+            if activeGamemodeName != name {
+                try activate(final, named: name, state: state)
+            }
 
             return GMLuaGamemodeLoadReport(
                 requestedName: name,
@@ -167,11 +185,56 @@ public final class GMLuaGamemodeLoader {
                 addonsLoaded: false
             )
         } catch {
+            activeGamemodeName = previousActiveName
             state.setGlobal("GM", value: previousGM)
             state.setGlobal("GAMEMODE", value: previousGamemode)
             state.setGlobal("GAMEMODE_NAME", value: previousGamemodeName)
             throw error
         }
+    }
+
+    /// Keeps the engine-visible active gamemode identity stable while loading
+    /// definitions into the separate `GM` tables registered by gamemode.lua.
+    /// The shipped hook.lua and gamemode.lua intentionally cache the first
+    /// non-nil result of gmod.GetGamemode(); mutating this stable table is what
+    /// lets a Base-stage cache observe the subsequently selected target.
+    private func activate(
+        _ record: Record,
+        named name: String,
+        state: LuaState
+    ) throws {
+        let active: LuaTable
+        if let activeGamemodeTable {
+            active = activeGamemodeTable
+        } else {
+            active = LuaTable()
+            activeGamemodeTable = active
+        }
+        let copier = try state.executeReturningValues(
+            """
+            local function merge(destination, source)
+                for key, value in pairs(source) do
+                    if type(value) == "table" and type(destination[key]) == "table" then
+                        merge(destination[key], value)
+                    else
+                        destination[key] = value
+                    end
+                end
+                return destination
+            end
+            return function(source, destination) return merge(destination, source) end
+            """,
+            sourceName: "=[GModLua active gamemode identity copier]"
+        ).first ?? .nilValue
+        _ = try state.call(
+            copier,
+            arguments: [record.value, .table(active)]
+        )
+        activeGamemodeName = name
+        let value = LuaValue.table(active)
+        state.setGlobal("GM", value: value)
+        state.setGlobal("GAMEMODE", value: value)
+        state.setGlobal("GAMEMODE_NAME", value: .string(LuaString(name)))
     }
 
     private func buildPlan(

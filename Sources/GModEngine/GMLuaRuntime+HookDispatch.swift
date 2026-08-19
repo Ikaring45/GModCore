@@ -4,7 +4,7 @@ extension GMLuaRuntime {
     /// Resolves the live hook dispatcher and active gamemode for every engine
     /// event. Neither value is cached: addons may replace hook.Call and the
     /// startup orchestrator may replace GAMEMODE between host frames.
-    func dispatchHostHook(named event: String) throws {
+    public func dispatchHostHook(named event: String) throws {
         guard !isClosed else {
             throw LuaError.runtime("cannot dispatch \(event) into a closed \(realm.rawValue) runtime")
         }

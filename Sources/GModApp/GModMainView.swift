@@ -5,6 +5,7 @@ import GModGameAssets
 import GModMetal
 
 public struct GModMainView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var console: GModConsoleModel
     @StateObject private var game: GModGameSessionModel
     @State private var stats = "Starting ARM engine..."
@@ -42,6 +43,7 @@ public struct GModMainView: View {
                     GModMetalView(
                         stats: $stats,
                         worldScene: game.worldScene,
+                        surfaceScene: game.surfaceScene,
                         onFrame: { request in
                             game.submitFrame(request)
                         }
@@ -54,23 +56,63 @@ public struct GModMainView: View {
                             .stroke(Color(red: 0.30, green: 0.31, blue: 0.32), lineWidth: 1)
                     )
 
-                    HStack(alignment: .bottom) {
-                        GModTouchJoystick { forward, side in
-                            game.setMovementAxes(
-                                forward: forward,
-                                side: side
+                    if game.isSpawnMenuOpen && !game.isInputSuspended {
+                        GModSpawnMenuPointerSurface {
+                            x, y, width, height, phase, timestamp in
+                            game.submitSpawnMenuPointer(
+                                x: x,
+                                y: y,
+                                viewWidth: width,
+                                viewHeight: height,
+                                phase: phase,
+                                timestamp: timestamp
                             )
                         }
-
-                        Spacer(minLength: 40)
-
-                        GModTouchLookPad { deltaX, deltaY in
-                            game.adjustLook(deltaX: deltaX, deltaY: deltaY)
-                        }
                     }
-                    .padding(18)
-                    .opacity(game.isReady ? 1 : 0.35)
-                    .allowsHitTesting(game.isReady)
+
+                    if !game.isSpawnMenuOpen &&
+                        !game.isSpawnMenuTransitioning &&
+                        !game.isInputSuspended {
+                        HStack(alignment: .bottom) {
+                            GModTouchJoystick { forward, side in
+                                game.setMovementAxes(
+                                    forward: forward,
+                                    side: side
+                                )
+                            }
+
+                            Spacer(minLength: 40)
+
+                            GModTouchLookPad { deltaX, deltaY in
+                                game.adjustLook(deltaX: deltaX, deltaY: deltaY)
+                            }
+                        }
+                        .padding(18)
+                        .opacity(game.isReady ? 1 : 0.35)
+                        .allowsHitTesting(game.isReady && !game.isInputSuspended)
+                    }
+
+                    VStack {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(game.surfaceStatus)
+                                if game.isSpawnMenuOpen {
+                                    Text(game.pointerCapability)
+                                    Text(game.pointerStatus)
+                                }
+                            }
+                                .font(.system(size: 9.5, design: .monospaced))
+                                .foregroundColor(Color.white.opacity(0.78))
+                                .lineLimit(1)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 4)
+                                .background(Color.black.opacity(0.55))
+                            Spacer()
+                        }
+                        Spacer()
+                    }
+                    .padding(8)
+                    .allowsHitTesting(false)
                 }
                 .frame(minHeight: 320)
 
@@ -83,6 +125,26 @@ public struct GModMainView: View {
             .padding(14)
         }
         .preferredColorScheme(.dark)
+        .onAppear {
+            if scenePhase == .active {
+                game.resumeInput()
+            } else {
+                game.suspendInput()
+            }
+        }
+        .onDisappear {
+            game.suspendInput()
+        }
+        .onChange(of: scenePhase) { phase in
+            switch phase {
+            case .active:
+                game.resumeInput()
+            case .inactive, .background:
+                game.suspendInput()
+            @unknown default:
+                game.suspendInput()
+            }
+        }
     }
 
     private var consoleWindow: some View {
@@ -269,6 +331,16 @@ public struct GModMainView: View {
             }
             .buttonStyle(GModButtonStyle())
 
+            Button(
+                game.isSpawnMenuOpen
+                    ? "Close Spawn Menu"
+                    : "Open Spawn Menu"
+            ) {
+                game.toggleSpawnMenu()
+            }
+            .buttonStyle(GModButtonStyle())
+            .disabled(!game.isReady || game.isSpawnMenuTransitioning)
+
             Spacer(minLength: 0)
 
             Text("tick \(game.fixedTickCount) / net \(game.lastDeliveredMessages)")
@@ -346,6 +418,79 @@ public struct GModMainView: View {
         if case let .source(source) = submission {
             game.executeActiveServer(source)
         }
+    }
+}
+
+/// SwiftUI exposes a bounded single-touch location and begin/move/end phases,
+/// which are forwarded without synthesizing VGUI clicks. The Engine now owns
+/// stock DButton enabled-state and mouse-capture callback behavior. Hover,
+/// wheel, multi-touch identity, host keyboard insertion, and UIKit's native
+/// touchesCancelled path still require a dedicated UIView input bridge.
+private struct GModSpawnMenuPointerSurface: View {
+    typealias Handler = (
+        _ x: Double,
+        _ y: Double,
+        _ viewWidth: Double,
+        _ viewHeight: Double,
+        _ phase: GMLuaPointerPhase,
+        _ timestamp: TimeInterval
+    ) -> Void
+
+    let onPointer: Handler
+    @State private var isTracking = false
+
+    var body: some View {
+        GeometryReader { geometry in
+            Color.clear
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0, coordinateSpace: .local)
+                        .onChanged { value in
+                            let timestamp = Date().timeIntervalSinceReferenceDate
+                            if !isTracking {
+                                isTracking = true
+                                send(
+                                    value.startLocation,
+                                    size: geometry.size,
+                                    phase: .began,
+                                    timestamp: timestamp
+                                )
+                            }
+                            send(
+                                value.location,
+                                size: geometry.size,
+                                phase: .moved,
+                                timestamp: timestamp
+                            )
+                        }
+                        .onEnded { value in
+                            send(
+                                value.location,
+                                size: geometry.size,
+                                phase: .ended,
+                                timestamp: Date().timeIntervalSinceReferenceDate
+                            )
+                            isTracking = false
+                        }
+                )
+        }
+        .accessibilityLabel("Spawn Menu single-touch pointer surface")
+    }
+
+    private func send(
+        _ location: CGPoint,
+        size: CGSize,
+        phase: GMLuaPointerPhase,
+        timestamp: TimeInterval
+    ) {
+        onPointer(
+            Double(location.x),
+            Double(location.y),
+            Double(size.width),
+            Double(size.height),
+            phase,
+            timestamp
+        )
     }
 }
 

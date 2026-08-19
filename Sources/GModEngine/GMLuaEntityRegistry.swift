@@ -21,6 +21,7 @@ private final class GMLuaEntityValue: @unchecked Sendable {
     let semanticValidity: Bool
     let sourceOwner: GMLuaSourceMirrorOwner?
     var className: String
+    var inputButtons: SourceInputButtons = []
     var luaTable: LuaTable? = LuaTable()
 
     init(
@@ -385,6 +386,44 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
         return value
     }
 
+    /// Replaces the current host-owned button word only for the exact
+    /// canonical Player generation. Stale lifecycle work cannot mutate a
+    /// replacement occupant of the same entity slot.
+    @discardableResult
+    func setPlayerInputButtons(
+        index: Int,
+        generation: UInt64,
+        buttons: SourceInputButtons
+    ) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let value = values[index],
+              let object = GMLuaTypeSystem.typedObject(from: value),
+              object.isValid,
+              let payload = object.payload as? GMLuaEntityValue,
+              payload.kind == .player,
+              payload.generation == generation else { return false }
+        payload.inputButtons = buttons
+        return true
+    }
+
+    /// Reads a button word only when the userdata is still this registry's
+    /// canonical Player. Invalidated Player userdata therefore cannot inherit
+    /// input from a later generation that reused its EntIndex.
+    private func playerInputButtons(for value: LuaValue) -> SourceInputButtons? {
+        guard case let .userdata(userdata) = value,
+              let object = GMLuaTypeSystem.typedObject(from: value),
+              let payload = object.payload as? GMLuaEntityValue else { return nil }
+        lock.lock()
+        defer { lock.unlock() }
+        guard object.isValid,
+              object.metaName == GMLuaEntityKind.player.rawValue,
+              payload.kind == .player,
+              case let .userdata(canonical)? = values[payload.index],
+              canonical === userdata else { return nil }
+        return payload.inputButtons
+    }
+
     /// Reduces a state-local Entity userdata to the engine identity that is
     /// valid on the network transport. The receiving realm resolves that
     /// index through its own canonical registry.
@@ -606,6 +645,62 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
             )
         }
 
+        // Source SDK 2013 `in_buttons.h` values are centralized by
+        // SourceInputButtons. Exporting the GLua spellings from those values
+        // avoids a second independently maintained numeric contract.
+        let buttonGlobals: [(String, SourceInputButtons)] = [
+            ("IN_ATTACK", .attack),
+            ("IN_JUMP", .jump),
+            ("IN_DUCK", .duck),
+            ("IN_FORWARD", .forward),
+            ("IN_BACK", .back),
+            ("IN_USE", .use),
+            ("IN_CANCEL", .cancel),
+            ("IN_LEFT", .left),
+            ("IN_RIGHT", .right),
+            ("IN_MOVELEFT", .moveLeft),
+            ("IN_MOVERIGHT", .moveRight),
+            ("IN_ATTACK2", .attack2),
+            ("IN_RUN", .run),
+            ("IN_RELOAD", .reload),
+            ("IN_ALT1", .alternate1),
+            ("IN_ALT2", .alternate2),
+            ("IN_SCORE", .score),
+            ("IN_SPEED", .speed),
+            ("IN_WALK", .walk),
+            ("IN_ZOOM", .zoom),
+            ("IN_WEAPON1", .weapon1),
+            ("IN_WEAPON2", .weapon2),
+            ("IN_BULLRUSH", .bullRush),
+            ("IN_GRENADE1", .grenade1),
+            ("IN_GRENADE2", .grenade2),
+            ("IN_ATTACK3", .attack3),
+        ]
+        for (name, buttons) in buttonGlobals {
+            state.setGlobal(name, value: .number(Double(buttons.rawValue)))
+        }
+
+        guard let playerMetatable = typeSystem.metatable(named: "Player") else {
+            throw LuaError.runtime("GLua Player metatable was not installed")
+        }
+        let playerKeyDown = entityNativeFunction("Player:KeyDown") { arguments in
+            guard let receiver = arguments.first,
+                  let current = registry.playerInputButtons(for: receiver) else {
+                return [.boolean(false)]
+            }
+            let mask = try inputButtonMask(
+                arguments,
+                index: 1,
+                function: "Player:KeyDown"
+            )
+            return [.boolean((current.rawValue & mask) != 0)]
+        }
+        try state.setRawTableValue(
+            playerKeyDown,
+            for: .string("KeyDown"),
+            in: playerMetatable
+        )
+
         let getTable = entityNativeFunction("Entity:GetTable") { arguments in
             _ = try descriptor(arguments.first, method: "GetTable")
             return [arguments.first.flatMap(registry.luaTable(for:)).map(LuaValue.table)
@@ -797,6 +892,40 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
             throw LuaError.runtime("Entity:\(method) received an unregistered engine object")
         }
         return payload
+    }
+
+    private static func inputButtonMask(
+        _ arguments: [LuaValue],
+        index: Int,
+        function: String
+    ) throws -> UInt32 {
+        guard arguments.indices.contains(index) else {
+            throw LuaError.runtime(
+                "bad argument #\(index) to '\(function)' (number expected, got no value)"
+            )
+        }
+        let number: Double?
+        switch arguments[index] {
+        case let .number(value):
+            number = value
+        case let .string(value):
+            number = Double(value.utf8String)
+        default:
+            number = nil
+        }
+        guard let number,
+              number.isFinite,
+              number.rounded(.towardZero) == number,
+              number >= Double(Int32.min),
+              number <= Double(UInt32.max) else {
+            throw LuaError.runtime(
+                "bad argument #\(index) to '\(function)' (32-bit integer expected)"
+            )
+        }
+        if number < 0 {
+            return UInt32(bitPattern: Int32(number))
+        }
+        return UInt32(number)
     }
 
     private static func entityIndex(_ arguments: [LuaValue], function: String) throws -> Int {

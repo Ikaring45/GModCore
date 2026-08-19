@@ -337,10 +337,17 @@ public final class GModBundledFontRegistry: @unchecked Sendable {
         if let exact = directPostScriptNames[canonical] {
             return exact
         }
-        if canonical.hasPrefix("roboto") {
+        // Stock Derma selects the Windows platform face Tahoma on every
+        // non-Linux realm. iPadOS does not ship that Microsoft-owned face, so
+        // both layout and rasterization deliberately resolve it through the
+        // authorized bundled Roboto family instead of allowing CoreText to
+        // choose two potentially different platform fallbacks.
+        if canonical.hasPrefix("roboto") || canonical == "tahoma" {
             let wantsCondensed = canonical.contains("condensed") || canonical == "robotocn"
             let wantsItalic = italic || canonical.contains("italic")
-            let wantedWeight = Self.explicitWeight(in: canonical) ?? weight
+            let wantedWeight = canonical == "tahoma"
+                ? weight
+                : (Self.explicitWeight(in: canonical) ?? weight)
             let candidates = faces.filter {
                 Self.canonicalName($0.postScript).hasPrefix("roboto")
                     && $0.condensed == wantsCondensed

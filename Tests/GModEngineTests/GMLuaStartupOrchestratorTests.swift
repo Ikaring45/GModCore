@@ -14,7 +14,8 @@ final class GMLuaStartupOrchestratorTests: XCTestCase {
             "lua/autorun/server/05_server.lua"
         ])
         XCTAssertEqual(result.runtime.includedFiles, [
-            "lua/autorun/startup_parts/nested.lua"
+            "lua/autorun/startup_parts/nested.lua",
+            "lua/weapons/startup_probe/shared.lua",
         ])
         XCTAssertEqual(result.report.autorunTransitiveIncludePaths, [
             "lua/autorun/startup_parts/nested.lua"
@@ -30,6 +31,7 @@ final class GMLuaStartupOrchestratorTests: XCTestCase {
             .realmAutorun,
             .addons,
             .targetGamemode,
+            .scriptedWeapons,
             .onGamemodeLoaded,
             .postGamemodeLoaded,
             .initialize,
@@ -39,10 +41,18 @@ final class GMLuaStartupOrchestratorTests: XCTestCase {
             result.report.stages.filter { $0.outcome == .skipped }.map(\.stage),
             [.addons]
         )
+        XCTAssertEqual(result.report.scriptedWeapons.realm, .server)
+        XCTAssertEqual(result.report.scriptedWeapons.directPaths, [
+            "lua/weapons/startup_probe/init.lua"
+        ])
+        XCTAssertEqual(result.report.scriptedWeapons.transitiveIncludePaths, [
+            "lua/weapons/startup_probe/shared.lua"
+        ])
         try result.runtime.execute(
             """
             assert(table.concat(STARTUP_ORDER, ",") ==
                 "base,shared-10,shared-nested,shared-20,server-05,sandbox," ..
+                "weapon-shared,weapon-server," ..
                 "hook-on,gm-on,hook-post,gm-post,hook-init,gm-init," ..
                 "hook-entity,gm-entity")
             assert(SERVER and not CLIENT)
@@ -72,6 +82,7 @@ final class GMLuaStartupOrchestratorTests: XCTestCase {
             .clientMaterialProxyBootstrap,
             .clientDefaultSkinBootstrap,
             .targetGamemode,
+            .scriptedWeapons,
             .onGamemodeLoaded,
             .postGamemodeLoaded,
             .initialize,
@@ -82,6 +93,13 @@ final class GMLuaStartupOrchestratorTests: XCTestCase {
             result.report.stages.filter { $0.outcome == .skipped }.map(\.stage),
             [.addons, .playerConnection]
         )
+        XCTAssertEqual(result.report.scriptedWeapons.realm, .client)
+        XCTAssertEqual(result.report.scriptedWeapons.directPaths, [
+            "lua/weapons/startup_probe/cl_init.lua"
+        ])
+        XCTAssertEqual(result.report.scriptedWeapons.transitiveIncludePaths, [
+            "lua/weapons/startup_probe/shared.lua"
+        ])
         let dermaStage = try XCTUnwrap(
             result.report.stages.first { $0.stage == .clientDermaBootstrap }
         )
@@ -119,7 +137,7 @@ final class GMLuaStartupOrchestratorTests: XCTestCase {
             assert(table.concat(STARTUP_ORDER, ",") ==
                 "derma,derma-core,base,shared-10,shared-nested,shared-20," ..
                 "client-07,post-10,post-20,vgui-10,vgui-nested,vgui-20," ..
-                "matproxy-10,skin,sandbox," ..
+                "matproxy-10,skin,sandbox,weapon-shared,weapon-client," ..
                 "hook-on,gm-on,hook-post,gm-post,hook-init,gm-init," ..
                 "hook-entity,gm-entity")
             assert(CLIENT and not SERVER)
@@ -345,7 +363,20 @@ final class GMLuaStartupOrchestratorTests: XCTestCase {
     private func runSyntheticStartup(
         realm: GMLuaRealm
     ) throws -> (runtime: GMLuaRuntime, report: GMLuaStartupReport) {
-        let files = try LuaMemoryFileSystem(initialFiles: fixtureFiles())
+        var initialFiles = fixtureFiles()
+        initialFiles["gamemodes/sandbox/entities/weapons/startup_probe/init.lua"] = data(
+            "assert(SERVER and not CLIENT); include('shared.lua'); " +
+                "table.insert(STARTUP_ORDER, 'weapon-server')"
+        )
+        initialFiles["gamemodes/sandbox/entities/weapons/startup_probe/cl_init.lua"] = data(
+            "assert(CLIENT and not SERVER); include('shared.lua'); " +
+                "table.insert(STARTUP_ORDER, 'weapon-client')"
+        )
+        initialFiles["gamemodes/sandbox/entities/weapons/startup_probe/shared.lua"] = data(
+            "assert(SWEP.Primary and SWEP.Secondary); " +
+                "table.insert(STARTUP_ORDER, 'weapon-shared')"
+        )
+        let files = try LuaMemoryFileSystem(initialFiles: initialFiles)
         let mounted = try mounted(files)
         let runtime = GMLuaRuntime(
             realm: realm,
@@ -484,6 +515,14 @@ final class GMLuaStartupOrchestratorTests: XCTestCase {
                 baseclass.Set("gamemode_" .. name, value)
             end
             function gamemode.Get(name) return gamemode.values[name] end
+
+            weapons = { values = {} }
+            function weapons.Register(value, name)
+                value.ClassName = name
+                weapons.values[name] = value
+            end
+            function weapons.GetStored(name) return weapons.values[name] end
+            function weapons.OnLoaded() end
 
             hook = { values = {} }
             function hook.Add(event, name, callback)

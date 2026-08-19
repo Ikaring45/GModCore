@@ -12,6 +12,7 @@ public enum GMLuaStartupStage: String, Sendable, Equatable {
     case realmAutorun
     case addons
     case targetGamemode
+    case scriptedWeapons
     case onGamemodeLoaded
     case postGamemodeLoaded
     case initialize
@@ -51,6 +52,7 @@ public struct GMLuaStartupReport: Sendable, Equatable {
     public let targetGamemode: String
     public let baseReport: GMLuaGamemodeLoadReport
     public let targetReport: GMLuaGamemodeLoadReport
+    public let scriptedWeapons: GMLuaScriptedWeaponLoadReport
     public let stages: [GMLuaStartupStageRecord]
 
     /// These are only the direct files selected by the engine autorun folders.
@@ -85,6 +87,7 @@ public enum GMLuaStartupError: Error, CustomStringConvertible {
     case clientBootstrap(stage: GMLuaStartupStage, path: String, reason: String)
     case autorunEnumeration(path: String, reason: String)
     case autorunExecution(path: String, reason: String)
+    case scriptedWeaponLoading(reason: String)
     case playerConnection(reason: String)
     case lifecycleUnavailable(event: String, reason: String)
     case lifecycleExecution(event: String, reason: String)
@@ -105,6 +108,8 @@ public enum GMLuaStartupError: Error, CustomStringConvertible {
             return "cannot enumerate autorun directory \(path): \(reason)"
         case let .autorunExecution(path, reason):
             return "autorun file failed at \(path): \(reason)"
+        case let .scriptedWeaponLoading(reason):
+            return "scripted weapon loading failed: \(reason)"
         case let .playerConnection(reason):
             return "player connection activation failed: \(reason)"
         case let .lifecycleUnavailable(event, reason):
@@ -121,16 +126,22 @@ public enum GMLuaStartupError: Error, CustomStringConvertible {
 /// orchestrator then reproduces the boundary which is material to gamemode
 /// compatibility:
 ///
-/// CLIENT Derma bootstrap -> Base -> shared autorun -> realm autorun -> addon boundary
+/// SERVER Base -> shared autorun -> server autorun -> addon boundary -> target
+///      -> scripted weapons -> OnGamemodeLoaded -> PostGamemodeLoaded -> Initialize
+///      -> InitPostEntity
+///
+/// CLIENT Derma bootstrap -> Base -> shared autorun -> client autorun -> addon boundary
 ///      -> postprocess -> VGUI controls -> material proxies -> Default skin -> target
-///      -> OnGamemodeLoaded -> PostGamemodeLoaded -> Initialize -> InitPostEntity
+///      -> scripted weapons -> OnGamemodeLoaded -> PostGamemodeLoaded -> Initialize
+///      -> InitPostEntity
 ///
 /// The game client does not use the menu realm's `lua/includes/vgui_base.lua`.
 /// It loads `lua/derma/init.lua` before Base, then the visible direct Lua files
 /// in the merged postprocess/VGUI/matproxy folders after autorun, followed by
-/// the exact Default skin before the target gamemode. The client report also
+/// the exact Default skin before the target gamemode. Both game realms load
+/// their realm-specific scripted weapons before `OnGamemodeLoaded`. The client report also
 /// inserts its observed player/session boundary between the last two lifecycle
-/// events. Server startup has none of these client-only stages.
+/// events. Server startup has none of the client-only bootstrap stages.
 ///
 /// Autorun files are direct `.lua` children sorted A-Z, matching GMod's public
 /// loading-order contract. Addon mount/GMA/VPK discovery and player/entity
@@ -259,6 +270,25 @@ public final class GMLuaStartupOrchestrator {
                 : "target loaded after autorun; cached Base was not re-executed"
         )
 
+        activeStageStorage = .scriptedWeapons
+        let scriptedWeapons: GMLuaScriptedWeaponLoadReport
+        do {
+            scriptedWeapons = try GMLuaScriptedWeaponLoader(
+                runtime: runtime,
+                fileSystem: fileSystem
+            ).load(gamemodeLoadOrder: targetReport.loadOrder)
+        } catch {
+            throw GMLuaStartupError.scriptedWeaponLoading(
+                reason: GMLuaRuntime.describe(error)
+            )
+        }
+        record(
+            .scriptedWeapons,
+            paths: scriptedWeapons.directPaths,
+            includes: scriptedWeapons.transitiveIncludePaths,
+            detail: "Base, global, and full gamemode-chain scripted weapons loaded in Source \(runtime.realm.rawValue) order"
+        )
+
         try dispatchLifecycle(
             event: "OnGamemodeLoaded",
             stage: .onGamemodeLoaded,
@@ -318,6 +348,7 @@ public final class GMLuaStartupOrchestrator {
             targetGamemode: targetReport.requestedName,
             baseReport: baseReport,
             targetReport: targetReport,
+            scriptedWeapons: scriptedWeapons,
             stages: stageStorage
         )
     }

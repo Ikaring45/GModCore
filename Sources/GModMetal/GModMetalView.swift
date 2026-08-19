@@ -5,6 +5,46 @@ import Foundation
 import simd
 import GModEngine
 
+/// Separates UIKit's logical point viewport from Metal's physical drawable.
+/// GLua/VGUI and pointer mapping use logical points; world projection uses the
+/// drawable aspect so Retina scale changes never shrink UI coordinates.
+public struct GModMetalViewportDimensions: Sendable, Equatable {
+    public let logicalWidth: Int
+    public let logicalHeight: Int
+    public let drawableWidth: Int
+    public let drawableHeight: Int
+
+    public init?(logicalSize: CGSize, drawableSize: CGSize) {
+        guard let logicalWidth = Self.dimension(logicalSize.width),
+              let logicalHeight = Self.dimension(logicalSize.height),
+              let drawableWidth = Self.dimension(drawableSize.width),
+              let drawableHeight = Self.dimension(drawableSize.height) else {
+            return nil
+        }
+        self.logicalWidth = logicalWidth
+        self.logicalHeight = logicalHeight
+        self.drawableWidth = drawableWidth
+        self.drawableHeight = drawableHeight
+    }
+
+    public var logicalAspectRatio: Double {
+        Double(logicalWidth) / Double(logicalHeight)
+    }
+
+    public var drawableAspectRatio: Double {
+        Double(drawableWidth) / Double(drawableHeight)
+    }
+
+    private static func dimension(_ value: CGFloat) -> Int? {
+        guard value.isFinite, value > 0, value <= CGFloat(Int.max) else {
+            return nil
+        }
+        let rounded = value.rounded()
+        guard rounded >= 1 else { return nil }
+        return Int(rounded)
+    }
+}
+
 public struct GModMetalFrameRequest: Sendable, Equatable {
     public let fixedTickCount: Int
     public let viewportWidth: Int
@@ -27,15 +67,18 @@ public struct GModMetalView:
 
     @Binding private var stats: String
     private let worldScene: GModMetalWorldScene?
+    private let surfaceScene: GModMetalSurfaceScene?
     private let onFrame: @Sendable (GModMetalFrameRequest) -> Void
 
     public init(
         stats: Binding<String>,
         worldScene: GModMetalWorldScene? = nil,
+        surfaceScene: GModMetalSurfaceScene? = nil,
         onFrame: @escaping @Sendable (GModMetalFrameRequest) -> Void = { _ in }
     ) {
         self._stats = stats
         self.worldScene = worldScene
+        self.surfaceScene = surfaceScene
         self.onFrame = onFrame
     }
 
@@ -45,6 +88,7 @@ public struct GModMetalView:
         Coordinator(
             stats: $stats,
             worldScene: worldScene,
+            surfaceScene: surfaceScene,
             onFrame: onFrame
         )
     }
@@ -112,8 +156,14 @@ public struct GModMetalView:
         _ uiView: MTKView,
         context: Context
     ) {
-        context.coordinator.reportDrawableSize(uiView.drawableSize)
-        context.coordinator.submit(worldScene: worldScene)
+        context.coordinator.reportViewport(
+            logicalSize: uiView.bounds.size,
+            drawableSize: uiView.drawableSize
+        )
+        context.coordinator.submit(
+            worldScene: worldScene,
+            surfaceScene: surfaceScene
+        )
     }
 
     // MARK: - Coordinator
@@ -129,8 +179,10 @@ public struct GModMetalView:
         private let onFrame:
             @Sendable (GModMetalFrameRequest) -> Void
 
-        private var reportedViewport:
-            SIMD2<Int>?
+        private let viewportLock = NSLock()
+
+        private var reportedViewportDimensions:
+            GModMetalViewportDimensions?
 
         private let engine =
             GMEngine()
@@ -144,13 +196,30 @@ public struct GModMetalView:
         private var worldPipeline:
             MTLRenderPipelineState?
 
+        private var surfaceSolidPipeline:
+            MTLRenderPipelineState?
+
+        private var surfaceTexturedPipeline:
+            MTLRenderPipelineState?
+
         private var depthState:
             MTLDepthStencilState?
+
+        private var surfaceDepthState:
+            MTLDepthStencilState?
+
+        private var surfaceSamplerState:
+            MTLSamplerState?
 
         private let pendingSceneLock = NSLock()
 
         private enum PendingWorldScene {
             case replace(GModMetalWorldScene)
+            case clear
+        }
+
+        private enum PendingSurfaceScene {
+            case replace(GModMetalSurfaceScene)
             case clear
         }
 
@@ -170,6 +239,45 @@ public struct GModMetalView:
         private struct WorldUniforms {
             let viewProjection: simd_float4x4
             let lightDirection: SIMD4<Float>
+        }
+
+        private struct SurfaceGPUVertex {
+            let position: SIMD2<Float>
+            let uv: SIMD2<Float>
+            let color: SIMD4<Float>
+        }
+
+        private struct CachedSurfaceTexture {
+            let bitmap: GModMetalSurfaceBitmap
+            let texture: MTLTexture
+        }
+
+        private struct SurfaceUploadBudget {
+            static let maximumTextureCount = 8
+            static let maximumByteCount = 8 * 1_024 * 1_024
+            static let maximumSingleTextureByteCount = 8 * 1_024 * 1_024
+
+            var remainingTextureCount = SurfaceUploadBudget.maximumTextureCount
+            var remainingByteCount = SurfaceUploadBudget.maximumByteCount
+            var deferredTextureCount = 0
+
+            mutating func reserve(byteCount: Int) -> Bool {
+                guard byteCount >= 0,
+                      byteCount <= Self.maximumSingleTextureByteCount,
+                      remainingTextureCount > 0,
+                      byteCount <= remainingByteCount else {
+                    deferredTextureCount += 1
+                    return false
+                }
+                remainingTextureCount -= 1
+                remainingByteCount -= byteCount
+                return true
+            }
+        }
+
+        private enum SurfaceTextureCachePolicy {
+            static let maximumTextureCount = 2_048
+            static let maximumByteCount = 32 * 1_024 * 1_024
         }
 
         private enum WorldSceneError: Error, CustomStringConvertible {
@@ -228,6 +336,9 @@ public struct GModMetalView:
         private var pendingWorldScene:
             PendingWorldScene?
 
+        private var pendingSurfaceScene:
+            PendingSurfaceScene?
+
         /// Accessed only by MTKView's serialized draw callback.
         private var activeWorldScene:
             GModMetalWorldScene?
@@ -238,6 +349,28 @@ public struct GModMetalView:
 
         private var worldSceneIssue:
             String?
+
+        /// Accessed only by MTKView's serialized draw callback.
+        private var activeSurfaceScene:
+            GModMetalSurfaceScene?
+
+        /// Accessed only by MTKView's serialized draw callback.
+        private var cachedSurfaceTextures:
+            [String: CachedSurfaceTexture] = [:]
+
+        /// Least-recently-used keys, oldest first. Accessed only by the
+        /// serialized MTKView draw callback.
+        private var cachedSurfaceTextureOrder:
+            [String] = []
+
+        private var cachedSurfaceTextureByteCount = 0
+
+        private var surfaceSceneIssue:
+            String?
+
+        private var lastSurfaceDrawCount = 0
+
+        private var lastSurfaceDroppedDrawCount = 0
 
         private var lastFrameTime =
             CACurrentMediaTime()
@@ -257,6 +390,7 @@ public struct GModMetalView:
         init(
             stats: Binding<String>,
             worldScene: GModMetalWorldScene?,
+            surfaceScene: GModMetalSurfaceScene? = nil,
             onFrame: @escaping @Sendable (GModMetalFrameRequest) -> Void
         ) {
             self.stats = stats
@@ -265,6 +399,11 @@ public struct GModMetalView:
                 pendingWorldScene = .replace(worldScene)
             } else {
                 pendingWorldScene = .clear
+            }
+            if let surfaceScene {
+                pendingSurfaceScene = .replace(surfaceScene)
+            } else {
+                pendingSurfaceScene = .clear
             }
         }
 
@@ -323,6 +462,24 @@ public struct GModMetalView:
                         library.makeFunction(
                             name:
                                 "worldFragmentMain"
+                        ),
+
+                    let surfaceVertexFunction =
+                        library.makeFunction(
+                            name:
+                                "surfaceVertexMain"
+                        ),
+
+                    let surfaceSolidFragmentFunction =
+                        library.makeFunction(
+                            name:
+                                "surfaceSolidFragmentMain"
+                        ),
+
+                    let surfaceTexturedFragmentFunction =
+                        library.makeFunction(
+                            name:
+                                "surfaceTexturedFragmentMain"
                         )
                 else {
 
@@ -381,6 +538,32 @@ public struct GModMetalView:
                                 worldDescriptor
                         )
 
+                let surfaceSolidDescriptor =
+                    Self.makeSurfacePipelineDescriptor(
+                        vertexFunction: surfaceVertexFunction,
+                        fragmentFunction: surfaceSolidFragmentFunction,
+                        colorPixelFormat: view.colorPixelFormat,
+                        depthPixelFormat: view.depthStencilPixelFormat
+                    )
+
+                surfaceSolidPipeline =
+                    try device.makeRenderPipelineState(
+                        descriptor: surfaceSolidDescriptor
+                    )
+
+                let surfaceTexturedDescriptor =
+                    Self.makeSurfacePipelineDescriptor(
+                        vertexFunction: surfaceVertexFunction,
+                        fragmentFunction: surfaceTexturedFragmentFunction,
+                        colorPixelFormat: view.colorPixelFormat,
+                        depthPixelFormat: view.depthStencilPixelFormat
+                    )
+
+                surfaceTexturedPipeline =
+                    try device.makeRenderPipelineState(
+                        descriptor: surfaceTexturedDescriptor
+                    )
+
                 let depthDescriptor =
                     MTLDepthStencilDescriptor()
 
@@ -404,6 +587,47 @@ public struct GModMetalView:
                 }
 
                 self.depthState = depthState
+
+                let surfaceDepthDescriptor =
+                    MTLDepthStencilDescriptor()
+
+                surfaceDepthDescriptor.depthCompareFunction =
+                    .always
+
+                surfaceDepthDescriptor.isDepthWriteEnabled =
+                    false
+
+                guard
+                    let surfaceDepthState =
+                        device.makeDepthStencilState(
+                            descriptor: surfaceDepthDescriptor
+                        )
+                else {
+                    publish(
+                        "Failed to create Metal surface depth state"
+                    )
+                    return
+                }
+
+                self.surfaceDepthState = surfaceDepthState
+
+                let samplerDescriptor = MTLSamplerDescriptor()
+                samplerDescriptor.minFilter = .linear
+                samplerDescriptor.magFilter = .linear
+                samplerDescriptor.mipFilter = .notMipmapped
+                samplerDescriptor.sAddressMode = .clampToEdge
+                samplerDescriptor.tAddressMode = .clampToEdge
+
+                guard let surfaceSamplerState = device.makeSamplerState(
+                    descriptor: samplerDescriptor
+                ) else {
+                    publish(
+                        "Failed to create Metal surface sampler"
+                    )
+                    return
+                }
+
+                self.surfaceSamplerState = surfaceSamplerState
 
                 engine.boot()
 
@@ -433,18 +657,30 @@ public struct GModMetalView:
             _ view: MTKView,
             drawableSizeWillChange size: CGSize
         ) {
-            reportDrawableSize(size)
+            reportViewport(
+                logicalSize: view.bounds.size,
+                drawableSize: size
+            )
         }
 
-        /// Reports physical drawable pixels, which are the viewport units
-        /// exposed by GLua's ScrW/ScrH rather than UIKit point dimensions.
-        func reportDrawableSize(_ size: CGSize) {
-            let width = Int(size.width.rounded())
-            let height = Int(size.height.rounded())
-            guard width > 0, height > 0 else { return }
-            let replacement = SIMD2<Int>(width, height)
-            guard reportedViewport != replacement else { return }
-            reportedViewport = replacement
+        func reportViewport(logicalSize: CGSize, drawableSize: CGSize) {
+            guard let replacement = GModMetalViewportDimensions(
+                logicalSize: logicalSize,
+                drawableSize: drawableSize
+            ) else { return }
+            viewportLock.lock()
+            if reportedViewportDimensions != replacement {
+                reportedViewportDimensions = replacement
+            }
+            viewportLock.unlock()
+        }
+
+        private func currentViewportDimensions()
+            -> GModMetalViewportDimensions?
+        {
+            viewportLock.lock()
+            defer { viewportLock.unlock() }
+            return reportedViewportDimensions
         }
 
         /// One-slot handoff from SwiftUI/MainActor state to MTKView's draw
@@ -460,18 +696,55 @@ public struct GModMetalView:
             pendingSceneLock.unlock()
         }
 
-        private func takePendingWorldScene() -> PendingWorldScene? {
+        /// Atomically replaces both renderer inputs so a SwiftUI update cannot
+        /// pair a new world camera with an older surface frame.
+        func submit(
+            worldScene: GModMetalWorldScene?,
+            surfaceScene: GModMetalSurfaceScene?
+        ) {
             pendingSceneLock.lock()
-            let result = pendingWorldScene
+            if let worldScene {
+                pendingWorldScene = .replace(worldScene)
+            } else {
+                pendingWorldScene = .clear
+            }
+            if let surfaceScene {
+                pendingSurfaceScene = .replace(surfaceScene)
+            } else {
+                pendingSurfaceScene = .clear
+            }
+            pendingSceneLock.unlock()
+        }
+
+        /// One-slot handoff for a fully materialized surface frame. It carries
+        /// no runtime/Lua references and replaces older, unconsumed frames.
+        func submit(surfaceScene: GModMetalSurfaceScene?) {
+            pendingSceneLock.lock()
+            if let surfaceScene {
+                pendingSurfaceScene = .replace(surfaceScene)
+            } else {
+                pendingSurfaceScene = .clear
+            }
+            pendingSceneLock.unlock()
+        }
+
+        private func takePendingScenes() -> (
+            world: PendingWorldScene?,
+            surface: PendingSurfaceScene?
+        ) {
+            pendingSceneLock.lock()
+            let result = (pendingWorldScene, pendingSurfaceScene)
             pendingWorldScene = nil
+            pendingSurfaceScene = nil
             pendingSceneLock.unlock()
             return result
         }
 
         private func applyPendingWorldScene(
+            _ pending: PendingWorldScene?,
             device: MTLDevice
         ) {
-            guard let pending = takePendingWorldScene() else { return }
+            guard let pending else { return }
 
             switch pending {
             case .clear:
@@ -504,6 +777,72 @@ public struct GModMetalView:
                     )
                 }
             }
+        }
+
+        private func applyPendingSurfaceScene(
+            _ pending: PendingSurfaceScene?
+        ) {
+            guard let pending else { return }
+
+            switch pending {
+            case .clear:
+                activeSurfaceScene = nil
+                clearCachedSurfaceTextures()
+                surfaceSceneIssue = nil
+                lastSurfaceDrawCount = 0
+                lastSurfaceDroppedDrawCount = 0
+
+            case let .replace(scene):
+                guard scene.viewportWidth > 0, scene.viewportHeight > 0 else {
+                    activeSurfaceScene = nil
+                    clearCachedSurfaceTextures()
+                    surfaceSceneIssue =
+                        "invalid viewport \(scene.viewportWidth)x\(scene.viewportHeight)"
+                    lastSurfaceDrawCount = 0
+                    lastSurfaceDroppedDrawCount = 0
+                    return
+                }
+
+                let retainedKeys = Set(scene.commands.compactMap {
+                    command -> String? in
+                    switch command {
+                    case .solidRectangle:
+                        return nil
+                    case let .texturedRectangle(rectangle):
+                        return rectangle.bitmap.cacheIdentifier
+                    case let .text(text):
+                        return text.glyphBitmap.cacheIdentifier
+                    }
+                })
+                pruneCachedSurfaceTextures(retaining: retainedKeys)
+                activeSurfaceScene = scene
+                surfaceSceneIssue = nil
+                lastSurfaceDrawCount = 0
+                lastSurfaceDroppedDrawCount = 0
+            }
+        }
+
+        private static func makeSurfacePipelineDescriptor(
+            vertexFunction: MTLFunction,
+            fragmentFunction: MTLFunction,
+            colorPixelFormat: MTLPixelFormat,
+            depthPixelFormat: MTLPixelFormat
+        ) -> MTLRenderPipelineDescriptor {
+            let descriptor = MTLRenderPipelineDescriptor()
+            descriptor.vertexFunction = vertexFunction
+            descriptor.fragmentFunction = fragmentFunction
+            descriptor.colorAttachments[0].pixelFormat = colorPixelFormat
+            descriptor.depthAttachmentPixelFormat = depthPixelFormat
+
+            let color = descriptor.colorAttachments[0]!
+            color.isBlendingEnabled = true
+            color.rgbBlendOperation = .add
+            color.alphaBlendOperation = .add
+            color.sourceRGBBlendFactor = .one
+            color.destinationRGBBlendFactor = .oneMinusSourceAlpha
+            color.sourceAlphaBlendFactor = .one
+            color.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            return descriptor
         }
 
         private static func makeCachedWorldMesh(
@@ -649,16 +988,25 @@ public struct GModMetalView:
             in view: MTKView
         ) {
 
-            reportDrawableSize(view.drawableSize)
+            reportViewport(
+                logicalSize: view.bounds.size,
+                drawableSize: view.drawableSize
+            )
 
             guard let device = view.device else { return }
-            applyPendingWorldScene(device: device)
+            let pendingScenes = takePendingScenes()
+            applyPendingWorldScene(pendingScenes.world, device: device)
+            applyPendingSurfaceScene(pendingScenes.surface)
 
             guard
                 let commandQueue,
                 let trianglePipeline,
                 let worldPipeline,
+                let surfaceSolidPipeline,
+                let surfaceTexturedPipeline,
                 let depthState,
+                let surfaceDepthState,
+                let surfaceSamplerState,
                 let descriptor =
                     view.currentRenderPassDescriptor,
                 let drawable =
@@ -690,12 +1038,20 @@ public struct GModMetalView:
                         delta
                 )
 
-            let viewport = reportedViewport ?? SIMD2<Int>(1, 1)
+            let viewportDimensions = currentViewportDimensions()
+            let logicalViewport = SIMD2<Int>(
+                viewportDimensions?.logicalWidth ?? 1,
+                viewportDimensions?.logicalHeight ?? 1
+            )
+            let drawableViewport = SIMD2<Int>(
+                viewportDimensions?.drawableWidth ?? 1,
+                viewportDimensions?.drawableHeight ?? 1
+            )
             onFrame(
                 GModMetalFrameRequest(
                     fixedTickCount: ticks,
-                    viewportWidth: viewport.x,
-                    viewportHeight: viewport.y
+                    viewportWidth: logicalViewport.x,
+                    viewportHeight: logicalViewport.y
                 )
             )
 
@@ -736,7 +1092,7 @@ public struct GModMetalView:
                 drawWorld(
                     scene: scene,
                     mesh: mesh,
-                    viewport: viewport,
+                    viewport: drawableViewport,
                     pipeline: worldPipeline,
                     encoder: encoder
                 )
@@ -745,6 +1101,21 @@ public struct GModMetalView:
                     pipeline: trianglePipeline,
                     encoder: encoder
                 )
+            }
+
+            if let surfaceScene = activeSurfaceScene {
+                lastSurfaceDrawCount = drawSurface(
+                    scene: surfaceScene,
+                    device: device,
+                    solidPipeline: surfaceSolidPipeline,
+                    texturedPipeline: surfaceTexturedPipeline,
+                    depthState: surfaceDepthState,
+                    sampler: surfaceSamplerState,
+                    encoder: encoder
+                )
+            } else {
+                lastSurfaceDrawCount = 0
+                lastSurfaceDroppedDrawCount = 0
             }
 
             encoder.endEncoding()
@@ -844,6 +1215,305 @@ public struct GModMetalView:
             )
         }
 
+        private func drawSurface(
+            scene: GModMetalSurfaceScene,
+            device: MTLDevice,
+            solidPipeline: MTLRenderPipelineState,
+            texturedPipeline: MTLRenderPipelineState,
+            depthState: MTLDepthStencilState,
+            sampler: MTLSamplerState,
+            encoder: MTLRenderCommandEncoder
+        ) -> Int {
+            var viewport = SIMD2<Float>(
+                Float(scene.viewportWidth),
+                Float(scene.viewportHeight)
+            )
+            guard viewport.x.isFinite, viewport.y.isFinite,
+                  viewport.x > 0, viewport.y > 0
+            else {
+                lastSurfaceDroppedDrawCount = 0
+                surfaceSceneIssue = "surface viewport cannot be represented by Metal"
+                return 0
+            }
+
+            surfaceSceneIssue = nil
+            encoder.setDepthStencilState(depthState)
+            encoder.setCullMode(.none)
+            encoder.setFragmentSamplerState(sampler, index: 0)
+
+            var drawn = 0
+            var uploadBudget = SurfaceUploadBudget()
+            let drawAdmission = GModMetalSurfaceDrawCommandBudget()
+                .admission(for: scene.commands.count)
+            lastSurfaceDroppedDrawCount = drawAdmission.droppedCommandCount
+            for command in scene.commands.prefix(
+                drawAdmission.admittedCommandCount
+            ) {
+                switch command {
+                case let .solidRectangle(rectangle):
+                    drawSurfaceQuad(
+                        frame: rectangle.frame,
+                        uv: GModMetalSurfaceRect(
+                            x: 0,
+                            y: 0,
+                            width: 1,
+                            height: 1
+                        ),
+                        color: rectangle.color,
+                        viewport: &viewport,
+                        pipeline: solidPipeline,
+                        texture: nil,
+                        encoder: encoder
+                    )
+                    drawn += 1
+
+                case let .texturedRectangle(rectangle):
+                    guard let texture = surfaceTexture(
+                        for: rectangle.bitmap,
+                        device: device,
+                        uploadBudget: &uploadBudget
+                    ) else { continue }
+                    drawSurfaceQuad(
+                        frame: rectangle.frame,
+                        uv: rectangle.uv,
+                        color: rectangle.color,
+                        viewport: &viewport,
+                        pipeline: texturedPipeline,
+                        texture: texture,
+                        encoder: encoder
+                    )
+                    drawn += 1
+
+                case let .text(text):
+                    guard let texture = surfaceTexture(
+                        for: text.glyphBitmap,
+                        device: device,
+                        uploadBudget: &uploadBudget
+                    ) else { continue }
+                    drawSurfaceQuad(
+                        frame: text.frame,
+                        uv: text.uv,
+                        color: text.color,
+                        viewport: &viewport,
+                        pipeline: texturedPipeline,
+                        texture: texture,
+                        encoder: encoder
+                    )
+                    drawn += 1
+                }
+            }
+            var issues: [String] = []
+            if let surfaceSceneIssue { issues.append(surfaceSceneIssue) }
+            if drawAdmission.droppedCommandCount > 0 {
+                issues.append(
+                    "dropped \(drawAdmission.droppedCommandCount) surface " +
+                        "draw command(s); render limit is " +
+                        "\(GModMetalSurfaceDrawCommandBudget.defaultMaximumCommandCount)"
+                )
+            }
+            if uploadBudget.deferredTextureCount > 0 {
+                issues.append(
+                    "deferred \(uploadBudget.deferredTextureCount) new surface " +
+                    "texture upload(s); per-frame budget is " +
+                    "\(SurfaceUploadBudget.maximumTextureCount) textures / " +
+                    "\(SurfaceUploadBudget.maximumByteCount) bytes"
+                )
+            }
+            surfaceSceneIssue = issues.isEmpty
+                ? nil
+                : issues.joined(separator: "; ")
+            return drawn
+        }
+
+        private func drawSurfaceQuad(
+            frame: GModMetalSurfaceRect,
+            uv: GModMetalSurfaceRect,
+            color: GModMetalSurfaceColor,
+            viewport: inout SIMD2<Float>,
+            pipeline: MTLRenderPipelineState,
+            texture: MTLTexture?,
+            encoder: MTLRenderCommandEncoder
+        ) {
+            let x0 = frame.x
+            let y0 = frame.y
+            let x1 = frame.x + frame.width
+            let y1 = frame.y + frame.height
+            let u0 = uv.x
+            let v0 = uv.y
+            let u1 = uv.x + uv.width
+            let v1 = uv.y + uv.height
+            let tint = SIMD4<Float>(
+                color.red,
+                color.green,
+                color.blue,
+                color.alpha
+            )
+            let vertices = [
+                SurfaceGPUVertex(
+                    position: SIMD2<Float>(x0, y0),
+                    uv: SIMD2<Float>(u0, v0),
+                    color: tint
+                ),
+                SurfaceGPUVertex(
+                    position: SIMD2<Float>(x1, y0),
+                    uv: SIMD2<Float>(u1, v0),
+                    color: tint
+                ),
+                SurfaceGPUVertex(
+                    position: SIMD2<Float>(x0, y1),
+                    uv: SIMD2<Float>(u0, v1),
+                    color: tint
+                ),
+                SurfaceGPUVertex(
+                    position: SIMD2<Float>(x1, y1),
+                    uv: SIMD2<Float>(u1, v1),
+                    color: tint
+                )
+            ]
+
+            encoder.setRenderPipelineState(pipeline)
+            vertices.withUnsafeBytes { bytes in
+                guard let address = bytes.baseAddress else { return }
+                encoder.setVertexBytes(
+                    address,
+                    length: bytes.count,
+                    index: 0
+                )
+            }
+            withUnsafeBytes(of: &viewport) { bytes in
+                guard let address = bytes.baseAddress else { return }
+                encoder.setVertexBytes(
+                    address,
+                    length: bytes.count,
+                    index: 1
+                )
+            }
+            encoder.setFragmentTexture(texture, index: 0)
+            encoder.drawPrimitives(
+                type: .triangleStrip,
+                vertexStart: 0,
+                vertexCount: vertices.count
+            )
+        }
+
+        private func surfaceTexture(
+            for bitmap: GModMetalSurfaceBitmap,
+            device: MTLDevice,
+            uploadBudget: inout SurfaceUploadBudget
+        ) -> MTLTexture? {
+            if let cached = cachedSurfaceTextures[bitmap.cacheIdentifier],
+               cached.bitmap == bitmap {
+                touchCachedSurfaceTexture(bitmap.cacheIdentifier)
+                return cached.texture
+            }
+
+            let byteCount = bitmap.premultipliedRGBA8.count
+            guard byteCount <= SurfaceUploadBudget.maximumSingleTextureByteCount
+            else {
+                surfaceSceneIssue =
+                    "surface texture exceeds the upload limit: " +
+                    "\(bitmap.resourceIdentifier) (\(byteCount) bytes)"
+                return nil
+            }
+            guard uploadBudget.reserve(byteCount: byteCount) else {
+                return nil
+            }
+
+            prepareSurfaceTextureCacheInsertion(
+                key: bitmap.cacheIdentifier,
+                byteCount: byteCount
+            )
+
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .rgba8Unorm,
+                width: bitmap.width,
+                height: bitmap.height,
+                mipmapped: false
+            )
+            descriptor.storageMode = .shared
+            descriptor.usage = [.shaderRead]
+            guard let texture = device.makeTexture(descriptor: descriptor) else {
+                surfaceSceneIssue =
+                    "Metal texture allocation failed for \(bitmap.resourceIdentifier)"
+                return nil
+            }
+
+            let uploaded = bitmap.premultipliedRGBA8.withUnsafeBytes {
+                bytes -> Bool in
+                guard let address = bytes.baseAddress else { return false }
+                texture.replace(
+                    region: MTLRegionMake2D(
+                        0,
+                        0,
+                        bitmap.width,
+                        bitmap.height
+                    ),
+                    mipmapLevel: 0,
+                    withBytes: address,
+                    bytesPerRow: bitmap.width * 4
+                )
+                return true
+            }
+            guard uploaded else {
+                surfaceSceneIssue =
+                    "Metal texture upload failed for \(bitmap.resourceIdentifier)"
+                return nil
+            }
+
+            cachedSurfaceTextures[bitmap.cacheIdentifier] = CachedSurfaceTexture(
+                bitmap: bitmap,
+                texture: texture
+            )
+            cachedSurfaceTextureOrder.append(bitmap.cacheIdentifier)
+            cachedSurfaceTextureByteCount += byteCount
+            return texture
+        }
+
+        private func clearCachedSurfaceTextures() {
+            cachedSurfaceTextures.removeAll(keepingCapacity: true)
+            cachedSurfaceTextureOrder.removeAll(keepingCapacity: true)
+            cachedSurfaceTextureByteCount = 0
+        }
+
+        private func pruneCachedSurfaceTextures(
+            retaining retainedKeys: Set<String>
+        ) {
+            let keysToRemove = cachedSurfaceTextureOrder.filter {
+                !retainedKeys.contains($0)
+            }
+            for key in keysToRemove {
+                removeCachedSurfaceTexture(key)
+            }
+        }
+
+        private func touchCachedSurfaceTexture(_ key: String) {
+            cachedSurfaceTextureOrder.removeAll { $0 == key }
+            cachedSurfaceTextureOrder.append(key)
+        }
+
+        private func removeCachedSurfaceTexture(_ key: String) {
+            if let removed = cachedSurfaceTextures.removeValue(forKey: key) {
+                cachedSurfaceTextureByteCount -=
+                    removed.bitmap.premultipliedRGBA8.count
+            }
+            cachedSurfaceTextureOrder.removeAll { $0 == key }
+            cachedSurfaceTextureByteCount = max(0, cachedSurfaceTextureByteCount)
+        }
+
+        private func prepareSurfaceTextureCacheInsertion(
+            key: String,
+            byteCount: Int
+        ) {
+            removeCachedSurfaceTexture(key)
+            while !cachedSurfaceTextureOrder.isEmpty,
+                  cachedSurfaceTextures.count >=
+                    SurfaceTextureCachePolicy.maximumTextureCount ||
+                  cachedSurfaceTextureByteCount + byteCount >
+                    SurfaceTextureCachePolicy.maximumByteCount {
+                removeCachedSurfaceTexture(cachedSurfaceTextureOrder[0])
+            }
+        }
+
         private static func makeViewMatrix(
             eye: SIMD3<Float>,
             forward rawForward: SIMD3<Float>
@@ -939,11 +1609,40 @@ public struct GModMetalView:
                     "Triangle fallback"
             }
 
+            let surfaceStats: String
+            if let scene = activeSurfaceScene {
+                let diagnostics = scene.diagnostics
+                let summary =
+                    "UI: \(lastSurfaceDrawCount)/\(diagnostics.resolvedCommandCount) " +
+                    "rendered (solid \(diagnostics.solidRectangleCount), " +
+                    "PNG \(diagnostics.texturedRectangleCount), " +
+                    "text \(diagnostics.textCount)); " +
+                    "unresolved \(diagnostics.unresolvedCommands.count); " +
+                    "dropped capture " +
+                    "\(diagnostics.captureDiagnostics.droppedCommandCount), " +
+                    "scene \(diagnostics.droppedSnapshotCommandCount), " +
+                    "draw \(lastSurfaceDroppedDrawCount); " +
+                    "scene bitmaps \(diagnostics.retainedBitmapCount) / " +
+                    "\(diagnostics.retainedBitmapByteCount) bytes; " +
+                    "GPU cache \(cachedSurfaceTextures.count) textures / " +
+                    "\(cachedSurfaceTextureByteCount) bytes"
+                if let surfaceSceneIssue {
+                    surfaceStats = summary + "; issue: \(surfaceSceneIssue)"
+                } else {
+                    surfaceStats = summary
+                }
+            } else if let surfaceSceneIssue {
+                surfaceStats = "UI rejected: \(surfaceSceneIssue)"
+            } else {
+                surfaceStats = "UI: none"
+            }
+
             publish(
                 """
                 ARM64 Swift + Metal
                 GPU: \(deviceName)
                 \(rendererStats)
+                \(surfaceStats)
                 \(numericStats)
                 """
             )
@@ -1053,6 +1752,70 @@ public struct GModMetalView:
             float brightness = min(1.0, hemisphere + diffuse * 0.72);
             float3 baseColor = float3(0.48, 0.61, 0.72);
             return float4(baseColor * brightness, 1.0);
+        }
+
+        struct SurfaceVertex
+        {
+            float2 position;
+            float2 uv;
+            float4 color;
+        };
+
+        struct SurfaceVertexOutput
+        {
+            float4 position [[position]];
+            float2 uv;
+            float4 color;
+        };
+
+        vertex SurfaceVertexOutput surfaceVertexMain(
+            const device SurfaceVertex *vertices
+                [[buffer(0)]],
+
+            constant float2 &viewport
+                [[buffer(1)]],
+
+            uint vertexID
+                [[vertex_id]]
+        )
+        {
+            SurfaceVertex vertex = vertices[vertexID];
+            float2 normalized = vertex.position / viewport;
+            SurfaceVertexOutput output;
+            output.position = float4(
+                normalized.x * 2.0 - 1.0,
+                1.0 - normalized.y * 2.0,
+                0.0,
+                1.0
+            );
+            output.uv = vertex.uv;
+            output.color = vertex.color;
+            return output;
+        }
+
+        fragment float4 surfaceSolidFragmentMain(
+            SurfaceVertexOutput input [[stage_in]]
+        )
+        {
+            return float4(
+                input.color.rgb * input.color.a,
+                input.color.a
+            );
+        }
+
+        fragment float4 surfaceTexturedFragmentMain(
+            SurfaceVertexOutput input [[stage_in]],
+
+            texture2d<float> bitmap [[texture(0)]],
+
+            sampler bitmapSampler [[sampler(0)]]
+        )
+        {
+            float4 sample = bitmap.sample(bitmapSampler, input.uv);
+            return float4(
+                sample.rgb * input.color.rgb * input.color.a,
+                sample.a * input.color.a
+            );
         }
         """
     }

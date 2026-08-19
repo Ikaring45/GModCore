@@ -54,6 +54,7 @@ public struct GModPlayableFixedTickReport: Equatable, Sendable {
     public let server: GMLuaSourceRuntimeRunReport
     public let client: GMLuaSourceRuntimeRunReport
     public let deliveredMessages: Int
+    public let actionFailures: [GMLuaForwardedConsoleCommandFailure]
 }
 
 public struct GModPlayableMovementInput: Equatable, Sendable {
@@ -335,6 +336,18 @@ public final class GModPlayableSession {
 
     public var isClosed: Bool { closedStorage }
 
+    /// Publishes the host-selected digital button word to both realm-local
+    /// Player mirrors. Analog movement is intentionally not interpreted here.
+    public func updateCurrentPlayerInputButtons(
+        _ buttons: SourceInputButtons
+    ) throws {
+        try ensureOpen()
+        try sharedSession.updatePlayerInputButtons(
+            for: clientRuntime,
+            buttons: buttons
+        )
+    }
+
     /// Runs one Source SERVER fixed tick, drains its queued realm traffic, and
     /// then advances the CLIENT fixed tick. Render-frame Think stays separate.
     @discardableResult
@@ -357,8 +370,9 @@ public final class GModPlayableSession {
         )
         playerWalkState = movement.state
         nextCommandNumber &+= 1
+        try updateCurrentPlayerInputButtons(movementInput.buttons)
         let serverReport = try sourceAdapter.runServerFixedTick()
-        let delivered = try Self.drain(
+        let delivery = try Self.drainReportingForwardedConsoleFailures(
             sharedSession,
             maximumDeliveries: maximumDeliveries
         )
@@ -367,7 +381,8 @@ public final class GModPlayableSession {
             movement: movement,
             server: serverReport,
             client: clientReport,
-            deliveredMessages: delivered
+            deliveredMessages: delivery.successfulDeliveries,
+            actionFailures: delivery.actionFailures
         )
     }
 
@@ -377,6 +392,74 @@ public final class GModPlayableSession {
     public func runClientFrame() throws -> GMLuaSourceRuntimeRunReport {
         try ensureOpen()
         return try sourceAdapter.runClientFrame()
+    }
+
+    /// Paints the live CLIENT VGUI tree into renderer-neutral surface
+    /// commands using the same registry, surface state, and viewport exposed
+    /// to the bundled Sandbox Lua runtime.
+    public func renderClientVGUIFrame() throws -> GMLuaSurfaceFrameSnapshot {
+        try ensureOpen()
+        let registry = try clientVGUIRegistry()
+        guard let surface = clientRuntime.surfaceCommandState else {
+            throw GModPlayableSessionError.missingRuntimeSurface(
+                .client,
+                "surface command state"
+            )
+        }
+        guard let viewport = clientRuntime.screenMetrics?.viewport else {
+            throw GModPlayableSessionError.missingRuntimeSurface(
+                .client,
+                "screen metrics"
+            )
+        }
+        return try registry.renderFrame(
+            surface: surface,
+            viewportWidth: viewport.width,
+            viewportHeight: viewport.height
+        )
+    }
+
+    /// Routes one value-only host pointer sample through the live CLIENT VGUI
+    /// hit-test and original Lua callbacks.
+    public func dispatchClientVGUIPointerEvent(
+        x: Double,
+        y: Double,
+        phase: GMLuaPointerPhase,
+        timestamp: TimeInterval
+    ) throws -> GMLuaPointerDispatchResult {
+        try ensureOpen()
+        let registry = try clientVGUIRegistry()
+        guard let viewport = clientRuntime.screenMetrics?.viewport else {
+            throw GModPlayableSessionError.missingRuntimeSurface(
+                .client,
+                "screen metrics"
+            )
+        }
+        return try registry.dispatchPointerEvent(
+            x: x,
+            y: y,
+            phase: phase,
+            timestamp: timestamp,
+            viewportWidth: viewport.width,
+            viewportHeight: viewport.height
+        )
+    }
+
+    /// Inserts UTF-8 text into the currently focused CLIENT TextEntry. A nil
+    /// result means no eligible focused TextEntry existed; it is not promoted
+    /// to a fabricated successful edit.
+    public func insertClientVGUIText(_ text: String) throws -> Int? {
+        try ensureOpen()
+        return try clientVGUIRegistry().insertText(text)
+    }
+
+    /// Dispatches the stock CLIENT spawn-menu lifecycle hook used by GMod's
+    /// `+menu`/`-menu` commands. Visibility remains owned by Sandbox Lua.
+    public func setSpawnMenuOpen(_ isOpen: Bool) throws {
+        try ensureOpen()
+        try clientRuntime.dispatchHostHook(
+            named: isOpen ? "OnSpawnMenuOpen" : "OnSpawnMenuClose"
+        )
     }
 
     @discardableResult
@@ -414,6 +497,16 @@ public final class GModPlayableSession {
               !clientRuntime.isClosed else {
             throw GModPlayableSessionError.closed
         }
+    }
+
+    private func clientVGUIRegistry() throws -> GMLuaVGUIRegistry {
+        guard let registry = clientRuntime.vguiRegistry else {
+            throw GModPlayableSessionError.missingRuntimeSurface(
+                .client,
+                "VGUI registry"
+            )
+        }
+        return registry
     }
 
     private static func makeMountedContentFileSystem() throws
@@ -466,6 +559,53 @@ public final class GModPlayableSession {
             delivered += step
         }
         return delivered
+    }
+
+    private struct ReportedDeliveryDrain {
+        let successfulDeliveries: Int
+        let actionFailures: [GMLuaForwardedConsoleCommandFailure]
+    }
+
+    /// Gameplay input may legitimately request a SERVER action whose host API
+    /// is not implemented yet. Such a command packet is consumed and reported
+    /// without preventing the paired CLIENT fixed tick. Transport, lifecycle,
+    /// and net callback errors continue to escape this boundary.
+    private static func drainReportingForwardedConsoleFailures(
+        _ session: GMLuaSharedSession,
+        maximumDeliveries: Int
+    ) throws -> ReportedDeliveryDrain {
+        guard maximumDeliveries >= 0 else {
+            throw GModPlayableSessionError.deliveryLimitExceeded(
+                maximumDeliveries
+            )
+        }
+        var processed = 0
+        var successful = 0
+        var actionFailures: [GMLuaForwardedConsoleCommandFailure] = []
+        while session.netTransport.pendingDeliveryCount > 0 {
+            guard processed < maximumDeliveries else {
+                throw GModPlayableSessionError.deliveryLimitExceeded(
+                    maximumDeliveries
+                )
+            }
+            let step = try session
+                .pumpReportingForwardedConsoleFailures(
+                    maxDeliveries: maximumDeliveries - processed
+                )
+            guard step.processedDeliveries > 0 else {
+                if session.netTransport.pendingDeliveryCount == 0 { break }
+                throw GModPlayableSessionError.deliveryStalled(
+                    session.netTransport.pendingDeliveryCount
+                )
+            }
+            processed += step.processedDeliveries
+            successful += step.successfulDeliveries
+            actionFailures.append(contentsOf: step.forwardedConsoleFailures)
+        }
+        return ReportedDeliveryDrain(
+            successfulDeliveries: successful,
+            actionFailures: actionFailures
+        )
     }
 
     private static func firstPlayerStart(

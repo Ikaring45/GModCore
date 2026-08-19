@@ -116,6 +116,16 @@ final class GMLuaUtilTraceTests: XCTestCase {
             assert(tr.HitBox == 7 and tr.HitGroup == 2 and tr.PhysicsBone == 4)
             assert(tr.HitTexture == nil and tr.SurfaceProps == nil and tr.MatType == nil)
             assert(MASK_ALL == -1 and COLLISION_GROUP_NONE == 0)
+            assert(CONTENTS_SOLID == 0x00000001)
+            assert(CONTENTS_AUX == 0x00000004)
+            assert(CONTENTS_MOVEABLE == 0x00004000)
+            assert(CONTENTS_MONSTER == 0x02000000)
+            assert(CONTENTS_DEBRIS == 0x04000000)
+            assert(CONTENTS_HITBOX == 0x40000000)
+            assert(bit.bor(
+                CONTENTS_SOLID, CONTENTS_MOVEABLE, CONTENTS_MONSTER,
+                CONTENTS_WINDOW, CONTENTS_DEBRIS, CONTENTS_GRATE, CONTENTS_AUX
+            ) == 0x0600400F)
             """,
             sourceName: "@GMLuaUtilTraceHit.lua"
         )

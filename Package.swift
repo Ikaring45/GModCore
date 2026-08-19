@@ -112,7 +112,11 @@ targets.insert(
             dependencies: [
                 "GModEngine"
             ],
-            path: "Sources/GModMetal"
+            path: "Sources/GModMetal",
+            linkerSettings: [
+                .linkedFramework("CoreGraphics"),
+                .linkedFramework("CoreText")
+            ]
         ),
 
         .target(
@@ -139,7 +143,8 @@ targets.insert(
             dependencies: [
                 "GModApp",
                 "GModEngine",
-                "GModLua"
+                "GModLua",
+                "GModMetal"
             ],
             path: "Tests/GModAppTests"
         )

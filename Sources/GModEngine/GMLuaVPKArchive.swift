@@ -393,24 +393,22 @@ private struct ByteCursor {
 }
 
 /// Material pixel resolver backed by one or more real Source VPK archives.
-public final class GMLuaVPKMaterialPixelResolver: GMLuaMaterialPixelResolver,
+public final class GMLuaVPKMaterialPixelResolver: GMLuaMaterialMetadataResolver,
     @unchecked Sendable
 {
-    private let encodedResolver: GMLuaEncodedMaterialPixelResolver
+    public let sourceMaterialResolver: GMLuaSourceMaterialResolver
 
     public init(
         looseFileSystem: (any LuaVirtualFileSystem & Sendable)? = nil,
         archivesInPriorityOrder archives: [GMLuaVPKArchive]
     ) {
-        encodedResolver = GMLuaEncodedMaterialPixelResolver { logicalPath, _ in
-            let logicalPathString = logicalPath.utf8String
-            if LuaString(logicalPathString) == logicalPath,
-               let looseFileSystem,
-               looseFileSystem.fileExists(at: logicalPathString) {
-                return try looseFileSystem.readFile(at: logicalPathString)
+        sourceMaterialResolver = GMLuaSourceMaterialResolver { logicalPath in
+            if let looseFileSystem,
+               looseFileSystem.fileExists(at: logicalPath) {
+                return try looseFileSystem.readFile(at: logicalPath)
             }
             for archive in archives {
-                if let encodedImage = try archive.data(for: logicalPath) {
+                if let encodedImage = try archive.data(for: LuaString(logicalPath)) {
                     return encodedImage
                 }
             }
@@ -422,9 +420,8 @@ public final class GMLuaVPKMaterialPixelResolver: GMLuaMaterialPixelResolver,
         materialPath: LuaString,
         encodedParameters: LuaString?
     ) throws -> GMLuaImageDimensions? {
-        guard let logicalPath = Self.materialLogicalPath(materialPath) else { return nil }
-        return try encodedResolver.dimensions(
-            materialPath: logicalPath,
+        try sourceMaterialResolver.dimensions(
+            materialPath: materialPath,
             encodedParameters: encodedParameters
         )
     }
@@ -435,35 +432,35 @@ public final class GMLuaVPKMaterialPixelResolver: GMLuaMaterialPixelResolver,
         x: Int,
         y: Int
     ) throws -> GMLuaRGBA8? {
-        guard let logicalPath = Self.materialLogicalPath(materialPath) else { return nil }
-        return try encodedResolver.pixel(
-            materialPath: logicalPath,
+        try sourceMaterialResolver.pixel(
+            materialPath: materialPath,
             encodedParameters: encodedParameters,
             x: x,
             y: y
         )
     }
 
-    public func removeAllCachedImages() {
-        encodedResolver.removeAllCachedImages()
+    public func metadata(
+        materialPath: LuaString,
+        encodedParameters: LuaString?
+    ) throws -> GMLuaMaterialMetadata {
+        try sourceMaterialResolver.metadata(
+            materialPath: materialPath,
+            encodedParameters: encodedParameters
+        )
     }
 
-    private static func materialLogicalPath(_ materialPath: LuaString) -> LuaString? {
-        var bytes = materialPath.bytes.map { byte -> UInt8 in
-            let slashNormalized = byte == 0x5C ? UInt8(0x2F) : byte
-            return (0x41...0x5A).contains(slashNormalized)
-                ? slashNormalized + 0x20
-                : slashNormalized
-        }
-        guard !bytes.isEmpty, !bytes.contains(0) else { return nil }
-        let materialsPrefix = Array("materials/".utf8)
-        if !bytes.starts(with: materialsPrefix) {
-            bytes.insert(contentsOf: materialsPrefix, at: 0)
-        }
-        guard bytes.count >= 4,
-              Array(bytes.suffix(4)) == Array(".png".utf8) else {
-            return nil
-        }
-        return LuaString(bytes: bytes)
+    public func resolve(
+        named materialName: String,
+        encodedParameters: LuaString? = nil
+    ) throws -> GMLuaResolvedSourceMaterial {
+        try sourceMaterialResolver.resolve(
+            named: materialName,
+            encodedParameters: encodedParameters
+        )
+    }
+
+    public func removeAllCachedImages() {
+        sourceMaterialResolver.removeAllCachedMaterials()
     }
 }

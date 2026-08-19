@@ -57,6 +57,77 @@ public enum GMLuaResourceResolution: String, Sendable, Equatable {
     case unresolved
 }
 
+/// Authoritative host-side state for one material lookup. This is separate
+/// from decoded pixels so VMTs backed by engine render targets can report
+/// their real shader and non-error identity without inventing static pixels.
+public enum GMLuaMaterialResolutionStatus: String, Sendable, Equatable {
+    case resolved
+    case materialMissing
+    case materialWithoutBaseTexture
+    case baseTextureMissing
+}
+
+public struct GMLuaMaterialMetadata: Sendable, Equatable {
+    public let materialPath: LuaString
+    public let shaderName: LuaString
+    public let baseTextureName: LuaString?
+    public let dimensions: GMLuaImageDimensions?
+    public let isError: Bool
+    public let status: GMLuaMaterialResolutionStatus
+
+    public init(
+        materialPath: LuaString,
+        shaderName: LuaString,
+        baseTextureName: LuaString?,
+        dimensions: GMLuaImageDimensions?,
+        isError: Bool,
+        status: GMLuaMaterialResolutionStatus
+    ) {
+        self.materialPath = materialPath
+        self.shaderName = shaderName
+        self.baseTextureName = baseTextureName
+        self.dimensions = dimensions
+        self.isError = isError
+        self.status = status
+    }
+}
+
+/// Optional richer material contract implemented by real Source resolvers.
+/// Legacy synthetic pixel resolvers retain the original fallback behavior.
+public protocol GMLuaMaterialMetadataResolver: GMLuaMaterialPixelResolver {
+    func metadata(
+        materialPath: LuaString,
+        encodedParameters: LuaString?
+    ) throws -> GMLuaMaterialMetadata
+}
+
+/// One engine request to load the particle definitions contained in a PCF.
+/// The registry retains only the byte-exact logical path until a Source
+/// particle decoder/renderer is connected by a later subsystem.
+public struct GMLuaParticleManifestRequest: Sendable, Equatable {
+    public let path: LuaString
+    public let hasAssetBacking: Bool
+
+    fileprivate init(path: LuaString) {
+        self.path = path
+        hasAssetBacking = false
+    }
+}
+
+/// The first observed registration for one named decal. Material bytes remain
+/// logical metadata until the VMT/VTF and decal-rendering subsystems exist.
+public struct GMLuaDecalRegistration: Sendable, Equatable {
+    public let name: LuaString
+    public let material: LuaString
+    public let hasAssetBacking: Bool
+
+    fileprivate init(name: LuaString, material: LuaString) {
+        self.name = name
+        self.material = material
+        hasAssetBacking = false
+    }
+}
+
 public final class GMLuaMaterialDescriptor: @unchecked Sendable {
     public let path: LuaString
     /// The seven-bit flag string produced by the official util.lua wrapper, or
@@ -151,6 +222,10 @@ public final class GMLuaResourceRegistry: @unchecked Sendable {
     private var requestedSounds: Set<LuaString> = []
     private var requestedModels: Set<LuaString> = []
     private var requestedParticleSystems: Set<LuaString> = []
+    private var requestedParticleManifestPaths: Set<LuaString> = []
+    private var particleManifestStorage: [GMLuaParticleManifestRequest] = []
+    private var registeredDecalNames: Set<LuaString> = []
+    private var decalRegistrationStorage: [GMLuaDecalRegistration] = []
 
     fileprivate init(typeSystem: GMLuaTypeSystem) {
         self.typeSystem = typeSystem
@@ -205,6 +280,22 @@ public final class GMLuaResourceRegistry: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return requestedParticleSystems.sorted()
+    }
+
+    /// PCF load requests in first-observed order. Repeated calls preserve the
+    /// first request and never imply that the corresponding bytes were loaded.
+    public var particleManifestRequests: [GMLuaParticleManifestRequest] {
+        lock.lock()
+        defer { lock.unlock() }
+        return particleManifestStorage
+    }
+
+    /// First registration for each byte-exact name, in observation order.
+    /// Re-registering a name does not manufacture replacement asset backing.
+    public var decalRegistrations: [GMLuaDecalRegistration] {
+        lock.lock()
+        defer { lock.unlock() }
+        return decalRegistrationStorage
     }
 
     public func materialDescriptor(
@@ -273,18 +364,39 @@ public final class GMLuaResourceRegistry: @unchecked Sendable {
         return value
     }
 
-    fileprivate func baseTexture(for material: GMLuaMaterialDescriptor) throws -> LuaValue {
+    fileprivate func baseTexture(for material: GMLuaMaterialDescriptor) throws -> LuaValue? {
         let key = GMLuaMaterialKey(
             path: material.path,
             encodedParameters: material.encodedParameters
         )
+        let resolvedMetadata = try metadata(
+            path: material.path,
+            encodedParameters: material.encodedParameters
+        )
+        let textureName: LuaString
+        if let resolvedMetadata {
+            guard resolvedMetadata.status == .resolved,
+                  let resolvedName = resolvedMetadata.baseTextureName else {
+                return nil
+            }
+            textureName = resolvedName
+        } else {
+            // Legacy PNG pixel resolvers predate material metadata. A decoded
+            // image is still authoritative backing; an unresolved lookup is
+            // not an ITexture and must surface to Lua as no return value.
+            guard try dimensions(
+                path: material.path,
+                encodedParameters: material.encodedParameters
+            ) != nil else { return nil }
+            textureName = material.path
+        }
         lock.lock()
         defer { lock.unlock() }
         if let existing = materialTextureValues[key] {
             return existing
         }
         let descriptor = GMLuaTextureDescriptor(
-            name: material.path,
+            name: textureName,
             kind: .materialBaseTexture(
                 path: material.path,
                 encodedParameters: material.encodedParameters
@@ -407,6 +519,60 @@ public final class GMLuaResourceRegistry: @unchecked Sendable {
         )
     }
 
+    fileprivate func shaderName(for material: GMLuaMaterialDescriptor) throws -> LuaString {
+        if let metadata = try metadata(
+            path: material.path,
+            encodedParameters: material.encodedParameters
+        ) {
+            return metadata.shaderName
+        }
+        // Imported PNG/JPG materials have a deterministic generated shader.
+        // Other unresolved paths require VMT parsing and truthfully expose
+        // Source's no-loaded-shader sentinel instead of guessing a shader.
+        let path = material.path.utf8String.lowercased()
+        let isImportedImage = path.hasSuffix(".png") || path.hasSuffix(".jpg")
+        guard isImportedImage,
+              try dimensions(
+                  path: material.path,
+                  encodedParameters: material.encodedParameters
+              ) != nil else {
+            return "shader_error"
+        }
+        let parameters = material.encodedParameters?.utf8String.lowercased() ?? ""
+        let tokens = parameters.split(whereSeparator: { $0.isWhitespace })
+        return tokens.contains("vertexlitgeneric")
+            ? "VertexLitGeneric"
+            : "UnlitGeneric"
+    }
+
+    fileprivate func materialIsError(
+        _ material: GMLuaMaterialDescriptor
+    ) throws -> Bool? {
+        if let metadata = try metadata(
+            path: material.path,
+            encodedParameters: material.encodedParameters
+        ) {
+            return metadata.isError
+        }
+        return try dimensions(
+            path: material.path,
+            encodedParameters: material.encodedParameters
+        ).map { _ in false }
+    }
+
+    private func metadata(
+        path: LuaString,
+        encodedParameters: LuaString?
+    ) throws -> GMLuaMaterialMetadata? {
+        lock.lock()
+        let resolver = materialPixelResolver as? any GMLuaMaterialMetadataResolver
+        lock.unlock()
+        return try resolver?.metadata(
+            materialPath: path,
+            encodedParameters: encodedParameters
+        )
+    }
+
     fileprivate func noteSound(_ name: LuaString) {
         lock.lock()
         requestedSounds.insert(name)
@@ -423,6 +589,23 @@ public final class GMLuaResourceRegistry: @unchecked Sendable {
         lock.lock()
         requestedParticleSystems.insert(name)
         lock.unlock()
+    }
+
+    fileprivate func noteParticleManifest(_ path: LuaString) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard requestedParticleManifestPaths.insert(path).inserted else { return }
+        particleManifestStorage.append(GMLuaParticleManifestRequest(path: path))
+    }
+
+    fileprivate func noteDecal(name: LuaString, material: LuaString) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard registeredDecalNames.insert(name).inserted else { return }
+        decalRegistrationStorage.append(GMLuaDecalRegistration(
+            name: name,
+            material: material
+        ))
     }
 
     fileprivate static func materialDescriptor(from value: LuaValue?) -> GMLuaMaterialDescriptor? {
@@ -487,6 +670,23 @@ public enum GMLuaResources {
             in: materialMetatable
         )
 
+        let materialGetShader = LuaNativeFunctionBox(
+            { [registry] arguments in
+                guard let descriptor = GMLuaResourceRegistry.materialDescriptor(
+                    from: arguments.first
+                ) else {
+                    throw LuaError.runtime("bad self to 'IMaterial:GetShader'")
+                }
+                return [.string(try registry.shaderName(for: descriptor))]
+            },
+            debugName: "IMaterial:GetShader"
+        )
+        try state.setRawTableValue(
+            .nativeFunction(materialGetShader),
+            for: .string("GetShader"),
+            in: materialMetatable
+        )
+
         let materialGetColor = LuaNativeFunctionBox(
             { [unowned state, registry] arguments in
                 guard let descriptor = GMLuaResourceRegistry.materialDescriptor(
@@ -535,7 +735,10 @@ public enum GMLuaResources {
                 guard asciiCaseInsensitiveEqual(parameter, "$basetexture") else {
                     return []
                 }
-                return [try registry.baseTexture(for: descriptor)]
+                guard let texture = try registry.baseTexture(for: descriptor) else {
+                    return []
+                }
+                return [texture]
             },
             debugName: "IMaterial:GetTexture",
             gcReferences: { [weak registry] in registry?.references ?? [] }
@@ -612,17 +815,13 @@ public enum GMLuaResources {
                 ) else {
                     throw LuaError.runtime("bad self to 'IMaterial:IsError'")
                 }
-                let dimensions = try registry.dimensions(
-                    path: descriptor.path,
-                    encodedParameters: descriptor.encodedParameters
-                )
-                guard dimensions != nil else {
+                guard let isError = try registry.materialIsError(descriptor) else {
                     throw LuaError.runtime(
                         "IMaterial:IsError cannot determine material error state " +
                         "without authoritative asset resolution for '\(descriptor.path.utf8String)'"
                     )
                 }
-                return [.boolean(false)]
+                return [.boolean(isError)]
             },
             debugName: "IMaterial:IsError",
             gcReferences: { [weak registry] in registry?.references ?? [] }
@@ -778,22 +977,73 @@ public enum GMLuaResources {
         )
         state.setGlobal("util", value: .table(utilTable))
 
-        let precacheParticleSystem = LuaNativeFunctionBox(
-            { [registry] arguments in
-                let name = try requiredString(
-                    arguments,
-                    index: 0,
-                    functionName: "PrecacheParticleSystem"
-                )
-                registry.noteParticleSystem(name)
-                return []
-            },
-            debugName: "PrecacheParticleSystem"
-        )
-        state.setGlobal(
-            "PrecacheParticleSystem",
-            value: .nativeFunction(precacheParticleSystem)
-        )
+        if realm == .server || realm == .client {
+            let precacheParticleSystem = LuaNativeFunctionBox(
+                { [registry] arguments in
+                    let name = try requiredString(
+                        arguments,
+                        index: 0,
+                        functionName: "PrecacheParticleSystem"
+                    )
+                    registry.noteParticleSystem(name)
+                    return []
+                },
+                debugName: "PrecacheParticleSystem"
+            )
+            state.setGlobal(
+                "PrecacheParticleSystem",
+                value: .nativeFunction(precacheParticleSystem)
+            )
+        }
+
+        let gameTable: LuaTable
+        if case let .table(existing) = state.getGlobal("game") {
+            gameTable = existing
+        } else {
+            gameTable = LuaTable()
+        }
+        if realm == .server || realm == .client {
+            let addParticles = LuaNativeFunctionBox(
+                { [registry] arguments in
+                    let path = try requiredString(
+                        arguments,
+                        index: 0,
+                        functionName: "AddParticles"
+                    )
+                    registry.noteParticleManifest(path)
+                    return []
+                },
+                debugName: "game.AddParticles"
+            )
+            try state.setRawTableValue(
+                .nativeFunction(addParticles),
+                for: .string("AddParticles"),
+                in: gameTable
+            )
+            let addDecal = LuaNativeFunctionBox(
+                { [registry] arguments in
+                    let name = try requiredString(
+                        arguments,
+                        index: 0,
+                        functionName: "AddDecal"
+                    )
+                    let material = try requiredString(
+                        arguments,
+                        index: 1,
+                        functionName: "AddDecal"
+                    )
+                    registry.noteDecal(name: name, material: material)
+                    return []
+                },
+                debugName: "game.AddDecal"
+            )
+            try state.setRawTableValue(
+                .nativeFunction(addDecal),
+                for: .string("AddDecal"),
+                in: gameTable
+            )
+        }
+        state.setGlobal("game", value: .table(gameTable))
 
         if realm != .server {
             let renderTable: LuaTable
@@ -854,6 +1104,18 @@ public enum GMLuaResources {
                 "GetRenderTargetEx",
                 value: .nativeFunction(getRenderTargetEx)
             )
+            let getRenderTarget = LuaNativeFunctionBox(
+                { [registry] arguments in
+                    let request = try simpleRenderTargetRequest(arguments)
+                    return [try registry.renderTarget(request: request)]
+                },
+                debugName: "GetRenderTarget",
+                gcReferences: { [weak registry] in registry?.references ?? [] }
+            )
+            state.setGlobal(
+                "GetRenderTarget",
+                value: .nativeFunction(getRenderTarget)
+            )
 
             // Exact values from the public STUDIO enum used at halo.lua load.
             state.setGlobal("STUDIO_RENDER", value: .number(1))
@@ -862,8 +1124,11 @@ public enum GMLuaResources {
             // Public render-target enum values used by the stock
             // postprocess/frame_blend.lua top-level resource declaration.
             state.setGlobal("RT_SIZE_FULL_FRAME_BUFFER", value: .number(4))
+            state.setGlobal("RT_SIZE_NO_CHANGE", value: .number(0))
+            state.setGlobal("MATERIAL_RT_DEPTH_SEPARATE", value: .number(1))
             state.setGlobal("MATERIAL_RT_DEPTH_NONE", value: .number(2))
             state.setGlobal("IMAGE_FORMAT_DEFAULT", value: .number(-1))
+            state.setGlobal("IMAGE_FORMAT_BGRA8888", value: .number(12))
         }
 
         return registry
@@ -961,6 +1226,35 @@ public enum GMLuaResources {
                 index: 7,
                 functionName: "GetRenderTargetEx"
             )
+        )
+    }
+
+    /// Public GetRenderTarget is the fixed-policy Source shorthand for
+    /// GetRenderTargetEx documented by Facepunch.
+    private static func simpleRenderTargetRequest(
+        _ arguments: [LuaValue]
+    ) throws -> GMLuaRenderTargetRequest {
+        GMLuaRenderTargetRequest(
+            name: try requiredString(
+                arguments,
+                index: 0,
+                functionName: "GetRenderTarget"
+            ),
+            width: try requiredInteger(
+                arguments,
+                index: 1,
+                functionName: "GetRenderTarget"
+            ),
+            height: try requiredInteger(
+                arguments,
+                index: 2,
+                functionName: "GetRenderTarget"
+            ),
+            sizeMode: 0,
+            depthMode: 1,
+            textureFlags: 2 | 256,
+            renderTargetFlags: 0,
+            imageFormat: 12
         )
     }
 

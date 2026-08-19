@@ -93,6 +93,115 @@ final class GModPlayableSessionTests: XCTestCase {
         }
     }
 
+    func testStrictSandboxSpawnMenuUsesLiveClientHooksAndInputRegistry() throws {
+        let session = try GModPlayableSession(
+            configuration: GModPlayableSessionConfiguration(map: .construct)
+        )
+        defer { _ = try? session.close() }
+
+        try session.clientRuntime.execute(
+            "assert(type(g_SpawnMenu) == 'Panel' and IsValid(g_SpawnMenu) and not g_SpawnMenu:IsVisible())",
+            sourceName: "=(playable stock spawn menu initial state)"
+        )
+        let achievements = try XCTUnwrap(session.clientRuntime.achievements)
+        XCTAssertEqual(achievements.capturedRequests, [])
+        try session.setSpawnMenuOpen(true)
+        defer { try? session.setSpawnMenuOpen(false) }
+        XCTAssertEqual(achievements.capturedRequests, [.spawnMenuOpened])
+        try session.clientRuntime.execute(
+            "assert(IsValid(g_SpawnMenu) and g_SpawnMenu:IsVisible())",
+            sourceName: "=(playable stock spawn menu open state)"
+        )
+
+        let registry = try XCTUnwrap(session.clientRuntime.vguiRegistry)
+        let viewport = try XCTUnwrap(session.clientRuntime.screenMetrics).viewport
+        let tree = registry.renderTree(
+            viewportWidth: viewport.width,
+            viewportHeight: viewport.height
+        )
+        XCTAssertFalse(tree.isEmpty)
+
+        let rendered = try session.renderClientVGUIFrame()
+        XCTAssertEqual(rendered.viewportWidth, viewport.width)
+        XCTAssertEqual(rendered.viewportHeight, viewport.height)
+        XCTAssertGreaterThan(rendered.drawCallCount, 0)
+        XCTAssertNil(try session.insertClientVGUIText("must not be inserted"))
+
+        let outside = try session.dispatchClientVGUIPointerEvent(
+            x: -1,
+            y: -1,
+            phase: .moved,
+            timestamp: 1
+        )
+        XCTAssertNil(outside.hitPanelIdentifier)
+        XCTAssertEqual(outside.callbackNames, [])
+        XCTAssertFalse(outside.clicked)
+        XCTAssertFalse(outside.doubleClicked)
+
+        try session.setSpawnMenuOpen(false)
+        try session.clientRuntime.execute(
+            "assert(IsValid(g_SpawnMenu) and not g_SpawnMenu:IsVisible())",
+            sourceName: "=(playable stock spawn menu closed state)"
+        )
+    }
+
+    func testMissingSpawnAPIIsReportedWithoutClosingOrDesynchronizingRealms() throws {
+        let session = try GModPlayableSession(
+            configuration: GModPlayableSessionConfiguration(map: .construct)
+        )
+        defer { _ = try? session.close() }
+
+        // This is the exact command enqueued by stock SpawnIcon.DoClick. The
+        // current host intentionally has no fake Player:Alive/ents/physics
+        // implementation, so the SERVER action must fail explicitly.
+        try session.clientRuntime.execute(
+            """
+            RunConsoleCommand(
+                "gm_spawn",
+                "models/props_c17/oildrum001.mdl",
+                "0",
+                ""
+            )
+            """,
+            sourceName: "=(stock SpawnIcon gm_spawn request)"
+        )
+        XCTAssertEqual(session.sharedSession.netTransport.pendingDeliveryCount, 1)
+
+        let failedActionTick = try session.runFixedTick()
+        XCTAssertEqual(failedActionTick.server.kind, .serverFixedTick)
+        XCTAssertEqual(failedActionTick.client.kind, .clientFixedTick)
+        XCTAssertEqual(failedActionTick.deliveredMessages, 0)
+        XCTAssertEqual(failedActionTick.actionFailures.count, 1)
+        let failure = try XCTUnwrap(failedActionTick.actionFailures.first)
+        XCTAssertEqual(failure.command, "gm_spawn")
+        XCTAssertEqual(
+            failure.arguments,
+            ["models/props_c17/oildrum001.mdl", "0", ""]
+        )
+        XCTAssertTrue(failure.message.contains("Alive"))
+        XCTAssertEqual(session.sharedSession.netTransport.pendingDeliveryCount, 0)
+        XCTAssertFalse(session.isClosed)
+        XCTAssertFalse(session.serverRuntime.isClosed)
+        XCTAssertFalse(session.clientRuntime.isClosed)
+        XCTAssertEqual(session.sourceAdapter.serverGlobals.tickCount, 1)
+        XCTAssertEqual(
+            try XCTUnwrap(session.serverRuntime.timerScheduler).currentTime,
+            try XCTUnwrap(session.clientRuntime.timerScheduler).currentTime,
+            accuracy: 0.000_001
+        )
+
+        let laterTick = try session.runFixedTick()
+        XCTAssertEqual(laterTick.actionFailures, [])
+        XCTAssertEqual(laterTick.server.kind, .serverFixedTick)
+        XCTAssertEqual(laterTick.client.kind, .clientFixedTick)
+        XCTAssertEqual(session.sourceAdapter.serverGlobals.tickCount, 2)
+        XCTAssertEqual(
+            try XCTUnwrap(session.serverRuntime.timerScheduler).currentTime,
+            try XCTUnwrap(session.clientRuntime.timerScheduler).currentTime,
+            accuracy: 0.000_001
+        )
+    }
+
     private func assertWorldTrace(
         in session: GModPlayableSession,
         expectedFloorZ: Double

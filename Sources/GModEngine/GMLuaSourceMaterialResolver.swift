@@ -1,0 +1,559 @@
+import Foundation
+import GModLua
+
+public enum GMLuaSourceMaterialError: Error, Sendable, Equatable,
+    CustomStringConvertible
+{
+    case unsafeLogicalPath(String)
+    case encodedMaterialByteCountExceeded(path: String, actual: Int, maximum: Int)
+    case materialIsNotUTF8(String)
+    case invalidPNGHeader(String)
+    case textureWidthExceeded(path: String, actual: Int, maximum: Int)
+    case textureHeightExceeded(path: String, actual: Int, maximum: Int)
+    case decodedDimensionsMismatch(
+        path: String,
+        expectedWidth: Int,
+        expectedHeight: Int,
+        actualWidth: Int,
+        actualHeight: Int
+    )
+
+    public var description: String {
+        switch self {
+        case let .unsafeLogicalPath(path):
+            return "unsafe Source material path: \(path)"
+        case let .encodedMaterialByteCountExceeded(path, actual, maximum):
+            return "Source material \(path) contains \(actual) encoded bytes; maximum is \(maximum)"
+        case let .materialIsNotUTF8(path):
+            return "Source material \(path) is not UTF-8"
+        case let .invalidPNGHeader(path):
+            return "imported material PNG header is invalid: \(path)"
+        case let .textureWidthExceeded(path, actual, maximum):
+            return "Source texture \(path) width \(actual) exceeds maximum \(maximum)"
+        case let .textureHeightExceeded(path, actual, maximum):
+            return "Source texture \(path) height \(actual) exceeds maximum \(maximum)"
+        case let .decodedDimensionsMismatch(
+            path,
+            expectedWidth,
+            expectedHeight,
+            actualWidth,
+            actualHeight
+        ):
+            return "decoded image \(path) is \(actualWidth)x\(actualHeight); " +
+                "header declares \(expectedWidth)x\(expectedHeight)"
+        }
+    }
+}
+
+/// Complete static result shared by GLua resource handles and renderer adapters.
+/// `rgbaBytes == nil` is intentional for real VMTs whose base texture is an
+/// engine render target or is absent from the mounted search paths.
+public struct GMLuaResolvedSourceMaterial: Sendable, Equatable {
+    public let metadata: GMLuaMaterialMetadata
+    /// Tightly packed, top-left-origin, straight-alpha RGBA8 mip zero pixels.
+    public let rgbaBytes: Data?
+    public let sourceTextureFormat: SourceVTFImageFormat?
+    public let sourceTextureFlags: SourceVTFTextureFlags?
+
+    public init(
+        metadata: GMLuaMaterialMetadata,
+        rgbaBytes: Data?,
+        sourceTextureFormat: SourceVTFImageFormat? = nil,
+        sourceTextureFlags: SourceVTFTextureFlags? = nil
+    ) {
+        self.metadata = metadata
+        self.rgbaBytes = rgbaBytes
+        self.sourceTextureFormat = sourceTextureFormat
+        self.sourceTextureFlags = sourceTextureFlags
+    }
+
+    public func pixel(x: Int, y: Int) -> GMLuaRGBA8? {
+        guard let dimensions = metadata.dimensions,
+              let rgbaBytes,
+              x >= 0,
+              y >= 0,
+              x < dimensions.width,
+              y < dimensions.height else { return nil }
+        let offset = (y * dimensions.width + x) * 4
+        guard offset + 3 < rgbaBytes.count else { return nil }
+        return GMLuaRGBA8(
+            red: rgbaBytes[offset],
+            green: rgbaBytes[offset + 1],
+            blue: rgbaBytes[offset + 2],
+            alpha: rgbaBytes[offset + 3]
+        )
+    }
+}
+
+/// Bounded Source VMT/VTF material resolver. It resolves only the explicit
+/// VMT `$basetexture` binding (or an explicitly imported PNG); proxies,
+/// animation frames, cubemap faces, environment maps, and wrap behavior are
+/// deliberately left to later renderer contracts.
+public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
+    @unchecked Sendable
+{
+    public typealias Loader = @Sendable (_ logicalPath: String) throws -> Data?
+
+    public static let defaultMaximumEncodedMaterialByteCount = 1 * 1_024 * 1_024
+    public static let defaultMaximumEncodedTextureByteCount = 16 * 1_024 * 1_024
+    public static let defaultMaximumTextureWidth = 4_096
+    public static let defaultMaximumTextureHeight = 4_096
+    public static let defaultMaximumTexturePixelCount = 2_097_152
+    public static let defaultMaximumDecodedTextureByteCount = 8 * 1_024 * 1_024
+
+    private struct Key: Hashable {
+        let canonicalMaterialPath: String
+        let encodedParameters: LuaString?
+    }
+
+    private let loader: Loader
+    private let maximumPatchDepth: Int
+    private let maximumEncodedMaterialByteCount: Int
+    private let maximumTextureWidth: Int
+    private let maximumTextureHeight: Int
+    private let maximumCachedEntryCount: Int
+    private let maximumCachedByteCount: Int
+    private let vtfLimits: SourceVTFAllocationLimits
+    private let lock = NSLock()
+    private var cache: [Key: GMLuaResolvedSourceMaterial] = [:]
+    private var cacheOrder: [Key] = []
+    private var cachedByteCountStorage = 0
+
+    public init(
+        maximumPatchDepth: Int = 10,
+        maximumCachedEntryCount: Int = 512,
+        maximumCachedByteCount: Int = 32 * 1_024 * 1_024,
+        maximumEncodedMaterialByteCount: Int =
+            GMLuaSourceMaterialResolver.defaultMaximumEncodedMaterialByteCount,
+        maximumEncodedTextureByteCount: Int =
+            GMLuaSourceMaterialResolver.defaultMaximumEncodedTextureByteCount,
+        maximumTextureWidth: Int =
+            GMLuaSourceMaterialResolver.defaultMaximumTextureWidth,
+        maximumTextureHeight: Int =
+            GMLuaSourceMaterialResolver.defaultMaximumTextureHeight,
+        maximumTexturePixelCount: Int =
+            GMLuaSourceMaterialResolver.defaultMaximumTexturePixelCount,
+        maximumDecodedTextureByteCount: Int =
+            GMLuaSourceMaterialResolver.defaultMaximumDecodedTextureByteCount,
+        loader: @escaping Loader
+    ) {
+        self.maximumPatchDepth = max(0, maximumPatchDepth)
+        self.maximumCachedEntryCount = max(1, maximumCachedEntryCount)
+        self.maximumCachedByteCount = max(1, maximumCachedByteCount)
+        self.maximumEncodedMaterialByteCount = max(1, maximumEncodedMaterialByteCount)
+        self.maximumTextureWidth = max(1, maximumTextureWidth)
+        self.maximumTextureHeight = max(1, maximumTextureHeight)
+        vtfLimits = SourceVTFAllocationLimits(
+            maximumEncodedBytes: max(1, maximumEncodedTextureByteCount),
+            maximumPixelCount: max(1, maximumTexturePixelCount),
+            maximumDecodedBytes: max(1, maximumDecodedTextureByteCount)
+        )
+        self.loader = loader
+    }
+
+    public var cachedEntryCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return cache.count
+    }
+
+    public var cachedImageByteCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return cachedByteCountStorage
+    }
+
+    public func removeAllCachedMaterials() {
+        lock.lock()
+        cache.removeAll(keepingCapacity: true)
+        cacheOrder.removeAll(keepingCapacity: true)
+        cachedByteCountStorage = 0
+        lock.unlock()
+    }
+
+    public func metadata(
+        materialPath: LuaString,
+        encodedParameters: LuaString?
+    ) throws -> GMLuaMaterialMetadata {
+        try resolve(
+            materialPath: materialPath,
+            encodedParameters: encodedParameters
+        ).metadata
+    }
+
+    public func dimensions(
+        materialPath: LuaString,
+        encodedParameters: LuaString?
+    ) throws -> GMLuaImageDimensions? {
+        try resolve(
+            materialPath: materialPath,
+            encodedParameters: encodedParameters
+        ).metadata.dimensions
+    }
+
+    public func pixel(
+        materialPath: LuaString,
+        encodedParameters: LuaString?,
+        x: Int,
+        y: Int
+    ) throws -> GMLuaRGBA8? {
+        try resolve(
+            materialPath: materialPath,
+            encodedParameters: encodedParameters
+        ).pixel(x: x, y: y)
+    }
+
+    public func resolve(
+        named materialName: String,
+        encodedParameters: LuaString? = nil
+    ) throws -> GMLuaResolvedSourceMaterial {
+        try resolve(
+            materialPath: LuaString(materialName),
+            encodedParameters: encodedParameters
+        )
+    }
+
+    public func resolve(
+        materialPath: LuaString,
+        encodedParameters: LuaString? = nil
+    ) throws -> GMLuaResolvedSourceMaterial {
+        let sourceName = materialPath.utf8String
+        guard LuaString(sourceName) == materialPath,
+              let logicalPath = try Self.normalizedMaterialPath(sourceName) else {
+            throw GMLuaSourceMaterialError.unsafeLogicalPath(sourceName)
+        }
+        let key = Key(
+            canonicalMaterialPath: logicalPath.lowercased(),
+            encodedParameters: encodedParameters
+        )
+        if let cached = cachedValue(for: key) { return cached }
+
+        let resolved: GMLuaResolvedSourceMaterial
+        if logicalPath.lowercased().hasSuffix(".png") {
+            resolved = try resolveImportedPNG(
+                logicalPath: logicalPath,
+                encodedParameters: encodedParameters
+            )
+        } else {
+            resolved = try resolveVMT(logicalPath: logicalPath)
+        }
+        store(resolved, for: key)
+        return resolved
+    }
+
+    private func resolveVMT(
+        logicalPath: String
+    ) throws -> GMLuaResolvedSourceMaterial {
+        guard let encodedVMT = try load(logicalPath) else {
+            return missingMaterial(logicalPath)
+        }
+        let source = try vmtSource(encodedVMT, logicalPath: logicalPath)
+        let includeResolver = SourceVMTIncludeResolver { [self] includeName in
+            guard let includePath = try Self.normalizedVMTPath(includeName) else {
+                throw GMLuaSourceMaterialError.unsafeLogicalPath(includeName)
+            }
+            guard let includeData = try load(includePath) else { return nil }
+            return try vmtSource(includeData, logicalPath: includePath)
+        }
+        let document = try SourceVMTDocument.parse(
+            source: source,
+            sourceName: logicalPath,
+            resolver: includeResolver,
+            maximumPatchDepth: maximumPatchDepth
+        )
+        let shader = LuaString(document.shader)
+        guard let baseTextureValue = try document.string(named: "$basetexture"),
+              !baseTextureValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return GMLuaResolvedSourceMaterial(
+                metadata: GMLuaMaterialMetadata(
+                    materialPath: LuaString(logicalPath),
+                    shaderName: shader,
+                    baseTextureName: nil,
+                    dimensions: nil,
+                    isError: false,
+                    status: .materialWithoutBaseTexture
+                ),
+                rgbaBytes: nil
+            )
+        }
+        guard let baseTexturePath = try Self.normalizedVTFPath(baseTextureValue) else {
+            throw GMLuaSourceMaterialError.unsafeLogicalPath(baseTextureValue)
+        }
+        guard let encodedVTF = try load(baseTexturePath) else {
+            return GMLuaResolvedSourceMaterial(
+                metadata: GMLuaMaterialMetadata(
+                    materialPath: LuaString(logicalPath),
+                    shaderName: shader,
+                    baseTextureName: LuaString(baseTexturePath),
+                    dimensions: nil,
+                    isError: false,
+                    status: .baseTextureMissing
+                ),
+                rgbaBytes: nil
+            )
+        }
+
+        let vtf = try SourceVTFFile(data: encodedVTF, allocationLimits: vtfLimits)
+        try validateDimensions(
+            width: vtf.width,
+            height: vtf.height,
+            logicalPath: baseTexturePath
+        )
+        let image = try vtf.decodeRGBA8(mipLevel: 0, frame: 0, face: 0, slice: 0)
+        return GMLuaResolvedSourceMaterial(
+            metadata: GMLuaMaterialMetadata(
+                materialPath: LuaString(logicalPath),
+                shaderName: shader,
+                baseTextureName: LuaString(baseTexturePath),
+                dimensions: GMLuaImageDimensions(width: image.width, height: image.height),
+                isError: false,
+                status: .resolved
+            ),
+            rgbaBytes: image.rgbaBytes,
+            sourceTextureFormat: vtf.imageFormat,
+            sourceTextureFlags: vtf.flags
+        )
+    }
+
+    private func resolveImportedPNG(
+        logicalPath: String,
+        encodedParameters: LuaString?
+    ) throws -> GMLuaResolvedSourceMaterial {
+        guard let encoded = try load(logicalPath) else {
+            return missingMaterial(logicalPath)
+        }
+        guard encoded.count <= vtfLimits.maximumEncodedBytes else {
+            throw GMLuaSourceMaterialError.encodedMaterialByteCountExceeded(
+                path: logicalPath,
+                actual: encoded.count,
+                maximum: vtfLimits.maximumEncodedBytes
+            )
+        }
+        let header = try pngDimensions(encoded, logicalPath: logicalPath)
+        try validateDimensions(
+            width: header.width,
+            height: header.height,
+            logicalPath: logicalPath
+        )
+        let pixels = header.width.multipliedReportingOverflow(by: header.height)
+        let bytes = pixels.partialValue.multipliedReportingOverflow(by: 4)
+        guard !pixels.overflow,
+              pixels.partialValue <= vtfLimits.maximumPixelCount,
+              !bytes.overflow,
+              bytes.partialValue <= vtfLimits.maximumDecodedBytes else {
+            throw SourceVTFError.allocationLimitExceeded(
+                context: "imported PNG decoded RGBA8 bytes",
+                limit: vtfLimits.maximumDecodedBytes,
+                actual: bytes.partialValue
+            )
+        }
+        let decoded = try GMLuaPlatformImageDecoder.decode(encoded)
+        guard decoded.width == header.width, decoded.height == header.height else {
+            throw GMLuaSourceMaterialError.decodedDimensionsMismatch(
+                path: logicalPath,
+                expectedWidth: header.width,
+                expectedHeight: header.height,
+                actualWidth: decoded.width,
+                actualHeight: decoded.height
+            )
+        }
+        var rgbaBytes = Data(count: bytes.partialValue)
+        var complete = true
+        rgbaBytes.withUnsafeMutableBytes { rawBytes in
+            let output = rawBytes.bindMemory(to: UInt8.self)
+            for y in 0..<decoded.height {
+                for x in 0..<decoded.width {
+                    guard let pixel = decoded.pixel(x: x, y: y) else {
+                        complete = false
+                        continue
+                    }
+                    let offset = (y * decoded.width + x) * 4
+                    output[offset] = pixel.red
+                    output[offset + 1] = pixel.green
+                    output[offset + 2] = pixel.blue
+                    output[offset + 3] = pixel.alpha
+                }
+            }
+        }
+        guard complete else { throw GMLuaImageDecodeError.platformFailure }
+
+        let parameters = encodedParameters?.utf8String.lowercased() ?? ""
+        let tokens = parameters.split(whereSeparator: { $0.isWhitespace })
+        let shader = tokens.contains("vertexlitgeneric")
+            ? LuaString("VertexLitGeneric")
+            : LuaString("UnlitGeneric")
+        return GMLuaResolvedSourceMaterial(
+            metadata: GMLuaMaterialMetadata(
+                materialPath: LuaString(logicalPath),
+                shaderName: shader,
+                baseTextureName: LuaString(logicalPath),
+                dimensions: GMLuaImageDimensions(width: decoded.width, height: decoded.height),
+                isError: false,
+                status: .resolved
+            ),
+            rgbaBytes: rgbaBytes
+        )
+    }
+
+    private func missingMaterial(_ logicalPath: String) -> GMLuaResolvedSourceMaterial {
+        GMLuaResolvedSourceMaterial(
+            metadata: GMLuaMaterialMetadata(
+                materialPath: LuaString(logicalPath),
+                shaderName: "shader_error",
+                baseTextureName: nil,
+                dimensions: nil,
+                isError: true,
+                status: .materialMissing
+            ),
+            rgbaBytes: nil
+        )
+    }
+
+    private func load(_ logicalPath: String) throws -> Data? {
+        if let data = try loader(logicalPath) { return data }
+        let folded = logicalPath.lowercased()
+        guard folded != logicalPath else { return nil }
+        return try loader(folded)
+    }
+
+    private func vmtSource(
+        _ data: Data,
+        logicalPath: String
+    ) throws -> String {
+        guard data.count <= maximumEncodedMaterialByteCount else {
+            throw GMLuaSourceMaterialError.encodedMaterialByteCountExceeded(
+                path: logicalPath,
+                actual: data.count,
+                maximum: maximumEncodedMaterialByteCount
+            )
+        }
+        let body = data.starts(with: [0xEF, 0xBB, 0xBF]) ? data.dropFirst(3) : data[...]
+        guard let source = String(data: body, encoding: .utf8) else {
+            throw GMLuaSourceMaterialError.materialIsNotUTF8(logicalPath)
+        }
+        return source
+    }
+
+    private func validateDimensions(
+        width: Int,
+        height: Int,
+        logicalPath: String
+    ) throws {
+        guard width <= maximumTextureWidth else {
+            throw GMLuaSourceMaterialError.textureWidthExceeded(
+                path: logicalPath,
+                actual: width,
+                maximum: maximumTextureWidth
+            )
+        }
+        guard height <= maximumTextureHeight else {
+            throw GMLuaSourceMaterialError.textureHeightExceeded(
+                path: logicalPath,
+                actual: height,
+                maximum: maximumTextureHeight
+            )
+        }
+    }
+
+    private func pngDimensions(
+        _ data: Data,
+        logicalPath: String
+    ) throws -> (width: Int, height: Int) {
+        guard data.count >= 24,
+              Array(data.prefix(8)) == [137, 80, 78, 71, 13, 10, 26, 10],
+              Array(data[8..<12]) == [0, 0, 0, 13],
+              Array(data[12..<16]) == [73, 72, 68, 82] else {
+            throw GMLuaSourceMaterialError.invalidPNGHeader(logicalPath)
+        }
+        func uint32(_ offset: Int) -> UInt32 {
+            UInt32(data[offset]) << 24 |
+                UInt32(data[offset + 1]) << 16 |
+                UInt32(data[offset + 2]) << 8 |
+                UInt32(data[offset + 3])
+        }
+        let width = uint32(16)
+        let height = uint32(20)
+        guard width > 0,
+              height > 0,
+              let safeWidth = Int(exactly: width),
+              let safeHeight = Int(exactly: height) else {
+            throw GMLuaSourceMaterialError.invalidPNGHeader(logicalPath)
+        }
+        return (safeWidth, safeHeight)
+    }
+
+    private func cachedValue(for key: Key) -> GMLuaResolvedSourceMaterial? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let value = cache[key] else { return nil }
+        cacheOrder.removeAll { $0 == key }
+        cacheOrder.append(key)
+        return value
+    }
+
+    private func store(_ value: GMLuaResolvedSourceMaterial, for key: Key) {
+        let byteCount = value.rgbaBytes?.count ?? 0
+        guard byteCount <= maximumCachedByteCount else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        if let previous = cache.removeValue(forKey: key) {
+            cachedByteCountStorage -= previous.rgbaBytes?.count ?? 0
+            cacheOrder.removeAll { $0 == key }
+        }
+        while !cacheOrder.isEmpty && (
+            cache.count >= maximumCachedEntryCount ||
+                cachedByteCountStorage > maximumCachedByteCount - byteCount
+        ) {
+            let oldest = cacheOrder.removeFirst()
+            if let evicted = cache.removeValue(forKey: oldest) {
+                cachedByteCountStorage -= evicted.rgbaBytes?.count ?? 0
+            }
+        }
+        cache[key] = value
+        cacheOrder.append(key)
+        cachedByteCountStorage += byteCount
+    }
+
+    private static func normalizedMaterialPath(_ name: String) throws -> String? {
+        guard var path = try normalizedAssetStem(name) else { return nil }
+        let lower = path.lowercased()
+        if lower.hasSuffix(".png") || lower.hasSuffix(".vmt") {
+            return "materials/" + path
+        }
+        path += ".vmt"
+        return "materials/" + path
+    }
+
+    private static func normalizedVMTPath(_ name: String) throws -> String? {
+        guard var path = try normalizedAssetStem(name) else { return nil }
+        if !path.lowercased().hasSuffix(".vmt") { path += ".vmt" }
+        return "materials/" + path
+    }
+
+    private static func normalizedVTFPath(_ name: String) throws -> String? {
+        guard var path = try normalizedAssetStem(name) else { return nil }
+        if !path.lowercased().hasSuffix(".vtf") { path += ".vtf" }
+        return "materials/" + path
+    }
+
+    private static func normalizedAssetStem(_ name: String) throws -> String? {
+        var path = name
+            .replacingOccurrences(of: "\\", with: "/")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.hasPrefix("/") else { return nil }
+        if path.lowercased().hasPrefix("materials/") {
+            path.removeFirst("materials/".count)
+        }
+        guard !path.isEmpty,
+              !path.contains(":"),
+              !path.contains("\0") else { return nil }
+        let components = path.split(
+            separator: "/",
+            omittingEmptySubsequences: false
+        )
+        guard components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
+            return nil
+        }
+        return components.map(String.init).joined(separator: "/")
+    }
+}

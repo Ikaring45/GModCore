@@ -1,0 +1,765 @@
+{
+  "schemaVersion": 2,
+  "sourceArchives": [
+    "garrysmod/garrysmod_dir.vpk",
+    "platform/platform_misc_dir.vpk"
+  ],
+  "selectionCriterion": "Generated from bundled stock Lua literal Material/SetImage/SetMaterial roots present in garrysmod/garrysmod_dir.vpk and every literal surface.GetTextureID root in the exact garrysmod then platform VPK precedence, plus recursively existing Patch includes and resolved $basetexture VTFs. Dynamic and missing dependencies remain explicit.",
+  "fileCount": 118,
+  "byteCount": 3013414,
+  "vmtCount": 72,
+  "vtfCount": 46,
+  "decodedMip0ByteCount": 8075776,
+  "surfaceTextureMaterialPaths": [
+    "materials/gui/corner16.vmt",
+    "materials/gui/corner32.vmt",
+    "materials/gui/corner512.vmt",
+    "materials/gui/corner64.vmt",
+    "materials/gui/corner8.vmt",
+    "materials/gui/faceposer_indicator.vmt",
+    "materials/gui/gradient.vmt",
+    "materials/gui/icorner8.vmt",
+    "materials/gui/info.vmt",
+    "materials/gui/speech_lid.vmt",
+    "materials/models/weapons/v_toolgun/screen_bg.vmt",
+    "materials/vgui/gmod_camera.vmt",
+    "materials/vgui/gmod_tool.vmt",
+    "materials/vgui/white.vmt",
+    "materials/weapons/swep.vmt"
+  ],
+  "assets": [
+    {
+      "logicalPath": "materials/brick/brick_model.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 114,
+      "sha256": "8a8351afa6695d7a0f1d493ff2c47a8601016d06cbfdfd861e4f62cd6d040417"
+    },
+    {
+      "logicalPath": "materials/brick/brickwall003a.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 174968,
+      "sha256": "d1ab85cf4b27663cd45dce16ab67151372ef084bde2a92e84359587ed11fa143"
+    },
+    {
+      "logicalPath": "materials/color.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 122,
+      "sha256": "d32eb11336176770bdf4c139fa37fc274bd00d590d3fc1672b20176b5f401ddc"
+    },
+    {
+      "logicalPath": "materials/color/white.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 1103,
+      "sha256": "4d912c4b984e304c087f83fda809b7988375fd853dfa965596eca2a5353f9261"
+    },
+    {
+      "logicalPath": "materials/color_ignorez.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 137,
+      "sha256": "ef40119fdc7f9612da7fa1b71b4088e91c7738db381ca11ed17db9800d75f153"
+    },
+    {
+      "logicalPath": "materials/effects/lamp_beam.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 108,
+      "sha256": "e30ae0b708c05d1035c686f3d55487535bccca08b9a78bc073f0e0ad805a7c0c"
+    },
+    {
+      "logicalPath": "materials/effects/select_dot.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 141,
+      "sha256": "a4148cf47f4422d8a14267591f987c6165771159c96468caa4afed0f7227f8b1"
+    },
+    {
+      "logicalPath": "materials/effects/select_dot.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 1472,
+      "sha256": "2ccefa99680b2294721e6e93c18494d4708c538065c306d1d36b532e2d90ad30"
+    },
+    {
+      "logicalPath": "materials/effects/select_ring.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 158,
+      "sha256": "0a5f4cbf7fd0ba1a70c292b707ef0f7387f7949ec9c2c7dc2dd790188adde702"
+    },
+    {
+      "logicalPath": "materials/effects/select_ring.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 5568,
+      "sha256": "c53f95bcbe7a8ee57ab631fd70adb1c4c3c1743059a7c696c879eef751f6e902"
+    },
+    {
+      "logicalPath": "materials/effects/tool_tracer.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 108,
+      "sha256": "eb0101782fb887e3ebb998239974c1d016aca2ec4aba3de8cfae535d743be36c"
+    },
+    {
+      "logicalPath": "materials/effects/tool_tracer.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 43832,
+      "sha256": "3c4c381609888c2509150f3fc6944859d97ee482854a75ecb0d22b74be198837"
+    },
+    {
+      "logicalPath": "materials/effects/wheel_ring.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 157,
+      "sha256": "709cf3bc447b99b7e3fe14e934a836b5356206282db159e7fd8d3b282cb8fc16"
+    },
+    {
+      "logicalPath": "materials/effects/wheel_ring.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 87488,
+      "sha256": "10f197216ef253cdef578afeb0bb4b381e23cefb99aa8a0a62ea1c87e900544e"
+    },
+    {
+      "logicalPath": "materials/gmod/edit_fog.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 264,
+      "sha256": "8e335568003373a1d7a2101396b02a4a20a16e615080fbff001c7d78a6d7d2ef"
+    },
+    {
+      "logicalPath": "materials/gmod/edit_fog.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 131280,
+      "sha256": "84e6f175e96550718e3448787a8c9da5251c1f65a4d075d048cfafdcae74c48d"
+    },
+    {
+      "logicalPath": "materials/gmod/edit_sky.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 264,
+      "sha256": "cbd09c774ddd93f36973f988aa0d6fb219c75f6e86f98c9277874fb84ce4ea80"
+    },
+    {
+      "logicalPath": "materials/gmod/edit_sky.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 174984,
+      "sha256": "b25aff92fbb1f8f33995a58a51d43fa49ccb3745e594e704b1099d9df60621c0"
+    },
+    {
+      "logicalPath": "materials/gmod/edit_sun.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 264,
+      "sha256": "6dd257b9b6dec73ce25466f122a399cac8f56536073afe2c34a737f23a8bccb4"
+    },
+    {
+      "logicalPath": "materials/gmod/edit_sun.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 131280,
+      "sha256": "e51ecb73325e565b4517a38c027f36645073f1f57ac0c3fa381b37ef8137610a"
+    },
+    {
+      "logicalPath": "materials/gui/corner16.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 119,
+      "sha256": "0c11fc82a1be2d40f6532d2b2da506c3492b04dfd910a706b15426046f4cfeb1"
+    },
+    {
+      "logicalPath": "materials/gui/corner16.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 1104,
+      "sha256": "fcdb4051df0392ff4198738281c72e009f59c265c72d1b45150685c7d9a59448"
+    },
+    {
+      "logicalPath": "materials/gui/corner32.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 119,
+      "sha256": "99b3c1e3bd9b628124440588e65b3f017612a96a3cea19700b50cea469457ab0"
+    },
+    {
+      "logicalPath": "materials/gui/corner32.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 4304,
+      "sha256": "8633fbd953197537936cb74c0b99a8b67a06c09e3469cac868997b2bd3fdd0d4"
+    },
+    {
+      "logicalPath": "materials/gui/corner512.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 120,
+      "sha256": "3efd81f4e12de202a2945588a48658e5155669176c55b0b19082ad81ad0ec487"
+    },
+    {
+      "logicalPath": "materials/gui/corner512.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 1048784,
+      "sha256": "2b34bf25c67b68f3d043de52ed9212ad93134b64e910d6a1def2562e42504064"
+    },
+    {
+      "logicalPath": "materials/gui/corner64.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 119,
+      "sha256": "0f50d40e402686707c3667c7c22e414b4d1d25cf76f17c3835589fb16cf9fd0b"
+    },
+    {
+      "logicalPath": "materials/gui/corner64.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 16464,
+      "sha256": "8fc8577d4d55295e97e6e05e0e9692212f630682299d7d13dfd0a8d0b16152cb"
+    },
+    {
+      "logicalPath": "materials/gui/corner8.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 118,
+      "sha256": "51cc8a95338f57bd82a5d5b683cc2c72d743111e03bd722a210a71393e05dfb6"
+    },
+    {
+      "logicalPath": "materials/gui/corner8.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 336,
+      "sha256": "2dda7a79be5efa7f8eebfbce46edf68c2a81ce13d0aa00872068067dd59e3fbb"
+    },
+    {
+      "logicalPath": "materials/gui/faceposer_indicator.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 131,
+      "sha256": "d028233883ec3c92daa86f95daec96af2e736110439b4d17ef48966b6b27e2cf"
+    },
+    {
+      "logicalPath": "materials/gui/faceposer_indicator.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 349760,
+      "sha256": "27f5a3c391cec755b3493c13661a015c67ed357e12d2edc6751a4add8991eed5"
+    },
+    {
+      "logicalPath": "materials/gui/gradient.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 120,
+      "sha256": "1ce138925be8655d76da787bab3bb1a156c9cf477f647a31b07157e6201f9acd"
+    },
+    {
+      "logicalPath": "materials/gui/gradient.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 11360,
+      "sha256": "0b472fa46fffe527e111379c72b81f9aeb72a3c01ae5bcca627467b5588e6909"
+    },
+    {
+      "logicalPath": "materials/gui/gradient_down.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 126,
+      "sha256": "519692b14acd2bc0c97382fb120b4c75499be53b9e82f0c32dcf31883bc853a2"
+    },
+    {
+      "logicalPath": "materials/gui/gradient_down.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 21964,
+      "sha256": "477eb1892007d29b36803eb0a07de59e936b15b2e226806c5163935d58495123"
+    },
+    {
+      "logicalPath": "materials/gui/gradient_up.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 124,
+      "sha256": "1c601991d04e7b8446b0479daa1435fca1e8625ada1c5cfa0ad8f505abad8f11"
+    },
+    {
+      "logicalPath": "materials/gui/gradient_up.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 21964,
+      "sha256": "8f73efac2990a7a5a44a876bf69c8bd195370c60d7320c961d47e1417d374489"
+    },
+    {
+      "logicalPath": "materials/gui/html/back.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 121,
+      "sha256": "72c96138508246f7aa33b03973e7aa3480213f7cbdaa6b981c34c4c02b942097"
+    },
+    {
+      "logicalPath": "materials/gui/html/back.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 5668,
+      "sha256": "61138795f5b88ddefeb92b3675827e20a262f7273a667c1c833144281e2241c6"
+    },
+    {
+      "logicalPath": "materials/gui/html/forward.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 124,
+      "sha256": "d5a2cf2e118ba6ee62b6aec01b99ec54d934849c2908a126955054e157352057"
+    },
+    {
+      "logicalPath": "materials/gui/html/forward.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 5668,
+      "sha256": "d2dbd7f094613aa639183b3d37c5804e720d1af0cbdbf2109722b3e262445ca4"
+    },
+    {
+      "logicalPath": "materials/gui/html/home.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 121,
+      "sha256": "53e350b5556426d36f3e640a6ba9e781efcb65f64a9e0aeaac8890b7c89b5084"
+    },
+    {
+      "logicalPath": "materials/gui/html/home.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 5668,
+      "sha256": "eea171a16882d1e60e8ab4923d25be543c5ed36c6d6f533bf2d64bec3b5336d1"
+    },
+    {
+      "logicalPath": "materials/gui/html/refresh.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 124,
+      "sha256": "02b6fb94e15752202e00d1e0cabbbd97cff94d8dc6b3bfc612a2e938adae012f"
+    },
+    {
+      "logicalPath": "materials/gui/html/refresh.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 5668,
+      "sha256": "a0fc1af24c085d3771883c7e6dbaf79cb46c49917702b21ea1302095c4cf0a9a"
+    },
+    {
+      "logicalPath": "materials/gui/html/stop.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 121,
+      "sha256": "0486d3351af7b20691d23dd1b19c8756604a6ea249206a173b8243ffcf7c50e9"
+    },
+    {
+      "logicalPath": "materials/gui/html/stop.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 5668,
+      "sha256": "5a02d44856e8e054a8d7ca520bdf5e37957ccb5ddfdd42d4b97001a800c44664"
+    },
+    {
+      "logicalPath": "materials/gui/icorner8.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 120,
+      "sha256": "c44e7b2f8746534ce6c3f90b4c23ba750ac1d91cab8380351ff7e1418f5441d7"
+    },
+    {
+      "logicalPath": "materials/gui/icorner8.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 336,
+      "sha256": "21af27a7a3523480bdbe9ec2134cf86361ebafddd1a1e106d0319fca11de47ef"
+    },
+    {
+      "logicalPath": "materials/gui/info.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 116,
+      "sha256": "3f3439d3f8a34baea24f57eced30441c679e6e059ea8e4586f23e188cad27fb8"
+    },
+    {
+      "logicalPath": "materials/gui/info.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 576,
+      "sha256": "ffab99e6b22765889a2d4f7612ab83324e1a65d47babc1fd8b61662f40457fcd"
+    },
+    {
+      "logicalPath": "materials/gui/spawnmenu_toggle.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 129,
+      "sha256": "14667fe3ab8600b44e054835e79c93860c3de4f689ca66a766424756f0483e77"
+    },
+    {
+      "logicalPath": "materials/gui/spawnmenu_toggle.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 576,
+      "sha256": "4d0cff292e3ff854929ae958fc10c72405b62b5f9664a36a291b755008b4cbff"
+    },
+    {
+      "logicalPath": "materials/gui/spawnmenu_toggle_back.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 134,
+      "sha256": "1230729479ad9f5c84f3f603582c3aed8663bb67fb00179e621d9225fabc1aec"
+    },
+    {
+      "logicalPath": "materials/gui/spawnmenu_toggle_back.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 576,
+      "sha256": "e43a65fd72f4d8715516fc125635662f752b01efe89576e4543c6b9f8d173e98"
+    },
+    {
+      "logicalPath": "materials/gui/speech_lid.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 122,
+      "sha256": "4573a81962a09dbc0fe4e81e73850f7df45788520a74cab7997960d4b13cc7be"
+    },
+    {
+      "logicalPath": "materials/gui/speech_lid.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 11040,
+      "sha256": "b36f3580ddeb66f9291e5cfef5f5ed01f797a97aa84f301b7e611f9cf583dd12"
+    },
+    {
+      "logicalPath": "materials/models/debug/debugwhite.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 65,
+      "sha256": "95c5f59530b17c7a727f50db5be1b7c92f13c254485aa7813aed741976fc80e3"
+    },
+    {
+      "logicalPath": "materials/models/debug/debugwhite.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 2936,
+      "sha256": "6db279768b54a3283662d7a60ecdd58d8bf63bc7182ddf48f69f146ef66f9b7d"
+    },
+    {
+      "logicalPath": "materials/models/spawn_effect.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 669,
+      "sha256": "08e3597919c2de59f8d5320926ecd7f6caad9c115c99216283f9b43519e41601"
+    },
+    {
+      "logicalPath": "materials/models/weapons/v_toolgun/screen.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 89,
+      "sha256": "cced67b3cb3b2c569e06b3e647007f3d9b97bd8f1b5a56fd23303621f080b524"
+    },
+    {
+      "logicalPath": "materials/models/weapons/v_toolgun/screen_bg.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 104,
+      "sha256": "08b110d41d4d1122bc33ac071d5527443907675e3a974c8a3fd255e0ccf7adf1"
+    },
+    {
+      "logicalPath": "materials/models/weapons/v_toolgun/screen_bg.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 43912,
+      "sha256": "6d106b4b9122199b217788a2567a49e29f3b45deef5f22ee237578e899346590"
+    },
+    {
+      "logicalPath": "materials/models/wireframe.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 28,
+      "sha256": "e3c896b91bfa43b2c1ccabb493bf8452f233d8b8486c36a55dfee83f2aba7ea4"
+    },
+    {
+      "logicalPath": "materials/pp/add.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 86,
+      "sha256": "0b12120b69ee3344982e95a3005d195f4e8328b29647249f129af6c6187ad072"
+    },
+    {
+      "logicalPath": "materials/pp/bloom.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 120,
+      "sha256": "9d39dfbc255088ed3b615cd78977d99e5eaf0ed7b7f596b9da2a1cfa3587f53b"
+    },
+    {
+      "logicalPath": "materials/pp/blurscreen.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 169,
+      "sha256": "142703daa9bf908e29ac34ba865b37f738d83f542f99be23170c884ae4ff4e78"
+    },
+    {
+      "logicalPath": "materials/pp/blurx.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 96,
+      "sha256": "6ddc824ec0cdb564a0b2b344bba8892a7a3e5d718c12c36f102411c890a39478"
+    },
+    {
+      "logicalPath": "materials/pp/blury.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 96,
+      "sha256": "9889015c0f819795c7fe2ddc3a3c5d969ebdc2daa491fb0a89387a4c7e94fe8e"
+    },
+    {
+      "logicalPath": "materials/pp/bokehblur.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 34,
+      "sha256": "b5280dd6731d5d894cbe0ab53166f32be07e4d45a5a310294709779f170fc901"
+    },
+    {
+      "logicalPath": "materials/pp/colour.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 69,
+      "sha256": "1cb5149823527d1b001a5ee2b60e82f015803564e5b183d3c2f5ae6b8f0e6932"
+    },
+    {
+      "logicalPath": "materials/pp/copy.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 102,
+      "sha256": "6fffa0809fe05519a3c0cade2744369ac54dee9e4cec3ab93c9db0dfa25cb40e"
+    },
+    {
+      "logicalPath": "materials/pp/dof.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 294,
+      "sha256": "04cf439ad69e69ab7ae00665422d42c9b92b775ecfd535e376f488b06d60595a"
+    },
+    {
+      "logicalPath": "materials/pp/downsample.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 105,
+      "sha256": "612a62b544470126a01b319d0bb57c277cb28a5cac5b2bd42ef1c8e88c81904b"
+    },
+    {
+      "logicalPath": "materials/pp/fb.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 97,
+      "sha256": "09180f793d5ad8dc0c1a8bd231188bd77cb788019624549b1161f9c44645b999"
+    },
+    {
+      "logicalPath": "materials/pp/frame_blend.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 56,
+      "sha256": "d96eafb4199530efd4b868778e87ab4c2e4aee8146eab7aef40d7c5d9dbe47c3"
+    },
+    {
+      "logicalPath": "materials/pp/motionblur.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 113,
+      "sha256": "6d9829f51806c90c82640dc6d24b2ab1e0bf97e19883729ad7319ebba44a58f4"
+    },
+    {
+      "logicalPath": "materials/pp/sharpen.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 64,
+      "sha256": "52f55123de88693dffd2b193fe95e12b0407fcc4601c4a45147f479b179f5e72"
+    },
+    {
+      "logicalPath": "materials/pp/sobel.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 64,
+      "sha256": "aa8ea7c63a443767114477a6633697d86b149c9f42b8dd8483bd5a29f099df9b"
+    },
+    {
+      "logicalPath": "materials/pp/sub.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 80,
+      "sha256": "36d8514675ece57cde64bbf2ac49b4c558f77cd87e2a96a13c5a282318748b02"
+    },
+    {
+      "logicalPath": "materials/pp/sunbeams.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 65,
+      "sha256": "8e2c2867060a3e4f24be98fcd58fe1597d7071e41ed4db2c195c54602c0e443f"
+    },
+    {
+      "logicalPath": "materials/pp/texturize.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 100,
+      "sha256": "0217573c5092fc91a1b7cabfd6ce1190debbe5ef516da43524c2ff056973b3ab"
+    },
+    {
+      "logicalPath": "materials/pp/toytown-top.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 353,
+      "sha256": "3398683b96d169cf4ca6ecf9a7c597a345a26d1d0b345d696583fedc7412ed5b"
+    },
+    {
+      "logicalPath": "materials/sprites/grip.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 145,
+      "sha256": "fd61bf7cc1feeb14fd2ac6b3994809afd3eb3268f142a96fa49f03727355f0da"
+    },
+    {
+      "logicalPath": "materials/sprites/grip.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 21924,
+      "sha256": "9942c6386a036ea87f7dff86df059394715f837b6af542bd6ae5f66e29cd6104"
+    },
+    {
+      "logicalPath": "materials/sprites/grip_hover.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 151,
+      "sha256": "06af2f1e59e1ba83cd41e94559c76951cefd339971eee10a559b4b02123b8460"
+    },
+    {
+      "logicalPath": "materials/sprites/grip_hover.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 16592,
+      "sha256": "8cbb0042bc30dae955f440991c57660dfe390f322cf353eada57211f9cd80d7b"
+    },
+    {
+      "logicalPath": "materials/sprites/light_ignorez.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 136,
+      "sha256": "7eec3965be1d0d2dbf93e0adc9211821a9775f984861d09d5a000d8158bd42a4"
+    },
+    {
+      "logicalPath": "materials/sprites/sent_ball.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 141,
+      "sha256": "49145e145ef237571b15193d6976a7967b1fd5fc370f4462cea8e5cafcaa1b77"
+    },
+    {
+      "logicalPath": "materials/sprites/sent_ball.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 349604,
+      "sha256": "2debdbcf8f701469d8d5edf81edf8e5bf97e63eb25629aad33958336dadb6c6d"
+    },
+    {
+      "logicalPath": "materials/vgui/arrow.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 118,
+      "sha256": "f25cbe48cdcc243604f2ace4a3717726675cb46600a68f23bee8bc65817a1608"
+    },
+    {
+      "logicalPath": "materials/vgui/arrow.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 11068,
+      "sha256": "b5c085435470874f2877d7c41a9b7e18a69c5684d1653ece739f7250e989bdd5"
+    },
+    {
+      "logicalPath": "materials/vgui/gmod_camera.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 109,
+      "sha256": "8960f036cf7066e15a20db377abea151c2ddc4898e3e7dc4ba53fe030cb7a1fb"
+    },
+    {
+      "logicalPath": "materials/vgui/gmod_camera.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 43872,
+      "sha256": "175f928de203c09df328a74bd11b953bbb821d222a4f9c46aeea46fcc6b1dbd2"
+    },
+    {
+      "logicalPath": "materials/vgui/gmod_tool.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 107,
+      "sha256": "064eefd556c4c018d27eb7d3010e36492819d73721c09a5195c758ef2b872405"
+    },
+    {
+      "logicalPath": "materials/vgui/gmod_tool.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 43872,
+      "sha256": "7a98fda2e255ff4ff25c6f64733f85b73ed44e545210331ce9d9026b54dfa55a"
+    },
+    {
+      "logicalPath": "materials/vgui/gradient-d.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 123,
+      "sha256": "8893e96870f6b5273b6e28a8f388b522fd9145a2a2f12484b32e0fce78dd342a"
+    },
+    {
+      "logicalPath": "materials/vgui/gradient-d.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 43820,
+      "sha256": "3aca5506edf2c4231253bd77471ed80a19a066f8090028e2f7c724089822e399"
+    },
+    {
+      "logicalPath": "materials/vgui/gradient-r.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 123,
+      "sha256": "2f6677dbd46c4d8bb5e23385d192fb8ec0a1375024905d8a477c5993bd465d65"
+    },
+    {
+      "logicalPath": "materials/vgui/gradient-r.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 43820,
+      "sha256": "c7067d0de3a8e00b83f16770b3c15c8494207fc1531352d6933571a844131bfa"
+    },
+    {
+      "logicalPath": "materials/vgui/gradient-u.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 123,
+      "sha256": "10de8e754bb90f5beb6661acc85eb5a7d908bdf27efa685945e57af1244c9b4a"
+    },
+    {
+      "logicalPath": "materials/vgui/gradient-u.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 43820,
+      "sha256": "a5d360a0a256b6fc098aa6c8585c872223ae04bb5a4db7b674a241bbd71c19ac"
+    },
+    {
+      "logicalPath": "materials/vgui/minixhair.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 107,
+      "sha256": "4260441d4b8ee669da07a961de55be076a988448d869a0f191d45dbbfdc98696"
+    },
+    {
+      "logicalPath": "materials/vgui/minixhair.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 1572,
+      "sha256": "9cdcfde8e23c354f49c644f533efd17c6ca137018be349aeee1c05f3987bb37c"
+    },
+    {
+      "logicalPath": "materials/vgui/notices/cleanup.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 127,
+      "sha256": "8492c6e61a876823f83c9d88a0d363663844b400127e55b33234b21f555fb6f7"
+    },
+    {
+      "logicalPath": "materials/vgui/notices/cleanup.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 5540,
+      "sha256": "95f1f01cb02d56f39277089c1ec94871acccf060277a5243d9f85aea8cc775ef"
+    },
+    {
+      "logicalPath": "materials/vgui/notices/error.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 126,
+      "sha256": "7d83d6d6d5b2364d3b91211a793f17fec4008ffe42e9b0931161bed743cb6fd6"
+    },
+    {
+      "logicalPath": "materials/vgui/notices/error.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 4176,
+      "sha256": "b57f6f8e74217e0af30dfdf73938dd92d7f56090771a3beb44205afa0b8e14fc"
+    },
+    {
+      "logicalPath": "materials/vgui/notices/generic.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 128,
+      "sha256": "289d496c5ddede08fadaebf542014b5d49dc7329358dcfd3372996644cf455b0"
+    },
+    {
+      "logicalPath": "materials/vgui/notices/generic.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 5540,
+      "sha256": "83380238debf684e8d8391f596508762226ff94a3a0c1de852d262252b3557e8"
+    },
+    {
+      "logicalPath": "materials/vgui/notices/hint.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 125,
+      "sha256": "b7002589d5598e66f3e956c019de129dc0958f9d30fb30f81c77f7963821cf47"
+    },
+    {
+      "logicalPath": "materials/vgui/notices/hint.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 4176,
+      "sha256": "288094f8cfff442e175f0b5d524f48d82ea6eb7c2ee0c817ec8762691b8ea06a"
+    },
+    {
+      "logicalPath": "materials/vgui/notices/undo.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 125,
+      "sha256": "b63e01794e96ef5826cf4d9df7a255f6c4e152bc13d22ad53b000a69e6966ee5"
+    },
+    {
+      "logicalPath": "materials/vgui/notices/undo.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 4176,
+      "sha256": "63c6e42a6695040a5ddbc0ca43c75480faa4b2223956d0844746538e23973ebf"
+    },
+    {
+      "logicalPath": "materials/vgui/white.vmt",
+      "sourceArchive": "platform/platform_misc_dir.vpk",
+      "byteCount": 251,
+      "sha256": "b5149aadde708e90c9061ac7d0d8e6c69f800ae6bdb4d05e7622dc0334a59d1f"
+    },
+    {
+      "logicalPath": "materials/weapons/swep.vmt",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 115,
+      "sha256": "9e63741c82defc3a4cbfcf0a3869cdbaa056f2ab670dd2e8454bef46799a19a5"
+    },
+    {
+      "logicalPath": "materials/weapons/swep.vtf",
+      "sourceArchive": "garrysmod/garrysmod_dir.vpk",
+      "byteCount": 43872,
+      "sha256": "09934d92fd2494d17275d2da3ab822b39c5ded8e8a26dc1caf167acea4ebe328"
+    }
+  ],
+  "unresolvedDynamicBaseTextures": [
+    "materials/_gmod_frameblend.vtf",
+    "materials/_rt_fullframefb.vtf",
+    "materials/sprites/glow_test02.vtf",
+    "materials/sprites/light_glow01.vtf"
+  ],
+  "unresolvedMaterialLiterals": [
+    "../",
+    "effects/fire_cloud1",
+    "effects/spark",
+    "effects/strider_muzzle",
+    "scripted/breen_fakemonitor_1",
+    "sprites/heatwave",
+    "sprites/light_glow02_add",
+    "vgui/white_additive"
+  ],
+  "unresolvedVMTDependencies": [
+    "materials/effects/fire_cloud1.vmt",
+    "materials/effects/spark.vmt",
+    "materials/effects/strider_muzzle.vmt",
+    "materials/scripted/breen_fakemonitor_1.vmt",
+    "materials/sprites/heatwave.vmt",
+    "materials/sprites/light_glow02_add.vmt",
+    "materials/vgui/white_additive.vmt"
+  ]
+}
