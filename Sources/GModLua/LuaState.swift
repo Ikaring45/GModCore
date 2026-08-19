@@ -4,6 +4,7 @@ final class LuaEnvironment {
     private var values: [String: LuaValue] = [:]
     private var order: [String] = []
     private let parent: LuaEnvironment?
+    private let isFunctionScopeRoot: Bool
     var globalTable: LuaTable
     let varargs: [LuaValue]?
 
@@ -11,9 +12,11 @@ final class LuaEnvironment {
         parent: LuaEnvironment? = nil,
         globalTable: LuaTable,
         varargs: [LuaValue]? = nil,
-        inheritVarargs: Bool = true
+        inheritVarargs: Bool = true,
+        isFunctionScopeRoot: Bool = false
     ) {
         self.parent = parent
+        self.isFunctionScopeRoot = isFunctionScopeRoot
         self.globalTable = globalTable
         if let varargs {
             self.varargs = varargs
@@ -55,6 +58,19 @@ final class LuaEnvironment {
         findLocal(name)
     }
 
+    func bindingKind(_ name: String) -> String? {
+        var crossedFunctionBoundary = false
+        var cursor: LuaEnvironment? = self
+        while let environment = cursor {
+            if environment.values[name] != nil {
+                return crossedFunctionBoundary ? "upvalue" : "local"
+            }
+            if environment.isFunctionScopeRoot { crossedFunctionBoundary = true }
+            cursor = environment.parent
+        }
+        return nil
+    }
+
     private func findLocal(_ name: String) -> LuaValue? {
         if let value = values[name] { return value }
         return parent?.findLocal(name)
@@ -83,9 +99,15 @@ enum LuaResolvedTarget {
     case indexed(LuaValue, LuaValue)
 }
 
+struct LuaCallFrame {
+    let function: LuaFunction
+    let environment: LuaEnvironment
+    let name: String?
+    let nameWhat: String
+}
+
 final class LuaCallStackBox {
-    var functions: [LuaFunction] = []
-    var environments: [LuaEnvironment] = []
+    var frames: [LuaCallFrame] = []
 }
 
 public final class LuaState {
@@ -347,6 +369,24 @@ public final class LuaState {
         try evaluateMulti(expression, environment: environment).first ?? .nilValue
     }
 
+    private func callSite(
+        for expression: LuaExpression,
+        environment: LuaEnvironment
+    ) -> (name: String?, nameWhat: String) {
+        switch expression {
+        case let .variable(name):
+            return (name, environment.bindingKind(name) ?? "global")
+        case let .field(_, name):
+            return (name, "field")
+        case let .index(_, .string(name)):
+            return (name.utf8String, "field")
+        case let .group(inner):
+            return callSite(for: inner, environment: environment)
+        default:
+            return (nil, "")
+        }
+    }
+
     private func evaluateMulti(_ expression: LuaExpression, environment: LuaEnvironment) throws -> [LuaValue] {
         switch expression {
         case .vararg:
@@ -358,13 +398,24 @@ public final class LuaState {
         case let .call(calleeExpression, argumentExpressions):
             let callable = try evaluateSingle(calleeExpression, environment: environment)
             let arguments = try evaluateExpressionList(argumentExpressions, environment: environment)
-            return try callValue(callable, arguments: arguments)
+            let site = callSite(for: calleeExpression, environment: environment)
+            return try callValue(
+                callable,
+                arguments: arguments,
+                callName: site.name,
+                callNameWhat: site.nameWhat
+            )
 
         case let .methodCall(receiverExpression, name, argumentExpressions):
             let receiver = try evaluateSingle(receiverExpression, environment: environment)
             let callable = try getIndexedValue(receiver: receiver, key: .string(LuaString(name)))
             let arguments = try evaluateExpressionList(argumentExpressions, environment: environment)
-            return try callValue(callable, arguments: [receiver] + arguments)
+            return try callValue(
+                callable,
+                arguments: [receiver] + arguments,
+                callName: name,
+                callNameWhat: "method"
+            )
 
         default:
             return [try evaluateNonMulti(expression, environment: environment)]
@@ -521,7 +572,12 @@ public final class LuaState {
 
     // MARK: - Calls
 
-    func callValue(_ callable: LuaValue, arguments: [LuaValue]) throws -> [LuaValue] {
+    func callValue(
+        _ callable: LuaValue,
+        arguments: [LuaValue],
+        callName: String? = nil,
+        callNameWhat: String = ""
+    ) throws -> [LuaValue] {
         switch callable {
         case let .nativeFunction(function):
             return try function.body(arguments)
@@ -535,17 +591,21 @@ public final class LuaState {
                 parent: function.closure,
                 globalTable: function.environmentTable,
                 varargs: function.isVararg ? extra : nil,
-                inheritVarargs: false
+                inheritVarargs: false,
+                isFunctionScopeRoot: true
             )
             for (index, parameter) in function.parameters.enumerated() {
                 callEnvironment.define(parameter, value: index < arguments.count ? arguments[index] : .nilValue)
             }
             let stack = currentCallStack()
-            stack.functions.append(function)
-            stack.environments.append(callEnvironment)
+            stack.frames.append(LuaCallFrame(
+                function: function,
+                environment: callEnvironment,
+                name: callName,
+                nameWhat: callNameWhat
+            ))
             defer {
-                _ = stack.functions.popLast()
-                _ = stack.environments.popLast()
+                _ = stack.frames.popLast()
             }
 
             let control = try executeBlock(function.body, environment: callEnvironment)
@@ -560,7 +620,12 @@ public final class LuaState {
             if let metatable = metatable(of: callable) {
                 let callMeta = metatable.rawValue(forString: "__call")
                 if !isNil(callMeta) {
-                    return try callValue(callMeta, arguments: [callable] + arguments)
+                    return try callValue(
+                        callMeta,
+                        arguments: [callable] + arguments,
+                        callName: callName,
+                        callNameWhat: callNameWhat
+                    )
                 }
             }
             throw LuaError.runtime("attempt to call a \(callable.typeName) value")
@@ -844,15 +909,17 @@ public final class LuaState {
     }
 
     func currentLuaFunction(level: Int = 1) -> LuaFunction? {
-        let stack = currentCallStack().functions
-        guard level >= 1, level <= stack.count else { return nil }
-        return stack[stack.count - level]
+        currentLuaCallFrame(level: level)?.function
     }
 
     func currentLuaEnvironment(level: Int = 1) -> LuaEnvironment? {
-        let stack = currentCallStack().environments
-        guard level >= 1, level <= stack.count else { return nil }
-        return stack[stack.count - level]
+        currentLuaCallFrame(level: level)?.environment
+    }
+
+    func currentLuaCallFrame(level: Int = 1) -> LuaCallFrame? {
+        let frames = currentCallStack().frames
+        guard level >= 1, level <= frames.count else { return nil }
+        return frames[frames.count - level]
     }
 
     func metatable(of value: LuaValue) -> LuaTable? {

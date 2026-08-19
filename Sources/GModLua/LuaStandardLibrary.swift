@@ -1051,24 +1051,28 @@ extension LuaState {
         native("getinfo") { [unowned self] args in
             let target: LuaValue
             let isStackQuery: Bool
+            let stackFrame: LuaCallFrame?
             if let first = args.first {
                 switch first {
                 case .luaFunction, .nativeFunction:
                     target = first
                     isStackQuery = false
+                    stackFrame = nil
                 case let .number(level):
-                    guard let function = self.currentLuaFunction(level: Int(level)) else {
+                    guard let frame = self.currentLuaCallFrame(level: Int(level)) else {
                         return [.nilValue]
                     }
-                    target = .luaFunction(function)
+                    target = .luaFunction(frame.function)
                     isStackQuery = true
+                    stackFrame = frame
                 default:
                     return [.nilValue]
                 }
             } else {
-                guard let function = self.currentLuaFunction() else { return [.nilValue] }
-                target = .luaFunction(function)
+                guard let frame = self.currentLuaCallFrame() else { return [.nilValue] }
+                target = .luaFunction(frame.function)
                 isStackQuery = true
+                stackFrame = frame
             }
 
             let table = LuaTable()
@@ -1091,7 +1095,10 @@ extension LuaState {
                 table.rawSetValue(.number(Double(function.lineDefined)), forString: "linedefined")
                 table.rawSetValue(.number(Double(function.lastLineDefined)), forString: "lastlinedefined")
                 table.rawSetValue(.string(LuaString(function.lineDefined == 0 ? "main" : "Lua")), forString: "what")
-                table.rawSetValue(.string(""), forString: "namewhat")
+                table.rawSetValue(.string(LuaString(stackFrame?.nameWhat ?? "")), forString: "namewhat")
+                if let name = stackFrame?.name {
+                    table.rawSetValue(.string(LuaString(name)), forString: "name")
+                }
                 table.rawSetValue(.number(Double(isStackQuery ? 0 : -1)), forString: "currentline")
                 table.rawSetValue(.number(Double(function.closure.capturedEntries().count)), forString: "nups")
                 table.rawSetValue(.luaFunction(function), forString: "func")
@@ -1110,7 +1117,9 @@ extension LuaState {
         }
         native("traceback") { [unowned self] args in
             let message = args.first.map { try? self.luaString($0) } ?? nil
-            let stack = self.currentCallStack().functions.reversed().map { "\t\($0.sourceName): in function" }.joined(separator: "\n")
+            let stack = self.currentCallStack().frames.reversed().map {
+                "\t\($0.function.sourceName): in function"
+            }.joined(separator: "\n")
             let prefix = message ?? ""
             return [.string(LuaString(prefix + (prefix.isEmpty ? "" : "\n") + "stack traceback:\n" + stack))]
         }
