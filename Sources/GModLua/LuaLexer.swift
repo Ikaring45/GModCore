@@ -1,625 +1,369 @@
-enum LuaTokenKind:
-    Equatable
-{
+enum LuaTokenKind: Equatable {
+    case identifier(String)
+    case number(Double)
+    case string(LuaString)
 
-    case identifier(
-        String
-    )
+    case keywordLocal, keywordFunction, keywordEnd, keywordReturn
+    case keywordTrue, keywordFalse, keywordNil
+    case keywordIf, keywordThen, keywordElseif, keywordElse
+    case keywordWhile, keywordDo, keywordRepeat, keywordUntil
+    case keywordFor, keywordIn, keywordBreak, keywordContinue
+    case keywordAnd, keywordOr, keywordNot
 
-    case number(
-        Double
-    )
-
-    case string(
-        String
-    )
-
-    case keywordLocal
-    case keywordFunction
-    case keywordEnd
-    case keywordReturn
-
-    case keywordTrue
-    case keywordFalse
-    case keywordNil
-
-    case plus
-    case minus
-    case star
-    case slash
-    case percent
-
-    case leftParen
-    case rightParen
-
-    case leftBrace
-    case rightBrace
-
-    case comma
-    case equal
-    case semicolon
-
-    case dot
+    case plus, minus, star, slash, percent, caret
+    case hash
+    case leftParen, rightParen
+    case leftBrace, rightBrace
+    case leftBracket, rightBracket
+    case comma, semicolon
+    case assign
+    case equal, notEqual, less, lessEqual, greater, greaterEqual
+    case dot, concat, vararg
     case colon
-
     case eof
 }
 
 struct LuaToken {
-
-    let kind:
-        LuaTokenKind
-
-    let line:
-        Int
-
-    let column:
-        Int
+    let kind: LuaTokenKind
+    let line: Int
+    let column: Int
 }
 
 final class LuaLexer {
-
-    private let characters:
-        [Character]
-
+    private let characters: [Character]
     private var index = 0
-
     private var line = 1
-
     private var column = 1
 
-    init(
-        source: String
-    ) {
-
-        self.characters =
-            Array(source)
+    init(source: String) {
+        self.characters = Array(source)
     }
 
-    func tokenize()
-        throws -> [LuaToken]
-    {
+    func tokenize() throws -> [LuaToken] {
+        var tokens: [LuaToken] = []
 
-        var tokens:
-            [LuaToken] = []
+        // Lua's standalone loader ignores an initial Unix shebang line.
+        if index == 0, peek() == "#", peek(1) == "!" {
+            skipLineComment()
+        }
 
         while !isAtEnd {
+            let startLine = line
+            let startColumn = column
+            let character = advance()
 
-            let startLine =
-                line
-
-            let startColumn =
-                column
-
-            let character =
-                advance()
-
-            if character.isWhitespace {
-                continue
-            }
+            if character.isWhitespace { continue }
 
             switch character {
-
-            case "+":
-
-                tokens.append(
-                    token(
-                        .plus,
-                        startLine,
-                        startColumn
-                    )
-                )
+            case "+": tokens.append(token(.plus, startLine, startColumn))
+            case "*": tokens.append(token(.star, startLine, startColumn))
+            case "%": tokens.append(token(.percent, startLine, startColumn))
+            case "^": tokens.append(token(.caret, startLine, startColumn))
+            case "#": tokens.append(token(.hash, startLine, startColumn))
+            case "(": tokens.append(token(.leftParen, startLine, startColumn))
+            case ")": tokens.append(token(.rightParen, startLine, startColumn))
+            case "{": tokens.append(token(.leftBrace, startLine, startColumn))
+            case "}": tokens.append(token(.rightBrace, startLine, startColumn))
+            case "]": tokens.append(token(.rightBracket, startLine, startColumn))
+            case ",": tokens.append(token(.comma, startLine, startColumn))
+            case ";": tokens.append(token(.semicolon, startLine, startColumn))
+            case ":": tokens.append(token(.colon, startLine, startColumn))
 
             case "-":
-
                 if peek() == "-" {
-
-                    while
-                        let value = peek(),
-                        value != "\n"
-                    {
-                        _ = advance()
+                    _ = advance()
+                    if peek() == "[" {
+                        _ = advance() // first '['
+                        if let level = consumeLongBracketOpeningIfPresent() {
+                            _ = try scanLongBracketBody(level: level, collect: false, startLine: startLine, startColumn: startColumn)
+                        } else {
+                            // It was just --[... rather than a long comment.
+                            skipLineComment()
+                        }
+                    } else {
+                        skipLineComment()
                     }
-
                 } else {
-
-                    tokens.append(
-                        token(
-                            .minus,
-                            startLine,
-                            startColumn
-                        )
-                    )
+                    tokens.append(token(.minus, startLine, startColumn))
                 }
 
-            case "*":
-
-                tokens.append(
-                    token(
-                        .star,
-                        startLine,
-                        startColumn
-                    )
-                )
-
             case "/":
-
-                tokens.append(
-                    token(
-                        .slash,
-                        startLine,
-                        startColumn
-                    )
-                )
-
-            case "%":
-
-                tokens.append(
-                    token(
-                        .percent,
-                        startLine,
-                        startColumn
-                    )
-                )
-
-            case "(":
-
-                tokens.append(
-                    token(
-                        .leftParen,
-                        startLine,
-                        startColumn
-                    )
-                )
-
-            case ")":
-
-                tokens.append(
-                    token(
-                        .rightParen,
-                        startLine,
-                        startColumn
-                    )
-                )
-
-            case "{":
-
-                tokens.append(
-                    token(
-                        .leftBrace,
-                        startLine,
-                        startColumn
-                    )
-                )
-
-            case "}":
-
-                tokens.append(
-                    token(
-                        .rightBrace,
-                        startLine,
-                        startColumn
-                    )
-                )
-
-            case ",":
-
-                tokens.append(
-                    token(
-                        .comma,
-                        startLine,
-                        startColumn
-                    )
-                )
+                if peek() == "/" { // GLua
+                    _ = advance(); skipLineComment()
+                } else if peek() == "*" { // GLua
+                    _ = advance(); try skipCStyleBlockComment(startLine: startLine, startColumn: startColumn)
+                } else {
+                    tokens.append(token(.slash, startLine, startColumn))
+                }
 
             case "=":
+                if peek() == "=" { _ = advance(); tokens.append(token(.equal, startLine, startColumn)) }
+                else { tokens.append(token(.assign, startLine, startColumn)) }
 
-                tokens.append(
-                    token(
-                        .equal,
-                        startLine,
-                        startColumn
-                    )
-                )
+            case "~":
+                guard peek() == "=" else { throw lexerError(startLine, startColumn, "unexpected '~'") }
+                _ = advance(); tokens.append(token(.notEqual, startLine, startColumn))
 
-            case ";":
+            case "!": // GLua
+                if peek() == "=" { _ = advance(); tokens.append(token(.notEqual, startLine, startColumn)) }
+                else { tokens.append(token(.keywordNot, startLine, startColumn)) }
 
-                tokens.append(
-                    token(
-                        .semicolon,
-                        startLine,
-                        startColumn
-                    )
-                )
+            case "&": // GLua &&
+                guard peek() == "&" else { throw lexerError(startLine, startColumn, "expected '&' after '&'") }
+                _ = advance(); tokens.append(token(.keywordAnd, startLine, startColumn))
+
+            case "|": // GLua ||
+                guard peek() == "|" else { throw lexerError(startLine, startColumn, "expected '|' after '|'") }
+                _ = advance(); tokens.append(token(.keywordOr, startLine, startColumn))
+
+            case "<":
+                if peek() == "=" { _ = advance(); tokens.append(token(.lessEqual, startLine, startColumn)) }
+                else { tokens.append(token(.less, startLine, startColumn)) }
+
+            case ">":
+                if peek() == "=" { _ = advance(); tokens.append(token(.greaterEqual, startLine, startColumn)) }
+                else { tokens.append(token(.greater, startLine, startColumn)) }
 
             case ".":
+                if peek() == ".", peek(1) == "." {
+                    _ = advance(); _ = advance(); tokens.append(token(.vararg, startLine, startColumn))
+                } else if peek() == "." {
+                    _ = advance(); tokens.append(token(.concat, startLine, startColumn))
+                } else if let next = peek(), next.isNumber {
+                    let value = try scanDecimalNumber(first: ".", startLine: startLine, startColumn: startColumn)
+                    tokens.append(token(.number(value), startLine, startColumn))
+                } else {
+                    tokens.append(token(.dot, startLine, startColumn))
+                }
 
-                tokens.append(
-                    token(
-                        .dot,
-                        startLine,
-                        startColumn
-                    )
-                )
-
-            case ":":
-
-                tokens.append(
-                    token(
-                        .colon,
-                        startLine,
-                        startColumn
-                    )
-                )
+            case "[":
+                if let level = consumeLongBracketOpeningIfPresent() {
+                    let text = try scanLongBracketBody(level: level, collect: true, startLine: startLine, startColumn: startColumn)
+                    tokens.append(token(.string(text), startLine, startColumn))
+                } else {
+                    tokens.append(token(.leftBracket, startLine, startColumn))
+                }
 
             case "\"", "'":
-
-                let value =
-                    try scanString(
-                        quote:
-                            character,
-                        line:
-                            startLine,
-                        column:
-                            startColumn
-                    )
-
-                tokens.append(
-                    token(
-                        .string(value),
-                        startLine,
-                        startColumn
-                    )
-                )
+                tokens.append(token(.string(try scanQuotedString(quote: character, startLine: startLine, startColumn: startColumn)), startLine, startColumn))
 
             default:
-
                 if character.isNumber {
-
-                    let value =
-                        try scanNumber(
-                            first:
-                                character,
-                            line:
-                                startLine,
-                            column:
-                                startColumn
-                        )
-
-                    tokens.append(
-                        token(
-                            .number(value),
-                            startLine,
-                            startColumn
-                        )
-                    )
-
-                } else if
-                    character.isLetter ||
-                    character == "_"
-                {
-
-                    let name =
-                        scanIdentifier(
-                            first:
-                                character
-                        )
-
-                    tokens.append(
-                        token(
-                            keywordOrIdentifier(
-                                name
-                            ),
-                            startLine,
-                            startColumn
-                        )
-                    )
-
+                    tokens.append(token(.number(try scanNumber(first: character, startLine: startLine, startColumn: startColumn)), startLine, startColumn))
+                } else if character.isLetter || character == "_" {
+                    let name = scanIdentifier(first: character)
+                    tokens.append(token(keywordOrIdentifier(name), startLine, startColumn))
                 } else {
-
-                    throw LuaError.lexer(
-                        line:
-                            startLine,
-                        column:
-                            startColumn,
-                        message:
-                            "unexpected character '\(character)'"
-                    )
+                    throw lexerError(startLine, startColumn, "unexpected character '\(character)'")
                 }
             }
         }
 
-        tokens.append(
-            LuaToken(
-                kind: .eof,
-                line: line,
-                column: column
-            )
-        )
-
+        tokens.append(LuaToken(kind: .eof, line: line, column: column))
         return tokens
     }
 
-    private var isAtEnd:
-        Bool
-    {
-
-        index >=
-            characters.count
-    }
+    private var isAtEnd: Bool { index >= characters.count }
 
     @discardableResult
-    private func advance()
-        -> Character
-    {
-
-        let value =
-            characters[index]
-
+    private func advance() -> Character {
+        let value = characters[index]
         index += 1
-
-        if value == "\n" {
-
-            line += 1
-            column = 1
-
-        } else {
-
-            column += 1
-        }
-
+        if value == "\n" { line += 1; column = 1 }
+        else { column += 1 }
         return value
     }
 
-    private func peek(
-        _ offset: Int = 0
-    ) -> Character? {
-
-        let target =
-            index + offset
-
-        guard
-            target >= 0,
-            target <
-                characters.count
-        else {
-            return nil
-        }
-
+    private func peek(_ offset: Int = 0) -> Character? {
+        let target = index + offset
+        guard target >= 0, target < characters.count else { return nil }
         return characters[target]
     }
 
-    private func scanNumber(
-        first: Character,
-        line: Int,
-        column: Int
-    ) throws -> Double {
+    private func skipLineComment() {
+        while let value = peek(), value != "\n" { _ = advance() }
+    }
 
-        var text =
-            String(first)
+    private func skipCStyleBlockComment(startLine: Int, startColumn: Int) throws {
+        while !isAtEnd {
+            if peek() == "*", peek(1) == "/" { _ = advance(); _ = advance(); return }
+            _ = advance()
+        }
+        throw lexerError(startLine, startColumn, "unfinished block comment")
+    }
 
-        while
-            let value = peek(),
-            value.isNumber
-        {
+    /// Called after the first '[' is already consumed. Accepts [[ and [=[ etc.
+    private func consumeLongBracketOpeningIfPresent() -> Int? {
+        var offset = 0
+        while peek(offset) == "=" { offset += 1 }
+        guard peek(offset) == "[" else { return nil }
+        for _ in 0..<offset { _ = advance() }
+        _ = advance()
+        return offset
+    }
 
-            text.append(
-                advance()
-            )
+    private func scanLongBracketBody(
+        level: Int,
+        collect: Bool,
+        startLine: Int,
+        startColumn: Int
+    ) throws -> LuaString {
+        var bytes: [UInt8] = []
+
+        // Lua ignores the first newline immediately after an opening long bracket.
+        if peek() == "\n" { _ = advance() }
+        else if peek() == "\r" {
+            _ = advance(); if peek() == "\n" { _ = advance() }
         }
 
-        if
-            peek() == ".",
-            let next = peek(1),
-            next.isNumber
-        {
-
-            text.append(
-                advance()
-            )
-
-            while
-                let value = peek(),
-                value.isNumber
-            {
-
-                text.append(
-                    advance()
-                )
+        while !isAtEnd {
+            if matchesLongBracketClose(level: level) {
+                _ = advance()
+                for _ in 0..<level { _ = advance() }
+                _ = advance()
+                return LuaString(bytes: bytes)
             }
+            let value = advance()
+            if collect { bytes.append(contentsOf: String(value).utf8) }
         }
 
-        guard
-            let value =
-                Double(text)
-        else {
+        throw lexerError(startLine, startColumn, "unfinished long string/comment")
+    }
 
-            throw LuaError.lexer(
-                line: line,
-                column: column,
-                message:
-                    "invalid number '\(text)'"
-            )
+    private func matchesLongBracketClose(level: Int) -> Bool {
+        guard peek() == "]" else { return false }
+        for i in 0..<level where peek(1 + i) != "=" { return false }
+        return peek(1 + level) == "]"
+    }
+
+    private func scanNumber(first: Character, startLine: Int, startColumn: Int) throws -> Double {
+        if first == "0", peek() == "x" || peek() == "X" {
+            _ = advance()
+            var digits = ""
+            while let c = peek(), c.isHexDigit { digits.append(advance()) }
+            guard !digits.isEmpty, let intValue = UInt64(digits, radix: 16) else {
+                throw lexerError(startLine, startColumn, "malformed number")
+            }
+            return Double(intValue)
+        }
+        return try scanDecimalNumber(first: first, startLine: startLine, startColumn: startColumn)
+    }
+
+    private func scanDecimalNumber(first: Character, startLine: Int, startColumn: Int) throws -> Double {
+        var text = String(first)
+        while let value = peek(), value.isNumber { text.append(advance()) }
+
+        if peek() == ".", peek(1) != "." {
+            text.append(advance())
+            while let value = peek(), value.isNumber { text.append(advance()) }
         }
 
+        if peek() == "e" || peek() == "E" {
+            text.append(advance())
+            if peek() == "+" || peek() == "-" { text.append(advance()) }
+            guard let digit = peek(), digit.isNumber else { throw lexerError(startLine, startColumn, "malformed number") }
+            while let value = peek(), value.isNumber { text.append(advance()) }
+        }
+
+        guard let value = Double(text) else { throw lexerError(startLine, startColumn, "malformed number") }
         return value
     }
 
-    private func scanIdentifier(
-        first: Character
-    ) -> String {
-
-        var text =
-            String(first)
-
-        while
-            let value = peek(),
-            value.isLetter ||
-            value.isNumber ||
-            value == "_"
-        {
-
-            text.append(
-                advance()
-            )
-        }
-
+    private func scanIdentifier(first: Character) -> String {
+        var text = String(first)
+        while let value = peek(), value.isLetter || value.isNumber || value == "_" { text.append(advance()) }
         return text
     }
 
-    private func keywordOrIdentifier(
-        _ name: String
-    ) -> LuaTokenKind {
-
+    private func keywordOrIdentifier(_ name: String) -> LuaTokenKind {
         switch name {
-
-        case "local":
-
-            return .keywordLocal
-
-        case "function":
-
-            return .keywordFunction
-
-        case "end":
-
-            return .keywordEnd
-
-        case "return":
-
-            return .keywordReturn
-
-        case "true":
-
-            return .keywordTrue
-
-        case "false":
-
-            return .keywordFalse
-
-        case "nil":
-
-            return .keywordNil
-
-        default:
-
-            return .identifier(
-                name
-            )
+        case "local": return .keywordLocal
+        case "function": return .keywordFunction
+        case "end": return .keywordEnd
+        case "return": return .keywordReturn
+        case "true": return .keywordTrue
+        case "false": return .keywordFalse
+        case "nil": return .keywordNil
+        case "if": return .keywordIf
+        case "then": return .keywordThen
+        case "elseif": return .keywordElseif
+        case "else": return .keywordElse
+        case "while": return .keywordWhile
+        case "do": return .keywordDo
+        case "repeat": return .keywordRepeat
+        case "until": return .keywordUntil
+        case "for": return .keywordFor
+        case "in": return .keywordIn
+        case "break": return .keywordBreak
+        case "continue": return .keywordContinue // GLua extension
+        case "and": return .keywordAnd
+        case "or": return .keywordOr
+        case "not": return .keywordNot
+        default: return .identifier(name)
         }
     }
 
-    private func scanString(
-        quote: Character,
-        line startLine: Int,
-        column startColumn: Int
-    ) throws -> String {
-
-        var result = ""
+    private func scanQuotedString(quote: Character, startLine: Int, startColumn: Int) throws -> LuaString {
+        var bytes: [UInt8] = []
 
         while !isAtEnd {
+            let value = advance()
+            if value == quote { return LuaString(bytes: bytes) }
+            if value == "\n" || value == "\r" { throw lexerError(startLine, startColumn, "unfinished string") }
 
-            let value =
-                advance()
-
-            if value == quote {
-                return result
+            if value != "\\" {
+                bytes.append(contentsOf: String(value).utf8)
+                continue
             }
 
-            if value == "\n" {
-
-                throw LuaError.lexer(
-                    line:
-                        startLine,
-                    column:
-                        startColumn,
-                    message:
-                        "unfinished string"
-                )
-            }
-
-            if value == "\\" {
-
-                guard !isAtEnd else {
-                    break
+            guard !isAtEnd else { break }
+            let escaped = advance()
+            switch escaped {
+            case "a": bytes.append(7)
+            case "b": bytes.append(8)
+            case "f": bytes.append(12)
+            case "n": bytes.append(10)
+            case "r": bytes.append(13)
+            case "t": bytes.append(9)
+            case "v": bytes.append(11)
+            case "\\": bytes.append(92)
+            case "\"": bytes.append(34)
+            case "'": bytes.append(39)
+            case "\n": bytes.append(10)
+            case "\r":
+                if peek() == "\n" { _ = advance() }
+                bytes.append(10)
+            default:
+                if escaped.isNumber {
+                    var digits = String(escaped)
+                    for _ in 0..<2 {
+                        if let next = peek(), next.isNumber { digits.append(advance()) } else { break }
+                    }
+                    guard let integer = Int(digits), integer <= 255 else {
+                        throw lexerError(startLine, startColumn, "escape sequence too large")
+                    }
+                    bytes.append(UInt8(integer))
+                } else {
+                    // Lua 5.1 accepts unknown escapes by dropping the backslash.
+                    bytes.append(contentsOf: String(escaped).utf8)
                 }
-
-                let escaped =
-                    advance()
-
-                switch escaped {
-
-                case "n":
-
-                    result.append(
-                        "\n"
-                    )
-
-                case "r":
-
-                    result.append(
-                        "\r"
-                    )
-
-                case "t":
-
-                    result.append(
-                        "\t"
-                    )
-
-                case "\\":
-
-                    result.append(
-                        "\\"
-                    )
-
-                case "\"":
-
-                    result.append(
-                        "\""
-                    )
-
-                case "'":
-
-                    result.append(
-                        "'"
-                    )
-
-                default:
-
-                    result.append(
-                        escaped
-                    )
-                }
-
-            } else {
-
-                result.append(
-                    value
-                )
             }
         }
 
-        throw LuaError.lexer(
-            line:
-                startLine,
-            column:
-                startColumn,
-            message:
-                "unfinished string"
-        )
+        throw lexerError(startLine, startColumn, "unfinished string")
     }
 
-    private func token(
-        _ kind: LuaTokenKind,
-        _ line: Int,
-        _ column: Int
-    ) -> LuaToken {
+    private func token(_ kind: LuaTokenKind, _ line: Int, _ column: Int) -> LuaToken {
+        LuaToken(kind: kind, line: line, column: column)
+    }
 
-        LuaToken(
-            kind: kind,
-            line: line,
-            column: column
-        )
+    private func lexerError(_ line: Int, _ column: Int, _ message: String) -> LuaError {
+        .lexer(line: line, column: column, message: message)
+    }
+}
+
+private extension Character {
+    var isHexDigit: Bool {
+        isNumber || ("a"..."f").contains(String(self).lowercased())
     }
 }
