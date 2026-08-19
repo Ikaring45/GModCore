@@ -59,7 +59,16 @@ let package = Package(
             dependencies: [
                 "GModEngine"
             ],
-            path: "Sources/GModLuaConformance"
+            path: "Sources/GModLuaConformance",
+            linkerSettings: [
+                // The Windows default executable stack is too small for Lua
+                // 5.1's required non-tail recursion depth. This affects only
+                // the native diagnostic executable, not the iPad libraries.
+                .unsafeFlags(
+                    ["-Xlinker", "/STACK:16777216"],
+                    .when(platforms: [.windows])
+                )
+            ]
         )
     ]
 )

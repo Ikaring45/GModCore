@@ -1,3 +1,4 @@
+import Foundation
 import GModLua
 
 public enum GMLuaRealm: String {
@@ -29,6 +30,10 @@ public final class GMLuaRuntime {
     public static func describe(_ error: Error) -> String {
         if let raised = error as? LuaRaisedError { return raised.value.printable }
         return String(describing: error)
+    }
+
+    public static func decodeSource(_ data: Data) -> String? {
+        LuaSourceDecoder.decode(data)
     }
 
     /// Broad runtime smoke test. This is intentionally much wider than the old

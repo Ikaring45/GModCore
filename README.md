@@ -14,8 +14,14 @@ runtime without launching Swift Playgrounds:
 
 ```powershell
 swift run GModLuaConformance --file .\path\to\test.lua
+swift run GModLuaConformance --trace-file .\path\to\test.lua
 swift run GModLuaConformance --eval 'print(table.getn({10, 20, 30}))'
+swift run GModLuaConformance --eval-name '=diagnostic' 'print(debug.getinfo(1).currentline)'
 ```
+
+`--trace-file` prints a Lua traceback when a default `assert` fails. Source
+files and dynamically compiled chunks preserve Lua 5.1 byte strings even when
+they are not valid UTF-8.
 
 The runner uses the same official-test order and Discovery classifications as
 the iPad console. `main.lua`, unfinished `gc.lua`, and PUC C-API-only `api.lua`

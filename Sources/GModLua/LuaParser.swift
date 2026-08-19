@@ -48,24 +48,25 @@ indirect enum LuaAssignmentTarget {
 
 struct LuaIfBranch {
     let condition: LuaExpression
+    let conditionLine: Int
     let body: [LuaStatement]
 }
 
 enum LuaStatement {
-    case localDeclaration([String], [LuaExpression])
-    case localFunction(String, LuaFunctionPrototype)
-    case assignment([LuaAssignmentTarget], [LuaExpression])
-    case functionDeclaration(LuaAssignmentTarget, LuaFunctionPrototype)
-    case ifStatement([LuaIfBranch], elseBody: [LuaStatement]?)
-    case whileLoop(LuaExpression, [LuaStatement])
-    case repeatLoop([LuaStatement], LuaExpression)
-    case numericFor(String, LuaExpression, LuaExpression, LuaExpression?, [LuaStatement])
-    case genericFor([String], [LuaExpression], [LuaStatement])
+    case localDeclaration([String], [LuaExpression], line: Int)
+    case localFunction(String, LuaFunctionPrototype, line: Int)
+    case assignment([LuaAssignmentTarget], [LuaExpression], line: Int)
+    case functionDeclaration(LuaAssignmentTarget, LuaFunctionPrototype, line: Int)
+    case ifStatement([LuaIfBranch], elseBody: [LuaStatement]?, endLine: Int)
+    case whileLoop(LuaExpression, [LuaStatement], conditionLine: Int, endLine: Int)
+    case repeatLoop([LuaStatement], LuaExpression, conditionLine: Int)
+    case numericFor(String, LuaExpression, LuaExpression, LuaExpression?, [LuaStatement], line: Int, endLine: Int)
+    case genericFor([String], [LuaExpression], [LuaStatement], line: Int, endLine: Int)
     case doBlock([LuaStatement])
-    case breakLoop
-    case continueLoop
-    case returnValues([LuaExpression])
-    case expression(LuaExpression)
+    case breakLoop(line: Int)
+    case continueLoop(line: Int)
+    case returnValues([LuaExpression], line: Int)
+    case expression(LuaExpression, line: Int)
 }
 
 struct LuaChunk { let statements: [LuaStatement] }
@@ -92,25 +93,28 @@ final class LuaParser {
     }
 
     private func parseStatement() throws -> LuaStatement {
+        let statementLine = peek.line
         if match(.keywordLocal) {
             if match(.keywordFunction) {
                 let lineDefined = previous.line
                 let name = try consumeIdentifier("expected local function name")
                 let prototype = try parseFunctionTail(prependSelf: false, lineDefined: lineDefined)
-                return .localFunction(name, prototype)
+                return .localFunction(name, prototype, line: statementLine)
             }
-            return try parseLocalDeclaration()
+            return try parseLocalDeclaration(line: statementLine)
         }
 
-        if match(.keywordFunction) { return try parseNamedFunctionDeclaration(lineDefined: previous.line) }
+        if match(.keywordFunction) {
+            return try parseNamedFunctionDeclaration(lineDefined: previous.line, statementLine: statementLine)
+        }
         if match(.keywordIf) { return try parseIfStatement() }
         if match(.keywordWhile) { return try parseWhileLoop() }
         if match(.keywordRepeat) { return try parseRepeatLoop() }
-        if match(.keywordFor) { return try parseForLoop() }
+        if match(.keywordFor) { return try parseForLoop(line: statementLine) }
         if match(.keywordDo) { return try parseDoBlock() }
-        if match(.keywordBreak) { return .breakLoop }
-        if match(.keywordContinue) { return .continueLoop }
-        if match(.keywordReturn) { return try parseReturn() }
+        if match(.keywordBreak) { return .breakLoop(line: statementLine) }
+        if match(.keywordContinue) { return .continueLoop(line: statementLine) }
+        if match(.keywordReturn) { return try parseReturn(line: statementLine) }
 
         let first = try parseExpression()
         if check(.comma) || check(.assign) {
@@ -119,20 +123,20 @@ final class LuaParser {
             try consume(.assign, "expected '=' in assignment")
             let targets = try targetExpressions.map { try assignmentTarget(from: $0) }
             let values = try parseExpressionList()
-            return .assignment(targets, values)
+            return .assignment(targets, values, line: statementLine)
         }
 
-        return .expression(first)
+        return .expression(first, line: statementLine)
     }
 
-    private func parseLocalDeclaration() throws -> LuaStatement {
+    private func parseLocalDeclaration(line: Int) throws -> LuaStatement {
         var names = [try consumeIdentifier("expected local variable name")]
         while match(.comma) { names.append(try consumeIdentifier("expected local variable name")) }
         let values = match(.assign) ? try parseExpressionList() : []
-        return .localDeclaration(names, values)
+        return .localDeclaration(names, values, line: line)
     }
 
-    private func parseNamedFunctionDeclaration(lineDefined: Int) throws -> LuaStatement {
+    private func parseNamedFunctionDeclaration(lineDefined: Int, statementLine: Int) throws -> LuaStatement {
         let firstName = try consumeIdentifier("expected function name")
         var targetExpression = LuaExpression.variable(firstName)
         while match(.dot) {
@@ -148,26 +152,29 @@ final class LuaParser {
         let prototype = try parseFunctionTail(prependSelf: prependSelf, lineDefined: lineDefined)
         return .functionDeclaration(
             try assignmentTarget(from: targetExpression),
-            prototype
+            prototype,
+            line: statementLine
         )
     }
 
     private func parseIfStatement() throws -> LuaStatement {
         var branches: [LuaIfBranch] = []
+        let firstConditionLine = peek.line
         let firstCondition = try parseExpression()
         try consume(.keywordThen, "expected 'then'")
         let firstBody = try parseBlock { kind in
             kind == .keywordElseif || kind == .keywordElse || kind == .keywordEnd || kind == .eof
         }
-        branches.append(LuaIfBranch(condition: firstCondition, body: firstBody))
+        branches.append(LuaIfBranch(condition: firstCondition, conditionLine: firstConditionLine, body: firstBody))
 
         while match(.keywordElseif) {
+            let conditionLine = peek.line
             let condition = try parseExpression()
             try consume(.keywordThen, "expected 'then'")
             let body = try parseBlock { kind in
                 kind == .keywordElseif || kind == .keywordElse || kind == .keywordEnd || kind == .eof
             }
-            branches.append(LuaIfBranch(condition: condition, body: body))
+            branches.append(LuaIfBranch(condition: condition, conditionLine: conditionLine, body: body))
         }
 
         var elseBody: [LuaStatement]?
@@ -176,24 +183,26 @@ final class LuaParser {
         }
 
         try consume(.keywordEnd, "expected 'end' after if")
-        return .ifStatement(branches, elseBody: elseBody)
+        return .ifStatement(branches, elseBody: elseBody, endLine: previous.line)
     }
 
     private func parseWhileLoop() throws -> LuaStatement {
+        let conditionLine = peek.line
         let condition = try parseExpression()
         try consume(.keywordDo, "expected 'do' after while condition")
         let body = try parseBlock { kind in kind == .keywordEnd || kind == .eof }
         try consume(.keywordEnd, "expected 'end' after while")
-        return .whileLoop(condition, body)
+        return .whileLoop(condition, body, conditionLine: conditionLine, endLine: previous.line)
     }
 
     private func parseRepeatLoop() throws -> LuaStatement {
         let body = try parseBlock { kind in kind == .keywordUntil || kind == .eof }
         try consume(.keywordUntil, "expected 'until' after repeat block")
-        return .repeatLoop(body, try parseExpression())
+        let conditionLine = previous.line
+        return .repeatLoop(body, try parseExpression(), conditionLine: conditionLine)
     }
 
-    private func parseForLoop() throws -> LuaStatement {
+    private func parseForLoop(line: Int) throws -> LuaStatement {
         let firstName = try consumeIdentifier("expected for variable")
 
         if match(.assign) {
@@ -205,7 +214,7 @@ final class LuaParser {
             try consume(.keywordDo, "expected 'do' after numeric for")
             let body = try parseBlock { kind in kind == .keywordEnd || kind == .eof }
             try consume(.keywordEnd, "expected 'end' after for")
-            return .numericFor(firstName, start, limit, step, body)
+            return .numericFor(firstName, start, limit, step, body, line: line, endLine: previous.line)
         }
 
         var names = [firstName]
@@ -215,7 +224,7 @@ final class LuaParser {
         try consume(.keywordDo, "expected 'do' after generic for")
         let body = try parseBlock { kind in kind == .keywordEnd || kind == .eof }
         try consume(.keywordEnd, "expected 'end' after for")
-        return .genericFor(names, expressions, body)
+        return .genericFor(names, expressions, body, line: line, endLine: previous.line)
     }
 
     private func parseDoBlock() throws -> LuaStatement {
@@ -224,9 +233,9 @@ final class LuaParser {
         return .doBlock(body)
     }
 
-    private func parseReturn() throws -> LuaStatement {
-        if isReturnTerminator(peek.kind) { return .returnValues([]) }
-        return .returnValues(try parseExpressionList())
+    private func parseReturn(line: Int) throws -> LuaStatement {
+        if isReturnTerminator(peek.kind) { return .returnValues([], line: line) }
+        return .returnValues(try parseExpressionList(), line: line)
     }
 
     private func isReturnTerminator(_ kind: LuaTokenKind) -> Bool {
@@ -350,6 +359,7 @@ final class LuaParser {
     private func parsePostfix() throws -> LuaExpression {
         var expression = try parsePrimary()
         while true {
+            guard isPrefixExpression(expression) else { break }
             if match(.dot) {
                 expression = .field(expression, try consumeIdentifier("expected field name after '.'"))
             } else if match(.leftBracket) {
@@ -366,6 +376,15 @@ final class LuaParser {
             }
         }
         return expression
+    }
+
+    private func isPrefixExpression(_ expression: LuaExpression) -> Bool {
+        switch expression {
+        case .variable, .group, .field, .index, .call, .methodCall:
+            return true
+        default:
+            return false
+        }
     }
 
     private func parsePrimary() throws -> LuaExpression {

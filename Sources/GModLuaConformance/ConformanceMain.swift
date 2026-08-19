@@ -13,14 +13,25 @@ import Glibc
 enum GModLuaConformanceMain {
     static func main() async {
         let arguments = Array(CommandLine.arguments.dropFirst())
-        if arguments.first == "--file", arguments.count == 2 {
+        if (arguments.first == "--file" || arguments.first == "--trace-file"), arguments.count == 2 {
             do {
                 let data = try Data(contentsOf: URL(fileURLWithPath: arguments[1]))
-                guard let source = String(data: data, encoding: .utf8)
-                    ?? String(data: data, encoding: .isoLatin1) else {
+                guard let source = GMLuaRuntime.decodeSource(data) else {
                     throw ConformanceCLIError.cannotDecode(arguments[1])
                 }
                 let runtime = GMLuaRuntime(realm: .server) { print($0) }
+                if arguments.first == "--trace-file" {
+                    try runtime.execute(
+                        """
+                        local original_assert = assert
+                        function assert(value, ...)
+                          if not value then print(debug.traceback("ASSERT TRACE", 2)) end
+                          return original_assert(value, ...)
+                        end
+                        """,
+                        sourceName: "=(trace bootstrap)"
+                    )
+                }
                 try runtime.execute(source, sourceName: "@\(arguments[1])")
             } catch {
                 print("[FILE][FAIL] \(GMLuaRuntime.describe(error))")
@@ -47,8 +58,21 @@ enum GModLuaConformanceMain {
             return
         }
 
+        if arguments.first == "--eval-name", arguments.count >= 3 {
+            let sourceName = arguments[1]
+            let source = arguments.dropFirst(2).joined(separator: " ")
+            let runtime = GMLuaRuntime(realm: .server) { print($0) }
+            do {
+                try runtime.execute(source, sourceName: sourceName)
+            } catch {
+                print("[EVAL][FAIL] \(GMLuaRuntime.describe(error))")
+                terminate(1)
+            }
+            return
+        }
+
         let report = await Lua51ConformanceRunner.runBasicSuite { line in
-            print(line)
+            FileHandle.standardOutput.write(Data((line + "\n").utf8))
         }
 
         print("")

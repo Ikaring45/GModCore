@@ -8,6 +8,7 @@ public final class LuaFunction: @unchecked Sendable {
     let lineDefined: Int
     let lastLineDefined: Int
     let activeLines: Set<Int>
+    let upvalueNames: [String]
 
     init(
         parameters: [String],
@@ -18,7 +19,8 @@ public final class LuaFunction: @unchecked Sendable {
         sourceName: String = "=(chunk)",
         lineDefined: Int = 0,
         lastLineDefined: Int = -1,
-        activeLines: Set<Int> = []
+        activeLines: Set<Int> = [],
+        upvalueNames: [String] = []
     ) {
         self.parameters = parameters
         self.isVararg = isVararg
@@ -29,5 +31,12 @@ public final class LuaFunction: @unchecked Sendable {
         self.lineDefined = lineDefined
         self.lastLineDefined = lastLineDefined
         self.activeLines = activeLines
+        self.upvalueNames = upvalueNames
+    }
+
+    func upvalueEntries() -> [(String, LuaValue)] {
+        upvalueNames.compactMap { name in
+            closure.localValue(name).map { (name, $0) }
+        }
     }
 }

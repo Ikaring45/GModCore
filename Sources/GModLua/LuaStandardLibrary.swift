@@ -14,6 +14,16 @@ extension LuaState {
         installOSLibrary()
         installIOLibrary()
         installDebugLibrary()
+        registerLoadedStandardLibraries()
+    }
+
+    private func registerLoadedStandardLibraries() {
+        guard case let .table(package) = getGlobal("package"),
+              case let .table(loaded) = package.rawValue(forString: "loaded") else { return }
+        for name in ["_G", "package", "coroutine", "table", "io", "os", "string", "math", "debug"] {
+            let value = name == "_G" ? LuaValue.table(globalTable) : getGlobal(name)
+            if !isNil(value) { loaded.rawSetValue(value, forString: name) }
+        }
     }
 
     // MARK: - Base library
@@ -188,7 +198,16 @@ extension LuaState {
             case let .number(levelNumber):
                 let level = Int(levelNumber)
                 if level == 0 { return [.table(self.globalTable)] }
-                return [.table(self.currentLuaFunction(level: level)?.environmentTable ?? self.globalTable)]
+                guard level > 0,
+                      let frame = self.currentLuaCallFrame(level: level + 1),
+                      !frame.isTailCall else {
+                    throw LuaError.runtime("bad argument #1 to 'getfenv' (invalid level)")
+                }
+                switch frame.callable {
+                case let .luaFunction(function): return [.table(function.environmentTable)]
+                case .nativeFunction: return [.table(self.globalTable)]
+                default: throw LuaError.runtime("bad argument #1 to 'getfenv' (invalid level)")
+                }
             default:
                 return [.table(self.globalTable)]
             }
@@ -261,13 +280,16 @@ extension LuaState {
                 throw LuaError.runtime("bad argument #1 to 'loadstring' (string expected)")
             }
             if let dumped = self.dumpRegistry[sourceBytes] { return [.luaFunction(dumped)] }
+            guard let decodedSource = LuaSourceDecoder.decode(Data(sourceBytes.bytes)) else {
+                return [.nilValue, .string("cannot decode Lua source")]
+            }
             let sourceName = try self.optionalStringArgument(
                 arguments,
                 at: 1,
-                defaultValue: sourceBytes.utf8String
+                defaultValue: decodedSource
             )
             do {
-                let function = try self.compile(sourceBytes.utf8String, sourceName: sourceName)
+                let function = try self.compile(decodedSource, sourceName: sourceName)
                 function.environmentTable = self.currentLuaFunction()?.environmentTable ?? self.globalTable
                 return [.luaFunction(function)]
             } catch {
@@ -294,7 +316,10 @@ extension LuaState {
                 bytes.append(contentsOf: piece.bytes)
             }
             do {
-                let function = try self.compile(String(decoding: bytes, as: UTF8.self), sourceName: chunkName)
+                guard let decodedSource = LuaSourceDecoder.decode(Data(bytes)) else {
+                    return [.nilValue, .string("cannot decode Lua source")]
+                }
+                let function = try self.compile(decodedSource, sourceName: chunkName)
                 function.environmentTable = self.currentLuaFunction()?.environmentTable ?? self.globalTable
                 return [.luaFunction(function)]
             } catch {
@@ -1058,33 +1083,70 @@ extension LuaState {
             return [args[0]]
         }
         native("getinfo") { [unowned self] args in
+            let queryArguments: [LuaValue]
+            let queriedThreadFrames: [LuaCallFrame]?
+            if let first = args.first, case let .thread(thread) = first {
+                queryArguments = Array(args.dropFirst())
+                queriedThreadFrames = thread.luaDebugFrames()
+            } else {
+                queryArguments = args
+                queriedThreadFrames = nil
+            }
+
             let target: LuaValue
             let isStackQuery: Bool
             let stackFrame: LuaCallFrame?
-            if let first = args.first {
+            let isTailStackFrame: Bool
+            if let first = queryArguments.first {
                 switch first {
                 case .luaFunction, .nativeFunction:
                     target = first
                     isStackQuery = false
                     stackFrame = nil
+                    isTailStackFrame = false
                 case let .number(level):
-                    guard let frame = self.currentLuaCallFrame(level: Int(level)) else {
-                        return [.nilValue]
+                    // The native debug.getinfo call itself occupies the top
+                    // frame; Lua level 1 is its caller.
+                    let frame: LuaCallFrame
+                    if let frames = queriedThreadFrames {
+                        let levelIndex = Int(level)
+                        guard levelIndex >= 1, levelIndex <= frames.count else { return [.nilValue] }
+                        frame = frames[frames.count - levelIndex]
+                    } else {
+                        guard let currentFrame = self.currentLuaCallFrame(level: Int(level) + 1) else {
+                            return [.nilValue]
+                        }
+                        frame = currentFrame
                     }
-                    target = .luaFunction(frame.function)
+                    target = frame.callable
                     isStackQuery = true
                     stackFrame = frame
+                    isTailStackFrame = frame.isTailCall
                 default:
                     return [.nilValue]
                 }
             } else {
-                guard let frame = self.currentLuaCallFrame() else { return [.nilValue] }
-                target = .luaFunction(frame.function)
+                guard queriedThreadFrames == nil,
+                      let frame = self.currentLuaCallFrame(level: 2) else { return [.nilValue] }
+                target = frame.callable
                 isStackQuery = true
                 stackFrame = frame
+                isTailStackFrame = frame.isTailCall
             }
 
             let table = LuaTable()
+
+            if isTailStackFrame {
+                table.rawSetValue(.string("=(tail call)"), forString: "source")
+                table.rawSetValue(.string("(tail call)"), forString: "short_src")
+                table.rawSetValue(.number(-1), forString: "linedefined")
+                table.rawSetValue(.number(-1), forString: "lastlinedefined")
+                table.rawSetValue(.string("tail"), forString: "what")
+                table.rawSetValue(.string(""), forString: "namewhat")
+                table.rawSetValue(.number(-1), forString: "currentline")
+                table.rawSetValue(.number(0), forString: "nups")
+                return [.table(table)]
+            }
 
             switch target {
             case let .nativeFunction(function):
@@ -1108,8 +1170,8 @@ extension LuaState {
                 if let name = stackFrame?.name {
                     table.rawSetValue(.string(LuaString(name)), forString: "name")
                 }
-                table.rawSetValue(.number(Double(isStackQuery ? 0 : -1)), forString: "currentline")
-                table.rawSetValue(.number(Double(function.closure.capturedEntries().count)), forString: "nups")
+                table.rawSetValue(.number(Double(isStackQuery ? (stackFrame?.currentLine ?? 0) : -1)), forString: "currentline")
+                table.rawSetValue(.number(Double(function.upvalueNames.count)), forString: "nups")
                 table.rawSetValue(.luaFunction(function), forString: "func")
 
                 let activeLines = LuaTable()
@@ -1125,17 +1187,54 @@ extension LuaState {
             return [.table(table)]
         }
         native("traceback") { [unowned self] args in
-            let message = args.first.map { try? self.luaString($0) } ?? nil
-            let stack = self.currentCallStack().frames.reversed().map {
-                "\t\($0.function.sourceName): in function"
+            let sourceFrames: [LuaCallFrame]
+            let messageIndex: Int
+            let defaultLevel: Int
+            if let first = args.first, case let .thread(thread) = first {
+                sourceFrames = thread.callStackFrames()
+                messageIndex = 1
+                defaultLevel = 0
+            } else {
+                sourceFrames = self.currentCallStack().frames
+                messageIndex = 0
+                defaultLevel = 1
+            }
+
+            var message: String?
+            if args.indices.contains(messageIndex), !self.isNil(args[messageIndex]) {
+                switch args[messageIndex] {
+                case .string, .number:
+                    message = try self.luaString(args[messageIndex])
+                default:
+                    // Lua 5.1 preserves non-string error objects verbatim.
+                    return [args[messageIndex]]
+                }
+            }
+
+            let levelIndex = messageIndex + 1
+            let level = args.indices.contains(levelIndex)
+                ? max(0, Int(try self.numberFromValue(args[levelIndex])))
+                : defaultLevel
+            let frames = Array(sourceFrames.reversed().dropFirst(level))
+            let stack = frames.map { frame -> String in
+                if frame.isTailCall { return "\t(tail call): ?" }
+                let quotedName = frame.name.map { " in function '\($0)'" } ?? " in function <?>"
+                switch frame.callable {
+                case let .luaFunction(function):
+                    return "\t\(self.debugShortSource(function.sourceName)):\(frame.currentLine):\(quotedName)"
+                case .nativeFunction:
+                    return "\t[C]:\(quotedName)"
+                default:
+                    return "\t?:\(quotedName)"
+                }
             }.joined(separator: "\n")
-            let prefix = message ?? ""
-            return [.string(LuaString(prefix + (prefix.isEmpty ? "" : "\n") + "stack traceback:\n" + stack))]
+            let prefix = message.map { $0 + "\n" } ?? ""
+            return [.string(LuaString(prefix + "stack traceback:\n" + stack))]
         }
         native("getupvalue") { [unowned self] args in
             guard args.count >= 2, case let .luaFunction(function) = args[0] else { return [.nilValue] }
             let index = Int(try self.numberFromValue(args[1]))
-            let entries = function.closure.capturedEntries()
+            let entries = function.upvalueEntries()
             guard index >= 1, index <= entries.count else { return [.nilValue] }
             let entry = entries[index - 1]
             return [.string(LuaString(entry.0)), entry.1]
@@ -1143,35 +1242,119 @@ extension LuaState {
         native("setupvalue") { [unowned self] args in
             guard args.count >= 3, case let .luaFunction(function) = args[0] else { return [.nilValue] }
             let index = Int(try self.numberFromValue(args[1]))
-            let entries = function.closure.capturedEntries()
+            let entries = function.upvalueEntries()
             guard index >= 1, index <= entries.count else { return [.nilValue] }
             let name = entries[index - 1].0
             _ = function.closure.assignExisting(name, value: args[2])
             return [.string(LuaString(name))]
         }
         native("getlocal") { [unowned self] args in
-            guard args.count >= 2 else { return [.nilValue] }
-            let level = Int(try self.numberFromValue(args[0]))
-            let index = Int(try self.numberFromValue(args[1]))
-            guard let env = self.currentLuaEnvironment(level: level + 1) else { return [.nilValue] }
-            let entries = env.directEntries()
-            guard index >= 1, index <= entries.count else { return [.nilValue] }
-            let entry = entries[index - 1]
-            return [.string(LuaString(entry.0)), entry.1]
+            var argumentIndex = 0
+            let thread: LuaThread?
+            if let first = args.first, case let .thread(value) = first {
+                thread = value
+                argumentIndex = 1
+            } else {
+                thread = nil
+            }
+            guard args.indices.contains(argumentIndex + 1) else { return [.nilValue] }
+            let level = Int(try self.numberFromValue(args[argumentIndex]))
+            let index = Int(try self.numberFromValue(args[argumentIndex + 1]))
+            if thread == nil, level == 0 {
+                guard index >= 1,
+                      let frame = self.currentLuaCallFrame(),
+                      index <= frame.temporaries.count else { return [.nilValue] }
+                return [.string("(*temporary)"), frame.temporaries[index - 1]]
+            }
+            let frame: LuaCallFrame
+            if let thread {
+                let frames = thread.luaDebugFrames()
+                guard level >= 1, level <= frames.count else { return [.nilValue] }
+                frame = frames[frames.count - level]
+            } else {
+                guard let currentFrame = self.currentLuaCallFrame(level: level + 1) else { return [.nilValue] }
+                frame = currentFrame
+            }
+            guard let env = frame.environment else { return [.nilValue] }
+            let entries = env.activeFunctionEntries()
+            guard index >= 1 else { return [.nilValue] }
+            if index <= entries.count {
+                let entry = entries[index - 1]
+                return [.string(LuaString(entry.0)), entry.1]
+            }
+            let temporaryIndex = index - entries.count - 1
+            guard frame.temporaries.indices.contains(temporaryIndex) else { return [.nilValue] }
+            return [.string("(*temporary)"), frame.temporaries[temporaryIndex]]
         }
         native("setlocal") { [unowned self] args in
-            guard args.count >= 3 else { return [.nilValue] }
-            let level = Int(try self.numberFromValue(args[0]))
-            let index = Int(try self.numberFromValue(args[1]))
-            guard let env = self.currentLuaEnvironment(level: level + 1) else { return [.nilValue] }
-            let entries = env.directEntries()
-            guard index >= 1, index <= entries.count else { return [.nilValue] }
-            let name = entries[index - 1].0
-            _ = env.assignExisting(name, value: args[2])
-            return [.string(LuaString(name))]
+            var argumentIndex = 0
+            let thread: LuaThread?
+            if let first = args.first, case let .thread(value) = first {
+                thread = value
+                argumentIndex = 1
+            } else {
+                thread = nil
+            }
+            guard args.indices.contains(argumentIndex + 2) else { return [.nilValue] }
+            let level = Int(try self.numberFromValue(args[argumentIndex]))
+            let index = Int(try self.numberFromValue(args[argumentIndex + 1]))
+            let replacement = args[argumentIndex + 2]
+            let frameLevel = level + 1
+            let frame: LuaCallFrame
+            if let thread {
+                let frames = thread.luaDebugFrames()
+                guard level >= 1, level <= frames.count else { return [.nilValue] }
+                frame = frames[frames.count - level]
+            } else {
+                guard let currentFrame = self.currentLuaCallFrame(level: frameLevel) else { return [.nilValue] }
+                frame = currentFrame
+            }
+            guard index >= 1, let env = frame.environment else { return [.nilValue] }
+            let entries = env.activeFunctionEntries()
+            if index <= entries.count,
+               let name = env.assignActiveFunctionEntry(at: index, value: replacement) {
+                return [.string(LuaString(name))]
+            }
+            let temporaryIndex = index - entries.count - 1
+            guard thread == nil, frame.temporaries.indices.contains(temporaryIndex) else { return [.nilValue] }
+            let stack = self.currentCallStack()
+            let storageIndex = stack.frames.count - frameLevel
+            stack.frames[storageIndex].temporaries[temporaryIndex] = replacement
+            return [.string("(*temporary)")]
         }
-        native("gethook") { _ in [.nilValue, .string(""), .number(0)] }
-        native("sethook") { _ in [] }
+        native("gethook") { [unowned self] args in
+            let thread: LuaThread?
+            if let first = args.first, case let .thread(value) = first { thread = value }
+            else { thread = nil }
+            let hookState = self.debugHookState(for: thread)
+            let function = self.isNil(hookState.function) ? LuaValue.nilValue : hookState.function
+            return [function, .string(LuaString(hookState.mask)), .number(Double(hookState.count))]
+        }
+        native("sethook") { [unowned self] args in
+            var argumentIndex = 0
+            let thread: LuaThread?
+            if let first = args.first, case let .thread(value) = first {
+                thread = value
+                argumentIndex = 1
+            } else {
+                thread = nil
+            }
+
+            guard args.indices.contains(argumentIndex), !self.isNil(args[argumentIndex]) else {
+                self.clearDebugHook(thread: thread)
+                return []
+            }
+            let first = args[argumentIndex]
+            guard first.typeName == "function" else {
+                throw LuaError.runtime("bad argument to 'sethook' (function expected)")
+            }
+            let maskIndex = argumentIndex + 1
+            let countIndex = argumentIndex + 2
+            let mask = args.indices.contains(maskIndex) ? try self.stringFromValue(args[maskIndex]) : ""
+            let count = args.indices.contains(countIndex) ? Int(try self.numberFromValue(args[countIndex])) : 0
+            self.setDebugHook(function: first, mask: mask, count: count, thread: thread)
+            return []
+        }
         native("debug") { _ in [] }
 
         setGlobal("debug", value: .table(debug))
@@ -1262,7 +1445,7 @@ extension LuaState {
         func normalize(_ index: Int) -> Int {
             if index > 0 { return index }
             if index < 0 { return count + index + 1 }
-            return 1
+            return 0
         }
         let start = max(1, normalize(i))
         let end = min(count, normalize(j))
@@ -1330,17 +1513,36 @@ extension LuaState {
         var index = 0
         var argumentIndex = 0
 
+        func padded(_ value: [UInt8], width: Int?, leftAligned: Bool) -> [UInt8] {
+            guard let width, width > value.count else { return value }
+            let padding = Array(repeating: UInt8(32), count: width - value.count)
+            return leftAligned ? value + padding : padding + value
+        }
+
         while index < bytes.count {
             if bytes[index] != 37 { output.append(bytes[index]); index += 1; continue }
             if index + 1 < bytes.count, bytes[index + 1] == 37 { output.append(37); index += 2; continue }
 
             let specStart = index
             index += 1
-            while index < bytes.count, [45,43,32,35,48].contains(bytes[index]) { index += 1 }
+            var leftAligned = false
+            while index < bytes.count, [45,43,32,35,48].contains(bytes[index]) {
+                if bytes[index] == 45 { leftAligned = true }
+                index += 1
+            }
+            let widthStart = index
             while index < bytes.count, bytes[index] >= 48, bytes[index] <= 57 { index += 1 }
+            let width = widthStart < index
+                ? Int(String(decoding: bytes[widthStart..<index], as: UTF8.self))
+                : nil
+            var precision: Int?
             if index < bytes.count, bytes[index] == 46 {
                 index += 1
+                let precisionStart = index
                 while index < bytes.count, bytes[index] >= 48, bytes[index] <= 57 { index += 1 }
+                precision = precisionStart < index
+                    ? Int(String(decoding: bytes[precisionStart..<index], as: UTF8.self))
+                    : 0
             }
             guard index < bytes.count else { throw LuaError.runtime("invalid format (ends with '%')") }
             let conversion = bytes[index]
@@ -1350,24 +1552,27 @@ extension LuaState {
             argumentIndex += 1
             let spec = String(decoding: bytes[specStart..<index], as: UTF8.self)
 
-            let rendered: String
+            let rendered: [UInt8]
             switch conversion {
             case 115: // s
-                rendered = try luaString(argument)
+                var value = try luaStringBytes(argument).bytes
+                if let precision, value.count > precision { value = Array(value.prefix(precision)) }
+                rendered = padded(value, width: width, leftAligned: leftAligned)
             case 113: // q
-                rendered = quoteLuaString(try luaStringBytes(argument))
+                rendered = Array(quoteLuaString(try luaStringBytes(argument)).utf8)
             case 99: // c
-                rendered = String(UnicodeScalar(UInt8(truncatingIfNeeded: Int(try numberFromValue(argument)))))
+                let value = [UInt8(truncatingIfNeeded: Int(try numberFromValue(argument)))]
+                rendered = padded(value, width: width, leftAligned: leftAligned)
             case 100, 105: // d i
-                rendered = String(format: spec, Int64(try numberFromValue(argument)))
+                rendered = Array(String(format: spec, Int64(try numberFromValue(argument))).utf8)
             case 111, 117, 120, 88: // o u x X
-                rendered = String(format: spec, UInt64(bitPattern: Int64(try numberFromValue(argument))))
+                rendered = Array(String(format: spec, UInt64(bitPattern: Int64(try numberFromValue(argument)))).utf8)
             case 101, 69, 102, 103, 71: // e E f g G
-                rendered = String(format: spec, try numberFromValue(argument))
+                rendered = Array(String(format: spec, try numberFromValue(argument)).utf8)
             default:
                 throw LuaError.runtime("invalid option '%\(Character(UnicodeScalar(conversion)))' to 'format'")
             }
-            output += rendered.utf8
+            output += rendered
         }
         return LuaString(bytes: output)
     }

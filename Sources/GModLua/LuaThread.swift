@@ -23,6 +23,7 @@ public final class LuaThread: @unchecked Sendable {
 
     weak var state: LuaState?
     let entry: LuaValue
+    let debugHookState = LuaDebugHookState()
 
     private let condition = NSCondition()
     private var started = false
@@ -31,6 +32,8 @@ public final class LuaThread: @unchecked Sendable {
     private var resumeArguments: [LuaValue] = []
     private var hasResumeArguments = false
     private var worker: Thread?
+    private var callStack: LuaCallStackBox?
+    private var failedFrames: [LuaCallFrame]?
     private var _status: Status = .suspended
 
     init(state: LuaState, entry: LuaValue) {
@@ -85,6 +88,9 @@ public final class LuaThread: @unchecked Sendable {
                         self.finish(.failed(.string("coroutine state released")))
                         return
                     }
+                    self.condition.lock()
+                    self.callStack = state.currentCallStack()
+                    self.condition.unlock()
                     let values = try state.callValue(self.entry, arguments: initialArguments)
                     self.finish(.returned(values))
                 } catch let raised as LuaRaisedError {
@@ -164,5 +170,30 @@ public final class LuaThread: @unchecked Sendable {
         event = completed
         condition.broadcast()
         condition.unlock()
+    }
+
+    func callStackFrames() -> [LuaCallFrame] {
+        condition.lock(); defer { condition.unlock() }
+        return failedFrames ?? callStack?.frames ?? []
+    }
+
+    func captureFailureFrames(_ frames: [LuaCallFrame]) {
+        condition.lock(); defer { condition.unlock() }
+        if failedFrames == nil { failedFrames = frames }
+    }
+
+    func luaDebugFrames() -> [LuaCallFrame] {
+        callStackFrames().filter { frame in
+            if case .nativeFunction = frame.callable { return false }
+            return true
+        }
+    }
+
+    func seedHookLinesFromCurrentPC() {
+        condition.lock(); defer { condition.unlock() }
+        guard let callStack else { return }
+        for index in callStack.frames.indices {
+            callStack.frames[index].lastHookLine = callStack.frames[index].currentLine
+        }
     }
 }

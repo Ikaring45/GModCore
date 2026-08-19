@@ -74,41 +74,42 @@ It is deliberately packaged as one milestone rather than many tiny feature drops
 - fileLoader hook ready to be replaced by GMod VFS
 - comprehensive one-shot smoke test for iPad
 
-## Local verification performed
+## Windows official-suite discovery status
 
-The pure-Swift runtime and GMLuaRuntime wrapper compile successfully together.
-The comprehensive smoke test currently produces successful output for:
-- arithmetic/control flow
-- multiple return + vararg + pcall
-- closures/methods
-- metatable arithmetic/comparison/call/tostring
-- environments
-- loadstring + dump round trip
-- nested coroutines
-- Lua patterns
-- package/require/module
-- math/table/string libraries
-- binary strings including NUL
-- userdata/newproxy
-- debug surface
-- xpcall/error handling
+The same pure-Swift runtime now builds and runs natively on Windows with Swift
+6.3.3, so Lua compatibility work does not require an iPad launch for every
+iteration. The official Lua 5.1 suite currently reaches `attrib.lua` in the
+original order.
+
+Verified official CORE files:
+- `db.lua` PASS, including line/call/return/count hooks, stack information,
+  locals, ordered upvalues, coroutine inspection, traceback, and tail calls
+- `calls.lua` PASS, including 30,000-deep tail recursion
+- `strings.lua` PASS, including binary/non-UTF-8 strings and format width/
+  precision behavior
+- `literals.lua` PASS, including byte-preserving `loadstring`, long strings,
+  and CR/LF/CRLF/LFCR source line normalization
+
+The next discovered CORE failure is in `attrib.lua`: files created by the Lua
+test through `io` are not yet visible through the conformance runner's
+`fileLoader`. This is a VFS/IO/require integration gap, not a pass.
 
 ## Important: why this is still called a candidate
 
 Do NOT call this "Lua 5.1 conformance certified" yet.
 
 The remaining conformance work is primarily:
-1. Run the official Lua 5.1 basic test suite end-to-end and reach `final OK`.
-2. Fix any semantic differences revealed by those tests.
-3. Strengthen Lua-style GC behavior:
+1. Add a writable sandbox VFS shared by `io`, `loadfile`, and `require`, then
+   continue from the first `attrib.lua` failure.
+2. Continue the official Lua 5.1 basic suite end-to-end and reach `final OK`.
+3. Implement real Lua-style GC behavior:
    - weak-key/weak-value tables
    - finalization ordering / `__gc`
    - collectgarbage step/count semantics
-4. Strengthen debug hooks and exact stack/local/upvalue information.
-5. Complete exact IO stream semantics and edge cases.
+4. Complete exact IO stream semantics and edge cases.
 6. Decide whether PUC Lua 5.1 binary-chunk interoperability is required.
    The current `string.dump` is an internal GModLua round-trip representation, not PUC Lua bytecode.
-7. Tail-call elimination / deep recursion compatibility may need a VM-style execution backend if tests expose Swift-stack limitations.
+7. Replace any remaining Swift-stack-sensitive non-tail recursion paths if later tests expose them. Tail calls are already trampolined.
 
 These are deliberately documented instead of silently pretending the implementation is already bit-for-bit PUC Lua.
 

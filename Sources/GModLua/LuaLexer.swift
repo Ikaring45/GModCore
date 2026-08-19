@@ -1,3 +1,20 @@
+import Foundation
+
+public enum LuaSourceDecoder {
+    /// Lua 5.1 source is byte-oriented. Invalid UTF-8 bytes are represented by
+    /// private-use scalars so the lexer can restore them without expansion.
+    public static func decode(_ data: Data) -> String? {
+        if let utf8 = String(data: data, encoding: .utf8) { return utf8 }
+        var scalars = String.UnicodeScalarView()
+        for byte in data {
+            let value = byte < 0x80 ? UInt32(byte) : 0xE000 + UInt32(byte)
+            guard let scalar = UnicodeScalar(value) else { return nil }
+            scalars.append(scalar)
+        }
+        return String(scalars)
+    }
+}
+
 enum LuaTokenKind: Equatable {
     case identifier(String)
     case number(Double)
@@ -36,7 +53,13 @@ final class LuaLexer {
     private var column = 1
 
     init(source: String) {
-        self.characters = Array(source)
+        // Lua treats CR, LF, CRLF, and LFCR as a single line ending and
+        // normalizes line breaks captured by strings to LF.
+        let normalized = source
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\n\r", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        self.characters = Array(normalized)
     }
 
     func tokenize() throws -> [LuaToken] {
@@ -224,7 +247,7 @@ final class LuaLexer {
                 return LuaString(bytes: bytes)
             }
             let value = advance()
-            if collect { bytes.append(contentsOf: String(value).utf8) }
+            if collect { appendSourceBytes(value, to: &bytes) }
         }
 
         throw lexerError(startLine, startColumn, "unfinished long string/comment")
@@ -312,7 +335,7 @@ final class LuaLexer {
             if value == "\n" || value == "\r" { throw lexerError(startLine, startColumn, "unfinished string") }
 
             if value != "\\" {
-                bytes.append(contentsOf: String(value).utf8)
+                appendSourceBytes(value, to: &bytes)
                 continue
             }
 
@@ -345,12 +368,25 @@ final class LuaLexer {
                     bytes.append(UInt8(integer))
                 } else {
                     // Lua 5.1 accepts unknown escapes by dropping the backslash.
-                    bytes.append(contentsOf: String(escaped).utf8)
+                    appendSourceBytes(escaped, to: &bytes)
                 }
             }
         }
 
         throw lexerError(startLine, startColumn, "unfinished string")
+    }
+
+    private func appendSourceBytes(_ character: Character, to bytes: inout [UInt8]) {
+        let text = String(character)
+        let scalars = Array(text.unicodeScalars)
+        if scalars.count == 1 {
+            let value = scalars[0].value
+            if (0xE080...0xE0FF).contains(value) {
+                bytes.append(UInt8(value - 0xE000))
+                return
+            }
+        }
+        bytes.append(contentsOf: text.utf8)
     }
 
     private func token(_ kind: LuaTokenKind, _ line: Int, _ column: Int) -> LuaToken {

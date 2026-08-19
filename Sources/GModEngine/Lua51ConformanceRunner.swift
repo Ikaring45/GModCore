@@ -274,13 +274,7 @@ public enum Lua51ConformanceRunner {
         // legacy single-byte source text (for example db.lua). Requiring
         // UTF-8 here incorrectly rejects valid Lua 5.1 test files before
         // the Lua runtime even sees them.
-        if let text = String(data: data, encoding: .utf8) {
-            return text
-        }
-
-        if let text = String(data: data, encoding: .isoLatin1) {
-            return text
-        }
+        if let text = LuaSourceDecoder.decode(data) { return text }
 
         throw Lua51ConformanceDownloadError.cannotDecode(url.lastPathComponent)
     }
