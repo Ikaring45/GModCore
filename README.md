@@ -1,5 +1,27 @@
 # GModCore
 
+## Windows Lua 5.1 conformance runner
+
+The pure Swift `GModLua` runtime can be built and tested without the iPad UI or
+Metal renderer. On Windows with the official Swift toolchain installed, run:
+
+```powershell
+swift run GModLuaConformance
+```
+
+Individual Lua files and short diagnostic snippets can use the same native
+runtime without launching Swift Playgrounds:
+
+```powershell
+swift run GModLuaConformance --file .\path\to\test.lua
+swift run GModLuaConformance --eval 'print(table.getn({10, 20, 30}))'
+```
+
+The runner uses the same official-test order and Discovery classifications as
+the iPad console. `main.lua`, unfinished `gc.lua`, and PUC C-API-only `api.lua`
+are reported as skips rather than passes. A CORE failure returns a non-zero
+process exit code.
+
 An experimental C/C++ game engine compatibility project aimed at recreating a Garry's Mod / Source-like experience on iPad, with Swift Playgrounds used as the application shell.
 
 > **Status:** Very early development.  

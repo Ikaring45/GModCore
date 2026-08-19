@@ -26,6 +26,11 @@ public final class GMLuaRuntime {
         try state.execute(source, sourceName: sourceName)
     }
 
+    public static func describe(_ error: Error) -> String {
+        if let raised = error as? LuaRaisedError { return raised.value.printable }
+        return String(describing: error)
+    }
+
     /// Broad runtime smoke test. This is intentionally much wider than the old
     /// phase-by-phase tests and exercises the Lua 5.1 runtime as one subsystem.
     public static func lua51ComprehensiveSmokeTest() -> String {

@@ -818,6 +818,15 @@ extension LuaState {
             return [.string(LuaString(bytes: bytes))]
         }
 
+        // Lua 5.1 keeps table.getn as the library equivalent of the length
+        // operator. The official conformance suite still calls it directly.
+        native("getn") { args in
+            guard let first = args.first, case let .table(table) = first else {
+                throw LuaError.runtime("bad argument #1 to 'getn' (table expected)")
+            }
+            return [.number(Double(table.rawLength()))]
+        }
+
         native("maxn") { args in
             guard let first = args.first, case let .table(table) = first else {
                 throw LuaError.runtime("bad argument #1 to 'maxn' (table expected)")

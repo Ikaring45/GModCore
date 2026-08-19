@@ -13,6 +13,10 @@ let package = Package(
         .library(
             name: "GModApp",
             targets: ["GModApp"]
+        ),
+        .executable(
+            name: "GModLuaConformance",
+            targets: ["GModLuaConformance"]
         )
     ],
 
@@ -48,6 +52,14 @@ let package = Package(
             resources: [
                 .process("Resources")
             ]
+        ),
+
+        .executableTarget(
+            name: "GModLuaConformance",
+            dependencies: [
+                "GModEngine"
+            ],
+            path: "Sources/GModLuaConformance"
         )
     ]
 )
