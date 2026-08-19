@@ -268,6 +268,53 @@ public final class LuaState {
         try table.rawSetValue(value, for: key)
     }
 
+    /// Assigns through Lua's ordinary table semantics, including `__newindex`.
+    /// Engine integrations use this when a native API writes an observable Lua
+    /// field rather than constructing an internal result table.
+    public func setTableValue(
+        _ value: LuaValue,
+        for key: LuaValue,
+        in table: LuaTable
+    ) throws {
+        try ensureOpen()
+        garbageCollector.adopt([.table(table), key, value])
+        try setIndexedValue(receiver: .table(table), key: key, value: value)
+    }
+
+    /// Reads an entry without invoking `__index`. Engine integrations use this
+    /// for documented data-table arguments while keeping LuaTable's internal
+    /// key representation private to GModLua.
+    public func rawTableValue(
+        for key: LuaValue,
+        in table: LuaTable
+    ) throws -> LuaValue {
+        try ensureOpen()
+        return try table.rawValue(for: key)
+    }
+
+    /// Enumerates the currently live entries without invoking `__pairs`,
+    /// `__index`, or any other Lua code. Engine persistence adapters use this
+    /// boundary to serialize documented data tables while LuaTable keeps its
+    /// internal key representation private.
+    public func rawTablePairs(in table: LuaTable) throws -> [(LuaValue, LuaValue)] {
+        try ensureOpen()
+        return table.allPairs()
+    }
+
+    /// Calls a Lua or native function from an embedding host and returns every
+    /// result value. Engine lifecycle code uses this boundary instead of
+    /// synthesizing Lua source merely to dispatch a hook or register a
+    /// gamemode. Ordinary Lua call frames, debug hooks, errors, yields and GC
+    /// roots are preserved by the same evaluator path used by script calls.
+    public func call(
+        _ callable: LuaValue,
+        arguments: [LuaValue] = []
+    ) throws -> [LuaValue] {
+        try ensureOpen()
+        garbageCollector.adopt([callable] + arguments)
+        return try callValue(callable, arguments: arguments)
+    }
+
     public func execute(_ source: String, sourceName: String = "=(chunk)") throws {
         try ensureOpen()
         _ = try executeReturningValues(source, sourceName: sourceName)
@@ -297,6 +344,30 @@ public final class LuaState {
     /// functions use this to resolve paths without exposing interpreter frames.
     public func luaCallerSourceName(level: Int = 2) -> String? {
         currentLuaFunction(level: level)?.sourceName
+    }
+
+    /// Returns the source of the innermost root chunk that is still executing.
+    ///
+    /// GLua resolves a relative `include()` against the file currently being
+    /// evaluated, not necessarily against the file where an intervening helper
+    /// function was defined. Root chunks are the functions produced directly
+    /// by `compile` (`lineDefined == 0`); nested Lua closures retain a positive
+    /// definition line. Keeping this lookup on the real call frames also makes
+    /// module loaders, nested includes and tail-called helpers inherit the
+    /// correct dynamic file context without maintaining a second side stack.
+    ///
+    /// When no root chunk is active (for example a callback invoked later by an
+    /// embedding host), the immediate Lua caller remains the only meaningful
+    /// source and is returned as a compatibility fallback.
+    public func luaActiveRootChunkSourceName(
+        fallbackCallerLevel level: Int = 2
+    ) -> String? {
+        for frame in currentCallStack().frames.reversed() {
+            guard case let .luaFunction(function) = frame.callable,
+                  function.lineDefined == 0 else { continue }
+            return function.sourceName
+        }
+        return currentLuaFunction(level: level)?.sourceName
     }
 
     public func compile(_ source: String, sourceName: String = "=(loadstring)") throws -> LuaFunction {

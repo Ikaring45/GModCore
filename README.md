@@ -30,6 +30,28 @@ No skipped or unfinished feature is reported as a pass. See
 [`LUA51_CONFORMANCE_STATUS.md`](LUA51_CONFORMANCE_STATUS.md) for the exact
 verification boundary.
 
+The GLua M2 milestone also replaces the early bootstrap placeholders with
+native Vector/Angle, ConVar, Entity identity, timer, file/preset, logical
+resource/surface, VGUI, Derma, game/engine host-state, and console-command
+layers. Strict mode completes the real `lua/includes/init.lua` in SERVER,
+CLIENT, and MENU. The modeled SERVER and CLIENT Sandbox startup stages now run
+Base, realm-correct loose autorun, Sandbox, and the three lifecycle hook
+dispatches in one Lua state; CLIENT also runs the engine-invoked VGUI bootstrap
+before Base. Addon mounting, CLIENT player connection, engine entity readiness,
+renderer/physics/network transport, and complete Entity/Panel behavior remain
+explicitly outside that result.
+
+The 0.1.43 packaging snapshot passes 89/89 Swift tests, the GC-enabled official
+Lua 5.1 sequence (exit 0, 38 chunk loads, two classified skips, 85.70 seconds),
+and the 259/259 installed-GMod parser gate. These are separate results: parsing
+a corpus file does not claim that every engine API it calls is implemented.
+
+Strict installed-tree measurements complete core init with 27 SERVER, 42
+CLIENT, and 42 MENU includes. Isolated CLIENT/MENU Sandbox loading reaches 101
+includes, and SERVER TTT registration reaches 59. TTT's full modeled startup is
+still a separate failing boundary: `SetGlobalFloat` is first required at
+`gamemodes/terrortown/gamemode/init.lua:199` during `Initialize`.
+
 ## Verified native path
 
 - iPad / Swift Playgrounds host
@@ -94,6 +116,7 @@ copied Garry's Mod Lua corpus or proprietary assets:
 - [`Docs/GLuaAnalysis/02_EXTENSIONS.md`](Docs/GLuaAnalysis/02_EXTENSIONS.md)
 - [`Docs/GLuaAnalysis/03_GAMEMODES_CORPUS.md`](Docs/GLuaAnalysis/03_GAMEMODES_CORPUS.md)
 - [`Docs/GLuaAnalysis/04_RUNTIME_M1_IMPLEMENTATION.md`](Docs/GLuaAnalysis/04_RUNTIME_M1_IMPLEMENTATION.md)
+- [`Docs/GLuaAnalysis/05_NATIVE_BOOTSTRAP_M2.md`](Docs/GLuaAnalysis/05_NATIVE_BOOTSTRAP_M2.md)
 - [`GMOD_BOOT_SEQUENCE.md`](GMOD_BOOT_SEQUENCE.md)
 - [`Tests/GModCorpus/README.md`](Tests/GModCorpus/README.md)
 
@@ -101,7 +124,9 @@ The current local regression corpus covers the real bootstrap modules, Base,
 all loose `lua/autorun` files, Sandbox including the nested Spawnmenu/VGUI
 loader tree, and TTT as a large compatibility corpus. The harness reads a
 legally installed local game directory and records hashes and diagnostics; it
-does not redistribute those files.
+does not redistribute those files. Its parser gate passes 259/259 files; its
+independent-file load diagnostic reaches 24/259 without shared bootstrap state,
+so that diagnostic is not presented as whole-corpus runtime compatibility.
 
 ## Compatibility roadmap
 

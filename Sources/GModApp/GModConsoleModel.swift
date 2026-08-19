@@ -99,6 +99,19 @@ final class GModConsoleModel: ObservableObject {
         }
     }
 
+    func advanceSimulation(ticks: Int) {
+        guard ticks > 0, let scheduler = runtime.timerScheduler else { return }
+        do {
+            for _ in 0..<ticks {
+                for failure in try scheduler.advance(by: GMEngine.tickInterval) {
+                    append("[ERROR][timer][\(failure.identifier)] \(failure.message)")
+                }
+            }
+        } catch {
+            append("[ERROR][timer] \(GMLuaRuntime.describe(error))")
+        }
+    }
+
     private func trimIfNeeded() {
         let maximum = 4000
         if lines.count > maximum {

@@ -1,7 +1,7 @@
 import Foundation
 import GModLua
 
-public enum GMLuaRealm: String {
+public enum GMLuaRealm: String, Sendable {
     case server = "SERVER"
     case client = "CLIENT"
     case menu = "MENU"
@@ -21,19 +21,32 @@ public final class GMLuaRuntime {
     public let bootstrapMode: GMLuaBootstrapMode
     let state: LuaState
     private(set) var typeSystem: GMLuaTypeSystem?
+    public private(set) var entityRegistry: GMLuaEntityRegistry?
+    public private(set) var surfaceCommandState: GMLuaSurfaceCommandState?
+    public private(set) var resourceRegistry: GMLuaResourceRegistry?
+    public private(set) var gamemodeLoader: GMLuaGamemodeLoader?
+    public private(set) var presetStore: GMLuaPresetStore?
+    public private(set) var timerScheduler: GMLuaTimerScheduler?
+    public private(set) var vguiRegistry: GMLuaVGUIRegistry?
+    public private(set) var dermaRegistry: GMLuaDermaRegistry?
+    public private(set) var screenMetrics: GMLuaScreenMetrics?
+    public private(set) var gameEnvironment: GMLuaGameEnvironment?
+    public private(set) var engineRegistry: GMLuaEngineRegistry?
+    public private(set) var consoleCommandDispatcher: GMLuaConsoleCommandDispatcher?
     private let logger: (String) -> Void
     private let fileLoader: ((String) throws -> String)?
     private let virtualFileSystem: LuaVirtualFileSystem?
     private var includedFileStorage: [String] = []
     private var clientLuaFileStorage: [String] = []
-    private var consoleCommandStorage: [String] = []
     private var networkStringStorage: [String] = []
     private var compatibilityGapStorage: [String] = []
     private var bootstrapInstallationError: Error?
 
     public var includedFiles: [String] { includedFileStorage }
     public var clientLuaFiles: [String] { clientLuaFileStorage }
-    public var consoleCommands: [String] { consoleCommandStorage }
+    public var consoleCommands: [String] {
+        consoleCommandDispatcher?.registeredCommands ?? []
+    }
     public var networkStrings: [String] { networkStringStorage }
     public var compatibilityGaps: [String] { compatibilityGapStorage }
 
@@ -42,7 +55,10 @@ public final class GMLuaRuntime {
         logger: @escaping (String) -> Void,
         fileLoader: ((String) throws -> String)? = nil,
         virtualFileSystem: LuaVirtualFileSystem? = nil,
-        bootstrapMode: GMLuaBootstrapMode = .strict
+        bootstrapMode: GMLuaBootstrapMode = .strict,
+        initialViewport: GMLuaViewportSize = .logicalDesktopDefault,
+        gameEnvironmentConfiguration: GMLuaGameEnvironmentConfiguration? = nil,
+        engineConfiguration: GMLuaEngineConfiguration? = nil
     ) {
         self.init(
             realm: realm,
@@ -50,6 +66,9 @@ public final class GMLuaRuntime {
             fileLoader: fileLoader,
             virtualFileSystem: virtualFileSystem,
             bootstrapMode: bootstrapMode,
+            initialViewport: initialViewport,
+            gameEnvironmentConfiguration: gameEnvironmentConfiguration,
+            engineConfiguration: engineConfiguration,
             typeSystemInstaller: { state in
                 try GMLuaTypeSystem.install(
                     into: state,
@@ -65,6 +84,9 @@ public final class GMLuaRuntime {
         fileLoader: ((String) throws -> String)? = nil,
         virtualFileSystem: LuaVirtualFileSystem? = nil,
         bootstrapMode: GMLuaBootstrapMode = .strict,
+        initialViewport: GMLuaViewportSize = .logicalDesktopDefault,
+        gameEnvironmentConfiguration: GMLuaGameEnvironmentConfiguration? = nil,
+        engineConfiguration: GMLuaEngineConfiguration? = nil,
         typeSystemInstaller: @escaping TypeSystemInstaller
     ) {
         self.realm = realm
@@ -77,7 +99,18 @@ public final class GMLuaRuntime {
             fileLoader: fileLoader,
             virtualFileSystem: virtualFileSystem
         )
-        installGLuaBootstrapSurface(typeSystemInstaller: typeSystemInstaller)
+        installGLuaBootstrapSurface(
+            typeSystemInstaller: typeSystemInstaller,
+            initialViewport: initialViewport,
+            gameEnvironmentConfiguration: gameEnvironmentConfiguration,
+            engineConfiguration: engineConfiguration
+        )
+        if let virtualFileSystem {
+            gamemodeLoader = GMLuaGamemodeLoader(
+                runtime: self,
+                fileSystem: virtualFileSystem
+            )
+        }
     }
 
     public func execute(_ source: String, sourceName: String = "=(gmod)") throws {
@@ -113,8 +146,18 @@ public final class GMLuaRuntime {
         LuaSourceDecoder.decode(data)
     }
 
+    /// Updates the render viewport observed by client/menu Lua. Server realms
+    /// do not expose screen APIs and therefore ignore this host notification.
+    @discardableResult
+    public func updateViewport(width: Int, height: Int) -> Bool {
+        screenMetrics?.updateViewport(width: width, height: height) ?? false
+    }
+
     private func installGLuaBootstrapSurface(
-        typeSystemInstaller: TypeSystemInstaller
+        typeSystemInstaller: TypeSystemInstaller,
+        initialViewport: GMLuaViewportSize,
+        gameEnvironmentConfiguration: GMLuaGameEnvironmentConfiguration?,
+        engineConfiguration: GMLuaEngineConfiguration?
     ) {
         state.setGlobal("SERVER", value: .boolean(realm == .server))
         // Garry's Mod menu Lua has the client-side API surface as well as its
@@ -124,12 +167,81 @@ public final class GMLuaRuntime {
         state.setGlobal("MENU", value: .boolean(realm == .menu))
         state.setGlobal("MENU_DLL", value: .boolean(realm == .menu))
         state.setGlobal("__gmod_discovery", value: .boolean(bootstrapMode == .discovery))
+        GMLuaAnimationEnums.install(into: state)
+        GMLuaNPCEnums.install(into: state, realm: realm)
 
         do {
             // Install only GMod's native type/metatable ABI here. The real
             // includes/util.lua must capture Lua 5.1's original `type` before
             // it installs the public GLua type/TypeID/predicate wrappers.
-            typeSystem = try typeSystemInstaller(state)
+            let installedTypeSystem = try typeSystemInstaller(state)
+            typeSystem = installedTypeSystem
+            try GMLuaVectorAngle.install(
+                into: state,
+                typeSystem: installedTypeSystem
+            )
+            entityRegistry = try GMLuaEntityRegistry.install(
+                into: state,
+                typeSystem: installedTypeSystem
+            )
+            let conVarRegistry = try GMLuaConVar.install(
+                into: state,
+                typeSystem: installedTypeSystem,
+                realm: realm
+            )
+            let installedConsoleDispatcher = GMLuaConsoleCommandDispatcher(
+                state: state,
+                realm: realm,
+                conVars: conVarRegistry
+            )
+            installedConsoleDispatcher.installBindings()
+            consoleCommandDispatcher = installedConsoleDispatcher
+            try GMLuaSQL.install(into: state)
+            timerScheduler = try GMLuaTimer.install(
+                into: state,
+                minimumTickInterval: 0.015
+            )
+            gameEnvironment = try GMLuaGameEnvironment.install(
+                into: state,
+                realm: realm,
+                initialConfiguration: gameEnvironmentConfiguration
+            )
+            engineRegistry = try GMLuaEngineRegistry.install(
+                into: state,
+                realm: realm,
+                initialConfiguration: engineConfiguration
+            )
+            resourceRegistry = try GMLuaResources.install(
+                into: state,
+                typeSystem: installedTypeSystem,
+                realm: realm
+            )
+            if realm != .server {
+                screenMetrics = GMLuaScreenMetrics.install(
+                    into: state,
+                    initialViewport: initialViewport
+                )
+                let installedVGUIRegistry = try GMLuaVGUI.install(
+                    into: state,
+                    typeSystem: installedTypeSystem
+                )
+                vguiRegistry = installedVGUIRegistry
+                dermaRegistry = try GMLuaDerma.install(
+                    into: state,
+                    vguiRegistry: installedVGUIRegistry
+                )
+                let presetFileSystem: LuaVirtualFileSystem
+                if let virtualFileSystem {
+                    presetFileSystem = virtualFileSystem
+                } else {
+                    presetFileSystem = try LuaMemoryFileSystem()
+                }
+                presetStore = GMLuaPresets.install(
+                    into: state,
+                    fileSystem: presetFileSystem
+                )
+                surfaceCommandState = try GMLuaSurface.install(into: state)
+            }
         } catch {
             // Initialization stays source-compatible with existing callers;
             // every execution boundary surfaces the original installer error.
@@ -141,7 +253,9 @@ public final class GMLuaRuntime {
             guard let first = arguments.first, case let .string(requested) = first else {
                 throw LuaError.runtime("bad argument #1 to 'include' (string expected)")
             }
-            let callerSource = self.state.luaCallerSourceName(level: 2)
+            let callerSource = self.state.luaActiveRootChunkSourceName(
+                fallbackCallerLevel: 2
+            )
             let logicalPath = try self.resolveInclude(
                 requested.utf8String,
                 callerSourceName: callerSource
@@ -161,14 +275,18 @@ public final class GMLuaRuntime {
             if let first = arguments.first, case let .string(path) = first {
                 requested = path.utf8String
             } else if arguments.isEmpty,
-                      let current = self.state.luaCallerSourceName(level: 2) {
+                      let current = self.state.luaActiveRootChunkSourceName(
+                          fallbackCallerLevel: 2
+                      ) {
                 requested = self.stripSourceMarker(current)
             } else {
                 throw LuaError.runtime("bad argument #1 to 'AddCSLuaFile' (string expected)")
             }
             let resolved = try self.resolveInclude(
                 requested,
-                callerSourceName: self.state.luaCallerSourceName(level: 2),
+                callerSourceName: self.state.luaActiveRootChunkSourceName(
+                    fallbackCallerLevel: 2
+                ),
                 requireExistingFile: false
             )
             if !self.clientLuaFileStorage.contains(resolved) {
@@ -189,20 +307,6 @@ public final class GMLuaRuntime {
                 }
                 return []
             }
-            state.register("isentity") { [unowned self] _ in
-                self.markCompatibilityGap("Entity type checks use discovery objects")
-                return [.boolean(false)]
-            }
-            state.register("IsEntity") { [unowned self] _ in
-                self.markCompatibilityGap("Entity type checks use discovery objects")
-                return [.boolean(false)]
-            }
-            state.register("IsValid") { [unowned self] arguments in
-                self.markCompatibilityGap("IsValid has no engine lifetime registry")
-                guard let first = arguments.first else { return [.boolean(false)] }
-                if case .userdata = first { return [.boolean(true)] }
-                return [.boolean(false)]
-            }
         }
 
         state.register("Msg") { [unowned self] arguments in
@@ -220,20 +324,6 @@ public final class GMLuaRuntime {
         state.register("ErrorNoHaltWithStack") { [unowned self] arguments in
             self.logger("[\(self.realm.rawValue)][Lua][ERROR] " + arguments.map(\.printable).joined())
             return []
-        }
-        state.register("AddConsoleCommand") { [unowned self] arguments in
-            guard let first = arguments.first, case let .string(name) = first else { return [] }
-            let command = name.utf8String
-            if !self.consoleCommandStorage.contains(command) {
-                self.consoleCommandStorage.append(command)
-            }
-            return []
-        }
-        if bootstrapMode == .discovery {
-            state.register("Material") { [unowned self] arguments in
-                self.markCompatibilityGap("Material is placeholder userdata without a Metal resource")
-                return [.userdata(LuaUserdata(payload: arguments.first?.printable ?? ""))]
-            }
         }
         state.register("__gmod_AddNetworkString") { [unowned self] arguments in
             guard let first = arguments.first, case let .string(name) = first else {
@@ -364,90 +454,23 @@ public final class GMLuaRuntime {
             if __gmod_discovery then
             ents = ents or {}
             player = player or {}
-            surface = surface or {}
-            function surface.GetTextureID()
-                __gmod_MarkCompatibilityGap("surface.GetTextureID returns a discovery sentinel")
-                return 0
-            end
-            sql = sql or {}
-            function sql.Query()
-                __gmod_MarkCompatibilityGap("sql.Query is a non-persistent discovery shim")
-                return false
-            end
-            function sql.LastError() return "" end
-
-            local entity_meta = FindMetaTable("Entity")
-            local player_meta = FindMetaTable("Player")
-            local weapon_meta = FindMetaTable("Weapon")
-            local vehicle_meta = FindMetaTable("Vehicle")
-            local panel_meta = FindMetaTable("Panel")
-            local __gmod_placeholder_meta = {
-                Entity = true, Player = true, Weapon = true, Vehicle = true, Panel = true
-            }
-            local __gmod_FindMetaTable = FindMetaTable
-            function FindMetaTable(name)
-                local value = __gmod_FindMetaTable(name)
-                if value and __gmod_placeholder_meta[name] then
-                    __gmod_MarkCompatibilityGap("Entity and Panel metatables use discovery objects")
-                end
-                return value
-            end
-
-            local __gmod_entities = {}
-            function Entity(index)
-                __gmod_MarkCompatibilityGap("Entity values use discovery objects")
-                index = tonumber(index) or 0
-                if not __gmod_entities[index] then
-                    __gmod_entities[index] = setmetatable({ __entity_index = index }, entity_meta)
-                end
-                return __gmod_entities[index]
-            end
-            local vector_meta = FindMetaTable("Vector")
-            function Vector(x, y, z)
-                __gmod_MarkCompatibilityGap("Vector values use discovery objects")
-                return setmetatable({ x = tonumber(x) or 0, y = tonumber(y) or 0, z = tonumber(z) or 0 }, vector_meta)
-            end
-
-            local angle_meta = FindMetaTable("Angle")
-            function Angle(p, y, r)
-                __gmod_MarkCompatibilityGap("Angle values use discovery objects")
-                return setmetatable({ p = tonumber(p) or 0, y = tonumber(y) or 0, r = tonumber(r) or 0 }, angle_meta)
-            end
-
-            local __gmod_convars = {}
-            local convar_meta = FindMetaTable("ConVar")
-            function convar_meta:GetName() return self.name end
-            function convar_meta:GetDefault() return self.default end
-            function convar_meta:GetString() return self.value end
-            function convar_meta:GetInt() return math.floor(tonumber(self.value) or 0) end
-            function convar_meta:GetFloat() return tonumber(self.value) or 0 end
-            function convar_meta:GetBool() return tobool(self.value) end
-            function convar_meta:SetString(value) self.value = tostring(value) end
-            function convar_meta:SetInt(value) self.value = tostring(math.floor(tonumber(value) or 0)) end
-            function convar_meta:SetFloat(value) self.value = tostring(tonumber(value) or 0) end
-            function convar_meta:SetBool(value) self.value = value and "1" or "0" end
-            function CreateConVar(name, default)
-                __gmod_MarkCompatibilityGap("ConVar values use discovery objects")
-                if __gmod_convars[name] then return __gmod_convars[name] end
-                local value = setmetatable({ name = name, default = tostring(default or ""), value = tostring(default or "") }, convar_meta)
-                __gmod_convars[name] = value
-                return value
-            end
-            function CreateClientConVar(name, default) return CreateConVar(name, default) end
-            function GetConVar(name) return __gmod_convars[name] end
-            function ConVarExists(name) return __gmod_convars[name] ~= nil end
             end
 
             local gmod_file_meta = {}
             gmod_file_meta.__index = gmod_file_meta
-            local function gmod_file_path(name, pathID)
+            local function gmod_file_path(name, pathID, mode)
+                if __gmod_file_ResolvePath then
+                    return __gmod_file_ResolvePath(name, pathID, mode)
+                end
                 pathID = pathID or "DATA"
                 if pathID == "DATA" then return "data/" .. name end
                 if pathID == "LUA" then return "lua/" .. name end
                 return name
             end
             function file.Open(name, mode, pathID)
-                local handle = io.open(gmod_file_path(name, pathID), mode or "rb")
+                local resolved = gmod_file_path(name, pathID, mode or "rb")
+                if not resolved then return nil end
+                local handle = io.open(resolved, mode or "rb")
                 if not handle then return nil end
                 return setmetatable({ handle = handle }, gmod_file_meta)
             end
@@ -482,6 +505,13 @@ public final class GMLuaRuntime {
             """#,
                 sourceName: "=(GLua bootstrap)"
             )
+            if let virtualFileSystem {
+                try GMLuaFileLibrary.install(
+                    into: state,
+                    fileSystem: virtualFileSystem,
+                    realm: realm
+                )
+            }
         } catch {
             // Keep init non-throwing for existing callers, but never continue
             // with a half-installed API surface. The first execution reports

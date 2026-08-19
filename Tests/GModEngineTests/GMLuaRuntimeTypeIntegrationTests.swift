@@ -15,7 +15,8 @@ final class GMLuaRuntimeTypeIntegrationTests: XCTestCase {
             assert(FindMetaTable("Player").MetaBaseClass == FindMetaTable("Entity"))
             assert(type(NULL) == "userdata")
             assert(TypeID == nil and isentity == nil)
-            assert(Vector == nil and Angle == nil)
+            assert(type(Vector) == "function" and type(Angle) == "function")
+            assert(type(CreateConVar) == "function")
             """,
             sourceName: "=(runtime native type ABI preflight)"
         )
@@ -74,7 +75,8 @@ final class GMLuaRuntimeTypeIntegrationTests: XCTestCase {
             assert(FindMetaTable("Entity").MetaID == TYPE_ENTITY)
             assert(FindMetaTable("Vector").MetaID == TYPE_VECTOR)
             assert(type(NULL) == "userdata")
-            assert(type(Entity(0)) == "table")
+            assert(type(Entity(0)) == "userdata")
+            assert(Entity(0) == NULL and not Entity(0):IsValid())
             assert(type(Vector) == "function" and type(Angle) == "function")
             """,
             sourceName: "=(discovery type ABI preflight)"

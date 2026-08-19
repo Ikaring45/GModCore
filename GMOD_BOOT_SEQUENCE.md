@@ -35,6 +35,11 @@ Nested `include()` calls are included in this order.
 
 ## Client
 
+Before the gamemode sequence, the engine invokes
+`lua/includes/vgui_base.lua`. This is a separate native loading stage rather
+than an `include()` from `lua/includes/init.lua`; it registers the original Lua
+Derma controls such as `DPanel` before gamemode lifecycle code creates them.
+
 1. Base Gamemode and its shared/client includes
 2. autorun / addons
 3. Sandbox and `cl_spawnmenu.lua`
@@ -55,3 +60,7 @@ Nested `include()` calls are included in this order.
 Garry's PAD will run the original Sandbox Lua on top of a compatible VGUI
 layer. Spawnmenu will not be replaced with an unrelated Swift implementation;
 this preserves the load graph and maximizes Workshop addon compatibility.
+
+The current modeled startup executes loose shared/realm autorun files and the
+listed hook dispatches. Addon discovery, CLIENT player connection, and live
+engine entity readiness remain explicit unmodeled boundaries.

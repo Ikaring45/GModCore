@@ -9,18 +9,29 @@ public struct GModMetalView:
 {
 
     @Binding private var stats: String
+    private let onSimulationTicks: (Int) -> Void
+    private let onViewportSize: (Int, Int) -> Void
 
     public init(
-        stats: Binding<String>
+        stats: Binding<String>,
+        onSimulationTicks: @escaping (Int) -> Void = { _ in },
+        // The app must explicitly route this to its CLIENT/MENU runtime. The
+        // current console owns a SERVER runtime, so its default remains a
+        // deliberate no-op until a client execution context is attached.
+        onViewportSize: @escaping (Int, Int) -> Void = { _, _ in }
     ) {
         self._stats = stats
+        self.onSimulationTicks = onSimulationTicks
+        self.onViewportSize = onViewportSize
     }
 
     public func makeCoordinator()
         -> Coordinator
     {
         Coordinator(
-            stats: $stats
+            stats: $stats,
+            onSimulationTicks: onSimulationTicks,
+            onViewportSize: onViewportSize
         )
     }
 
@@ -82,6 +93,7 @@ public struct GModMetalView:
         _ uiView: MTKView,
         context: Context
     ) {
+        context.coordinator.reportDrawableSize(uiView.drawableSize)
     }
 
     // MARK: - Coordinator
@@ -93,6 +105,15 @@ public struct GModMetalView:
 
         private var stats:
             Binding<String>
+
+        private let onSimulationTicks:
+            (Int) -> Void
+
+        private let onViewportSize:
+            (Int, Int) -> Void
+
+        private var reportedViewport:
+            SIMD2<Int>?
 
         private let engine =
             GMEngine()
@@ -119,9 +140,13 @@ public struct GModMetalView:
             "Unknown GPU"
 
         init(
-            stats: Binding<String>
+            stats: Binding<String>,
+            onSimulationTicks: @escaping (Int) -> Void,
+            onViewportSize: @escaping (Int, Int) -> Void
         ) {
             self.stats = stats
+            self.onSimulationTicks = onSimulationTicks
+            self.onViewportSize = onViewportSize
         }
 
         func setup(
@@ -226,11 +251,26 @@ public struct GModMetalView:
             _ view: MTKView,
             drawableSizeWillChange size: CGSize
         ) {
+            reportDrawableSize(size)
+        }
+
+        /// Reports physical drawable pixels, which are the viewport units
+        /// exposed by GLua's ScrW/ScrH rather than UIKit point dimensions.
+        func reportDrawableSize(_ size: CGSize) {
+            let width = Int(size.width.rounded())
+            let height = Int(size.height.rounded())
+            guard width > 0, height > 0 else { return }
+            let replacement = SIMD2<Int>(width, height)
+            guard reportedViewport != replacement else { return }
+            reportedViewport = replacement
+            onViewportSize(width, height)
         }
 
         public func draw(
             in view: MTKView
         ) {
+
+            reportDrawableSize(view.drawableSize)
 
             guard
                 let commandQueue,
@@ -265,6 +305,10 @@ public struct GModMetalView:
                     deltaTime:
                         delta
                 )
+
+            if ticks > 0 {
+                onSimulationTicks(ticks)
+            }
 
             statsElapsed += delta
             statsFrames &+= 1

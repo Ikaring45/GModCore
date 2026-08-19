@@ -21,7 +21,14 @@ public struct GModMainView: View {
 
                 rendererHeader
 
-                GModMetalView(stats: $stats)
+                GModMetalView(
+                    stats: $stats,
+                    onSimulationTicks: { ticks in
+                        Task { @MainActor in
+                            console.advanceSimulation(ticks: ticks)
+                        }
+                    }
+                )
                     .frame(maxWidth: .infinity)
                     .frame(height: 250)
                     .background(Color.black)

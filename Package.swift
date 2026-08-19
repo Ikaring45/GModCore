@@ -20,7 +20,13 @@ var targets: [Target] = [
         dependencies: [
             "GModLua"
         ],
-        path: "Sources/GModEngine"
+        path: "Sources/GModEngine",
+        linkerSettings: [
+            // Windows ships SQLite as winsqlite3 while Apple platforms and
+            // Linux expose the same C ABI from sqlite3.
+            .linkedLibrary("winsqlite3", .when(platforms: [.windows])),
+            .linkedLibrary("sqlite3", .when(platforms: [.iOS, .macOS, .linux]))
+        ]
     ),
 
     .executableTarget(
