@@ -1041,25 +1041,63 @@ extension LuaState {
             return [args[0]]
         }
         native("getinfo") { [unowned self] args in
-            let function: LuaFunction?
+            let target: LuaValue
+            let isStackQuery: Bool
             if let first = args.first {
                 switch first {
-                case let .luaFunction(f): function = f
-                case let .number(level): function = self.currentLuaFunction(level: Int(level) + 1)
-                default: function = nil
+                case .luaFunction, .nativeFunction:
+                    target = first
+                    isStackQuery = false
+                case let .number(level):
+                    guard let function = self.currentLuaFunction(level: Int(level)) else {
+                        return [.nilValue]
+                    }
+                    target = .luaFunction(function)
+                    isStackQuery = true
+                default:
+                    return [.nilValue]
                 }
-            } else { function = self.currentLuaFunction() }
-            guard let function else { return [.nilValue] }
+            } else {
+                guard let function = self.currentLuaFunction() else { return [.nilValue] }
+                target = .luaFunction(function)
+                isStackQuery = true
+            }
+
             let table = LuaTable()
-            table.rawSetValue(.string(LuaString(function.sourceName)), forString: "source")
-            table.rawSetValue(.string(LuaString(function.sourceName)), forString: "short_src")
-            table.rawSetValue(.number(Double(function.lineDefined)), forString: "linedefined")
-            table.rawSetValue(.number(-1), forString: "lastlinedefined")
-            table.rawSetValue(.string("Lua"), forString: "what")
-            table.rawSetValue(.string(""), forString: "name")
-            table.rawSetValue(.string(""), forString: "namewhat")
-            table.rawSetValue(.number(0), forString: "currentline")
-            table.rawSetValue(.number(Double(function.parameters.count)), forString: "nups")
+
+            switch target {
+            case let .nativeFunction(function):
+                table.rawSetValue(.string("=[C]"), forString: "source")
+                table.rawSetValue(.string("[C]"), forString: "short_src")
+                table.rawSetValue(.number(-1), forString: "linedefined")
+                table.rawSetValue(.number(-1), forString: "lastlinedefined")
+                table.rawSetValue(.string("C"), forString: "what")
+                table.rawSetValue(.string(""), forString: "namewhat")
+                table.rawSetValue(.number(-1), forString: "currentline")
+                table.rawSetValue(.number(0), forString: "nups")
+                table.rawSetValue(.nativeFunction(function), forString: "func")
+
+            case let .luaFunction(function):
+                table.rawSetValue(.string(LuaString(function.sourceName)), forString: "source")
+                table.rawSetValue(.string(LuaString(self.debugShortSource(function.sourceName))), forString: "short_src")
+                table.rawSetValue(.number(Double(function.lineDefined)), forString: "linedefined")
+                table.rawSetValue(.number(Double(function.lastLineDefined)), forString: "lastlinedefined")
+                table.rawSetValue(.string(LuaString(function.lineDefined == 0 ? "main" : "Lua")), forString: "what")
+                table.rawSetValue(.string(""), forString: "namewhat")
+                table.rawSetValue(.number(Double(isStackQuery ? 0 : -1)), forString: "currentline")
+                table.rawSetValue(.number(Double(function.closure.capturedEntries().count)), forString: "nups")
+                table.rawSetValue(.luaFunction(function), forString: "func")
+
+                let activeLines = LuaTable()
+                for line in function.activeLines.sorted() {
+                    activeLines.rawSetValue(.boolean(true), forNumber: Double(line))
+                }
+                table.rawSetValue(.table(activeLines), forString: "activelines")
+
+            default:
+                return [.nilValue]
+            }
+
             return [.table(table)]
         }
         native("traceback") { [unowned self] args in
@@ -1111,6 +1149,32 @@ extension LuaState {
         native("debug") { _ in [] }
 
         setGlobal("debug", value: .table(debug))
+    }
+
+    private func debugShortSource(_ source: String) -> String {
+        if source.hasPrefix("@") {
+            let path = String(source.dropFirst())
+            let maximumLength = 60
+            if path.count > maximumLength {
+                return "..." + String(path.suffix(maximumLength - 3))
+            }
+            return path
+        }
+
+        if source.hasPrefix("=") {
+            return String(source.dropFirst())
+        }
+
+        if source.first == "\n" || source.first == "\r" {
+            return "[string \"...\"]"
+        }
+
+        let maximumSnippetLength = 51
+        let firstLine = source.split(whereSeparator: { $0 == "\n" || $0 == "\r" }).first.map(String.init) ?? ""
+        let wasTruncated = firstLine.count < source.count || firstLine.count > maximumSnippetLength
+        var snippet = String(firstLine.prefix(maximumSnippetLength))
+        if wasTruncated { snippet += "..." }
+        return "[string \"\(snippet)\"]"
     }
 
     // MARK: - Helpers

@@ -7,7 +7,7 @@ indirect enum LuaExpression {
     case vararg
     case group(LuaExpression)
     case table([LuaTableField])
-    case function(parameters: [String], isVararg: Bool, body: [LuaStatement])
+    case function(LuaFunctionPrototype)
     case field(LuaExpression, String)
     case index(LuaExpression, LuaExpression)
     case unary(LuaUnaryOperator, LuaExpression)
@@ -31,6 +31,15 @@ enum LuaBinaryOperator {
     case and, or
 }
 
+struct LuaFunctionPrototype {
+    let parameters: [String]
+    let isVararg: Bool
+    let body: [LuaStatement]
+    let lineDefined: Int
+    let lastLineDefined: Int
+    let activeLines: Set<Int>
+}
+
 indirect enum LuaAssignmentTarget {
     case variable(String)
     case field(LuaExpression, String)
@@ -44,9 +53,9 @@ struct LuaIfBranch {
 
 enum LuaStatement {
     case localDeclaration([String], [LuaExpression])
-    case localFunction(String, [String], Bool, [LuaStatement])
+    case localFunction(String, LuaFunctionPrototype)
     case assignment([LuaAssignmentTarget], [LuaExpression])
-    case functionDeclaration(LuaAssignmentTarget, [String], Bool, [LuaStatement])
+    case functionDeclaration(LuaAssignmentTarget, LuaFunctionPrototype)
     case ifStatement([LuaIfBranch], elseBody: [LuaStatement]?)
     case whileLoop(LuaExpression, [LuaStatement])
     case repeatLoop([LuaStatement], LuaExpression)
@@ -85,14 +94,15 @@ final class LuaParser {
     private func parseStatement() throws -> LuaStatement {
         if match(.keywordLocal) {
             if match(.keywordFunction) {
+                let lineDefined = previous.line
                 let name = try consumeIdentifier("expected local function name")
-                let tail = try parseFunctionTail(prependSelf: false)
-                return .localFunction(name, tail.parameters, tail.isVararg, tail.body)
+                let prototype = try parseFunctionTail(prependSelf: false, lineDefined: lineDefined)
+                return .localFunction(name, prototype)
             }
             return try parseLocalDeclaration()
         }
 
-        if match(.keywordFunction) { return try parseNamedFunctionDeclaration() }
+        if match(.keywordFunction) { return try parseNamedFunctionDeclaration(lineDefined: previous.line) }
         if match(.keywordIf) { return try parseIfStatement() }
         if match(.keywordWhile) { return try parseWhileLoop() }
         if match(.keywordRepeat) { return try parseRepeatLoop() }
@@ -122,7 +132,7 @@ final class LuaParser {
         return .localDeclaration(names, values)
     }
 
-    private func parseNamedFunctionDeclaration() throws -> LuaStatement {
+    private func parseNamedFunctionDeclaration(lineDefined: Int) throws -> LuaStatement {
         let firstName = try consumeIdentifier("expected function name")
         var targetExpression = LuaExpression.variable(firstName)
         while match(.dot) {
@@ -135,12 +145,10 @@ final class LuaParser {
             prependSelf = true
         }
 
-        let tail = try parseFunctionTail(prependSelf: prependSelf)
+        let prototype = try parseFunctionTail(prependSelf: prependSelf, lineDefined: lineDefined)
         return .functionDeclaration(
             try assignmentTarget(from: targetExpression),
-            tail.parameters,
-            tail.isVararg,
-            tail.body
+            prototype
         )
     }
 
@@ -226,7 +234,7 @@ final class LuaParser {
         kind == .keywordUntil || kind == .semicolon || kind == .eof
     }
 
-    private func parseFunctionTail(prependSelf: Bool) throws -> (parameters: [String], isVararg: Bool, body: [LuaStatement]) {
+    private func parseFunctionTail(prependSelf: Bool, lineDefined: Int) throws -> LuaFunctionPrototype {
         try consume(.leftParen, "expected '('")
         var parameters = prependSelf ? ["self"] : []
         var isVararg = false
@@ -248,9 +256,21 @@ final class LuaParser {
         }
 
         try consume(.rightParen, "expected ')'")
+        let bodyTokenStart = current
         let body = try parseBlock { kind in kind == .keywordEnd || kind == .eof }
+        let bodyTokenEnd = current
+        let lastLineDefined = peek.line
         try consume(.keywordEnd, "expected 'end' after function body")
-        return (parameters, isVararg, body)
+        var activeLines = Set(tokens[bodyTokenStart..<bodyTokenEnd].map(\.line))
+        activeLines.insert(lastLineDefined)
+        return LuaFunctionPrototype(
+            parameters: parameters,
+            isVararg: isVararg,
+            body: body,
+            lineDefined: lineDefined,
+            lastLineDefined: lastLineDefined,
+            activeLines: activeLines
+        )
     }
 
     private func parseExpressionList() throws -> [LuaExpression] {
@@ -368,8 +388,7 @@ final class LuaParser {
             return try parseTableConstructor()
         case .keywordFunction:
             _ = advance()
-            let tail = try parseFunctionTail(prependSelf: false)
-            return .function(parameters: tail.parameters, isVararg: tail.isVararg, body: tail.body)
+            return .function(try parseFunctionTail(prependSelf: false, lineDefined: token.line))
         default:
             throw parserError(token, "expected expression")
         }
@@ -436,6 +455,7 @@ final class LuaParser {
     }
 
     private var peek: LuaToken { tokens[current] }
+    private var previous: LuaToken { tokens[max(0, current - 1)] }
 
     @discardableResult
     private func advance() -> LuaToken {

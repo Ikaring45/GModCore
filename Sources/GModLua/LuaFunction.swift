@@ -6,6 +6,8 @@ public final class LuaFunction: @unchecked Sendable {
     var environmentTable: LuaTable
     let sourceName: String
     let lineDefined: Int
+    let lastLineDefined: Int
+    let activeLines: Set<Int>
 
     init(
         parameters: [String],
@@ -14,7 +16,9 @@ public final class LuaFunction: @unchecked Sendable {
         closure: LuaEnvironment,
         environmentTable: LuaTable? = nil,
         sourceName: String = "=(chunk)",
-        lineDefined: Int = 0
+        lineDefined: Int = 0,
+        lastLineDefined: Int = -1,
+        activeLines: Set<Int> = []
     ) {
         self.parameters = parameters
         self.isVararg = isVararg
@@ -23,5 +27,7 @@ public final class LuaFunction: @unchecked Sendable {
         self.environmentTable = environmentTable ?? closure.globalTable
         self.sourceName = sourceName
         self.lineDefined = lineDefined
+        self.lastLineDefined = lastLineDefined
+        self.activeLines = activeLines
     }
 }

@@ -143,6 +143,24 @@ public final class LuaState {
 
     // MARK: - Execution
 
+    private func makeLuaFunction(
+        from prototype: LuaFunctionPrototype,
+        closure: LuaEnvironment
+    ) -> LuaFunction {
+        let parent = currentLuaFunction()
+        return LuaFunction(
+            parameters: prototype.parameters,
+            isVararg: prototype.isVararg,
+            body: prototype.body,
+            closure: closure,
+            environmentTable: parent?.environmentTable ?? closure.globalTable,
+            sourceName: parent?.sourceName ?? "=(chunk)",
+            lineDefined: prototype.lineDefined,
+            lastLineDefined: prototype.lastLineDefined,
+            activeLines: prototype.activeLines
+        )
+    }
+
     private func executeBlock(_ statements: [LuaStatement], environment: LuaEnvironment) throws -> LuaControl {
         for statement in statements {
             let control = try execute(statement, environment: environment)
@@ -161,9 +179,9 @@ public final class LuaState {
             }
             return .normal
 
-        case let .localFunction(name, parameters, isVararg, body):
+        case let .localFunction(name, prototype):
             environment.define(name, value: .nilValue)
-            let function = LuaFunction(parameters: parameters, isVararg: isVararg, body: body, closure: environment)
+            let function = makeLuaFunction(from: prototype, closure: environment)
             _ = environment.assignExisting(name, value: .luaFunction(function))
             return .normal
 
@@ -177,8 +195,8 @@ public final class LuaState {
             }
             return .normal
 
-        case let .functionDeclaration(target, parameters, isVararg, body):
-            let function = LuaFunction(parameters: parameters, isVararg: isVararg, body: body, closure: environment)
+        case let .functionDeclaration(target, prototype):
+            let function = makeLuaFunction(from: prototype, closure: environment)
             let resolved = try resolveTarget(target, environment: environment)
             try assignResolved(resolved, value: .luaFunction(function), environment: environment)
             return .normal
@@ -387,13 +405,8 @@ public final class LuaState {
             }
             return .table(table)
 
-        case let .function(parameters, isVararg, body):
-            return .luaFunction(LuaFunction(
-                parameters: parameters,
-                isVararg: isVararg,
-                body: body,
-                closure: environment
-            ))
+        case let .function(prototype):
+            return .luaFunction(makeLuaFunction(from: prototype, closure: environment))
 
         case let .field(baseExpression, name):
             let receiver = try evaluateSingle(baseExpression, environment: environment)
