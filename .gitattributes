@@ -2,3 +2,7 @@ Sources/GModGameAssets/Resources/Maps/*.bsp filter=lfs diff=lfs merge=lfs -text
 Sources/GModGameAssets/Resources/Maps/*.nav filter=lfs diff=lfs merge=lfs -text
 Sources/GModGameAssets/Resources/Maps/graphs/*.ain filter=lfs diff=lfs merge=lfs -text
 Sources/GModGameAssets/Resources/ClientContent/** -text -diff
+Sources/GModEngine/Resources/Lua51Tests/*.lua -text -diff
+Sources/GModEngine/Resources/Lua51Tests/OFFICIAL_README.txt -text -diff
+Sources/GModEngine/Resources/Lua51Tests/SOURCE.txt text eol=lf
+Sources/GModEngine/Resources/Lua51Tests/LUA_LICENSE.txt text eol=lf

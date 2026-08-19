@@ -43,6 +43,9 @@ var targets: [Target] = [
             "GModImageDecode"
         ],
         path: "Sources/GModEngine",
+        resources: [
+            .copy("Resources/Lua51Tests")
+        ],
         linkerSettings: [
             // Windows ships SQLite as winsqlite3 while Apple platforms and
             // Linux expose the same C ABI from sqlite3.
