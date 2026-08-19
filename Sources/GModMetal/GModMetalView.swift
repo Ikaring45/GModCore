@@ -1749,10 +1749,10 @@ public struct GModMetalView:
         )
         {
             WorldVertexOutput output;
-            WorldVertex vertex = vertices[vertexID];
+            WorldVertex sourceVertex = vertices[vertexID];
             output.position =
-                uniforms.viewProjection * vertex.position;
-            output.normal = vertex.normal.xyz;
+                uniforms.viewProjection * sourceVertex.position;
+            output.normal = sourceVertex.normal.xyz;
             return output;
         }
 
@@ -1797,8 +1797,8 @@ public struct GModMetalView:
                 [[vertex_id]]
         )
         {
-            SurfaceVertex vertex = vertices[vertexID];
-            float2 normalized = vertex.position / viewport;
+            SurfaceVertex sourceVertex = vertices[vertexID];
+            float2 normalized = sourceVertex.position / viewport;
             SurfaceVertexOutput output;
             output.position = float4(
                 normalized.x * 2.0 - 1.0,
@@ -1806,8 +1806,8 @@ public struct GModMetalView:
                 0.0,
                 1.0
             );
-            output.uv = vertex.uv;
-            output.color = vertex.color;
+            output.uv = sourceVertex.uv;
+            output.color = sourceVertex.color;
             return output;
         }
 
