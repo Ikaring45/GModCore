@@ -41,6 +41,7 @@ public final class GMLuaRuntime {
     public private(set) var networkedGlobals: GMLuaNetworkedGlobals?
     public private(set) var netTransport: GMLuaNetTransport?
     public private(set) var netEndpoint: GMLuaNetEndpoint?
+    public private(set) var traceBridge: GMLuaTraceBridge?
     private let logger: (String) -> Void
     private let fileLoader: ((String) throws -> String)?
     private let virtualFileSystem: LuaVirtualFileSystem?
@@ -71,6 +72,7 @@ public final class GMLuaRuntime {
         engineConVarCatalog: GMLuaEngineConVarCatalog? = nil,
         networkedGlobalTransport: GMLuaNetworkedGlobalTransport? = nil,
         netTransport: GMLuaNetTransport? = nil,
+        traceProvider: (any GMLuaTraceProvider)? = nil,
         inputConfiguration: GMLuaInputConfiguration = GMLuaInputConfiguration(),
         cursorWarpSink: GMLuaCursorWarpSink? = nil
     ) {
@@ -86,6 +88,7 @@ public final class GMLuaRuntime {
             engineConVarCatalog: engineConVarCatalog,
             networkedGlobalTransport: networkedGlobalTransport,
             netTransport: netTransport,
+            traceProvider: traceProvider,
             inputConfiguration: inputConfiguration,
             cursorWarpSink: cursorWarpSink,
             typeSystemInstaller: { state in
@@ -109,6 +112,7 @@ public final class GMLuaRuntime {
         engineConVarCatalog: GMLuaEngineConVarCatalog? = nil,
         networkedGlobalTransport: GMLuaNetworkedGlobalTransport? = nil,
         netTransport: GMLuaNetTransport? = nil,
+        traceProvider: (any GMLuaTraceProvider)? = nil,
         inputConfiguration: GMLuaInputConfiguration = GMLuaInputConfiguration(),
         cursorWarpSink: GMLuaCursorWarpSink? = nil,
         typeSystemInstaller: @escaping TypeSystemInstaller
@@ -131,6 +135,7 @@ public final class GMLuaRuntime {
             engineConVarCatalog: engineConVarCatalog,
             networkedGlobalTransport: networkedGlobalTransport,
             netTransport: netTransport,
+            traceProvider: traceProvider,
             inputConfiguration: inputConfiguration,
             cursorWarpSink: cursorWarpSink
         )
@@ -190,6 +195,7 @@ public final class GMLuaRuntime {
         engineConVarCatalog explicitEngineConVarCatalog: GMLuaEngineConVarCatalog?,
         networkedGlobalTransport: GMLuaNetworkedGlobalTransport?,
         netTransport explicitNetTransport: GMLuaNetTransport?,
+        traceProvider: (any GMLuaTraceProvider)?,
         inputConfiguration: GMLuaInputConfiguration,
         cursorWarpSink: GMLuaCursorWarpSink?
     ) {
@@ -221,6 +227,12 @@ public final class GMLuaRuntime {
                 realm: realm
             )
             entityRegistry = installedEntityRegistry
+            traceBridge = try GMLuaUtilTrace.install(
+                into: state,
+                typeSystem: installedTypeSystem,
+                entityRegistry: installedEntityRegistry,
+                provider: traceProvider
+            )
             chat = try GMLuaChat.install(
                 into: state,
                 realm: realm,
