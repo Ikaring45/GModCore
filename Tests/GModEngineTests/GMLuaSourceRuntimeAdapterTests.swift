@@ -305,7 +305,7 @@ final class GMLuaSourceRuntimeAdapterTests: XCTestCase {
         let clientRegistry = try XCTUnwrap(client.entityRegistry)
         XCTAssertEqual(serverRegistry.sourceMirrorIdentity(at: 24), identity)
         XCTAssertEqual(clientRegistry.sourceMirrorIdentity(at: 24), identity)
-        weak let releasedAdapter = adapter
+        weak var releasedAdapter = adapter
 
         adapter = nil
 
