@@ -3,6 +3,15 @@ import Combine
 import GModEngine
 
 @MainActor
+private final class GModConsoleLogSink {
+    weak var target: GModConsoleModel?
+
+    func publish(_ message: String) {
+        target?.append(message)
+    }
+}
+
+@MainActor
 final class GModConsoleModel: ObservableObject {
     enum Submission {
         case clear
@@ -33,12 +42,14 @@ final class GModConsoleModel: ObservableObject {
 
     private let runtimeFactory: GModAppRuntimeFactory
     private let clientSurfaceRuntime: GMLuaRuntime
+    private let runtimeLogSink = GModConsoleLogSink()
     private lazy var runtime: GMLuaRuntime = {
-        runtimeFactory.makeRuntime(
+        let sink = runtimeLogSink
+        return runtimeFactory.makeRuntime(
             realm: .server,
-            logger: { [weak self] message in
+            logger: { message in
                 Task { @MainActor in
-                    self?.append(message)
+                    sink.publish(message)
                 }
             }
         )
@@ -51,6 +62,7 @@ final class GModConsoleModel: ObservableObject {
             logger: { _ in }
         )
         fontRegistrationReport = factory.fontRegistrationReport
+        runtimeLogSink.target = self
 
         if let report = factory.fontRegistrationReport {
             let summary = "[FONT] bundled=\(report.bundledFileCount) " +
