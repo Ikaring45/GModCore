@@ -3,7 +3,8 @@ import GModMetal
 
 public struct GModMainView: View {
     @State private var stats = "Starting ARM engine..."
-    @State private var conformanceText = "Lua 5.1 official basic suite is ready.\nTap Run Official Lua 5.1 Tests."
+    @State private var conformanceText =
+        "iPad-only mode.\nOfficial Lua 5.1 tests download automatically when you tap Run."
     @State private var isRunning = false
     @State private var resultLabel = "READY"
 
@@ -60,7 +61,8 @@ public struct GModMainView: View {
 
         isRunning = true
         resultLabel = "RUNNING"
-        conformanceText = "Running official Lua 5.1 basic test suite…\nMode: _U=true\n\nThis can take a while."
+        conformanceText =
+            "Downloading official Lua 5.1 tests…\nThen running all.lua with _U=true.\n\nInternet connection is required for this run."
 
         Task {
             let report = await Lua51ConformanceRunner.runBasicSuite()
