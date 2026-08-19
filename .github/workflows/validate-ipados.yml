@@ -352,36 +352,55 @@ jobs:
         run: |
           set -euo pipefail
           devices_json="$RUNNER_TEMP/gmod-simulator-devices.json"
+          simulator_sdk_version="$(
+            xcrun --sdk iphonesimulator --show-sdk-version
+          )"
           xcrun simctl list devices available --json > "$devices_json"
 
-          python3 - "$devices_json" <<'PY'
+          python3 - "$devices_json" "$simulator_sdk_version" <<'PY'
           import json
           import os
           import re
           import sys
 
-          with open(sys.argv[1], encoding="utf-8") as handle:
+          devices_path, sdk_version = sys.argv[1:]
+          sdk_match = re.fullmatch(r"(\d+)\.(\d+)(?:\.\d+)?", sdk_version)
+          if sdk_match is None:
+              raise SystemExit(f"Invalid Simulator SDK version: {sdk_version!r}")
+          required_runtime = tuple(int(value) for value in sdk_match.groups())
+
+          with open(devices_path, encoding="utf-8") as handle:
               payload = json.load(handle)
 
           candidates = []
           for runtime, devices in payload.get("devices", {}).items():
-              version = tuple(int(part) for part in re.findall(r"\d+", runtime))
+              runtime_match = re.search(r"\.iOS-(\d+)-(\d+)(?:-\d+)?$", runtime)
+              if runtime_match is None:
+                  continue
+              runtime_version = tuple(int(value) for value in runtime_match.groups())
+              if runtime_version != required_runtime:
+                  continue
               for device in devices:
                   name = device.get("name", "")
                   if "iPad" not in name or not device.get("isAvailable", True):
                       continue
                   candidates.append(
                       (
-                          version,
+                          device.get("state", "") != "Booted",
                           name,
                           device.get("udid", ""),
                           device.get("state", ""),
+                          runtime,
                       )
                   )
 
           if not candidates:
-              raise SystemExit("No available iPad Simulator is installed")
-          _, name, udid, state = max(candidates)
+              raise SystemExit(
+                  "No available iPad Simulator exactly matches the "
+                  f"iPhone Simulator SDK {sdk_version} runtime "
+                  f"({required_runtime[0]}.{required_runtime[1]})"
+              )
+          _, name, udid, state, runtime = sorted(candidates)[0]
           if not udid:
               raise SystemExit(f"Selected iPad Simulator {name!r} has no UDID")
 
@@ -389,7 +408,8 @@ jobs:
               output.write(f"udid={udid}\n")
               output.write(f"name={name}\n")
               output.write(f"state={state}\n")
-          print(f"Selected iPad Simulator: {name} ({udid}), state={state}")
+              output.write(f"sdk_version={sdk_version}\n")
+          print(f"Selected {name} ({udid}), {state}, {runtime}, SDK {sdk_version}")
           PY
 
       - name: Boot iPad Simulator and install and launch the real app
@@ -472,27 +492,134 @@ jobs:
             SWIFT_STRICT_CONCURRENCY=complete
 
       - name: Run Swift package XCTest libraries on iPad Simulator
+        id: package_tests
         env:
           TEST_SCHEME: ${{ steps.package.outputs.test_scheme }}
           SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
 
+          diagnostics_dir="$RUNNER_TEMP/gmod-package-test-diagnostics"
+          result_bundle="$RUNNER_TEMP/GModCore-iPadOS.xcresult"
+          mkdir -p "$diagnostics_dir"
+          touch "$diagnostics_dir/test-started.marker"
+
+          set +e
           xcodebuild test \
             -scheme "$TEST_SCHEME" \
             -configuration Debug \
             -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
             -derivedDataPath "$RUNNER_TEMP/gmod-package-simulator" \
-            -resultBundlePath "$RUNNER_TEMP/GModCore-iPadOS.xcresult" \
+            -resultBundlePath "$result_bundle" \
             -parallel-testing-enabled NO \
             ARCHS=arm64 \
             ONLY_ACTIVE_ARCH=YES \
             IPHONEOS_DEPLOYMENT_TARGET=16.0 \
             CODE_SIGNING_ALLOWED=NO \
             COPY_PHASE_STRIP=NO \
-            SWIFT_STRICT_CONCURRENCY=complete
+            SWIFT_STRICT_CONCURRENCY=complete \
+            2>&1 | tee "$diagnostics_dir/xcodebuild.log"
+          test_status="${PIPESTATUS[0]}"
+          set -e
+
+          printf 'exit_code=%s\n' "$test_status" >> "$GITHUB_OUTPUT"
+
+          # Diagnostics and artifact upload run in later steps. Keep this step
+          # successful so they still execute, then return this exact status in
+          # the final workflow step.
+          exit 0
+
+      - name: Collect failed package XCTest diagnostics
+        if: ${{ always() && steps.package_tests.outputs.exit_code != '' && steps.package_tests.outputs.exit_code != '0' }}
+        continue-on-error: true
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+          SIMULATOR_NAME: ${{ steps.simulator.outputs.name }}
+          SIMULATOR_SDK_VERSION: ${{ steps.simulator.outputs.sdk_version }}
+          PACKAGE_TEST_EXIT_CODE: ${{ steps.package_tests.outputs.exit_code }}
+        run: |
+          set -uo pipefail
+
+          diagnostics_dir="$RUNNER_TEMP/gmod-package-test-diagnostics"
+          result_bundle="$RUNNER_TEMP/GModCore-iPadOS.xcresult"
+          mkdir -p "$diagnostics_dir"
+
+          {
+            printf 'package_test_exit_code=%s\n' "$PACKAGE_TEST_EXIT_CODE"
+            printf 'simulator_name=%s\n' "$SIMULATOR_NAME"
+            printf 'simulator_udid=%s\n' "$SIMULATOR_UDID"
+            printf 'simulator_sdk_version=%s\n' "$SIMULATOR_SDK_VERSION"
+            xcodebuild -version
+            swift --version
+          } > "$diagnostics_dir/environment.txt" 2>&1
+
+          if [[ -d "$result_bundle" ]]; then
+            xcrun xcresulttool get test-results summary \
+              --path "$result_bundle" \
+              > "$diagnostics_dir/xcresult-summary.json" \
+              2> "$diagnostics_dir/xcresult-summary.stderr" || true
+          else
+            printf 'xcodebuild produced no xcresult bundle at %s\n' \
+              "$result_bundle" \
+              > "$diagnostics_dir/xcresult-missing.txt"
+          fi
+
+          log_predicate='process == "xctest" OR process == "testmanagerd" OR process CONTAINS[c] "GModEngineTests" OR eventMessage CONTAINS[c] "GModPlayableSessionLaneTests" OR eventMessage CONTAINS[c] "jetsam" OR eventMessage CONTAINS[c] "crash"'
+          xcrun simctl spawn "$SIMULATOR_UDID" log show \
+            --last 20m \
+            --style compact \
+            --predicate "$log_predicate" \
+            2>&1 | tail -c 8388608 \
+            > "$diagnostics_dir/simulator-unified-log.txt" || true
+
+          crash_reports="$diagnostics_dir/crash-reports"
+          mkdir -p "$crash_reports"
+          report_index=0
+          while IFS= read -r -d '' report; do
+            report_index=$((report_index + 1))
+            cp "$report" \
+              "$crash_reports/$report_index-$(basename "$report")" || true
+            [[ "$report_index" -ge 24 ]] && break
+          done < <(
+            find \
+              "$HOME/Library/Logs/DiagnosticReports" \
+              "$HOME/Library/Developer/CoreSimulator/Devices/$SIMULATOR_UDID/data/Library/Logs/CrashReporter" \
+              -type f \
+              -newer "$diagnostics_dir/test-started.marker" \
+              \( -iname '*xctest*' \
+                 -o -iname '*GModEngineTests*' \
+                 -o -iname '*Jetsam*' \
+                 -o -iname '*testmanager*' \) \
+              -print0 2>/dev/null
+          )
+
+      - name: Upload failed package XCTest diagnostics
+        if: ${{ always() && steps.package_tests.outputs.exit_code != '' && steps.package_tests.outputs.exit_code != '0' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: >-
+            gmod-ipados-xctest-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/GModCore-iPadOS.xcresult
+            ${{ runner.temp }}/gmod-package-test-diagnostics
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 6
 
       - name: Confirm validation did not modify tracked sources
+        if: ${{ always() && steps.package_tests.outputs.exit_code != '' }}
         run: |
           set -euo pipefail
           git diff --exit-code
+
+      - name: Return Swift package XCTest status
+        if: ${{ always() && steps.package_tests.outputs.exit_code != '' }}
+        env:
+          PACKAGE_TEST_EXIT_CODE: ${{ steps.package_tests.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$PACKAGE_TEST_EXIT_CODE" =~ ^[0-9]+$ ]]; then
+            echo "Invalid package XCTest exit code: $PACKAGE_TEST_EXIT_CODE" >&2
+            exit 1
+          fi
+          exit "$PACKAGE_TEST_EXIT_CODE"
