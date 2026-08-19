@@ -63,7 +63,7 @@ public struct GModMainView: View {
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundColor(Color(white: 0.93))
 
-            Text("Lua 5.1 / SERVER")
+            Text("Lua 5.1 CORE / SERVER")
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundColor(Color(white: 0.62))
 
@@ -73,7 +73,7 @@ public struct GModMainView: View {
                 .font(.system(size: 11, weight: .bold, design: .monospaced))
                 .foregroundColor(statusColor)
 
-            Button(isRunning ? "Running…" : "Run Lua 5.1 Tests") {
+            Button(isRunning ? "Running…" : "Run Lua 5.1 Core Tests") {
                 runOfficialTests()
             }
             .buttonStyle(GModButtonStyle())
@@ -219,7 +219,7 @@ public struct GModMainView: View {
 
         isRunning = true
         resultLabel = "RUNNING"
-        console.append("[CONFORMANCE] Starting official Lua 5.1 basic suite (_U=true)")
+        console.append("[CONFORMANCE] Starting Lua 5.1 embedded-core suite (_U=true)")
 
         Task {
             let report = await Lua51ConformanceRunner.runBasicSuite { line in
