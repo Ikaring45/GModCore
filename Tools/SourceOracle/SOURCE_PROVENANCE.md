@@ -13,10 +13,15 @@
   `src/game/shared/gamemovement.cpp`, and
   `src/utils/vbsp/materialpatch.cpp`.
 - The `Source*.swift` files are newly authored Swift compatibility code. No
-  Source SDK source file or game asset is vendored in this working tree. This
-  statement is provenance, not a legal conclusion about derivative works.
-- Installed GMod/HL2 content was read locally for format diagnostics only. The
-  diagnostic did not copy game assets into this repository.
+  Source SDK source file is vendored in this working tree. This statement is
+  provenance, not a legal conclusion about derivative works.
+- Project-authorized base GMod game files are intentionally vendored in the
+  dedicated resource and map bundles. Their logical paths, sizes, and hashes are
+  fixed by the tracked manifests and validators. Workshop, download-cache, and
+  addon content are outside that authorization and are not included.
+- Installed GMod/HL2 content is otherwise read in place by diagnostic and Oracle
+  tooling. Those tools do not copy unapproved game content into the repository
+  or modify the installed game tree.
 
 ## Project-specific written authorization
 
