@@ -1424,7 +1424,7 @@ extension LuaState {
             do {
                 return [try openValue(path: path, mode: mode)]
             } catch {
-                return [.nilValue, .string(LuaString(error.localizedDescription))]
+                return self.luaFileFailure(error)
             }
         }
 
@@ -2274,8 +2274,55 @@ extension LuaState {
         } else {
             message = String(describing: error)
         }
-        let errorCode = (error as? LuaFileOperationError)?.errorCode ?? 5
+        let errorCode = luaFileErrorCode(error)
         return [.nilValue, .string(LuaString(message)), .number(Double(errorCode))]
+    }
+
+    private func luaFileErrorCode(_ error: Error) -> Int {
+        if let operationError = error as? LuaFileOperationError {
+            return operationError.errorCode
+        }
+        if let virtualError = error as? LuaVirtualFileSystemError {
+            switch virtualError {
+            case .fileNotFound: return Int(POSIXErrorCode.ENOENT.rawValue)
+            case .invalidPath: return Int(POSIXErrorCode.EINVAL.rawValue)
+            case .notDirectory: return Int(POSIXErrorCode.ENOTDIR.rawValue)
+            case .directoryNotEmpty: return Int(POSIXErrorCode.ENOTEMPTY.rawValue)
+            }
+        }
+
+        // FileHandle and Data errors preserve the native errno as an
+        // NSPOSIXErrorDomain error, normally beneath one Cocoa wrapper.
+        // Prefer that value so host-backed files expose the same contract as
+        // C stdio instead of inventing a platform-independent placeholder.
+        var nsError = error as NSError
+        for _ in 0..<4 {
+            if nsError.domain == NSPOSIXErrorDomain, nsError.code > 0 {
+                return nsError.code
+            }
+            guard let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError,
+                  underlying !== nsError else { break }
+            nsError = underlying
+        }
+
+        if nsError.domain == NSCocoaErrorDomain {
+            switch nsError.code {
+            case 4, 260:
+                return Int(POSIXErrorCode.ENOENT.rawValue)
+            case 257, 513:
+                return Int(POSIXErrorCode.EACCES.rawValue)
+            case 258, 514:
+                return Int(POSIXErrorCode.EINVAL.rawValue)
+            case 516:
+                return Int(POSIXErrorCode.EEXIST.rawValue)
+            case 640:
+                return Int(POSIXErrorCode.ENOSPC.rawValue)
+            case 642:
+                return Int(POSIXErrorCode.EROFS.rawValue)
+            default: break
+            }
+        }
+        return Int(POSIXErrorCode.EIO.rawValue)
     }
 }
 
@@ -2285,6 +2332,7 @@ enum LuaFileOperationError: Error, LocalizedError {
     case closed
     case notReadable
     case notWritable
+    case invalidFileMode
     case invalidSeekOption(String)
     case negativeSeek
     case invalidReadCount
@@ -2294,6 +2342,7 @@ enum LuaFileOperationError: Error, LocalizedError {
         case .closed: return "attempt to use a closed file"
         case .notReadable: return "file is not readable"
         case .notWritable: return "file is not writable"
+        case .invalidFileMode: return "invalid file mode"
         case let .invalidSeekOption(option): return "invalid seek option '\(option)'"
         case .negativeSeek: return "invalid seek position"
         case .invalidReadCount: return "invalid read count"
@@ -2302,15 +2351,17 @@ enum LuaFileOperationError: Error, LocalizedError {
 
     var errorCode: Int {
         switch self {
-        case .closed, .notReadable, .notWritable: return 9 // EBADF
-        case .invalidSeekOption, .negativeSeek, .invalidReadCount: return 22 // EINVAL
+        case .closed, .notReadable, .notWritable:
+            return Int(POSIXErrorCode.EBADF.rawValue)
+        case .invalidFileMode, .invalidSeekOption, .negativeSeek, .invalidReadCount:
+            return Int(POSIXErrorCode.EINVAL.rawValue)
         }
     }
 
     var isRecoverableIOFailure: Bool {
         switch self {
         case .notReadable, .notWritable, .negativeSeek: return true
-        case .closed, .invalidSeekOption, .invalidReadCount: return false
+        case .closed, .invalidFileMode, .invalidSeekOption, .invalidReadCount: return false
         }
     }
 }
@@ -2376,7 +2427,7 @@ final class LuaFile: @unchecked Sendable {
     ) throws -> LuaFile {
         let mode = rawMode.replacingOccurrences(of: "b", with: "")
         guard ["r", "w", "a", "r+", "w+", "a+"].contains(mode) else {
-            throw LuaError.runtime("invalid file mode")
+            throw LuaFileOperationError.invalidFileMode
         }
         let readable = mode.hasPrefix("r") || mode.contains("+")
         let writable = mode.hasPrefix("w") || mode.hasPrefix("a") || mode.contains("+")
