@@ -6,15 +6,18 @@ public final class LuaNativeFunctionBox: @unchecked Sendable {
     let body: LuaNativeFunction
     var environment: LuaTable?
     let debugName: String?
+    let gcReferences: () -> [LuaValue]
 
     public init(
         _ body: @escaping LuaNativeFunction,
         environment: LuaTable? = nil,
-        debugName: String? = nil
+        debugName: String? = nil,
+        gcReferences: @escaping () -> [LuaValue] = { [] }
     ) {
         self.body = body
         self.environment = environment
         self.debugName = debugName
+        self.gcReferences = gcReferences
     }
 }
 
@@ -25,6 +28,11 @@ public final class LuaUserdata: @unchecked Sendable {
 
     public init(payload: Any? = nil) {
         self.payload = payload
+    }
+
+    func gcClearReferences() {
+        metatable = nil
+        environment = nil
     }
 }
 
@@ -48,7 +56,9 @@ public final class LuaRaisedError: Error, @unchecked Sendable {
 public enum LuaError: Error, CustomStringConvertible, Sendable {
     case lexer(line: Int, column: Int, message: String)
     case parser(line: Int, column: Int, message: String)
+    case syntax(source: String, line: Int, message: String, near: String)
     case runtime(String)
+    case runtimeAt(source: String, line: Int, message: String)
 
     public var description: String {
         switch self {
@@ -56,13 +66,28 @@ public enum LuaError: Error, CustomStringConvertible, Sendable {
             return "Lua lexer error \(line):\(column): \(message)"
         case let .parser(line, column, message):
             return "Lua parser error \(line):\(column): \(message)"
+        case let .syntax(source, line, message, near):
+            return "\(source):\(line): \(message) near '\(near)'"
         case let .runtime(message):
             return "Lua runtime error: \(message)"
+        case let .runtimeAt(source, line, message):
+            return "\(source):\(line): \(message)"
         }
     }
 }
 
 extension LuaValue {
+    var collectableObjectIdentifier: ObjectIdentifier? {
+        switch self {
+        case let .table(value): return ObjectIdentifier(value)
+        case let .luaFunction(value): return ObjectIdentifier(value)
+        case let .nativeFunction(value): return ObjectIdentifier(value)
+        case let .userdata(value): return ObjectIdentifier(value)
+        case let .thread(value): return ObjectIdentifier(value)
+        case .nilValue, .boolean, .number, .string: return nil
+        }
+    }
+
     public var typeName: String {
         switch self {
         case .nilValue: return "nil"

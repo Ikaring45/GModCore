@@ -34,6 +34,7 @@ enum LuaBinaryOperator {
 struct LuaFunctionPrototype {
     let parameters: [String]
     let isVararg: Bool
+    let needsCompatibilityArgTable: Bool
     let body: [LuaStatement]
     let lineDefined: Int
     let lastLineDefined: Int
@@ -60,8 +61,8 @@ enum LuaStatement {
     case ifStatement([LuaIfBranch], elseBody: [LuaStatement]?, endLine: Int)
     case whileLoop(LuaExpression, [LuaStatement], conditionLine: Int, endLine: Int)
     case repeatLoop([LuaStatement], LuaExpression, conditionLine: Int)
-    case numericFor(String, LuaExpression, LuaExpression, LuaExpression?, [LuaStatement], line: Int, endLine: Int)
-    case genericFor([String], [LuaExpression], [LuaStatement], line: Int, endLine: Int)
+    case numericFor(String, LuaExpression, LuaExpression, LuaExpression?, [LuaStatement], line: Int, controlLine: Int, endLine: Int)
+    case genericFor([String], [LuaExpression], [LuaStatement], line: Int, expressionLine: Int, endLine: Int)
     case doBlock([LuaStatement])
     case breakLoop(line: Int)
     case continueLoop(line: Int)
@@ -72,32 +73,92 @@ enum LuaStatement {
 struct LuaChunk { let statements: [LuaStatement] }
 
 final class LuaParser {
+    private struct FunctionContext {
+        var locals: [String: Int] = [:]
+        var nextBindingID = 0
+        var localCount = 0
+        var upvalues = Set<String>()
+        let lineDefined: Int
+    }
+
     private let tokens: [LuaToken]
     private var current = 0
+    private var varargExpressionUsage: [Bool] = []
+    private var syntaxDepth = 0
+    private let maximumSyntaxDepth = 200
+    private var functionContexts: [FunctionContext] = []
 
     init(tokens: [LuaToken]) { self.tokens = tokens }
 
     func parse() throws -> LuaChunk {
-        LuaChunk(statements: try parseBlock { kind in kind == .eof })
+        functionContexts = [FunctionContext(lineDefined: 0)]
+        defer { functionContexts.removeAll(keepingCapacity: false) }
+        return LuaChunk(statements: try parseBlock { kind in kind == .eof })
     }
 
     private func parseBlock(until shouldStop: (LuaTokenKind) -> Bool) throws -> [LuaStatement] {
-        var statements: [LuaStatement] = []
-        while !shouldStop(peek.kind) {
-            while match(.semicolon) {}
-            if shouldStop(peek.kind) { break }
-            statements.append(try parseStatement())
-            _ = match(.semicolon)
+        try withSyntaxDepth {
+            var statements: [LuaStatement] = []
+            while !shouldStop(peek.kind) {
+                if isDefineBaseClassDirectiveStart {
+                    let declaration = try parseDefineBaseClassDirective()
+                    _ = match(.semicolon)
+
+                    // Garry's Mod rewrites DEFINE_BASECLASS(...) to a lexical
+                    // `local BaseClass = baseclass.Get(...)` in the caller.
+                    // Put the declaration and the rest of this lexical block in
+                    // a child block. Besides matching the local's visibility,
+                    // this preserves distinct captured bindings when a source
+                    // file uses the directive more than once.
+                    let remainder = try parseBlock(until: shouldStop)
+                    statements.append(.doBlock([declaration] + remainder))
+                    return statements
+                }
+
+                let statement = try parseStatement()
+                statements.append(statement)
+                _ = match(.semicolon)
+                switch statement {
+                case .breakLoop, .returnValues:
+                    if !shouldStop(peek.kind) { throw parserError(peek, "syntax error") }
+                default:
+                    break
+                }
+            }
+            return statements
         }
-        return statements
+    }
+
+    private var isDefineBaseClassDirectiveStart: Bool {
+        guard case .identifier("DEFINE_BASECLASS") = peek.kind else { return false }
+        return checkNext(.leftParen)
+    }
+
+    private func parseDefineBaseClassDirective() throws -> LuaStatement {
+        let directiveToken = advance()
+        let arguments = try parseCallArguments()
+
+        // The initializer is evaluated before the new local enters scope.
+        try recordVariableReference("baseclass", token: directiveToken)
+        try recordLocal("BaseClass", token: directiveToken)
+
+        let getBaseClass = LuaExpression.field(.variable("baseclass"), "Get")
+        return .localDeclaration(
+            ["BaseClass"],
+            [.call(getBaseClass, arguments)],
+            line: directiveToken.line
+        )
     }
 
     private func parseStatement() throws -> LuaStatement {
+        let statementToken = peek
         let statementLine = peek.line
         if match(.keywordLocal) {
             if match(.keywordFunction) {
                 let lineDefined = previous.line
+                let nameToken = peek
                 let name = try consumeIdentifier("expected local function name")
+                try recordLocal(name, token: nameToken)
                 let prototype = try parseFunctionTail(prependSelf: false, lineDefined: lineDefined)
                 return .localFunction(name, prototype, line: statementLine)
             }
@@ -126,12 +187,24 @@ final class LuaParser {
             return .assignment(targets, values, line: statementLine)
         }
 
-        return .expression(first, line: statementLine)
+        switch first {
+        case .call, .methodCall:
+            return .expression(first, line: statementLine)
+        case .variable, .field, .index, .group:
+            throw parserError(peek, "syntax error")
+        default:
+            throw parserError(statementToken, "syntax error")
+        }
     }
 
     private func parseLocalDeclaration(line: Int) throws -> LuaStatement {
+        var nameTokens = [peek]
         var names = [try consumeIdentifier("expected local variable name")]
-        while match(.comma) { names.append(try consumeIdentifier("expected local variable name")) }
+        while match(.comma) {
+            nameTokens.append(peek)
+            names.append(try consumeIdentifier("expected local variable name"))
+        }
+        for (name, token) in zip(names, nameTokens) { try recordLocal(name, token: token) }
         let values = match(.assign) ? try parseExpressionList() : []
         return .localDeclaration(names, values, line: line)
     }
@@ -206,25 +279,32 @@ final class LuaParser {
         let firstName = try consumeIdentifier("expected for variable")
 
         if match(.assign) {
+            let controlLine = peek.line
             let start = try parseExpression()
             try consume(.comma, "expected ',' after numeric for start")
             let limit = try parseExpression()
             let step: LuaExpression?
             if match(.comma) { step = try parseExpression() } else { step = nil }
             try consume(.keywordDo, "expected 'do' after numeric for")
+            // The conformance corpus (and GLua/LuaJIT source in the wild)
+            // permits a single separator immediately after a for-loop `do`.
+            // Keep lone/duplicate empty statements invalid as in Lua 5.1.
+            _ = match(.semicolon)
             let body = try parseBlock { kind in kind == .keywordEnd || kind == .eof }
             try consume(.keywordEnd, "expected 'end' after for")
-            return .numericFor(firstName, start, limit, step, body, line: line, endLine: previous.line)
+            return .numericFor(firstName, start, limit, step, body, line: line, controlLine: controlLine, endLine: previous.line)
         }
 
         var names = [firstName]
         while match(.comma) { names.append(try consumeIdentifier("expected for variable")) }
         try consume(.keywordIn, "expected 'in' in generic for")
+        let expressionLine = peek.line
         let expressions = try parseExpressionList()
         try consume(.keywordDo, "expected 'do' after generic for")
+        _ = match(.semicolon)
         let body = try parseBlock { kind in kind == .keywordEnd || kind == .eof }
         try consume(.keywordEnd, "expected 'end' after for")
-        return .genericFor(names, expressions, body, line: line, endLine: previous.line)
+        return .genericFor(names, expressions, body, line: line, expressionLine: expressionLine, endLine: previous.line)
     }
 
     private func parseDoBlock() throws -> LuaStatement {
@@ -265,8 +345,14 @@ final class LuaParser {
         }
 
         try consume(.rightParen, "expected ')'")
+        functionContexts.append(FunctionContext(lineDefined: lineDefined))
+        defer { _ = functionContexts.popLast() }
+        for parameter in parameters { try recordLocal(parameter, token: previous) }
+        if isVararg { try recordLocal("arg", token: previous) }
+        varargExpressionUsage.append(false)
         let bodyTokenStart = current
         let body = try parseBlock { kind in kind == .keywordEnd || kind == .eof }
+        let usesVarargExpression = varargExpressionUsage.removeLast()
         let bodyTokenEnd = current
         let lastLineDefined = peek.line
         try consume(.keywordEnd, "expected 'end' after function body")
@@ -275,6 +361,7 @@ final class LuaParser {
         return LuaFunctionPrototype(
             parameters: parameters,
             isVararg: isVararg,
+            needsCompatibilityArgTable: isVararg && !usesVarargExpression,
             body: body,
             lineDefined: lineDefined,
             lastLineDefined: lastLineDefined,
@@ -288,7 +375,9 @@ final class LuaParser {
         return values
     }
 
-    private func parseExpression() throws -> LuaExpression { try parseOr() }
+    private func parseExpression() throws -> LuaExpression {
+        try withSyntaxDepth { try parseOr() }
+    }
 
     private func parseOr() throws -> LuaExpression {
         var expression = try parseAnd()
@@ -317,9 +406,11 @@ final class LuaParser {
     }
 
     private func parseConcat() throws -> LuaExpression {
-        let left = try parseAddition()
-        if match(.concat) { return .binary(left, .concat, try parseConcat()) }
-        return left
+        try withSyntaxDepth {
+            let left = try parseAddition()
+            if match(.concat) { return .binary(left, .concat, try parseConcat()) }
+            return left
+        }
     }
 
     private func parseAddition() throws -> LuaExpression {
@@ -344,10 +435,12 @@ final class LuaParser {
     }
 
     private func parseUnary() throws -> LuaExpression {
-        if match(.minus) { return .unary(.negate, try parseUnary()) }
-        if match(.keywordNot) { return .unary(.not, try parseUnary()) }
-        if match(.hash) { return .unary(.length, try parseUnary()) }
-        return try parsePower()
+        try withSyntaxDepth {
+            if match(.minus) { return .unary(.negate, try parseUnary()) }
+            if match(.keywordNot) { return .unary(.not, try parseUnary()) }
+            if match(.hash) { return .unary(.length, try parseUnary()) }
+            return try parsePower()
+        }
     }
 
     private func parsePower() throws -> LuaExpression {
@@ -370,6 +463,9 @@ final class LuaParser {
                 let name = try consumeIdentifier("expected method name after ':'")
                 expression = .methodCall(expression, name, try parseCallArguments())
             } else if check(.leftParen) || check(.leftBrace) || isStringToken(peek.kind) {
+                if check(.leftParen), peek.line > previous.line {
+                    throw parserError(peek, "ambiguous syntax (function call x new statement)")
+                }
                 expression = .call(expression, try parseCallArguments())
             } else {
                 break
@@ -395,8 +491,16 @@ final class LuaParser {
         case .keywordTrue: _ = advance(); return .boolean(true)
         case .keywordFalse: _ = advance(); return .boolean(false)
         case .keywordNil: _ = advance(); return .nilValue
-        case let .identifier(name): _ = advance(); return .variable(name)
-        case .vararg: _ = advance(); return .vararg
+        case let .identifier(name):
+            _ = advance()
+            try recordVariableReference(name, token: token)
+            return .variable(name)
+        case .vararg:
+            _ = advance()
+            if !varargExpressionUsage.isEmpty {
+                varargExpressionUsage[varargExpressionUsage.count - 1] = true
+            }
+            return .vararg
         case .leftParen:
             _ = advance()
             let expression = try parseExpression()
@@ -508,5 +612,50 @@ final class LuaParser {
 
     private func parserError(_ token: LuaToken, _ message: String) -> LuaError {
         .parser(line: token.line, column: token.column, message: message)
+    }
+
+    private func withSyntaxDepth<T>(_ body: () throws -> T) throws -> T {
+        syntaxDepth += 1
+        guard syntaxDepth <= maximumSyntaxDepth else {
+            syntaxDepth -= 1
+            throw parserError(peek, "chunk has too many syntax levels")
+        }
+        defer { syntaxDepth -= 1 }
+        return try body()
+    }
+
+    private func recordLocal(_ name: String, token: LuaToken) throws {
+        guard !functionContexts.isEmpty else { return }
+        let index = functionContexts.count - 1
+        functionContexts[index].nextBindingID += 1
+        functionContexts[index].localCount += 1
+        functionContexts[index].locals[name] = functionContexts[index].nextBindingID
+        if functionContexts[index].localCount > 200 {
+            let line = functionContexts[index].lineDefined
+            throw parserError(token, "function at line \(line) has more than 200 local variables")
+        }
+    }
+
+    private func recordVariableReference(_ name: String, token: LuaToken) throws {
+        guard functionContexts.count > 1 else { return }
+        let currentIndex = functionContexts.count - 1
+        var definingIndex: Int?
+        var bindingID: Int?
+        for index in stride(from: currentIndex, through: 0, by: -1) {
+            if let found = functionContexts[index].locals[name] {
+                definingIndex = index
+                bindingID = found
+                break
+            }
+        }
+        guard let definingIndex, let bindingID, definingIndex < currentIndex else { return }
+        let identity = "\(definingIndex):\(bindingID)"
+        for index in (definingIndex + 1)...currentIndex {
+            functionContexts[index].upvalues.insert(identity)
+            if functionContexts[index].upvalues.count > 60 {
+                let line = functionContexts[index].lineDefined
+                throw parserError(token, "function at line \(line) has more than 60 upvalues")
+            }
+        }
     }
 }

@@ -47,6 +47,7 @@ public enum Lua51ConformanceRunner {
     private static let mirrorRoot = "_lua5.1-tests"
 
     public static func runBasicSuite(
+        sourceDirectory: URL? = nil,
         progress: @escaping @Sendable (String) -> Void = { _ in }
     ) async -> Lua51ConformanceReport {
         let started = Date()
@@ -56,7 +57,6 @@ public enum Lua51ConformanceRunner {
         var fetchedFiles = 0
         let skippedFiles = [
             "main.lua [CLI-only]",
-            "gc.lua [GC-unimplemented]",
             "api.lua [C-API-only]"
         ]
 
@@ -67,14 +67,17 @@ public enum Lua51ConformanceRunner {
 
         do {
             append("[CONFORMANCE] Garry's PAD embedded-core mode")
-            append("[CONFORMANCE] Discovery mode: CLI-only, unfinished GC, and C-API-only files are classified and skipped")
+            append("[CONFORMANCE] Embedded mode: CLI-only and C-API-only files are classified and skipped")
             append("[SKIP][CLI] main.lua - standalone lua executable/options/arg/process test")
-            append("[SKIP][GC] gc.lua - collector, weak tables, and finalization are not implemented yet")
+            append("[TEST][GC] gc.lua - explicit mark/sweep, weak tables, incremental steps, and finalizers enabled")
             append("[SKIP][C-API] api.lua - PUC Lua C API/internal test")
-            append("[CONFORMANCE] fetching official Lua 5.1 test mirror…")
-
-            let sources = try await fetchOfficialLuaSources { line in
-                append(line)
+            let sources: [String: String]
+            if let sourceDirectory {
+                append("[CONFORMANCE] loading official Lua 5.1 tests from \(sourceDirectory.path)")
+                sources = try loadLocalLuaSources(from: sourceDirectory) { line in append(line) }
+            } else {
+                append("[CONFORMANCE] fetching official Lua 5.1 test mirror…")
+                sources = try await fetchOfficialLuaSources { line in append(line) }
             }
             fetchedFiles = sources.count
             append("[CONFORMANCE] fetched \(sources.count) Lua files")
@@ -91,10 +94,12 @@ public enum Lua51ConformanceRunner {
                 throw Lua51ConformanceResourceError.missing(normalized)
             }
 
+            let writableFileSystem = try LuaMemoryFileSystem()
             let runtime = GMLuaRuntime(
                 realm: .server,
                 logger: { append($0) },
-                fileLoader: loader
+                fileLoader: loader,
+                virtualFileSystem: writableFileSystem
             )
 
             let allLua = try loader("all.lua")
@@ -116,6 +121,12 @@ public enum Lua51ConformanceRunner {
             try runtime.execute(
                 embeddedAllLua,
                 sourceName: "@all.lua"
+            )
+            let closeReport = runtime.close()
+            append(
+                "[CONFORMANCE][CLOSE] finalized \(closeReport.finalizedUserdataCount) userdata; "
+                    + "additional passes \(closeReport.additionalPasses); "
+                    + "ignored finalizer errors \(closeReport.errorMessages.count)"
             )
         } catch {
             failure = describe(error)
@@ -149,10 +160,8 @@ public enum Lua51ConformanceRunner {
     /// The official suite assumes a standalone PUC Lua executable for main.lua
     /// and direct access to the PUC C API for api.lua. Garry's PAD embeds Lua in
     /// an iPad application, so those two tests are classified separately instead
-    /// of allowing them to mask language/runtime failures. gc.lua is also skipped
-    /// in discovery mode because the collector is still intentionally unfinished;
-    /// it must not be reported as a pass until reachability, weak tables,
-    /// finalization, gcinfo, and incremental stepping are implemented.
+    /// of allowing them to mask language/runtime failures. gc.lua is executed in
+    /// its original all.lua position and is required for an overall PASS.
     ///
     /// Everything else remains in the official all.lua order, including debug,
     /// patterns, libraries, files, closures, varargs, and events.
@@ -165,16 +174,6 @@ public enum Lua51ConformanceRunner {
         )
 
         result = result.replacingOccurrences(
-            of: "loadfile('gc.lua')",
-            with: "function() print('[SKIP][GC] gc.lua') end"
-        )
-
-        result = result.replacingOccurrences(
-            of: "dofile('gc.lua')",
-            with: "print('[SKIP][GC] gc.lua')"
-        )
-
-        result = result.replacingOccurrences(
             of: "dofile('api.lua')",
             with: "print('[SKIP][C-API] api.lua')"
         )
@@ -183,6 +182,40 @@ public enum Lua51ConformanceRunner {
     }
 
     // MARK: - Official network fetch
+
+    private static func loadLocalLuaSources(
+        from directory: URL,
+        progress: (String) -> Void
+    ) throws -> [String: String] {
+        let root = directory.standardizedFileURL
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            throw Lua51ConformanceResourceError.missing(root.path)
+        }
+
+        var result: [String: String] = [:]
+        for case let fileURL as URL in enumerator where fileURL.pathExtension.lowercased() == "lua" {
+            let values = try fileURL.resourceValues(forKeys: [.isRegularFileKey])
+            guard values.isRegularFile == true else { continue }
+            let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
+            guard fileURL.path.hasPrefix(rootPath) else { continue }
+            let relative = normalizePath(String(fileURL.path.dropFirst(rootPath.count)))
+            let data = try Data(contentsOf: fileURL)
+            guard let source = LuaSourceDecoder.decode(data) else {
+                throw Lua51ConformanceDownloadError.cannotDecode(relative)
+            }
+            result[relative] = source
+            progress("[LOCAL] \(relative)")
+        }
+
+        guard result["all.lua"] != nil else {
+            throw Lua51ConformanceDownloadError.missingAllLua
+        }
+        return result
+    }
 
     private static func fetchOfficialLuaSources(
         progress: @escaping (String) -> Void

@@ -32,7 +32,8 @@ final class LuaPatternMatcher {
     }
 
     func firstMatch(from requestedStart: Int = 0) throws -> LuaPatternMatch? {
-        let start = max(0, min(requestedStart, subject.count))
+        guard requestedStart <= subject.count else { return nil }
+        let start = max(0, requestedStart)
         if anchored {
             guard start == 0 else { return nil }
             return try attempt(at: 0)
@@ -48,6 +49,9 @@ final class LuaPatternMatcher {
 
     private func attempt(at start: Int) throws -> LuaPatternMatch? {
         if let result = try match(si: start, pi: 0, captures: []) {
+            guard result.captures.allSatisfy({ $0.positionOnly || $0.end != nil }) else {
+                throw LuaError.runtime("unfinished capture")
+            }
             let values = materialize(result.captures)
             return LuaPatternMatch(start: start, end: result.si, captures: values)
         }
@@ -89,7 +93,11 @@ final class LuaPatternMatcher {
             return try match(si: si, pi: pi + 1, captures: next)
         }
 
-        // Back reference %1 .. %9.
+        // Back reference %1 .. %9. Capture zero is only meaningful in a
+        // gsub replacement template, never inside a Lua pattern.
+        if pattern[pi] == 37, pi + 1 < pattern.count, pattern[pi + 1] == 48 {
+            throw LuaError.runtime("invalid capture index")
+        }
         if pattern[pi] == 37, pi + 1 < pattern.count,
            pattern[pi + 1] >= 49, pattern[pi + 1] <= 57 {
             let captureIndex = Int(pattern[pi + 1] - 49)

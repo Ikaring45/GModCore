@@ -22,8 +22,9 @@ public final class LuaThread: @unchecked Sendable {
     private static let tlsKey = "GModLua.LuaThread.current"
 
     weak var state: LuaState?
-    let entry: LuaValue
+    private var entry: LuaValue
     let debugHookState = LuaDebugHookState()
+    var environmentTable: LuaTable
 
     private let condition = NSCondition()
     private var started = false
@@ -39,6 +40,7 @@ public final class LuaThread: @unchecked Sendable {
     init(state: LuaState, entry: LuaValue) {
         self.state = state
         self.entry = entry
+        self.environmentTable = state.currentThreadEnvironmentTable
     }
 
     public var status: Status {
@@ -182,6 +184,16 @@ public final class LuaThread: @unchecked Sendable {
         if failedFrames == nil { failedFrames = frames }
     }
 
+    func failureFramesSnapshot() -> [LuaCallFrame]? {
+        condition.lock(); defer { condition.unlock() }
+        return failedFrames
+    }
+
+    func clearFailureFrames() {
+        condition.lock(); defer { condition.unlock() }
+        failedFrames = nil
+    }
+
     func luaDebugFrames() -> [LuaCallFrame] {
         callStackFrames().filter { frame in
             if case .nativeFunction = frame.callable { return false }
@@ -195,5 +207,37 @@ public final class LuaThread: @unchecked Sendable {
         for index in callStack.frames.indices {
             callStack.frames[index].lastHookLine = callStack.frames[index].currentLine
         }
+    }
+
+    func gcReferences() -> (values: [LuaValue], environments: [LuaEnvironment]) {
+        condition.lock(); defer { condition.unlock() }
+        var values = [entry, .table(environmentTable)] + resumeArguments
+        var environments: [LuaEnvironment] = []
+        let frames = failedFrames ?? callStack?.frames ?? []
+        for frame in frames {
+            values.append(frame.callable)
+            values.append(contentsOf: frame.temporaries)
+            if let environment = frame.environment { environments.append(environment) }
+        }
+        if let event {
+            switch event {
+            case let .yielded(eventValues), let .returned(eventValues):
+                values.append(contentsOf: eventValues)
+            case let .failed(value):
+                values.append(value)
+            }
+        }
+        return (values, environments)
+    }
+
+    func gcClearReferences() {
+        condition.lock(); defer { condition.unlock() }
+        guard _status == .dead || !started else { return }
+        entry = .nilValue
+        resumeArguments.removeAll(keepingCapacity: false)
+        event = nil
+        failedFrames = nil
+        callStack = nil
+        worker = nil
     }
 }

@@ -1,6 +1,8 @@
 public final class LuaFunction: @unchecked Sendable {
     let parameters: [String]
     let isVararg: Bool
+    let hasCompatibilityArg: Bool
+    let needsCompatibilityArgTable: Bool
     let body: [LuaStatement]
     let closure: LuaEnvironment
     var environmentTable: LuaTable
@@ -13,6 +15,8 @@ public final class LuaFunction: @unchecked Sendable {
     init(
         parameters: [String],
         isVararg: Bool,
+        hasCompatibilityArg: Bool = false,
+        needsCompatibilityArgTable: Bool = false,
         body: [LuaStatement],
         closure: LuaEnvironment,
         environmentTable: LuaTable? = nil,
@@ -24,6 +28,8 @@ public final class LuaFunction: @unchecked Sendable {
     ) {
         self.parameters = parameters
         self.isVararg = isVararg
+        self.hasCompatibilityArg = hasCompatibilityArg
+        self.needsCompatibilityArgTable = needsCompatibilityArgTable
         self.body = body
         self.closure = closure
         self.environmentTable = environmentTable ?? closure.globalTable

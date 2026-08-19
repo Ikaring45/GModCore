@@ -30,7 +30,17 @@ extension LuaState {
 
     private func installBaseLibrary() {
         register("print") { [unowned self] arguments in
-            self.emit(try arguments.map { try self.luaString($0) }.joined(separator: "\t"))
+            let tostring = self.getGlobal("tostring")
+            var fields: [String] = []
+            fields.reserveCapacity(arguments.count)
+            for argument in arguments {
+                let value = try self.callValue(tostring, arguments: [argument]).first ?? .nilValue
+                guard case let .string(string) = value else {
+                    throw LuaError.runtime("'tostring' must return a string to 'print'")
+                }
+                fields.append(string.utf8String)
+            }
+            self.emit(fields.joined(separator: "\t"))
             return []
         }
 
@@ -39,11 +49,16 @@ extension LuaState {
         }
 
         register("tostring") { [unowned self] arguments in
-            [.string(LuaString(try self.luaString(arguments.first ?? .nilValue)))]
+            guard let value = arguments.first else {
+                throw LuaError.runtime("bad argument #1 to 'tostring' (value expected)")
+            }
+            return [try self.luaTostringValue(value)]
         }
 
         register("tonumber") { [unowned self] arguments in
-            guard let first = arguments.first else { return [.nilValue] }
+            guard let first = arguments.first else {
+                throw LuaError.runtime("bad argument #1 to 'tonumber' (value expected)")
+            }
             if case let .number(number) = first { return [.number(number)] }
             guard case let .string(text) = first else { return [.nilValue] }
 
@@ -64,23 +79,51 @@ extension LuaState {
             return self.coerceNumber(first).map { [.number($0)] } ?? [.nilValue]
         }
 
-        register("assert") { arguments in
+        register("assert") { [unowned self] arguments in
             let condition = arguments.first ?? .nilValue
             guard condition.isTruthy else {
-                let message = arguments.count > 1 ? arguments[1] : .string("assertion failed!")
-                throw LuaRaisedError(message)
+                let message: LuaString
+                if arguments.count > 1, !self.isNil(arguments[1]) {
+                    do {
+                        message = try self.luaStringBytes(arguments[1])
+                    } catch {
+                        throw LuaError.runtime("bad argument #2 to 'assert' (string expected, got \(arguments[1].typeName))")
+                    }
+                } else {
+                    message = "assertion failed!"
+                }
+
+                if let frame = self.currentLuaCallFrame(level: 2),
+                   case let .luaFunction(function) = frame.callable {
+                    let location = LuaString("\(self.debugShortSource(function.sourceName)):\(max(0, frame.currentLine)): ")
+                    throw LuaRaisedError(.string(location + message))
+                }
+                throw LuaRaisedError(.string(message))
             }
             return arguments
         }
 
-        register("error") { arguments in
-            throw LuaRaisedError(arguments.first ?? .nilValue)
+        register("error") { [unowned self] arguments in
+            let value = arguments.first ?? .nilValue
+            let level = arguments.count > 1 && !self.isNil(arguments[1])
+                ? Int(try self.numberFromValue(arguments[1]))
+                : 1
+            guard level > 0,
+                  case let .string(message) = value,
+                  let frame = self.currentLuaCallFrame(level: level + 1),
+                  case let .luaFunction(function) = frame.callable else {
+                throw LuaRaisedError(value)
+            }
+            let whereText = LuaString("\(self.debugShortSource(function.sourceName)):\(max(0, frame.currentLine)): ")
+            throw LuaRaisedError(.string(whereText + message))
         }
 
         register("pcall") { [unowned self] arguments in
             guard let callable = arguments.first else {
                 return [.boolean(false), .string("attempt to call a nil value")]
             }
+            self.clearFailureFramesForCurrentThread()
+            defer { self.clearFailureFramesForCurrentThread() }
             do {
                 return [.boolean(true)] + (try self.callValue(callable, arguments: Array(arguments.dropFirst())))
             } catch {
@@ -94,6 +137,8 @@ extension LuaState {
             }
             let callable = arguments[0]
             let handler = arguments[1]
+            self.clearFailureFramesForCurrentThread()
+            defer { self.clearFailureFramesForCurrentThread() }
             do {
                 return [.boolean(true)] + (try self.callValue(callable, arguments: []))
             } catch {
@@ -102,7 +147,7 @@ extension LuaState {
                     let transformed = try self.callValue(handler, arguments: [original])
                     return [.boolean(false)] + transformed
                 } catch {
-                    return [.boolean(false), self.errorValue(error)]
+                    return [.boolean(false), .string("error in error handling")]
                 }
             }
         }
@@ -197,7 +242,7 @@ extension LuaState {
             case let .luaFunction(function): return [.table(function.environmentTable)]
             case let .number(levelNumber):
                 let level = Int(levelNumber)
-                if level == 0 { return [.table(self.globalTable)] }
+                if level == 0 { return [.table(self.currentThreadEnvironmentTable)] }
                 guard level > 0,
                       let frame = self.currentLuaCallFrame(level: level + 1),
                       !frame.isTailCall else {
@@ -205,11 +250,11 @@ extension LuaState {
                 }
                 switch frame.callable {
                 case let .luaFunction(function): return [.table(function.environmentTable)]
-                case .nativeFunction: return [.table(self.globalTable)]
+                case .nativeFunction: return [.table(self.currentThreadEnvironmentTable)]
                 default: throw LuaError.runtime("bad argument #1 to 'getfenv' (invalid level)")
                 }
             default:
-                return [.table(self.globalTable)]
+                return [.table(self.currentThreadEnvironmentTable)]
             }
         }
 
@@ -219,16 +264,25 @@ extension LuaState {
             }
             switch arguments[0] {
             case let .luaFunction(function):
-                function.environmentTable = environment
+                self.setEnvironment(environment, for: function)
                 return [arguments[0]]
             case let .number(levelNumber):
                 let level = Int(levelNumber)
-                guard level > 0, let function = self.currentLuaFunction(level: level) else {
+                if level == 0 {
+                    self.currentThreadEnvironmentTable = environment
+                    return [arguments[0]]
+                }
+                // level 1 is the Lua caller; level 1 in the raw stack is this
+                // native setfenv() frame.
+                let frameLevel = level + 1
+                guard level > 0,
+                      let frame = self.currentLuaCallFrame(level: frameLevel),
+                      !frame.isTailCall,
+                      let function = self.currentLuaFunction(level: frameLevel) else {
                     throw LuaError.runtime("'setfenv' cannot change environment of given object")
                 }
-                function.environmentTable = environment
-                self.currentLuaEnvironment(level: level)?.globalTable = environment
-                return [arguments[0]]
+                self.setEnvironment(environment, for: function)
+                return [.luaFunction(function)]
             default:
                 throw LuaError.runtime("'setfenv' cannot change environment of given object")
             }
@@ -269,8 +323,12 @@ extension LuaState {
             guard let first = arguments.first, case let .table(table) = first else {
                 throw LuaError.runtime("bad argument #1 to 'unpack' (table expected)")
             }
-            let start = arguments.count > 1 ? Int(try self.numberFromValue(arguments[1])) : 1
-            let end = arguments.count > 2 ? Int(try self.numberFromValue(arguments[2])) : table.rawLength()
+            let start = arguments.count > 1 && !self.isNil(arguments[1])
+                ? Int(try self.numberFromValue(arguments[1]))
+                : 1
+            let end = arguments.count > 2 && !self.isNil(arguments[2])
+                ? Int(try self.numberFromValue(arguments[2]))
+                : table.rawLength()
             if end < start { return [] }
             return (start...end).map { table.rawValue(forNumber: Double($0)) }
         }
@@ -290,7 +348,7 @@ extension LuaState {
             )
             do {
                 let function = try self.compile(decodedSource, sourceName: sourceName)
-                function.environmentTable = self.currentLuaFunction()?.environmentTable ?? self.globalTable
+                function.environmentTable = self.currentThreadEnvironmentTable
                 return [.luaFunction(function)]
             } catch {
                 return [.nilValue, self.errorValue(error)]
@@ -320,7 +378,7 @@ extension LuaState {
                     return [.nilValue, .string("cannot decode Lua source")]
                 }
                 let function = try self.compile(decodedSource, sourceName: chunkName)
-                function.environmentTable = self.currentLuaFunction()?.environmentTable ?? self.globalTable
+                function.environmentTable = self.currentThreadEnvironmentTable
                 return [.luaFunction(function)]
             } catch {
                 return [.nilValue, self.errorValue(error)]
@@ -328,15 +386,12 @@ extension LuaState {
         }
 
         register("loadfile") { [unowned self] arguments in
-            guard let loader = self.fileLoader else {
-                return [.nilValue, .string("file loading is unavailable")]
-            }
             let filename = arguments.first.map { try? self.stringFromValue($0) } ?? nil
             guard let filename else { return [.nilValue, .string("stdin loading is unavailable")] }
             do {
-                let source = try loader(filename)
+                let source = try self.loadSourceFile(filename)
                 let function = try self.compile(source, sourceName: "@\(filename)")
-                function.environmentTable = self.currentLuaFunction()?.environmentTable ?? self.globalTable
+                function.environmentTable = self.currentThreadEnvironmentTable
                 return [.luaFunction(function)]
             } catch {
                 return [.nilValue, self.errorValue(error)]
@@ -355,9 +410,28 @@ extension LuaState {
         register("collectgarbage") { [unowned self] arguments in
             let option = arguments.first.map { try? self.stringFromValue($0) } ?? "collect"
             switch option {
-            case "collect", "stop", "restart", "step": return [.number(0)]
+            case "collect":
+                return [.number(Double(try self.garbageCollector.fullCollection()))]
+            case "stop":
+                return [.number(Double(self.garbageCollector.stop()))]
+            case "restart":
+                return [.number(Double(self.garbageCollector.restart()))]
+            case "step":
+                let size = arguments.count > 1
+                    ? Int(try self.numberFromValue(arguments[1]))
+                    : 0
+                return [.boolean(try self.garbageCollector.step(size))]
             case "count": return [.number(self.estimatedMemoryKilobytes())]
-            case "setpause", "setstepmul": return [.number(200)]
+            case "setpause":
+                let value = arguments.count > 1
+                    ? Int(try self.numberFromValue(arguments[1]))
+                    : 0
+                return [.number(Double(self.garbageCollector.setPause(value)))]
+            case "setstepmul":
+                let value = arguments.count > 1
+                    ? Int(try self.numberFromValue(arguments[1]))
+                    : 0
+                return [.number(Double(self.garbageCollector.setStepMultiplier(value)))]
             default: throw LuaError.runtime("bad argument #1 to 'collectgarbage' (invalid option)")
             }
         }
@@ -420,7 +494,7 @@ extension LuaState {
                 case let .success(values): return values
                 case let .failure(value): throw LuaRaisedError(value)
                 }
-            }, debugName: "coroutine.wrap")
+            }, debugName: "coroutine.wrap", gcReferences: { [.thread(thread)] })
             return [.nativeFunction(wrapper)]
         }
 
@@ -453,7 +527,6 @@ extension LuaState {
 
         let fileLoader = LuaNativeFunctionBox({ args in
             guard let nameValue = args.first, case let .string(moduleName) = nameValue else { return [.string("\n\tinvalid module name")] }
-            guard let hostLoader = self.fileLoader else { return [.string("\n\tno host file loader")] }
             let modulePath = moduleName.utf8String.replacingOccurrences(of: ".", with: "/")
             let pathText: String
             if case let .string(path) = package.rawValue(forString: "path") { pathText = path.utf8String }
@@ -462,9 +535,9 @@ extension LuaState {
             for template in pathText.split(separator: ";", omittingEmptySubsequences: true) {
                 let candidate = String(template).replacingOccurrences(of: "?", with: modulePath)
                 do {
-                    let source = try hostLoader(candidate)
+                    let source = try self.loadSourceFile(candidate)
                     let function = try self.compile(source, sourceName: "@\(candidate)")
-                    return [.luaFunction(function), .string(LuaString(candidate))]
+                    return [.luaFunction(function)]
                 } catch {
                     errors += "\n\tno file '\(candidate)'"
                 }
@@ -487,7 +560,6 @@ extension LuaState {
             var diagnostics = ""
             var index = 1
             var foundLoader: LuaValue?
-            var loaderExtra: LuaValue = .nilValue
             while true {
                 let loader = loaders.rawValue(forNumber: Double(index))
                 if self.isNil(loader) { break }
@@ -496,7 +568,6 @@ extension LuaState {
                     switch first {
                     case .luaFunction, .nativeFunction:
                         foundLoader = first
-                        loaderExtra = results.count > 1 ? results[1] : .nilValue
                     case let .string(message): diagnostics += message.utf8String
                     default: break
                     }
@@ -511,7 +582,9 @@ extension LuaState {
 
             // Loop sentinel compatible with the usual package.loaded behavior.
             loaded.rawSetValue(.boolean(true), forString: name)
-            let results = try self.callValue(foundLoader, arguments: [.string(name), loaderExtra])
+            // Lua 5.1 loaders receive only the module name. The searcher
+            // "extra value" parameter was introduced in later Lua versions.
+            let results = try self.callValue(foundLoader, arguments: [.string(name)])
             if let result = results.first, !self.isNil(result) {
                 loaded.rawSetValue(result, forString: name)
             }
@@ -524,21 +597,30 @@ extension LuaState {
                 throw LuaError.runtime("bad argument #1 to 'module' (string expected)")
             }
             let components = name.utf8String.split(separator: ".").map(String.init)
-            var container = self.globalTable
-            var moduleTable: LuaTable?
-            for component in components {
-                let existing = container.rawValue(forString: component)
-                if case let .table(table) = existing {
-                    moduleTable = table
-                    container = table
-                } else {
-                    let table = LuaTable()
-                    container.rawSetValue(.table(table), forString: component)
-                    moduleTable = table
-                    container = table
+            let alreadyLoaded = loaded.rawValue(forString: name)
+            let moduleTable: LuaTable
+            if case let .table(table) = alreadyLoaded {
+                moduleTable = table
+            } else {
+                var container = self.globalTable
+                var found: LuaTable?
+                for component in components {
+                    let existing = container.rawValue(forString: component)
+                    if case let .table(table) = existing {
+                        found = table
+                        container = table
+                    } else if self.isNil(existing) {
+                        let table = LuaTable()
+                        container.rawSetValue(.table(table), forString: component)
+                        found = table
+                        container = table
+                    } else {
+                        throw LuaError.runtime("name conflict for module '\(name.utf8String)'")
+                    }
                 }
+                guard let found else { throw LuaError.runtime("invalid module name") }
+                moduleTable = found
             }
-            guard let moduleTable else { throw LuaError.runtime("invalid module name") }
             moduleTable.rawSetValue(.string(name), forString: "_NAME")
             moduleTable.rawSetValue(.table(moduleTable), forString: "_M")
             let packagePrefix: String
@@ -547,8 +629,10 @@ extension LuaState {
             } else { packagePrefix = "" }
             moduleTable.rawSetValue(.string(LuaString(packagePrefix)), forString: "_PACKAGE")
             loaded.rawSetValue(.table(moduleTable), forString: name)
-            if let current = self.currentLuaFunction() { current.environmentTable = moduleTable }
-            self.currentLuaEnvironment()?.globalTable = moduleTable
+            // level 1 is this native module() frame; level 2 is its Lua caller.
+            if let current = self.currentLuaFunction(level: 2) {
+                self.setEnvironment(moduleTable, for: current)
+            }
             for option in args.dropFirst() { _ = try self.callValue(option, arguments: [.table(moduleTable)]) }
             return []
         }
@@ -658,10 +742,18 @@ extension LuaState {
         native("rep") { args in
             let value = try self.requireLuaString(args, 0, "rep")
             let count = Int(try self.requireNumber(args, 1, "rep"))
-            if count <= 0 { return [.string("")] }
-            var bytes: [UInt8] = []
-            bytes.reserveCapacity(value.count * count)
-            for _ in 0..<count { bytes += value.bytes }
+            if count <= 0 || value.isEmpty { return [.string("")] }
+            let (total, overflow) = value.count.multipliedReportingOverflow(by: count)
+            guard !overflow, total <= Int(UInt32.max) else {
+                throw LuaError.runtime("string length overflow")
+            }
+            var bytes = value.bytes
+            bytes.reserveCapacity(total)
+            while bytes.count < total {
+                let amount = min(bytes.count, total - bytes.count)
+                let chunk = Array(bytes.prefix(amount))
+                bytes.append(contentsOf: chunk)
+            }
             return [.string(LuaString(bytes: bytes))]
         }
         native("sub") { args in
@@ -723,10 +815,7 @@ extension LuaState {
             }, debugName: "string.gmatch iterator")
             return [.nativeFunction(iterator)]
         }
-        native("gfind") { [unowned self] args in
-            let gmatch = string.rawValue(forString: "gmatch")
-            return try self.callValue(gmatch, arguments: args)
-        }
+        string.rawSetValue(string.rawValue(forString: "gmatch"), forString: "gfind")
         native("gsub") { [unowned self] args in
             let subject = try self.requireLuaString(args, 0, "gsub")
             let pattern = try self.requireLuaString(args, 1, "gsub")
@@ -868,24 +957,83 @@ extension LuaState {
                 throw LuaError.runtime("bad argument #1 to 'sort' (table expected)")
             }
             let comparator = args.count > 1 ? args[1] : .nilValue
-            var values = (1...table.rawLength()).map { table.rawValue(forNumber: Double($0)) }
-            // Stable insertion sort avoids throwing from Swift's nonthrowing comparator.
-            if values.count > 1 {
-                for i in 1..<values.count {
-                    var j = i
-                    while j > 0 {
-                        let shouldSwap: Bool
-                        if self.isNil(comparator) {
-                            shouldSwap = try self.luaLessThan(values[j], values[j - 1])
-                        } else {
-                            shouldSwap = (try self.callValue(comparator, arguments: [values[j], values[j - 1]]).first ?? .nilValue).isTruthy
-                        }
-                        if !shouldSwap { break }
-                        values.swapAt(j, j - 1)
-                        j -= 1
+            switch comparator {
+            case .nilValue, .luaFunction, .nativeFunction:
+                break
+            default:
+                throw LuaError.runtime("bad argument #2 to 'sort' (function expected, got \(comparator.typeName))")
+            }
+
+            let length = table.rawLength()
+            guard length > 1 else { return [] }
+            var values = (0..<length).map { table.rawValue(forNumber: Double($0 + 1)) }
+
+            func comesBefore(_ lhs: LuaValue, _ rhs: LuaValue) throws -> Bool {
+                if self.isNil(comparator) {
+                    return try self.luaLessThan(lhs, rhs)
+                }
+                return (try self.callValue(comparator, arguments: [lhs, rhs]).first ?? .nilValue).isTruthy
+            }
+
+            // Lua 5.1's table library uses a median-of-three quicksort. Recurse
+            // into the smaller partition and iterate over the larger one so the
+            // native stack remains logarithmic even for adversarial inputs.
+            func auxiliarySort(_ initialLower: Int, _ initialUpper: Int) throws {
+                var lower = initialLower
+                var upper = initialUpper
+
+                while lower < upper {
+                    if try comesBefore(values[upper], values[lower]) {
+                        values.swapAt(lower, upper)
+                    }
+                    if upper - lower == 1 { break }
+
+                    var middle = (lower + upper) / 2
+                    if try comesBefore(values[middle], values[lower]) {
+                        values.swapAt(middle, lower)
+                    } else if try comesBefore(values[upper], values[middle]) {
+                        values.swapAt(middle, upper)
+                    }
+                    if upper - lower == 2 { break }
+
+                    values.swapAt(middle, upper - 1)
+                    let pivot = values[upper - 1]
+                    var left = lower
+                    var right = upper - 1
+
+                    while true {
+                        repeat {
+                            left += 1
+                            guard left <= upper else {
+                                throw LuaError.runtime("invalid order function for sorting")
+                            }
+                        } while try comesBefore(values[left], pivot)
+
+                        repeat {
+                            right -= 1
+                            guard right >= lower else {
+                                throw LuaError.runtime("invalid order function for sorting")
+                            }
+                        } while try comesBefore(pivot, values[right])
+
+                        if right < left { break }
+                        values.swapAt(left, right)
+                    }
+
+                    values.swapAt(upper - 1, left)
+                    middle = left
+
+                    if middle - lower < upper - middle {
+                        try auxiliarySort(lower, middle - 1)
+                        lower = middle + 1
+                    } else {
+                        try auxiliarySort(middle + 1, upper)
+                        upper = middle - 1
                     }
                 }
             }
+
+            try auxiliarySort(0, values.count - 1)
             for (index, value) in values.enumerated() { table.rawSetValue(value, forNumber: Double(index + 1)) }
             return []
         }
@@ -968,16 +1116,35 @@ extension LuaState {
         }
         native("remove") { args in
             let path = try self.requireString(args, 0, "remove")
-            do { try FileManager.default.removeItem(atPath: path); return [.boolean(true)] }
+            do {
+                if let virtualFileSystem = self.virtualFileSystem {
+                    try virtualFileSystem.removeFile(at: path)
+                } else {
+                    try FileManager.default.removeItem(atPath: path)
+                }
+                return [.boolean(true)]
+            }
             catch { return [.nilValue, .string(LuaString(error.localizedDescription))] }
         }
         native("rename") { args in
             let from = try self.requireString(args, 0, "rename")
             let to = try self.requireString(args, 1, "rename")
-            do { try FileManager.default.moveItem(atPath: from, toPath: to); return [.boolean(true)] }
+            do {
+                if let virtualFileSystem = self.virtualFileSystem {
+                    try virtualFileSystem.moveFile(from: from, to: to)
+                } else {
+                    try FileManager.default.moveItem(atPath: from, toPath: to)
+                }
+                return [.boolean(true)]
+            }
             catch { return [.nilValue, .string(LuaString(error.localizedDescription))] }
         }
-        native("tmpname") { _ in [.string(LuaString(FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path))] }
+        native("tmpname") { _ in
+            let path = self.virtualFileSystem == nil
+                ? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+                : ".tmp/\(UUID().uuidString)"
+            return [.string(LuaString(path))]
+        }
         native("execute") { _ in [.number(-1)] } // iOS does not permit spawning arbitrary processes.
         native("setlocale") { args in
             if args.isEmpty || self.isNil(args[0]) { return [.string("C")] }
@@ -995,41 +1162,152 @@ extension LuaState {
 
     private func installIOLibrary() {
         let io = LuaTable()
-        func native(_ name: String, _ body: @escaping LuaNativeFunction) {
-            io.rawSetValue(.nativeFunction(LuaNativeFunctionBox(body, debugName: "io.\(name)")), forString: name)
+        func native(
+            _ name: String,
+            gcReferences: @escaping () -> [LuaValue] = { [] },
+            _ body: @escaping LuaNativeFunction
+        ) {
+            io.rawSetValue(
+                .nativeFunction(LuaNativeFunctionBox(
+                    body,
+                    debugName: "io.\(name)",
+                    gcReferences: gcReferences
+                )),
+                forString: name
+            )
         }
+
+        func file(from value: LuaValue, function: String) throws -> LuaFile {
+            guard case let .userdata(userdata) = value,
+                  let file = userdata.payload as? LuaFile else {
+                throw LuaError.runtime("bad argument #1 to '\(function)' (file expected)")
+            }
+            return file
+        }
+
+        func openValue(path: String, mode: String) throws -> LuaValue {
+            .userdata(makeFileUserdata(try LuaFile.open(
+                path: path,
+                mode: mode,
+                virtualFileSystem: virtualFileSystem
+            )))
+        }
+
+        // The embedded runtime has no process-level stdin/stdout FILE pointers,
+        // but Lua code relies on their identity and file-handle behaviour. Keep
+        // sandboxed handles for those values; io.write still forwards stdout to
+        // the host console emitter below.
+        let standardFileSystem = try! LuaMemoryFileSystem(initialFiles: [
+            ".stdio/stdin": Data(),
+            ".stdio/stdout": Data(),
+            ".stdio/stderr": Data()
+        ])
+        let stdinValue = LuaValue.userdata(makeFileUserdata(
+            try! LuaFile.open(path: ".stdio/stdin", mode: "r", virtualFileSystem: standardFileSystem),
+            closeOnGC: false
+        ))
+        let stdoutValue = LuaValue.userdata(makeFileUserdata(
+            try! LuaFile.open(path: ".stdio/stdout", mode: "a", virtualFileSystem: standardFileSystem),
+            closeOnGC: false
+        ))
+        let stderrValue = LuaValue.userdata(makeFileUserdata(
+            try! LuaFile.open(path: ".stdio/stderr", mode: "a", virtualFileSystem: standardFileSystem),
+            closeOnGC: false
+        ))
+        io.rawSetValue(stdinValue, forString: "stdin")
+        io.rawSetValue(stdoutValue, forString: "stdout")
+        io.rawSetValue(stderrValue, forString: "stderr")
+        var defaultInput = stdinValue
+        var defaultOutput = stdoutValue
 
         native("open") { [unowned self] args in
             let path = try self.requireString(args, 0, "open")
             let mode = args.count > 1 ? try self.stringFromValue(args[1]) : "r"
             do {
-                let file = try LuaFile.open(path: path, mode: mode)
-                return [.userdata(self.makeFileUserdata(file))]
+                return [try openValue(path: path, mode: mode)]
             } catch {
                 return [.nilValue, .string(LuaString(error.localizedDescription))]
             }
         }
 
-        native("lines") { [unowned self] args in
+        native("lines", gcReferences: { [defaultInput, defaultOutput] }) { [unowned self] args in
+            if args.isEmpty {
+                let input = try file(from: defaultInput, function: "lines")
+                return [.nativeFunction(self.makeLineIterator(
+                    input,
+                    closeOnEOF: false,
+                    retainedValue: defaultInput
+                ))]
+            }
             let path = try self.requireString(args, 0, "lines")
-            let file = try LuaFile.open(path: path, mode: "r")
-            return [.nativeFunction(self.makeLineIterator(file, closeOnEOF: true))]
+            let value = try openValue(path: path, mode: "r")
+            return [.nativeFunction(self.makeLineIterator(
+                try file(from: value, function: "lines"),
+                closeOnEOF: true,
+                retainedValue: value
+            ))]
         }
 
         native("write") { [unowned self] args in
-            self.emit(try args.map { try self.luaString($0) }.joined())
+            if self.rawEqual(defaultOutput, stdoutValue) {
+                let bytes = try args.flatMap { try self.luaStringBytes($0).bytes }
+                self.emit(LuaString(bytes: bytes).utf8String)
+                return [stdoutValue]
+            }
+            let output = try file(from: defaultOutput, function: "write")
+            do {
+                try output.validateWritable()
+                for value in args { try output.write(self.luaStringBytes(value).bytes) }
+                return [defaultOutput]
+            } catch let error as LuaFileOperationError where error.isRecoverableIOFailure {
+                return self.luaFileFailure(error)
+            }
+        }
+        native("flush") { _ in
+            guard case .nilValue = defaultOutput else {
+                try file(from: defaultOutput, function: "flush").flush()
+                return [.boolean(true)]
+            }
             return [.boolean(true)]
         }
-        native("flush") { _ in [.boolean(true)] }
-        native("close") { _ in [.boolean(true)] }
-        native("input") { _ in [.nilValue] }
-        native("output") { _ in [.nilValue] }
-        native("read") { _ in [.nilValue] }
-        native("popen") { _ in [.nilValue, .string("popen is unavailable on iOS")] }
+        native("close") { args in
+            let target = args.first ?? defaultOutput
+            if case .nilValue = target { return [.boolean(true)] }
+            try file(from: target, function: "close").close()
+            return [.boolean(true)]
+        }
+        native("input") { [unowned self] args in
+            guard let value = args.first else { return [defaultInput] }
+            if case .string = value {
+                defaultInput = try openValue(path: try self.stringFromValue(value), mode: "r")
+            } else {
+                _ = try file(from: value, function: "input")
+                defaultInput = value
+            }
+            return [defaultInput]
+        }
+        native("output") { [unowned self] args in
+            guard let value = args.first else { return [defaultOutput] }
+            if case .string = value {
+                defaultOutput = try openValue(path: try self.stringFromValue(value), mode: "w")
+            } else {
+                _ = try file(from: value, function: "output")
+                defaultOutput = value
+            }
+            return [defaultOutput]
+        }
+        native("read") { args in
+            let input = try file(from: defaultInput, function: "read")
+            return try self.readFile(input, formats: args)
+        }
+        native("popen") { _ in
+            throw LuaError.runtime("popen is unavailable in the embedded runtime")
+        }
         native("tmpfile") { [unowned self] _ in
-            let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
-            let file = try LuaFile.open(path: path, mode: "w+")
-            return [.userdata(self.makeFileUserdata(file))]
+            let path = self.virtualFileSystem == nil
+                ? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+                : ".tmp/\(UUID().uuidString)"
+            return [try openValue(path: path, mode: "w+")]
         }
         native("type") { args in
             guard let first = args.first, case let .userdata(ud) = first, let file = ud.payload as? LuaFile else { return [.nilValue] }
@@ -1069,15 +1347,17 @@ extension LuaState {
             case let .luaFunction(function): return [.table(function.environmentTable)]
             case let .userdata(userdata): return [.table(userdata.environment ?? self.globalTable)]
             case let .nativeFunction(function): return [.table(function.environment ?? self.globalTable)]
+            case let .thread(thread): return [.table(thread.environmentTable)]
             default: return [.table(self.globalTable)]
             }
         }
         native("setfenv") { args in
             guard args.count >= 2, case let .table(env) = args[1] else { throw LuaError.runtime("table expected") }
             switch args[0] {
-            case let .luaFunction(function): function.environmentTable = env
+            case let .luaFunction(function): self.setEnvironment(env, for: function)
             case let .userdata(userdata): userdata.environment = env
             case let .nativeFunction(function): function.environment = env
+            case let .thread(thread): thread.environmentTable = env
             default: throw LuaError.runtime("cannot change environment")
             }
             return [args[0]]
@@ -1195,9 +1475,10 @@ extension LuaState {
                 messageIndex = 1
                 defaultLevel = 0
             } else {
-                sourceFrames = self.currentCallStack().frames
+                let failedFrames = self.failureFramesForCurrentThread()
+                sourceFrames = failedFrames ?? self.currentCallStack().frames
                 messageIndex = 0
-                defaultLevel = 1
+                defaultLevel = failedFrames == nil ? 1 : 0
             }
 
             var message: String?
@@ -1398,7 +1679,10 @@ extension LuaState {
 
     func requireNumber(_ args: [LuaValue], _ index: Int, _ name: String) throws -> Double {
         guard index < args.count else { throw LuaError.runtime("bad argument #\(index + 1) to '\(name)' (number expected)") }
-        return try numberFromValue(args[index])
+        guard let number = coerceNumber(args[index]) else {
+            throw LuaError.runtime("bad argument #\(index + 1) to '\(name)' (number expected)")
+        }
+        return number
     }
 
     func requireString(_ args: [LuaValue], _ index: Int, _ name: String) throws -> String {
@@ -1485,7 +1769,11 @@ extension LuaState {
                     if code >= 48, code <= 57 {
                         let index = Int(code - 48)
                         if index == 0 { out += whole.bytes }
-                        else if index - 1 < captures.count { out += try luaStringBytes(captures[index - 1]).bytes }
+                        else if index - 1 < captures.count {
+                            out += try luaStringBytes(captures[index - 1]).bytes
+                        } else {
+                            throw LuaError.runtime("invalid capture index")
+                        }
                         i += 2; continue
                     }
                 }
@@ -1594,7 +1882,7 @@ extension LuaState {
         return result
     }
 
-    func estimatedMemoryKilobytes() -> Double { 0 }
+    func estimatedMemoryKilobytes() -> Double { garbageCollector.memoryKilobytes() }
 
     func numberOrDefault(_ value: LuaValue, _ fallback: Double) -> Double {
         (try? numberFromValue(value)) ?? fallback
@@ -1608,6 +1896,11 @@ extension LuaState {
         formatter.timeZone = calendar.timeZone
         // Common Lua/C strftime tokens. Unknown tokens are preserved.
         var result = format
+        let components = calendar.dateComponents([.weekday], from: date)
+        let weekday = (components.weekday ?? 1) - 1 // C strftime: Sunday is zero.
+        let yearDay = calendar.ordinality(of: .day, in: .year, for: date) ?? 1
+        result = result.replacingOccurrences(of: "%w", with: String(weekday))
+        result = result.replacingOccurrences(of: "%j", with: String(format: "%03d", yearDay))
         let replacements: [(String, String)] = [
             ("%Y", "yyyy"), ("%y", "yy"), ("%m", "MM"), ("%d", "dd"),
             ("%H", "HH"), ("%M", "mm"), ("%S", "ss"), ("%c", "yyyy-MM-dd HH:mm:ss"),
@@ -1622,7 +1915,26 @@ extension LuaState {
         return result
     }
 
-    func makeFileUserdata(_ file: LuaFile) -> LuaUserdata {
+    func loadSourceFile(_ path: String) throws -> String {
+        if let virtualFileSystem, virtualFileSystem.fileExists(at: path) {
+            let data = try virtualFileSystem.readFile(at: path)
+            guard let source = LuaSourceDecoder.decode(data) else {
+                throw LuaError.runtime("cannot decode Lua source: \(path)")
+            }
+            return source
+        }
+        if let fileLoader { return try fileLoader(path) }
+        if virtualFileSystem == nil, FileManager.default.fileExists(atPath: path) {
+            let data = try Data(contentsOf: URL(fileURLWithPath: path))
+            guard let source = LuaSourceDecoder.decode(data) else {
+                throw LuaError.runtime("cannot decode Lua source: \(path)")
+            }
+            return source
+        }
+        throw LuaError.runtime("file not found: \(path)")
+    }
+
+    func makeFileUserdata(_ file: LuaFile, closeOnGC: Bool = true) -> LuaUserdata {
         let userdata = LuaUserdata(payload: file)
         let methods = LuaTable()
         methods.rawSetValue(.nativeFunction(LuaNativeFunctionBox({ args in
@@ -1632,42 +1944,92 @@ extension LuaState {
         methods.rawSetValue(.nativeFunction(LuaNativeFunctionBox({ [unowned self] args in
             guard let first = args.first, case let .userdata(ud) = first, let file = ud.payload as? LuaFile else { throw LuaError.runtime("file expected") }
             let formats = Array(args.dropFirst())
-            return try self.readFile(file, formats: formats)
+            do {
+                return try self.readFile(file, formats: formats)
+            } catch let error as LuaFileOperationError where error.isRecoverableIOFailure {
+                return self.luaFileFailure(error)
+            }
         })), forString: "read")
         methods.rawSetValue(.nativeFunction(LuaNativeFunctionBox({ [unowned self] args in
             guard let first = args.first, case let .userdata(ud) = first, let file = ud.payload as? LuaFile else { throw LuaError.runtime("file expected") }
-            for value in args.dropFirst() { try file.write(self.luaStringBytes(value).bytes) }
-            return [first]
+            do {
+                try file.validateWritable()
+                for value in args.dropFirst() { try file.write(self.luaStringBytes(value).bytes) }
+                return [first]
+            } catch let error as LuaFileOperationError where error.isRecoverableIOFailure {
+                return self.luaFileFailure(error)
+            }
         })), forString: "write")
         methods.rawSetValue(.nativeFunction(LuaNativeFunctionBox({ args in
             guard let first = args.first, case let .userdata(ud) = first, let file = ud.payload as? LuaFile else { throw LuaError.runtime("file expected") }
-            try file.flush(); return [.boolean(true)]
+            do {
+                try file.flush()
+                return [.boolean(true)]
+            } catch let error as LuaFileOperationError where error.isRecoverableIOFailure {
+                return self.luaFileFailure(error)
+            }
         })), forString: "flush")
         methods.rawSetValue(.nativeFunction(LuaNativeFunctionBox({ [unowned self] args in
             guard let first = args.first, case let .userdata(ud) = first, let file = ud.payload as? LuaFile else { throw LuaError.runtime("file expected") }
             let whence = args.count > 1 ? try self.stringFromValue(args[1]) : "cur"
             let offset = args.count > 2 ? Int64(try self.numberFromValue(args[2])) : 0
-            return [.number(Double(try file.seek(whence: whence, offset: offset)))]
+            do {
+                return [.number(Double(try file.seek(whence: whence, offset: offset)))]
+            } catch let error as LuaFileOperationError where error.isRecoverableIOFailure {
+                return self.luaFileFailure(error)
+            }
         })), forString: "seek")
-        methods.rawSetValue(.nativeFunction(makeLineIterator(file, closeOnEOF: false)), forString: "lines")
-        methods.rawSetValue(.nativeFunction(LuaNativeFunctionBox({ _ in [] })), forString: "setvbuf")
+        methods.rawSetValue(.nativeFunction(LuaNativeFunctionBox({ [unowned self] args in
+            guard let first = args.first,
+                  case let .userdata(ud) = first,
+                  let target = ud.payload as? LuaFile else { throw LuaError.runtime("file expected") }
+            return [.nativeFunction(self.makeLineIterator(
+                target,
+                closeOnEOF: false,
+                retainedValue: first
+            ))]
+        })), forString: "lines")
+        methods.rawSetValue(.nativeFunction(LuaNativeFunctionBox({ [unowned self] args in
+            guard let first = args.first,
+                  case let .userdata(ud) = first,
+                  let target = ud.payload as? LuaFile else { throw LuaError.runtime("file expected") }
+            let mode = try self.requireString(args, 1, "setvbuf")
+            let size = args.count > 2 ? Int(try self.numberFromValue(args[2])) : nil
+            try target.setBuffer(mode: mode, size: size)
+            return [.boolean(true)]
+        })), forString: "setvbuf")
         let mt = LuaTable()
         mt.rawSetValue(.table(methods), forString: "__index")
         mt.rawSetValue(.nativeFunction(LuaNativeFunctionBox({ args in
-            guard let first = args.first, case let .userdata(ud) = first, let file = ud.payload as? LuaFile else { return [] }
-            try? file.close(); return []
+            guard let first = args.first else {
+                throw LuaError.runtime("bad argument #1 to '__gc' (FILE* expected, got no value)")
+            }
+            guard case let .userdata(ud) = first, let file = ud.payload as? LuaFile else {
+                throw LuaError.runtime("bad argument #1 to '__gc' (FILE* expected)")
+            }
+            if closeOnGC { try? file.close() }
+            return []
         })), forString: "__gc")
-        mt.rawSetValue(.string("FILE*"), forString: "__metatable")
+        mt.rawSetValue(.nativeFunction(LuaNativeFunctionBox({ args in
+            guard let first = args.first,
+                  case let .userdata(ud) = first,
+                  let file = ud.payload as? LuaFile else { return [.string("file")] }
+            return [.string(LuaString(file.closed ? "file (closed)" : "file (open)"))]
+        })), forString: "__tostring")
         userdata.metatable = mt
         return userdata
     }
 
-    func makeLineIterator(_ file: LuaFile, closeOnEOF: Bool) -> LuaNativeFunctionBox {
+    func makeLineIterator(
+        _ file: LuaFile,
+        closeOnEOF: Bool,
+        retainedValue: LuaValue
+    ) -> LuaNativeFunctionBox {
         LuaNativeFunctionBox({ _ in
             if let line = try file.readLine() { return [.string(LuaString(bytes: line))] }
             if closeOnEOF { try? file.close() }
             return []
-        }, debugName: "file:lines iterator")
+        }, debugName: "file:lines iterator", gcReferences: { [retainedValue] })
     }
 
     func readFile(_ file: LuaFile, formats: [LuaValue]) throws -> [LuaValue] {
@@ -1681,12 +2043,12 @@ extension LuaState {
             }
             let format = try stringFromValue(formatValue)
             switch format {
-            case "*l":
+            case "*l", "*line":
                 if let line = try file.readLine() { results.append(.string(LuaString(bytes: line))) }
                 else { results.append(.nilValue) }
-            case "*a":
+            case "*a", "*all":
                 results.append(.string(LuaString(bytes: try file.readAll())))
-            case "*n":
+            case "*n", "*number":
                 if let number = try file.readNumber() { results.append(.number(number)) }
                 else { results.append(.nilValue) }
             default: throw LuaError.runtime("invalid format")
@@ -1694,121 +2056,418 @@ extension LuaState {
         }
         return results
     }
+
+    func luaFileFailure(_ error: Error) -> [LuaValue] {
+        let message: String
+        if let localized = error as? LocalizedError, let description = localized.errorDescription {
+            message = description
+        } else {
+            message = String(describing: error)
+        }
+        let errorCode = (error as? LuaFileOperationError)?.errorCode ?? 5
+        return [.nilValue, .string(LuaString(message)), .number(Double(errorCode))]
+    }
 }
 
 // MARK: - Lua file object
 
+enum LuaFileOperationError: Error, LocalizedError {
+    case closed
+    case notReadable
+    case notWritable
+    case invalidSeekOption(String)
+    case negativeSeek
+    case invalidReadCount
+
+    var errorDescription: String? {
+        switch self {
+        case .closed: return "attempt to use a closed file"
+        case .notReadable: return "file is not readable"
+        case .notWritable: return "file is not writable"
+        case let .invalidSeekOption(option): return "invalid seek option '\(option)'"
+        case .negativeSeek: return "invalid seek position"
+        case .invalidReadCount: return "invalid read count"
+        }
+    }
+
+    var errorCode: Int {
+        switch self {
+        case .closed, .notReadable, .notWritable: return 9 // EBADF
+        case .invalidSeekOption, .negativeSeek, .invalidReadCount: return 22 // EINVAL
+        }
+    }
+
+    var isRecoverableIOFailure: Bool {
+        switch self {
+        case .notReadable, .notWritable, .negativeSeek: return true
+        case .closed, .invalidSeekOption, .invalidReadCount: return false
+        }
+    }
+}
+
 final class LuaFile: @unchecked Sendable {
-    let handle: FileHandle
+    private enum BufferMode {
+        case none
+        case full
+        case line
+    }
+
+    private let handle: FileHandle?
+    private let hostPath: String?
+    private let virtualFileSystem: LuaVirtualFileSystem?
+    private let virtualPath: String?
+    private var virtualBytes: [UInt8]
+    private var virtualOffset: Int
+    private var virtualDirty = false
+    private var hostBufferingActive = false
+    private let appendMode: Bool
+    private var bufferMode: BufferMode = .none
     let readable: Bool
     let writable: Bool
     var closed = false
     private var pushback: [UInt8] = []
 
-    private init(handle: FileHandle, readable: Bool, writable: Bool) {
+    private init(handle: FileHandle, hostPath: String, readable: Bool, writable: Bool, appendMode: Bool) {
         self.handle = handle
+        self.hostPath = hostPath
+        self.virtualFileSystem = nil
+        self.virtualPath = nil
+        self.virtualBytes = []
+        self.virtualOffset = 0
+        self.appendMode = appendMode
         self.readable = readable
         self.writable = writable
     }
 
-    static func open(path: String, mode: String) throws -> LuaFile {
+    private init(
+        virtualFileSystem: LuaVirtualFileSystem,
+        path: String,
+        bytes: [UInt8],
+        offset: Int,
+        readable: Bool,
+        writable: Bool,
+        appendMode: Bool
+    ) {
+        self.handle = nil
+        self.hostPath = nil
+        self.virtualFileSystem = virtualFileSystem
+        self.virtualPath = path
+        self.virtualBytes = bytes
+        self.virtualOffset = offset
+        self.appendMode = appendMode
+        self.readable = readable
+        self.writable = writable
+    }
+
+    static func open(
+        path: String,
+        mode rawMode: String,
+        virtualFileSystem: LuaVirtualFileSystem? = nil
+    ) throws -> LuaFile {
+        let mode = rawMode.replacingOccurrences(of: "b", with: "")
+        guard ["r", "w", "a", "r+", "w+", "a+"].contains(mode) else {
+            throw LuaError.runtime("invalid file mode")
+        }
+        let readable = mode.hasPrefix("r") || mode.contains("+")
+        let writable = mode.hasPrefix("w") || mode.hasPrefix("a") || mode.contains("+")
+        let appendMode = mode.hasPrefix("a")
+
+        if let virtualFileSystem {
+            let exists = virtualFileSystem.fileExists(at: path)
+            if mode.hasPrefix("r"), !exists {
+                throw LuaVirtualFileSystemError.fileNotFound(path)
+            }
+            var bytes = exists ? Array(try virtualFileSystem.readFile(at: path)) : []
+            if mode.hasPrefix("w") { bytes.removeAll() }
+            if mode.hasPrefix("w") || mode.hasPrefix("a") {
+                try virtualFileSystem.writeFile(Data(bytes), at: path)
+            }
+            let file = LuaFile(
+                virtualFileSystem: virtualFileSystem,
+                path: path,
+                bytes: bytes,
+                offset: appendMode ? bytes.count : 0,
+                readable: readable,
+                writable: writable,
+                appendMode: appendMode
+            )
+            // Regular C stdio streams are buffered by default. Besides matching
+            // Lua 5.1, this prevents a VFS-backed write from copying the entire
+            // file after every small io.write argument.
+            try file.setBuffer(mode: "full", size: nil)
+            return file
+        }
+
         let fm = FileManager.default
-        let readable = mode.contains("r") || mode.contains("+")
-        let writable = mode.contains("w") || mode.contains("a") || mode.contains("+")
         if mode.contains("w") {
             _ = fm.createFile(atPath: path, contents: Data())
         } else if mode.contains("a"), !fm.fileExists(atPath: path) {
             _ = fm.createFile(atPath: path, contents: Data())
         }
-        let handle = try FileHandle(forUpdating: URL(fileURLWithPath: path))
+        let url = URL(fileURLWithPath: path)
+        let handle = writable ? try FileHandle(forUpdating: url) : try FileHandle(forReadingFrom: url)
         if mode.contains("w") { try handle.truncate(atOffset: 0); try handle.seek(toOffset: 0) }
         if mode.contains("a") { try handle.seekToEnd() }
-        return LuaFile(handle: handle, readable: readable, writable: writable)
+        let file = LuaFile(
+            handle: handle,
+            hostPath: path,
+            readable: readable,
+            writable: writable,
+            appendMode: appendMode
+        )
+        if writable {
+            try file.setBuffer(mode: "full", size: nil)
+        } else {
+            // Foundation's Windows FileHandle can retain an EOF view even
+            // after another handle flushes the same file. Read through a
+            // path-refreshed snapshot so seek()+read observes that flush,
+            // matching C stdio and the Lua 5.1 files.lua contract.
+            try file.activateHostBufferIfNeeded()
+        }
+        return file
     }
 
     func close() throws {
-        guard !closed else { return }
-        try handle.close(); closed = true
+        guard !closed else { throw LuaFileOperationError.closed }
+        try flush()
+        if let handle { try handle.close() }
+        closed = true
     }
 
-    func flush() throws { try ensureOpen(); try handle.synchronize() }
+    func flush() throws {
+        try ensureOpen()
+        if let virtualFileSystem, let virtualPath, writable, virtualDirty {
+            try virtualFileSystem.writeFile(Data(virtualBytes), at: virtualPath)
+            virtualDirty = false
+        } else if hostBufferingActive, let handle, writable, virtualDirty {
+            let position = UInt64(max(0, virtualOffset))
+            try handle.seek(toOffset: 0)
+            try handle.truncate(atOffset: 0)
+            try handle.write(contentsOf: Data(virtualBytes))
+            try handle.seek(toOffset: position)
+            try handle.synchronize()
+            virtualDirty = false
+        } else if let handle, writable {
+            try handle.synchronize()
+        }
+    }
 
     func write(_ bytes: [UInt8]) throws {
-        try ensureOpen(); guard writable else { throw LuaError.runtime("file is not writable") }
-        try handle.write(contentsOf: Data(bytes))
+        try validateWritable()
+        if usesMemoryBuffer {
+            try refreshVirtualBytesIfClean()
+            if appendMode { virtualOffset = virtualBytes.count }
+            if virtualOffset > virtualBytes.count {
+                virtualBytes += Array(repeating: 0, count: virtualOffset - virtualBytes.count)
+            }
+            let overwriteCount = min(bytes.count, virtualBytes.count - virtualOffset)
+            if overwriteCount > 0 {
+                virtualBytes.replaceSubrange(
+                    virtualOffset..<(virtualOffset + overwriteCount),
+                    with: bytes.prefix(overwriteCount)
+                )
+            }
+            if overwriteCount < bytes.count {
+                virtualBytes.append(contentsOf: bytes.dropFirst(overwriteCount))
+            }
+            virtualOffset += bytes.count
+            virtualDirty = true
+            switch bufferMode {
+            case .none:
+                try flush()
+            case .line where bytes.contains(10):
+                try flush()
+            case .line, .full:
+                break
+            }
+        } else if let handle {
+            if appendMode { try handle.seekToEnd() }
+            try handle.write(contentsOf: Data(bytes))
+        }
+    }
+
+    func validateWritable() throws {
+        try ensureOpen()
+        guard writable else { throw LuaFileOperationError.notWritable }
     }
 
     func read(count: Int) throws -> [UInt8]? {
-        try ensureOpen(); guard readable else { throw LuaError.runtime("file is not readable") }
-        if count == 0 { return [] }
+        try ensureOpen()
+        guard readable else { throw LuaFileOperationError.notReadable }
+        guard count >= 0 else { throw LuaFileOperationError.invalidReadCount }
+        try refreshVirtualBytesIfClean()
+        if count == 0 { return try isAtEndOfFile() ? nil : [] }
         var result: [UInt8] = []
         while !pushback.isEmpty && result.count < count { result.append(pushback.removeFirst()) }
-        if result.count < count, let data = try handle.read(upToCount: count - result.count), !data.isEmpty { result += data }
+        if result.count < count {
+            if usesMemoryBuffer {
+                let amount = min(count - result.count, virtualBytes.count - virtualOffset)
+                if amount > 0 {
+                    result += virtualBytes[virtualOffset..<(virtualOffset + amount)]
+                    virtualOffset += amount
+                }
+            } else if let handle, let data = try handle.read(upToCount: count - result.count), !data.isEmpty {
+                result += data
+            }
+        }
         return result.isEmpty ? nil : result
     }
 
     func readAll() throws -> [UInt8] {
-        try ensureOpen(); guard readable else { throw LuaError.runtime("file is not readable") }
+        try ensureOpen()
+        guard readable else { throw LuaFileOperationError.notReadable }
+        try refreshVirtualBytesIfClean()
         var result = pushback; pushback.removeAll()
-        if let data = try handle.readToEnd() { result += data }
+        if usesMemoryBuffer {
+            if virtualOffset < virtualBytes.count { result += virtualBytes[virtualOffset...] }
+            virtualOffset = virtualBytes.count
+        } else if let handle, let data = try handle.readToEnd() {
+            result += data
+        }
         return result
     }
 
     func readLine() throws -> [UInt8]? {
         var bytes: [UInt8] = []
+        var consumed = false
         while let next = try read(count: 1)?.first {
+            consumed = true
             if next == 10 { break }
             bytes.append(next)
         }
-        return bytes.isEmpty ? nil : bytes
+        return consumed ? bytes : nil
     }
 
     func readNumber() throws -> Double? {
         try ensureOpen()
-        guard readable else { throw LuaError.runtime("file is not readable") }
+        guard readable else { throw LuaFileOperationError.notReadable }
 
         // Lua's *n reader skips leading whitespace, consumes one numeric token,
         // and leaves the first non-number byte for the next read.
-        var bytes: [UInt8] = []
-        var started = false
-        let allowed = Set("+-.0123456789eExXaAbBcCdDeEfF".utf8)
+        var candidate: [UInt8] = []
+        var terminator: UInt8?
+        let potentialNumberBytes = Set("+-.0123456789eExXaAbBcCdDeEfF".utf8)
 
         while let byte = try read(count: 1)?.first {
-            if !started && [9, 10, 13, 32].contains(byte) { continue }
-            if allowed.contains(byte) {
-                started = true
-                bytes.append(byte)
-                continue
+            if candidate.isEmpty && [9, 10, 11, 12, 13, 32].contains(byte) { continue }
+            guard potentialNumberBytes.contains(byte) else {
+                terminator = byte
+                break
             }
-            pushback.insert(byte, at: 0)
-            break
+            candidate.append(byte)
         }
 
-        guard !bytes.isEmpty else { return nil }
-        let text = String(decoding: bytes, as: UTF8.self)
-        if text.lowercased().hasPrefix("0x") {
-            let body = String(text.dropFirst(2))
-            if let value = UInt64(body, radix: 16) { return Double(value) }
+        for prefixLength in stride(from: candidate.count, through: 1, by: -1) {
+            let prefix = Array(candidate.prefix(prefixLength))
+            if let value = Self.parseNumber(prefix) {
+                var unread = Array(candidate.dropFirst(prefixLength))
+                if let terminator { unread.append(terminator) }
+                pushback.insert(contentsOf: unread, at: 0)
+                return value
+            }
         }
-        return Double(text)
+
+        var unread = candidate
+        if let terminator { unread.append(terminator) }
+        pushback.insert(contentsOf: unread, at: 0)
+        return nil
     }
 
     func seek(whence: String, offset: Int64) throws -> UInt64 {
         try ensureOpen()
+        if virtualDirty { try flush() }
+        try refreshVirtualBytesIfClean()
         let base: Int64
         switch whence {
         case "set": base = 0
-        case "cur": base = Int64(try handle.offset())
-        case "end": base = Int64(try handle.seekToEnd())
-        default: throw LuaError.runtime("invalid option")
+        case "cur":
+            let physical = usesMemoryBuffer ? Int64(virtualOffset) : Int64(try handle?.offset() ?? 0)
+            base = physical - Int64(pushback.count)
+        case "end":
+            base = usesMemoryBuffer ? Int64(virtualBytes.count) : Int64(try handle?.seekToEnd() ?? 0)
+        default: throw LuaFileOperationError.invalidSeekOption(whence)
         }
-        let target = max(0, base + offset)
-        try handle.seek(toOffset: UInt64(target))
+        let target = base + offset
+        guard target >= 0 else { throw LuaFileOperationError.negativeSeek }
+        pushback.removeAll()
+        if usesMemoryBuffer { virtualOffset = Int(target) }
+        else { try handle?.seek(toOffset: UInt64(target)) }
         return UInt64(target)
     }
 
+    func setBuffer(mode: String, size: Int?) throws {
+        try ensureOpen()
+        if let size, size <= 0 { throw LuaFileOperationError.invalidReadCount }
+        if virtualDirty { try flush() }
+        switch mode {
+        case "no":
+            bufferMode = .none
+            if hostBufferingActive {
+                try handle?.seek(toOffset: UInt64(max(0, virtualOffset)))
+                hostBufferingActive = false
+            }
+        case "full":
+            bufferMode = .full
+            try activateHostBufferIfNeeded()
+        case "line":
+            bufferMode = .line
+            try activateHostBufferIfNeeded()
+        default: throw LuaError.runtime("invalid option '\(mode)' to 'setvbuf'")
+        }
+    }
+
+    private var usesMemoryBuffer: Bool {
+        virtualFileSystem != nil || hostBufferingActive
+    }
+
+    private func activateHostBufferIfNeeded() throws {
+        guard virtualFileSystem == nil, !hostBufferingActive, let handle else { return }
+        let current = try handle.offset()
+        try handle.seek(toOffset: 0)
+        virtualBytes = Array(try handle.readToEnd() ?? Data())
+        virtualOffset = Int(current)
+        try handle.seek(toOffset: current)
+        hostBufferingActive = true
+    }
+
+    private func refreshVirtualBytesIfClean() throws {
+        guard !virtualDirty else { return }
+        if let virtualFileSystem, let virtualPath {
+            virtualBytes = Array(try virtualFileSystem.readFile(at: virtualPath))
+        } else if hostBufferingActive, !writable, let hostPath {
+            virtualBytes = Array(try Data(contentsOf: URL(fileURLWithPath: hostPath)))
+        }
+    }
+
+    private func isAtEndOfFile() throws -> Bool {
+        if !pushback.isEmpty { return false }
+        if usesMemoryBuffer { return virtualOffset >= virtualBytes.count }
+        guard let handle else { return true }
+        let current = try handle.offset()
+        let end = try handle.seekToEnd()
+        try handle.seek(toOffset: current)
+        return current >= end
+    }
+
+    private static func parseNumber(_ bytes: [UInt8]) -> Double? {
+        var text = String(decoding: bytes, as: UTF8.self)
+        var sign = 1.0
+        if text.first == "-" {
+            sign = -1
+            text.removeFirst()
+        } else if text.first == "+" {
+            text.removeFirst()
+        }
+        if text.lowercased().hasPrefix("0x") {
+            let digits = String(text.dropFirst(2))
+            guard !digits.isEmpty, let value = UInt64(digits, radix: 16) else { return nil }
+            return sign * Double(value)
+        }
+        return Double(String(decoding: bytes, as: UTF8.self))
+    }
+
     private func ensureOpen() throws {
-        if closed { throw LuaError.runtime("attempt to use a closed file") }
+        if closed { throw LuaFileOperationError.closed }
     }
 }
 

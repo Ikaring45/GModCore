@@ -1,16 +1,73 @@
-# GModCore
+# Garry's PAD / GModCore
 
-## Windows Lua 5.1 conformance runner
+Garry's PAD is an experimental compatibility runtime for running Garry's Mod
+Lua, gamemodes, and Source assets natively on iPad. It is not a Windows
+emulator or a remote-play client. The shipping architecture is Swift ARM64 +
+Metal, hosted by Swift Playgrounds.
 
-The pure Swift `GModLua` runtime can be built and tested without the iPad UI or
-Metal renderer. On Windows with the official Swift toolchain installed, run:
+The objective is compatibility, not a mobile sandbox that merely resembles
+Garry's Mod. Wherever practical, the original Lua gamemode and Spawnmenu code
+should run on a compatible runtime instead of being reimplemented as a separate
+Swift UI.
 
-```powershell
-swift run GModLuaConformance
+## Current milestone
+
+The pure-Swift `GModLua` runtime now runs the Lua 5.1 official basic test corpus
+through `final OK !!!` and all cleanup collections. The passing Windows run
+executes the real `gc.lua`, including weak tables, userdata finalizers,
+incremental steps, and its 200,000-node deep structure. CORE language, debug,
+calls, strings, literals, attributes/modules, closures, errors, math, sort,
+large-program, and file/IO tests run in their original order.
+
+The following categories remain deliberately separate from that result:
+
+- `main.lua`: standalone CLI/process behavior, not the embedded language runtime
+- `api.lua`: PUC Lua internal C-API test, not applicable to a pure-Swift VM
+- PUC binary chunks: `string.dump` currently provides an internal GModLua
+  round-trip format, not PUC bytecode interoperability
+
+No skipped or unfinished feature is reported as a pass. See
+[`LUA51_CONFORMANCE_STATUS.md`](LUA51_CONFORMANCE_STATUS.md) for the exact
+verification boundary.
+
+## Verified native path
+
+- iPad / Swift Playgrounds host
+- ARM64 Swift runtime
+- Metal rendering on Apple M5 GPU
+- approximately 120 render FPS in the current preview
+- fixed simulation interval `0.015` seconds (approximately 66.67 ticks/s)
+- render and simulation clocks are independent
+- GMod-style developer console with direct Lua and `lua_run` input
+
+Windows is used for fast Lua compatibility iteration only. The same pure-Swift
+runtime source is consumed by Swift Playgrounds; final UI, Metal, filesystem,
+and sandbox behavior still require iPad validation.
+
+## Architecture
+
+```text
+Swift Playgrounds / iPadOS
+├─ GModApp       console, app lifecycle, input
+├─ GModMetal     ARM64 Metal renderer
+├─ GModEngine    realms, VFS mounts, include/require boot flow
+└─ GModLua       pure-Swift Lua 5.1 + GLua compatibility runtime
 ```
 
-Individual Lua files and short diagnostic snippets can use the same native
-runtime without launching Swift Playgrounds:
+The existing `GModCore` C ABI remains available for native engine experiments,
+but Lua execution is not delegated to a Windows binary or an emulated PUC Lua
+process.
+
+## Windows Lua conformance runner
+
+Install the official Swift toolchain, then build only the cross-platform
+diagnostic executable:
+
+```powershell
+swift build --product GModLuaConformance
+```
+
+Run an individual file or diagnostic snippet:
 
 ```powershell
 swift run GModLuaConformance --file .\path\to\test.lua
@@ -19,232 +76,61 @@ swift run GModLuaConformance --eval 'print(table.getn({10, 20, 30}))'
 swift run GModLuaConformance --eval-name '=diagnostic' 'print(debug.getinfo(1).currentline)'
 ```
 
-`--trace-file` prints a Lua traceback when a default `assert` fails. Source
-files and dynamically compiled chunks preserve Lua 5.1 byte strings even when
-they are not valid UTF-8.
+Run an already downloaded official suite:
 
-The runner uses the same official-test order and Discovery classifications as
-the iPad console. `main.lua`, unfinished `gc.lua`, and PUC C-API-only `api.lua`
-are reported as skips rather than passes. A CORE failure returns a non-zero
-process exit code.
+```powershell
+.\.build\debug\GModLuaConformance.exe --suite-dir C:\path\to\lua5.1-tests
+```
 
-An experimental C/C++ game engine compatibility project aimed at recreating a Garry's Mod / Source-like experience on iPad, with Swift Playgrounds used as the application shell.
+`--trace-file` preserves Lua byte strings and prints a Lua traceback for failed
+assertions. A CORE failure returns a non-zero process exit code.
 
-> **Status:** Very early development.  
-> The project currently contains only the initial native C/C++ core and Swift-compatible C API.
+## GMod compatibility research
 
-## Goal
+The repository contains reproducible analysis and a regression harness, but no
+copied Garry's Mod Lua corpus or proprietary assets:
 
-The long-term goal of GModCore is to reproduce as much of the distinctive Garry's Mod experience as reasonably possible on iPad, including:
+- [`Docs/GLuaAnalysis/01_BOOTSTRAP_MODULES.md`](Docs/GLuaAnalysis/01_BOOTSTRAP_MODULES.md)
+- [`Docs/GLuaAnalysis/02_EXTENSIONS.md`](Docs/GLuaAnalysis/02_EXTENSIONS.md)
+- [`Docs/GLuaAnalysis/03_GAMEMODES_CORPUS.md`](Docs/GLuaAnalysis/03_GAMEMODES_CORPUS.md)
+- [`Docs/GLuaAnalysis/04_RUNTIME_M1_IMPLEMENTATION.md`](Docs/GLuaAnalysis/04_RUNTIME_M1_IMPLEMENTATION.md)
+- [`GMOD_BOOT_SEQUENCE.md`](GMOD_BOOT_SEQUENCE.md)
+- [`Tests/GModCorpus/README.md`](Tests/GModCorpus/README.md)
 
-- Source-like player movement
-- Physics-driven sandbox gameplay
-- Props, entities and ragdolls
-- Physgun and Toolgun-style interaction
-- Constraints such as Weld, Rope, Axis and No-Collide
-- Garry's Mod-style Lua / GLua compatibility
-- Separate Server, Client and Menu Lua states
-- Sandbox gamemode compatibility
-- Spawnmenu and VGUI compatibility
-- Source asset loading
-- VPK and GMA addon support
-- Local addon loading
-- Keyboard, mouse, controller and touch input
-- Metal-based rendering
-- Fixed-timestep Source-like simulation
-- Developer console, ConVars and ConCommands
+The current local regression corpus covers the real bootstrap modules, Base,
+all loose `lua/autorun` files, Sandbox including the nested Spawnmenu/VGUI
+loader tree, and TTT as a large compatibility corpus. The harness reads a
+legally installed local game directory and records hashes and diagnostics; it
+does not redistribute those files.
 
-The intention is not to create a simplified mobile sandbox inspired by GMod.
+## Compatibility roadmap
 
-The objective is to build a compatibility-oriented engine that preserves as much of GMod's behavior, scripting model and distinctive Source-engine feel as possible.
+Work proceeds from the bottom of the actual GMod boot chain:
 
-## Architecture
+1. Lua 5.1 runtime and collector semantics
+2. GLua syntax, type ABI, and base primitives
+3. mount-aware VFS, `include`, `require`, and `AddCSLuaFile`
+4. `SERVER`, `CLIENT`, and `MENU` realm bootstraps
+5. original `lua/includes/init.lua` and core modules
+6. Base Gamemode, autorun/addons, and Sandbox
+7. Entity/Player registries, hooks, concommands, file/SQL, and net transport
+8. VGUI/Spawnmenu compatibility using the original Sandbox Lua
+9. BSP/MDL/VTF/VMT/VPK/GMA assets, physics, rendering, and Workshop addons
 
-Swift Playgrounds is used primarily as the iPad application host.
-
-Most engine functionality is intended to live in native C/C++.
+The observed high-level order is:
 
 ```text
-Swift Playgrounds
-│
-├─ Application lifecycle
-├─ iPad UI
-├─ Files integration
-├─ Touch input
-├─ Keyboard / mouse / controller bridge
-└─ Metal view host
-        │
-        ▼
-      C ABI
-        │
-        ▼
-     GModCore
-       C/C++
-│
-├─ Engine
-├─ Filesystem
-├─ Console / ConVars
-├─ Lua / GLua runtime
-├─ Entity system
-├─ Source-like movement
-├─ Physics
-├─ Renderer
-├─ VPK / GMA loaders
-├─ Source asset formats
-└─ Addon compatibility
+SERVER: Base -> autorun/addons -> Sandbox -> PostGamemodeLoaded -> Initialize -> InitPostEntity
+CLIENT: Base -> autorun/addons -> Sandbox/Spawnmenu/VGUI -> PostGamemodeLoaded -> Initialize -> player connection -> InitPostEntity
 ```
 
-The Swift-to-engine boundary is intentionally kept small and uses a stable C ABI.
+## Project scope
 
-Example:
+GModCore is independent research and is not affiliated with or endorsed by
+Facepunch Studios, Valve Corporation, or Garry Newman. Garry's Mod, Source,
+Steam, and related names and trademarks belong to their respective owners.
 
-```c
-typedef struct GMEngine GMEngine;
-
-GMEngine *gm_create(void);
-void gm_destroy(GMEngine *engine);
-void gm_boot(GMEngine *engine);
-```
-
-Internally, the engine can use C++ freely without exposing C++ implementation details to Swift.
-
-## Current State
-
-The first milestone is establishing a working native C++ core that can be imported into a Swift Playgrounds application on iPad.
-
-Current API:
-
-```c
-uint32_t gm_abi_version(void);
-
-GMEngine *gm_create(void);
-void gm_destroy(GMEngine *engine);
-void gm_boot(GMEngine *engine);
-
-const char *gm_version(void);
-
-int32_t gm_test_add(
-    int32_t a,
-    int32_t b
-);
-
-void gm_set_log_callback(
-    GMLogCallback callback
-);
-```
-
-At this stage there is no renderer, physics system, Lua runtime or game world yet.
-
-## Planned Development
-
-Development will proceed incrementally.
-
-### Phase 1 — Core
-
-- Native C++ startup
-- Logging
-- Engine lifecycle
-- Fixed-timestep clock
-- Source-style console
-- ConVars and ConCommands
-
-### Phase 2 — Filesystem
-
-- Virtual filesystem
-- Source-style search paths
-- KeyValues parser
-- VPK reader
-- GMA reader
-- Addon mounting
-
-### Phase 3 — Lua
-
-- Lua 5.1-compatible runtime
-- Server Lua state
-- Client Lua state
-- Menu Lua state
-- `include`
-- `require`
-- hooks
-- timers
-- basic GLua types and APIs
-
-### Phase 4 — World
-
-- Entity system
-- Map/world representation
-- Player entity
-- Collision and tracing
-- Source-like movement
-- Noclip
-
-### Phase 5 — Rendering and Physics
-
-- Metal renderer
-- Source material support
-- Source model support
-- Physics backend
-- Props
-- Ragdolls
-- Constraints
-- Physgun
-
-### Phase 6 — Garry's Mod Compatibility
-
-- Base gamemode
-- Sandbox gamemode
-- Spawnmenu
-- VGUI
-- Toolgun
-- SWEPs
-- SENTs
-- Dupes and saves
-- Real-world addon compatibility testing
-
-## Compatibility Research
-
-Development is informed by publicly available Garry's Mod Lua code, public Source SDK code, official documentation and behavioral testing against a legitimate Garry's Mod installation.
-
-Compatibility behavior is being reproduced independently.
-
-## Legal / Project Scope
-
-GModCore is an independent experimental project.
-
-It is **not affiliated with, endorsed by, or sponsored by Facepunch Studios, Valve Corporation, or Garry Newman**.
-
-Garry's Mod, Source, Steam and related names and trademarks belong to their respective owners.
-
-This repository does not include Garry's Mod game assets, Valve game assets, proprietary engine binaries, leaked source code, or Workshop content.
-
-Users are responsible for providing any legally obtained game content required for local compatibility testing.
-
-## Platform
-
-Primary target:
-
-- iPadOS
-- Swift Playgrounds
-- ARM64
-- Metal
-
-The core is being designed in portable C/C++ where practical so that engine systems are not unnecessarily coupled to Swift or iPadOS.
-
-## Why?
-
-Garry's Mod has a very particular combination of:
-
-- Source movement
-- physics
-- Lua scripting
-- modding
-- sandbox tools
-- community-created content
-
-That combination is difficult to replace with a generic mobile sandbox.
-
-GModCore exists to investigate how much of that experience can be recreated natively on iPad while preserving the parts that make GMod feel like GMod.
-
----
-
-**GModCore is currently a research and early-development project. Expect major architectural changes.**
+This repository does not include Garry's Mod game assets, Valve game assets,
+proprietary engine binaries, leaked source code, or Workshop content. Users are
+responsible for supplying legally obtained content for local compatibility
+testing.

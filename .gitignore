@@ -1,0 +1,7 @@
+.build/
+.build-*/
+.swiftpm/
+.gc-agent-logs/
+.DS_Store
+*.xcuserstate
+xcuserdata/

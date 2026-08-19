@@ -1,0 +1,13 @@
+// Copyright-safe KeyValues V1 parser fixture authored for Garry's PAD.
+"Root"
+{
+    "Quoted Key" "quoted value"
+    bareKey bareValue
+    "Nested"
+    {
+        "Child" "yes"
+    }
+    "Same" "first"
+    "Same" "last"
+    "Conditional" "windows" [$WIN32]
+}

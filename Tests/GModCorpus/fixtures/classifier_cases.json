@@ -1,0 +1,57 @@
+[
+  {
+    "name": "lexer error",
+    "diagnostic": "[FILE][FAIL] Lua lexer error 4:9: unexpected character",
+    "expectedCategory": "GLUA-SYNTAX"
+  },
+  {
+    "name": "parser error",
+    "diagnostic": "[FILE][FAIL] Lua parser error 17:3: expected expression",
+    "expectedCategory": "GLUA-SYNTAX"
+  },
+  {
+    "name": "missing global function",
+    "diagnostic": "[FILE][FAIL] Lua runtime error: attempt to call a nil value",
+    "expectedCategory": "MISSING-API"
+  },
+  {
+    "name": "named missing global function",
+    "diagnostic": "[FILE][FAIL] Lua runtime error: attempt to call global 'include' (a nil value)",
+    "expectedCategory": "MISSING-API"
+  },
+  {
+    "name": "named missing global table",
+    "diagnostic": "[FILE][FAIL] Lua runtime error: attempt to index global 'hook' (a nil value)",
+    "expectedCategory": "MISSING-API"
+  },
+  {
+    "name": "missing table surface",
+    "diagnostic": "[FILE][FAIL] Lua runtime error: attempt to index a nil value",
+    "expectedCategory": "MISSING-API"
+  },
+  {
+    "name": "missing enum used as table key",
+    "diagnostic": "[FILE][FAIL] Lua runtime error: table index is nil",
+    "expectedCategory": "MISSING-API"
+  },
+  {
+    "name": "nested source missing",
+    "diagnostic": "[FILE][FAIL] Lua runtime error: file not found: includes/util.lua",
+    "expectedCategory": "VFS"
+  },
+  {
+    "name": "explicit realm failure",
+    "diagnostic": "[FILE][FAIL] Lua runtime error: not available in this realm",
+    "expectedCategory": "REALM"
+  },
+  {
+    "name": "assertion failure",
+    "diagnostic": "ASSERT TRACE\n[FILE][FAIL] Lua runtime error: assertion failed!",
+    "expectedCategory": "BEHAVIOR"
+  },
+  {
+    "name": "unknown runtime failure stays unknown",
+    "diagnostic": "[FILE][FAIL] Lua runtime error: synthetic failure",
+    "expectedCategory": "UNCLASSIFIED-RUNTIME"
+  }
+]

@@ -1,0 +1,242 @@
+{
+  "schemaVersion": 1,
+  "milestone": "GLua Gameplay Bootstrap M1",
+  "sourcePolicy": {
+    "repositoryContainsGModLua": false,
+    "description": "The harness reads a locally installed Garry's Mod tree and records only paths, hashes, diagnostics, and aggregate results."
+  },
+  "cohorts": [
+    {
+      "id": "bootstrap-modules",
+      "priority": 1,
+      "phase": "bootstrap",
+      "realm": "server-client",
+      "selection": {
+        "kind": "files",
+        "paths": [
+          "lua/includes/init.lua",
+          "lua/includes/modules/hook.lua",
+          "lua/includes/modules/gamemode.lua",
+          "lua/includes/modules/baseclass.lua",
+          "lua/includes/modules/concommand.lua",
+          "lua/includes/modules/list.lua"
+        ]
+      },
+      "expectedFileCount": 6
+    },
+    {
+      "id": "priority-extensions",
+      "priority": 2,
+      "phase": "extensions",
+      "realm": "server-client-menu-subset",
+      "selection": {
+        "kind": "files",
+        "paths": [
+          "lua/includes/extensions/string.lua",
+          "lua/includes/extensions/table.lua",
+          "lua/includes/extensions/math.lua",
+          "lua/includes/extensions/file.lua",
+          "lua/includes/extensions/net.lua",
+          "lua/includes/extensions/entity.lua",
+          "lua/includes/extensions/player.lua"
+        ]
+      },
+      "expectedFileCount": 7
+    },
+    {
+      "id": "base-gamemode",
+      "priority": 3,
+      "phase": "base",
+      "realm": "mixed",
+      "selection": {
+        "kind": "recursive",
+        "root": "gamemodes/base/gamemode",
+        "extension": ".lua"
+      },
+      "expectedFileCount": 19
+    },
+    {
+      "id": "autorun",
+      "priority": 4,
+      "phase": "autorun",
+      "realm": "mixed",
+      "selection": {
+        "kind": "recursive",
+        "root": "lua/autorun",
+        "extension": ".lua"
+      },
+      "expectedFileCount": 34
+    },
+    {
+      "id": "sandbox-gamemode",
+      "priority": 5,
+      "phase": "sandbox-spawnmenu",
+      "realm": "mixed",
+      "selection": {
+        "kind": "recursive",
+        "root": "gamemodes/sandbox/gamemode",
+        "extension": ".lua"
+      },
+      "expectedFileCount": 50
+    },
+    {
+      "id": "sandbox-global-drive",
+      "priority": 6,
+      "phase": "sandbox-vfs-fallback",
+      "realm": "server-client",
+      "selection": {
+        "kind": "files",
+        "paths": [
+          "lua/drive/drive_sandbox.lua"
+        ]
+      },
+      "expectedFileCount": 1
+    },
+    {
+      "id": "terrortown-regression",
+      "priority": 7,
+      "phase": "ttt-t0",
+      "realm": "mixed",
+      "selection": {
+        "kind": "recursive",
+        "root": "gamemodes/terrortown",
+        "extension": ".lua"
+      },
+      "expectedFileCount": 142
+    }
+  ],
+  "aggregateChecks": [
+    {
+      "id": "gameplay-corpus",
+      "cohorts": [
+        "base-gamemode",
+        "autorun",
+        "sandbox-gamemode",
+        "sandbox-global-drive",
+        "terrortown-regression"
+      ],
+      "expectedFileCount": 246
+    },
+    {
+      "id": "all-priority-corpora",
+      "cohorts": [
+        "bootstrap-modules",
+        "priority-extensions",
+        "base-gamemode",
+        "autorun",
+        "sandbox-gamemode",
+        "sandbox-global-drive",
+        "terrortown-regression"
+      ],
+      "expectedFileCount": 259
+    }
+  ],
+  "diagnosticRules": [
+    {
+      "category": "SOURCE-DECODE",
+      "phase": "parse",
+      "confidence": "exact",
+      "patterns": [
+        "cannot decode",
+        "invalid UTF"
+      ]
+    },
+    {
+      "category": "GLUA-SYNTAX",
+      "phase": "parse",
+      "confidence": "exact",
+      "patterns": [
+        "Lua lexer error",
+        "Lua parser error"
+      ]
+    },
+    {
+      "category": "REALM",
+      "phase": "load",
+      "confidence": "explicit-only",
+      "patterns": [
+        "realm mismatch",
+        "not available in this realm",
+        "wrong realm"
+      ]
+    },
+    {
+      "category": "VFS",
+      "phase": "load",
+      "confidence": "heuristic",
+      "patterns": [
+        "file not found",
+        "no such file",
+        "cannot open",
+        "unable to open"
+      ]
+    },
+    {
+      "category": "MISSING-API",
+      "phase": "load",
+      "confidence": "heuristic",
+      "patterns": [
+        "attempt to call a nil value",
+        "attempt to index a nil value",
+        "attempt to perform arithmetic on a nil value",
+        "attempt to call global '",
+        "attempt to call field '",
+        "attempt to index global '",
+        "attempt to index field '",
+        "attempt to perform arithmetic on global '",
+        "attempt to call local '",
+        "attempt to index local '",
+        "table index is nil"
+      ]
+    },
+    {
+      "category": "BEHAVIOR",
+      "phase": "load",
+      "confidence": "heuristic",
+      "patterns": [
+        "assertion failed",
+        "ASSERT TRACE"
+      ]
+    },
+    {
+      "category": "LUA51",
+      "phase": "load",
+      "confidence": "explicit-only",
+      "patterns": [
+        "Lua 5.1 compatibility"
+      ]
+    }
+  ],
+  "deferredGates": [
+    {
+      "category": "BEHAVIOR",
+      "status": "SKIP",
+      "reason": "Lifecycle and deterministic gameplay scenarios require the M1 realm/VFS/API substrate."
+    },
+    {
+      "category": "RENDER",
+      "status": "SKIP",
+      "reason": "Headless VGUI/render command capture is not implemented by this static corpus harness."
+    },
+    {
+      "category": "WORKSHOP",
+      "status": "SKIP",
+      "reason": "Workshop, GMA, and mounted addon behavior is outside the local core corpus gate."
+    }
+  ],
+  "m1Contracts": {
+    "baseNetworkStrings": 6,
+    "sandboxNetworkStrings": [
+      "GModSave"
+    ],
+    "sandboxCleanupCategories": 8,
+    "autorunLuaFiles": 34,
+    "spawnmenuLuaFiles": 33,
+    "spawnmenuVGUIClasses": 20,
+    "spawnmenuContentTypes": 6,
+    "spawnmenuCreationTabs": 8,
+    "tttLuaFiles": 142,
+    "tttNetworkStrings": 33,
+    "tttNetReceivers": 33
+  }
+}

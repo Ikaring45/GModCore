@@ -31,6 +31,15 @@ final class LuaEnvironment {
         LuaEnvironment(parent: self, globalTable: globalTable)
     }
 
+    func replaceActiveFunctionGlobalTable(with table: LuaTable) {
+        var cursor: LuaEnvironment? = self
+        while let environment = cursor {
+            environment.globalTable = table
+            if environment.isFunctionScopeRoot { break }
+            cursor = environment.parent
+        }
+    }
+
     func define(_ name: String, value: LuaValue) {
         if values[name] == nil { order.append(name) }
         values[name] = value
@@ -111,6 +120,15 @@ final class LuaEnvironment {
         return parent?.findLocal(name)
     }
 
+    func gcReferences() -> (parent: LuaEnvironment?, globalTable: LuaTable, values: [LuaValue]) {
+        (parent, globalTable, Array(values.values))
+    }
+
+    func gcClearValues() {
+        values.removeAll(keepingCapacity: false)
+        order.removeAll(keepingCapacity: false)
+    }
+
     @discardableResult
     func assignExisting(_ name: String, value: LuaValue) -> Bool {
         if values[name] != nil {
@@ -168,55 +186,206 @@ final class LuaDebugHookState {
 public final class LuaState {
     let globalTable = LuaTable()
     let registryTable = LuaTable()
+    let garbageCollector = LuaGarbageCollector()
     var dumpRegistry: [LuaString: LuaFunction] = [:]
     var dumpSerial: UInt64 = 0
     var randomState: UInt64 = 0x4D595DF4D0F33173
     let mainDebugHookState = LuaDebugHookState()
     private let output: (String) -> Void
     private static let maxMetatableChainDepth = 100
+    // Lua 5.1 accepts ordinary non-tail recursion beyond 200 Lua frames
+    // (the official calls.lua suite exercises deep(200)). Keep an explicit
+    // host-stack guard for this recursive Swift interpreter, but leave enough
+    // headroom for Lua frames plus pcall/dofile/native wrapper frames.
+    private static let maxLuaCallDepth = 1_000
     private let callStackKey = "GModLua.CallStack.\(UUID().uuidString)"
     private var primitiveMetatables: [String: LuaTable] = [:]
+    private var mainFailureFrames: [LuaCallFrame]?
     public var fileLoader: ((String) throws -> String)?
+    public var virtualFileSystem: LuaVirtualFileSystem?
+    var threadEnvironmentTable: LuaTable
+
+    var currentThreadEnvironmentTable: LuaTable {
+        get { LuaThread.current?.environmentTable ?? threadEnvironmentTable }
+        set {
+            if let thread = LuaThread.current { thread.environmentTable = newValue }
+            else { threadEnvironmentTable = newValue }
+        }
+    }
 
     public init(
         output: @escaping (String) -> Void = { print($0) },
-        fileLoader: ((String) throws -> String)? = nil
+        fileLoader: ((String) throws -> String)? = nil,
+        virtualFileSystem: LuaVirtualFileSystem? = nil
     ) {
         self.output = output
         self.fileLoader = fileLoader
+        self.virtualFileSystem = virtualFileSystem
+        self.threadEnvironmentTable = globalTable
+        garbageCollector.attach(to: self)
         installStandardLibrary()
+        // Adopt roots after library installation. Existing-object adoption is
+        // intentionally O(1), so pre-adopting empty roots would hide later raw
+        // insertions from the initial heap graph scan.
+        garbageCollector.adopt([.table(globalTable), .table(registryTable)])
     }
 
     public func register(_ name: String, function: @escaping LuaNativeFunction) {
-        globalTable.rawSetValue(.nativeFunction(LuaNativeFunctionBox(function)), forString: name)
+        guard !isClosed else { return }
+        let value = LuaValue.nativeFunction(LuaNativeFunctionBox(function))
+        globalTable.rawSetValue(value, forString: name)
+        garbageCollector.adopt(value)
     }
 
     public func setGlobal(_ name: String, value: LuaValue) {
+        guard !isClosed else { return }
         globalTable.rawSetValue(value, forString: name)
+        garbageCollector.adopt(value)
     }
 
     public func getGlobal(_ name: String) -> LuaValue {
         globalTable.rawValue(forString: name)
     }
 
+    public var isClosed: Bool { garbageCollector.hasClosed }
+
+    /// Explicitly ends this embedded state's lifetime. deinit deliberately does
+    /// not run Lua while Swift object graphs are being destroyed.
+    @discardableResult
+    public func close() -> LuaCloseReport {
+        garbageCollector.close()
+    }
+
+    /// Engine integrations can construct native-backed Lua tables without
+    /// exposing the interpreter's internal table-key representation.
+    public func setRawTableValue(
+        _ value: LuaValue,
+        for key: LuaValue,
+        in table: LuaTable
+    ) throws {
+        try ensureOpen()
+        garbageCollector.adopt([.table(table), key, value])
+        try table.rawSetValue(value, for: key)
+    }
+
     public func execute(_ source: String, sourceName: String = "=(chunk)") throws {
+        try ensureOpen()
+        _ = try executeReturningValues(source, sourceName: sourceName)
+    }
+
+    /// Executes a source chunk and preserves its multiple return values.
+    ///
+    /// `inheritCallerEnvironmentAtLevel` is used by GLua's `include()`: the
+    /// included chunk runs in the environment of the Lua chunk that called the
+    /// native include function. Level 1 is the native function itself, so an
+    /// include implementation normally passes 2.
+    public func executeReturningValues(
+        _ source: String,
+        sourceName: String = "=(chunk)",
+        inheritCallerEnvironmentAtLevel callerLevel: Int? = nil
+    ) throws -> [LuaValue] {
+        try ensureOpen()
         let chunkFunction = try compile(source, sourceName: sourceName)
-        _ = try callValue(.luaFunction(chunkFunction), arguments: [])
+        if let callerLevel,
+           let callerEnvironment = currentLuaEnvironment(level: callerLevel) {
+            setEnvironment(callerEnvironment.globalTable, for: chunkFunction)
+        }
+        return try callValue(.luaFunction(chunkFunction), arguments: [])
+    }
+
+    /// Returns the source name of an active Lua caller. Native integration
+    /// functions use this to resolve paths without exposing interpreter frames.
+    public func luaCallerSourceName(level: Int = 2) -> String? {
+        currentLuaFunction(level: level)?.sourceName
     }
 
     public func compile(_ source: String, sourceName: String = "=(loadstring)") throws -> LuaFunction {
-        let tokens = try LuaLexer(source: source).tokenize()
-        let chunk = try LuaParser(tokens: tokens).parse()
-        let root = LuaEnvironment(globalTable: globalTable, inheritVarargs: false)
-        return LuaFunction(
+        try ensureOpen()
+        let chunk: LuaChunk
+        do {
+            let tokens = try LuaLexer(source: source).tokenize()
+            chunk = try LuaParser(tokens: tokens).parse()
+        } catch let LuaError.lexer(line, column, message) {
+            throw LuaError.syntax(
+                source: syntaxSourceDescription(sourceName),
+                line: line,
+                message: message,
+                near: syntaxNearToken(source: source, line: line, column: column)
+            )
+        } catch let LuaError.parser(line, column, message) {
+            throw LuaError.syntax(
+                source: syntaxSourceDescription(sourceName),
+                line: line,
+                message: message,
+                near: syntaxNearToken(source: source, line: line, column: column)
+            )
+        }
+        let activeEnvironment = currentThreadEnvironmentTable
+        let root = LuaEnvironment(globalTable: activeEnvironment, inheritVarargs: false)
+        let function = LuaFunction(
             parameters: [],
             isVararg: true,
+            hasCompatibilityArg: false,
+            needsCompatibilityArgTable: false,
             body: chunk.statements,
             closure: root,
-            environmentTable: globalTable,
+            environmentTable: activeEnvironment,
             sourceName: sourceName,
             lineDefined: 0
         )
+        garbageCollector.adopt(.luaFunction(function))
+        return function
+    }
+
+    private func ensureOpen() throws {
+        if isClosed { throw LuaError.runtime("Lua state is closed") }
+    }
+
+    private func syntaxSourceDescription(_ sourceName: String) -> String {
+        if sourceName.hasPrefix("@") { return String(sourceName.dropFirst()) }
+        if sourceName.hasPrefix("=") { return String(sourceName.dropFirst()) }
+        let firstLine = sourceName.split(whereSeparator: { $0 == "\n" || $0 == "\r" }).first.map(String.init) ?? ""
+        var snippet = String(firstLine.prefix(51))
+        if firstLine.count < sourceName.count || firstLine.count > 51 { snippet += "..." }
+        return "[string \"\(snippet)\"]"
+    }
+
+    private func syntaxNearToken(source: String, line: Int, column: Int) -> String {
+        let normalized = source
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\n\r", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let lines = normalized.split(separator: "\n", omittingEmptySubsequences: false)
+        guard line >= 1, line <= lines.count else { return "<eof>" }
+        let characters = Array(lines[line - 1])
+        let start = max(0, column - 1)
+        guard start < characters.count else { return "<eof>" }
+        let tail = Array(characters[start...])
+        guard let first = tail.first else { return "<eof>" }
+
+        if first == "'" || first == "\"" {
+            var token = String(first)
+            var escaped = false
+            for character in tail.dropFirst() {
+                token.append(character)
+                if escaped { escaped = false; continue }
+                if character == "\\" { escaped = true; continue }
+                if character == first { break }
+            }
+            return token
+        }
+        if first == "[", tail.count > 1, tail[1] == "[" {
+            let text = String(tail)
+            if let range = text.range(of: "]]" ) { return String(text[..<range.upperBound]) }
+            return text
+        }
+        if first.isLetter || first == "_" {
+            return String(tail.prefix { $0.isLetter || $0.isNumber || $0 == "_" })
+        }
+        if first.isNumber {
+            return String(tail.prefix { !$0.isWhitespace && !";,(){}[]".contains($0) })
+        }
+        return String(first)
     }
 
     // MARK: - Execution
@@ -226,9 +395,11 @@ public final class LuaState {
         closure: LuaEnvironment
     ) -> LuaFunction {
         let parent = currentLuaFunction()
-        return LuaFunction(
+        let function = LuaFunction(
             parameters: prototype.parameters,
             isVararg: prototype.isVararg,
+            hasCompatibilityArg: prototype.isVararg,
+            needsCompatibilityArgTable: prototype.needsCompatibilityArgTable,
             body: prototype.body,
             closure: closure,
             environmentTable: parent?.environmentTable ?? closure.globalTable,
@@ -238,6 +409,8 @@ public final class LuaState {
             activeLines: prototype.activeLines,
             upvalueNames: discoverUpvalueNames(in: prototype, closure: closure)
         )
+        garbageCollector.adopt(.luaFunction(function))
+        return function
     }
 
     private func discoverUpvalueNames(
@@ -345,14 +518,14 @@ public final class LuaState {
                     visitBlock(body, scopes: &childScopes)
                     visitExpression(condition, scopes: childScopes)
 
-                case let .numericFor(name, start, limit, step, body, _, _):
+                case let .numericFor(name, start, limit, step, body, _, _, _):
                     visitExpression(start, scopes: scopes)
                     visitExpression(limit, scopes: scopes)
                     if let step { visitExpression(step, scopes: scopes) }
                     var childScopes = scopes + [Set([name])]
                     visitBlock(body, scopes: &childScopes)
 
-                case let .genericFor(localNames, expressions, body, _, _):
+                case let .genericFor(localNames, expressions, body, _, _, _):
                     expressions.forEach { visitExpression($0, scopes: scopes) }
                     var childScopes = scopes + [Set(localNames)]
                     visitBlock(body, scopes: &childScopes)
@@ -388,8 +561,25 @@ public final class LuaState {
             }
         }
         for statement in statements {
-            let control = try execute(statement, environment: environment)
-            if case .normal = control { continue }
+            let control: LuaControl
+            do {
+                control = try execute(statement, environment: environment)
+            } catch let LuaError.runtime(message) {
+                let frame = currentCallStack().frames.last
+                let source = frame.flatMap { frame -> String? in
+                    guard case let .luaFunction(function) = frame.callable else { return nil }
+                    return syntaxSourceDescription(function.sourceName)
+                } ?? "?"
+                throw LuaError.runtimeAt(
+                    source: source,
+                    line: max(0, frame?.currentLine ?? 0),
+                    message: message
+                )
+            }
+            if case .normal = control {
+                try garbageCollector.safePoint()
+                continue
+            }
             return control
         }
         return .normal
@@ -478,20 +668,20 @@ public final class LuaState {
             } while true
             return .normal
 
-        case let .numericFor(name, startExpression, limitExpression, stepExpression, body, line, endLine):
+        case let .numericFor(name, startExpression, limitExpression, stepExpression, body, line, controlLine, endLine):
+            try traceInstruction(line: controlLine, forceLineEvent: true)
             var current = try numericValue(evaluateSingle(startExpression, environment: environment))
             let limit = try numericValue(evaluateSingle(limitExpression, environment: environment))
             let step = try stepExpression.map { try numericValue(evaluateSingle($0, environment: environment)) } ?? 1.0
-            if step == 0 { throw LuaError.runtime("'for' step is zero") }
-
-            let loopEnvironment = environment.child()
-            loopEnvironment.define(name, value: .number(current))
             func shouldRun(_ value: Double) -> Bool { step > 0 ? value <= limit : value >= limit }
 
-            try traceInstruction(line: line, forceLineEvent: true)
             while shouldRun(current) {
-                _ = loopEnvironment.assignExisting(name, value: .number(current))
-                let control = try executeBlock(body, environment: loopEnvironment.child())
+                // Lua closes the visible control variable at the end of every
+                // iteration. A fresh binding is therefore required so closures
+                // created in different iterations do not share the same cell.
+                let iterationEnvironment = environment.child()
+                iterationEnvironment.define(name, value: .number(current))
+                let control = try executeBlock(body, environment: iterationEnvironment.child())
                 switch control {
                 case .breakLoop: return .normal
                 case .returned, .tailCall: return control
@@ -503,26 +693,26 @@ public final class LuaState {
             try traceInstruction(line: endLine)
             return .normal
 
-        case let .genericFor(names, expressions, body, line, endLine):
+        case let .genericFor(names, expressions, body, line, expressionLine, endLine):
+            try traceInstruction(line: expressionLine, forceLineEvent: true)
             let values = try evaluateExpressionList(expressions, environment: environment)
             let iterator = values.indices.contains(0) ? values[0] : .nilValue
             let state = values.indices.contains(1) ? values[1] : .nilValue
             var controlValue = values.indices.contains(2) ? values[2] : .nilValue
-            let loopEnvironment = environment.child()
-            for name in names { loopEnvironment.define(name, value: .nilValue) }
-
-            try traceInstruction(line: line, forceLineEvent: true)
             while true {
                 let results = try callValue(iterator, arguments: [state, controlValue])
                 let first = results.first ?? .nilValue
                 if isNil(first) { break }
                 controlValue = first
 
+                // Like numeric-for control variables, generic-for variables get
+                // distinct closed bindings for each completed iteration.
+                let iterationEnvironment = environment.child()
                 for (index, name) in names.enumerated() {
-                    _ = loopEnvironment.assignExisting(name, value: index < results.count ? results[index] : .nilValue)
+                    iterationEnvironment.define(name, value: index < results.count ? results[index] : .nilValue)
                 }
 
-                let control = try executeBlock(body, environment: loopEnvironment.child())
+                let control = try executeBlock(body, environment: iterationEnvironment.child())
                 switch control {
                 case .breakLoop: return .normal
                 case .returned, .tailCall: return control
@@ -623,6 +813,21 @@ public final class LuaState {
         }
     }
 
+    private func contextualOperationError(
+        action: String,
+        value: LuaValue,
+        expression: LuaExpression,
+        environment: LuaEnvironment
+    ) -> LuaError {
+        let site = callSite(for: expression, environment: environment)
+        if let name = site.name, !site.nameWhat.isEmpty {
+            return .runtime(
+                "attempt to \(action) \(site.nameWhat) '\(name)' (a \(value.typeName) value)"
+            )
+        }
+        return .runtime("attempt to \(action) a \(value.typeName) value")
+    }
+
     private func prepareCall(
         _ expression: LuaExpression,
         environment: LuaEnvironment
@@ -641,7 +846,18 @@ public final class LuaState {
 
         case let .methodCall(receiverExpression, name, argumentExpressions):
             let receiver = try evaluateSingle(receiverExpression, environment: environment)
-            let callable = try getIndexedValue(receiver: receiver, key: .string(LuaString(name)))
+            let callable: LuaValue
+            do {
+                callable = try getIndexedValue(receiver: receiver, key: .string(LuaString(name)))
+            } catch let LuaError.runtime(message)
+                where message == "attempt to index a \(receiver.typeName) value" {
+                throw contextualOperationError(
+                    action: "index",
+                    value: receiver,
+                    expression: receiverExpression,
+                    environment: environment
+                )
+            }
             let arguments = try evaluateExpressionList(argumentExpressions, environment: environment)
             return LuaPreparedCall(
                 callable: callable,
@@ -691,6 +907,7 @@ public final class LuaState {
 
         case let .table(fields):
             let table = LuaTable()
+            garbageCollector.adopt(.table(table))
             var arrayIndex = 1.0
             for (fieldIndex, field) in fields.enumerated() {
                 switch field {
@@ -718,19 +935,49 @@ public final class LuaState {
 
         case let .field(baseExpression, name):
             let receiver = try evaluateSingle(baseExpression, environment: environment)
-            return try getIndexedValue(receiver: receiver, key: .string(LuaString(name)))
+            do {
+                return try getIndexedValue(receiver: receiver, key: .string(LuaString(name)))
+            } catch let LuaError.runtime(message)
+                where message == "attempt to index a \(receiver.typeName) value" {
+                throw contextualOperationError(
+                    action: "index",
+                    value: receiver,
+                    expression: baseExpression,
+                    environment: environment
+                )
+            }
 
         case let .index(baseExpression, keyExpression):
             let receiver = try evaluateSingle(baseExpression, environment: environment)
             let key = try evaluateSingle(keyExpression, environment: environment)
-            return try getIndexedValue(receiver: receiver, key: key)
+            do {
+                return try getIndexedValue(receiver: receiver, key: key)
+            } catch let LuaError.runtime(message)
+                where message == "attempt to index a \(receiver.typeName) value" {
+                throw contextualOperationError(
+                    action: "index",
+                    value: receiver,
+                    expression: baseExpression,
+                    environment: environment
+                )
+            }
 
         case let .unary(operation, inner):
             let value = try evaluateSingle(inner, environment: environment)
             switch operation {
             case .negate:
                 if let number = coerceNumber(value) { return .number(-number) }
-                return try unaryMetamethod(value, name: "__unm")
+                do {
+                    return try unaryMetamethod(value, name: "__unm")
+                } catch let LuaError.runtime(message)
+                    where message.hasPrefix("attempt to perform arithmetic") {
+                    throw contextualOperationError(
+                        action: "perform arithmetic on",
+                        value: value,
+                        expression: inner,
+                        environment: environment
+                    )
+                }
             case .not:
                 return .boolean(!value.isTruthy)
             case .length:
@@ -752,6 +999,9 @@ public final class LuaState {
                 let lhs = try evaluateSingle(left, environment: environment)
                 return lhs.isTruthy ? lhs : try evaluateSingle(right, environment: environment)
             }
+            if operation == .concat {
+                return try evaluateConcatenation(left: left, right: right, environment: environment)
+            }
 
             var lhs = try evaluateSingle(left, environment: environment)
             let stack = currentCallStack()
@@ -770,24 +1020,37 @@ public final class LuaState {
             }
 
             switch operation {
-            case .add: return try arithmeticBinary(lhs, rhs, metamethod: "__add", primitive: +)
-            case .subtract: return try arithmeticBinary(lhs, rhs, metamethod: "__sub", primitive: -)
-            case .multiply: return try arithmeticBinary(lhs, rhs, metamethod: "__mul", primitive: *)
-            case .divide: return try arithmeticBinary(lhs, rhs, metamethod: "__div", primitive: /)
-            case .modulo:
-                if let a = coerceNumber(lhs), let b = coerceNumber(rhs) {
-                    return .number(a - floor(a / b) * b)
+            case .add, .subtract, .multiply, .divide, .modulo, .power:
+                do {
+                    switch operation {
+                    case .add: return try arithmeticBinary(lhs, rhs, metamethod: "__add", primitive: +)
+                    case .subtract: return try arithmeticBinary(lhs, rhs, metamethod: "__sub", primitive: -)
+                    case .multiply: return try arithmeticBinary(lhs, rhs, metamethod: "__mul", primitive: *)
+                    case .divide: return try arithmeticBinary(lhs, rhs, metamethod: "__div", primitive: /)
+                    case .modulo:
+                        if let a = coerceNumber(lhs), let b = coerceNumber(rhs) {
+                            return .number(a - floor(a / b) * b)
+                        }
+                        if let result = try callBinaryMetamethod(lhs, rhs, name: "__mod") { return result }
+                        throw arithmeticError(lhs, rhs)
+                    case .power:
+                        if let a = coerceNumber(lhs), let b = coerceNumber(rhs) { return .number(pow(a, b)) }
+                        if let result = try callBinaryMetamethod(lhs, rhs, name: "__pow") { return result }
+                        throw arithmeticError(lhs, rhs)
+                    default: fatalError("non-arithmetic operation")
+                    }
+                } catch let LuaError.runtime(message)
+                    where message.hasPrefix("attempt to perform arithmetic") {
+                    let failingLeft = coerceNumber(lhs) == nil
+                    throw contextualOperationError(
+                        action: "perform arithmetic on",
+                        value: failingLeft ? lhs : rhs,
+                        expression: failingLeft ? left : right,
+                        environment: environment
+                    )
                 }
-                if let result = try callBinaryMetamethod(lhs, rhs, name: "__mod") { return result }
-                throw arithmeticError(lhs, rhs)
-            case .power:
-                if let a = coerceNumber(lhs), let b = coerceNumber(rhs) { return .number(pow(a, b)) }
-                if let result = try callBinaryMetamethod(lhs, rhs, name: "__pow") { return result }
-                throw arithmeticError(lhs, rhs)
             case .concat:
-                if let a = primitiveConcatString(lhs), let b = primitiveConcatString(rhs) { return .string(a + b) }
-                if let result = try callBinaryMetamethod(lhs, rhs, name: "__concat") { return result }
-                throw LuaError.runtime("attempt to concatenate a \(lhs.typeName) value")
+                fatalError("handled above")
             case .equal:
                 return .boolean(try luaEqual(lhs, rhs))
             case .notEqual:
@@ -818,13 +1081,28 @@ public final class LuaState {
             return try getTableValue(table: table, receiver: receiver, key: key, depth: 0)
         case let .userdata(userdata):
             return try getUserdataValue(userdata: userdata, receiver: receiver, key: key, depth: 0)
-        case .string:
-            guard case let .string(keyName) = key,
-                  case let .table(stringLibrary) = getGlobal("string") else {
-                throw LuaError.runtime("attempt to index a string value")
-            }
-            return stringLibrary.rawValue(forString: keyName)
         default:
+            if let metatable = metatable(of: receiver) {
+                let index = metatable.rawValue(forString: "__index")
+                switch index {
+                case let .table(table):
+                    return try getTableValue(table: table, receiver: .table(table), key: key, depth: 1)
+                case .luaFunction, .nativeFunction:
+                    return try callValue(index, arguments: [receiver, key]).first ?? .nilValue
+                case .nilValue:
+                    break
+                default:
+                    throw LuaError.runtime("attempt to index a \(index.typeName) value")
+                }
+            }
+            // The string library is exposed as the implicit string metatable's
+            // __index table. Keep this fallback until the library installs that
+            // metatable explicitly during bootstrap.
+            if case .string = receiver,
+               case let .string(keyName) = key,
+               case let .table(stringLibrary) = getGlobal("string") {
+                return stringLibrary.rawValue(forString: keyName)
+            }
             throw LuaError.runtime("attempt to index a \(receiver.typeName) value")
         }
     }
@@ -836,6 +1114,21 @@ public final class LuaState {
         case let .userdata(userdata):
             try setUserdataValue(userdata: userdata, receiver: receiver, key: key, value: value, depth: 0)
         default:
+            if let metatable = metatable(of: receiver) {
+                let newIndex = metatable.rawValue(forString: "__newindex")
+                switch newIndex {
+                case let .table(table):
+                    try setTableValue(table: table, receiver: .table(table), key: key, value: value, depth: 1)
+                    return
+                case .luaFunction, .nativeFunction:
+                    _ = try callValue(newIndex, arguments: [receiver, key, value])
+                    return
+                case .nilValue:
+                    break
+                default:
+                    throw LuaError.runtime("attempt to index a \(newIndex.typeName) value")
+                }
+            }
             throw LuaError.runtime("attempt to index a \(receiver.typeName) value")
         }
     }
@@ -868,19 +1161,22 @@ public final class LuaState {
             do {
                 results = try function.body(arguments)
             } catch {
-                LuaThread.current?.captureFailureFrames(stack.frames)
+                captureFailureFrames(stack.frames)
                 throw error
             }
             try traceReturnHook()
+            garbageCollector.adopt(results)
             return results
 
         case let .luaFunction(function):
-            return try callLuaFunction(
+            let results = try callLuaFunction(
                 function,
                 arguments: arguments,
                 callName: callName,
                 callNameWhat: callNameWhat
             )
+            garbageCollector.adopt(results)
+            return results
 
         default:
             if let metatable = metatable(of: callable) {
@@ -894,6 +1190,11 @@ public final class LuaState {
                     )
                 }
             }
+            if let callName, !callNameWhat.isEmpty {
+                throw LuaError.runtime(
+                    "attempt to call \(callNameWhat) '\(callName)' (a \(callable.typeName) value)"
+                )
+            }
             throw LuaError.runtime("attempt to call a \(callable.typeName) value")
         }
     }
@@ -905,6 +1206,13 @@ public final class LuaState {
         callNameWhat initialCallNameWhat: String
     ) throws -> [LuaValue] {
         let stack = currentCallStack()
+        let activeLuaDepth = stack.frames.reduce(into: 0) { depth, frame in
+            guard !frame.isTailCall else { return }
+            if case .luaFunction = frame.callable { depth += 1 }
+        }
+        guard activeLuaDepth < Self.maxLuaCallDepth else {
+            throw LuaError.runtime("stack overflow")
+        }
         let baseDepth = stack.frames.count
         var function = initialFunction
         var arguments = initialArguments
@@ -913,7 +1221,7 @@ public final class LuaState {
 
         func cleanFrames() {
             if stack.frames.count > baseDepth {
-                LuaThread.current?.captureFailureFrames(stack.frames)
+                captureFailureFrames(stack.frames)
                 stack.frames.removeSubrange(baseDepth...)
             }
         }
@@ -940,16 +1248,22 @@ public final class LuaState {
             for (index, parameter) in function.parameters.enumerated() {
                 callEnvironment.define(parameter, value: index < arguments.count ? arguments[index] : .nilValue)
             }
-            if function.isVararg {
+            if function.hasCompatibilityArg {
                 // Lua 5.1 exposes the compatibility `arg` local in vararg
-                // functions in addition to `...`; its position is observable
-                // through debug.getlocal/debug.setlocal.
-                let argTable = LuaTable()
-                for (index, value) in extra.enumerated() {
-                    argTable.rawSetValue(value, forNumber: Double(index + 1))
+                // functions. Evaluating `...` clears VARARG_NEEDSARG in PUC
+                // Lua 5.1, leaving that local nil instead of constructing the
+                // legacy table.
+                if function.needsCompatibilityArgTable {
+                    let argTable = LuaTable()
+                    garbageCollector.adopt(.table(argTable))
+                    for (index, value) in extra.enumerated() {
+                        argTable.rawSetValue(value, forNumber: Double(index + 1))
+                    }
+                    argTable.rawSetValue(.number(Double(extra.count)), forString: "n")
+                    callEnvironment.define("arg", value: .table(argTable))
+                } else {
+                    callEnvironment.define("arg", value: .nilValue)
                 }
-                argTable.rawSetValue(.number(Double(extra.count)), forString: "n")
-                callEnvironment.define("arg", value: .table(argTable))
             }
             let stack = currentCallStack()
             stack.frames.append(LuaCallFrame(
@@ -977,18 +1291,24 @@ public final class LuaState {
 
             switch control {
             case let .tailCall(tailCall):
-                stack.frames[stack.frames.count - 1] = LuaCallFrame(
-                    callable: .nilValue,
-                    environment: nil,
-                    name: nil,
-                    nameWhat: "",
-                    isTailCall: true,
-                    temporaries: [],
-                    currentLine: -1,
-                    lastHookLine: nil
-                )
-
                 if case let .luaFunction(nextFunction) = tailCall.callable {
+                    // PUC Lua 5.1 only replaces the current Lua activation
+                    // (and therefore exposes a historical "tail" pseudo
+                    // frame) when OP_TAILCALL enters another Lua closure. A
+                    // C/native callee returns through the still-active Lua
+                    // frame. This distinction matters to getfenv(): a
+                    // historical tail pseudo frame is not a valid level, but
+                    // `return getfenv(1)` must still see its active caller.
+                    stack.frames[stack.frames.count - 1] = LuaCallFrame(
+                        callable: .luaFunction(function),
+                        environment: callEnvironment,
+                        name: callName,
+                        nameWhat: callNameWhat,
+                        isTailCall: true,
+                        temporaries: [],
+                        currentLine: stack.frames[stack.frames.count - 1].currentLine,
+                        lastHookLine: stack.frames[stack.frames.count - 1].lastHookLine
+                    )
                     function = nextFunction
                     arguments = tailCall.arguments
                     callName = tailCall.name
@@ -1003,6 +1323,8 @@ public final class LuaState {
                         callName: tailCall.name,
                         callNameWhat: tailCall.nameWhat
                     )
+                    try traceReturnHook()
+                    _ = stack.frames.popLast()
                     try unwindTailFrames()
                     return values
                 } catch {
@@ -1177,6 +1499,59 @@ public final class LuaState {
         }
     }
 
+    private func evaluateConcatenation(
+        left: LuaExpression,
+        right: LuaExpression,
+        environment: LuaEnvironment
+    ) throws -> LuaValue {
+        var expressions: [LuaExpression] = []
+        func flatten(_ expression: LuaExpression) {
+            if case let .binary(nestedLeft, .concat, nestedRight) = expression {
+                flatten(nestedLeft)
+                flatten(nestedRight)
+            } else {
+                expressions.append(expression)
+            }
+        }
+        flatten(left)
+        flatten(right)
+
+        let values = try expressions.map { try evaluateSingle($0, environment: environment) }
+        let strings = values.map(primitiveConcatString)
+        if strings.allSatisfy({ $0 != nil }) {
+            let pieces = strings.compactMap { $0 }
+            let maximumLua51StringLength = UInt64(UInt32.max)
+            var total: UInt64 = 0
+            for piece in pieces {
+                let count = UInt64(piece.count)
+                guard count <= maximumLua51StringLength - total else {
+                    throw LuaError.runtime("string length overflow")
+                }
+                total += count
+            }
+            var bytes: [UInt8] = []
+            bytes.reserveCapacity(Int(total))
+            for piece in pieces { bytes.append(contentsOf: piece.bytes) }
+            return .string(LuaString(bytes: bytes))
+        }
+
+        guard var result = values.last else { return .string("") }
+        for value in values.dropLast().reversed() {
+            if let a = primitiveConcatString(value), let b = primitiveConcatString(result) {
+                let count = UInt64(a.count) + UInt64(b.count)
+                guard count <= UInt64(UInt32.max) else {
+                    throw LuaError.runtime("string length overflow")
+                }
+                result = .string(LuaString(bytes: a.bytes + b.bytes))
+            } else if let metamethodResult = try callBinaryMetamethod(value, result, name: "__concat") {
+                result = metamethodResult
+            } else {
+                throw LuaError.runtime("attempt to concatenate a \(value.typeName) value")
+            }
+        }
+        return result
+    }
+
     private func sharedComparisonHandler(_ lhs: LuaValue, _ rhs: LuaValue, name: String) -> LuaValue? {
         guard lhs.typeName == rhs.typeName else { return nil }
         let a = metamethod(lhs, name)
@@ -1242,18 +1617,22 @@ public final class LuaState {
         }
     }
 
-    func luaString(_ value: LuaValue) throws -> String {
+    func luaTostringValue(_ value: LuaValue) throws -> LuaValue {
         if let metatable = metatable(of: value) {
             let metamethod = metatable.rawValue(forString: "__tostring")
             if !isNil(metamethod) {
-                let result = try callValue(metamethod, arguments: [value]).first ?? .nilValue
-                guard case let .string(string) = result else {
-                    throw LuaError.runtime("'__tostring' must return a string")
-                }
-                return string.utf8String
+                return try callValue(metamethod, arguments: [value]).first ?? .nilValue
             }
         }
-        return value.printable
+        return .string(LuaString(value.printable))
+    }
+
+    func luaString(_ value: LuaValue) throws -> String {
+        let result = try luaTostringValue(value)
+        guard case let .string(string) = result else {
+            throw LuaError.runtime("'__tostring' must return a string")
+        }
+        return string.utf8String
     }
 
     func isNil(_ value: LuaValue) -> Bool {
@@ -1296,10 +1675,24 @@ public final class LuaState {
         if let luaError = error as? LuaError {
             switch luaError {
             case let .runtime(message): return .string(LuaString(message))
+            case .syntax:
+                return .string(luaStringPreservingSourceBytes(luaError.description))
             default: return .string(LuaString(luaError.description))
             }
         }
         return .string(LuaString(String(describing: error)))
+    }
+
+    private func luaStringPreservingSourceBytes(_ text: String) -> LuaString {
+        var bytes: [UInt8] = []
+        for scalar in text.unicodeScalars {
+            if (0xE080...0xE0FF).contains(scalar.value) {
+                bytes.append(UInt8(scalar.value - 0xE000))
+            } else {
+                bytes.append(contentsOf: String(scalar).utf8)
+            }
+        }
+        return LuaString(bytes: bytes)
     }
 
     func nextRandomUnit() -> Double {
@@ -1319,6 +1712,47 @@ public final class LuaState {
         return box
     }
 
+    func garbageCollectionRoots() -> (values: [LuaValue], environments: [LuaEnvironment]) {
+        var values: [LuaValue] = [
+            .table(globalTable),
+            .table(registryTable),
+            .table(threadEnvironmentTable),
+            mainDebugHookState.function
+        ]
+        values.append(contentsOf: primitiveMetatables.values.map(LuaValue.table))
+        values.append(contentsOf: dumpRegistry.values.map(LuaValue.luaFunction))
+        if let currentThread = LuaThread.current { values.append(.thread(currentThread)) }
+
+        var environments: [LuaEnvironment] = []
+        func appendFrames(_ frames: [LuaCallFrame]) {
+            for frame in frames {
+                values.append(frame.callable)
+                values.append(contentsOf: frame.temporaries)
+                if let environment = frame.environment { environments.append(environment) }
+            }
+        }
+        appendFrames(currentCallStack().frames)
+        if let mainFailureFrames { appendFrames(mainFailureFrames) }
+        return (values, environments)
+    }
+
+    func captureFailureFrames(_ frames: [LuaCallFrame]) {
+        if let thread = LuaThread.current {
+            thread.captureFailureFrames(frames)
+        } else if mainFailureFrames == nil {
+            mainFailureFrames = frames
+        }
+    }
+
+    func failureFramesForCurrentThread() -> [LuaCallFrame]? {
+        LuaThread.current?.failureFramesSnapshot() ?? mainFailureFrames
+    }
+
+    func clearFailureFramesForCurrentThread() {
+        if let thread = LuaThread.current { thread.clearFailureFrames() }
+        else { mainFailureFrames = nil }
+    }
+
     func currentLuaFunction(level: Int = 1) -> LuaFunction? {
         guard let frame = currentLuaCallFrame(level: level),
               case let .luaFunction(function) = frame.callable else { return nil }
@@ -1333,6 +1767,16 @@ public final class LuaState {
         let frames = currentCallStack().frames
         guard level >= 1, level <= frames.count else { return nil }
         return frames[frames.count - level]
+    }
+
+    func setEnvironment(_ table: LuaTable, for function: LuaFunction) {
+        function.environmentTable = table
+        let stack = currentCallStack()
+        for frame in stack.frames {
+            guard case let .luaFunction(activeFunction) = frame.callable,
+                  activeFunction === function else { continue }
+            frame.environment?.replaceActiveFunctionGlobalTable(with: table)
+        }
     }
 
     func debugHookState(for thread: LuaThread? = nil) -> LuaDebugHookState {
