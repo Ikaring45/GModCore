@@ -843,10 +843,13 @@ public struct SourceBSP: Sendable, Equatable {
                 type: UInt8(truncatingIfNeeded: plane.type)
             )
         }
-        let firstSurface = sides
-            .first(where: { $0.bevel == 0 })
-            .map(surface(for:)) ?? SourceTraceSurface()
-        let planeSurfaces = sides.map { side in
+        let firstSurface: SourceTraceSurface
+        if let firstRealSide = sides.first(where: { $0.bevel == 0 }) {
+            firstSurface = surface(for: firstRealSide)
+        } else {
+            firstSurface = SourceTraceSurface()
+        }
+        let planeSurfaces: [SourceTraceSurface] = sides.map { side in
             // Bevels are collision-only planes; preserve the first real side's
             // metadata if one becomes the entering clip plane.
             side.bevel == 0 ? surface(for: side) : firstSurface
