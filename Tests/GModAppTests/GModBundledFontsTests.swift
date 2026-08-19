@@ -142,7 +142,9 @@ final class GModBundledFontsTests: XCTestCase {
         )
         let surface = try XCTUnwrap(client.surfaceCommandState)
         for name in ["DermaFallbackRegular", "DermaFallbackBold"] {
-            let descriptor = try XCTUnwrap(surface.fontDescriptor(named: name))
+            let descriptor = try XCTUnwrap(
+                surface.fontDescriptor(named: LuaString(name))
+            )
             let bitmap = try XCTUnwrap(
                 factory.surfaceTextRasterizer.rasterizeSurfaceText(
                     "Sandbox",

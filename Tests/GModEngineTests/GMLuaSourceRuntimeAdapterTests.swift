@@ -38,6 +38,14 @@ private final class AdapterRuntimeBox: @unchecked Sendable {
     }
 }
 
+private final class WeakAdapterReference {
+    weak var value: GMLuaSourceRuntimeAdapter?
+
+    init(_ value: GMLuaSourceRuntimeAdapter?) {
+        self.value = value
+    }
+}
+
 final class GMLuaSourceRuntimeAdapterTests: XCTestCase {
     func testInitializationRejectsAdvancedServerClockBeforeAnyKernelTick() throws {
         let server = makeRuntime(.server)
@@ -305,11 +313,11 @@ final class GMLuaSourceRuntimeAdapterTests: XCTestCase {
         let clientRegistry = try XCTUnwrap(client.entityRegistry)
         XCTAssertEqual(serverRegistry.sourceMirrorIdentity(at: 24), identity)
         XCTAssertEqual(clientRegistry.sourceMirrorIdentity(at: 24), identity)
-        weak var releasedAdapter = adapter
+        let releasedAdapter = WeakAdapterReference(adapter)
 
         adapter = nil
 
-        XCTAssertNil(releasedAdapter)
+        XCTAssertNil(releasedAdapter.value)
         XCTAssertFalse(sourceEntity.refHandle.isValid)
         XCTAssertNil(serverRegistry.sourceMirrorIdentity(at: 24))
         XCTAssertNil(clientRegistry.sourceMirrorIdentity(at: 24))
