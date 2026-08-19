@@ -10,6 +10,7 @@ struct Lua51ConformanceReport: Sendable {
     let elapsedSeconds: Double
     let loadedFiles: [String]
     let fetchedFiles: Int
+    let skippedFiles: [String]
     let outputLines: [String]
     let failure: String?
 
@@ -23,6 +24,7 @@ struct Lua51ConformanceReport: Sendable {
         lines.append(String(format: "Elapsed: %.2fs", elapsedSeconds))
         lines.append("Fetched test files: \(fetchedFiles)")
         lines.append("Loaded files: \(loadedFiles.count)")
+        lines.append("Skipped host-only files: \(skippedFiles.count)")
         lines.append("final OK: \(finalOKFound ? "YES" : "NO")")
         if let lastLoadedFile { lines.append("Last loaded: \(lastLoadedFile)") }
         if let failure { lines.append("Failure: \(failure)") }
@@ -52,6 +54,10 @@ enum Lua51ConformanceRunner {
         var loadedFiles: [String] = []
         var failure: String?
         var fetchedFiles = 0
+        let skippedFiles = [
+            "main.lua [CLI-only]",
+            "api.lua [C-API-only]"
+        ]
 
         func append(_ line: String) {
             output.append(line)
@@ -59,7 +65,10 @@ enum Lua51ConformanceRunner {
         }
 
         do {
-            append("[CONFORMANCE] iPad-only mode")
+            append("[CONFORMANCE] Garry's PAD embedded-core mode")
+            append("[CONFORMANCE] CORE tests run normally; CLI-only and C-API-only files are classified and skipped")
+            append("[SKIP][CLI] main.lua - standalone lua executable/options/arg/process test")
+            append("[SKIP][C-API] api.lua - PUC Lua C API/internal test")
             append("[CONFORMANCE] fetching official Lua 5.1 test mirror…")
 
             let sources = try await fetchOfficialLuaSources { line in
@@ -104,8 +113,10 @@ enum Lua51ConformanceRunner {
                 sourceName: "=(lua51-conformance-bootstrap)"
             )
 
+            let embeddedAllLua = makeEmbeddedCoreAllLua(from: allLua)
+
             try runtime.execute(
-                allLua,
+                embeddedAllLua,
                 sourceName: "@all.lua"
             )
         } catch {
@@ -131,9 +142,33 @@ enum Lua51ConformanceRunner {
             elapsedSeconds: Date().timeIntervalSince(started),
             loadedFiles: loadedFiles,
             fetchedFiles: fetchedFiles,
+            skippedFiles: skippedFiles,
             outputLines: output,
             failure: failure
         )
+    }
+
+    /// The official suite assumes a standalone PUC Lua executable for main.lua
+    /// and direct access to the PUC C API for api.lua. Garry's PAD embeds Lua in
+    /// an iPad application, so those two tests are classified separately instead
+    /// of allowing them to mask language/runtime failures.
+    ///
+    /// Everything else remains in the official all.lua order, including GC,
+    /// debug, patterns, libraries, files, closures, varargs, and events.
+    private static func makeEmbeddedCoreAllLua(from source: String) -> String {
+        var result = source
+
+        result = result.replacingOccurrences(
+            of: "dofile('main.lua')",
+            with: "print('[SKIP][CLI] main.lua')"
+        )
+
+        result = result.replacingOccurrences(
+            of: "dofile('api.lua')",
+            with: "print('[SKIP][C-API] api.lua')"
+        )
+
+        return result
     }
 
     // MARK: - iPad-only network fetch
