@@ -261,7 +261,11 @@ extension LuaState {
                 throw LuaError.runtime("bad argument #1 to 'loadstring' (string expected)")
             }
             if let dumped = self.dumpRegistry[sourceBytes] { return [.luaFunction(dumped)] }
-            let sourceName = arguments.count > 1 ? (try self.stringFromValue(arguments[1])) : sourceBytes.utf8String
+            let sourceName = try self.optionalStringArgument(
+                arguments,
+                at: 1,
+                defaultValue: sourceBytes.utf8String
+            )
             do {
                 let function = try self.compile(sourceBytes.utf8String, sourceName: sourceName)
                 function.environmentTable = self.currentLuaFunction()?.environmentTable ?? self.globalTable
@@ -273,7 +277,11 @@ extension LuaState {
 
         register("load") { [unowned self] arguments in
             guard let reader = arguments.first else { throw LuaError.runtime("bad argument #1 to 'load' (function expected)") }
-            let chunkName = arguments.count > 1 ? try self.stringFromValue(arguments[1]) : "=(load)"
+            let chunkName = try self.optionalStringArgument(
+                arguments,
+                at: 1,
+                defaultValue: "=(load)"
+            )
             var bytes: [UInt8] = []
             while true {
                 let results = try self.callValue(reader, arguments: [])
@@ -1208,6 +1216,15 @@ extension LuaState {
 
     func stringFromValue(_ value: LuaValue) throws -> String {
         try luaStringBytes(value).utf8String
+    }
+
+    func optionalStringArgument(
+        _ arguments: [LuaValue],
+        at index: Int,
+        defaultValue: String
+    ) throws -> String {
+        guard index < arguments.count, !isNil(arguments[index]) else { return defaultValue }
+        return try stringFromValue(arguments[index])
     }
 
     func luaStringBytes(_ value: LuaValue) throws -> LuaString {
