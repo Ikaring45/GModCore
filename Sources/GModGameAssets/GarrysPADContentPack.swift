@@ -166,6 +166,12 @@ public final class GarrysPADContentPack: @unchecked Sendable {
     /// locations are accepted without recursively scanning the app container.
     public static func discover(in bundle: Bundle = .main) throws -> GarrysPADContentPack? {
         guard let root = bundle.resourceURL else { return nil }
+        return try discover(resourceRootURL: root)
+    }
+
+    public static func discover(resourceRootURL root: URL) throws
+        -> GarrysPADContentPack?
+    {
         var searchRoots = [root]
         let wrapped = root.appendingPathComponent("Resources", isDirectory: true)
         var wrappedIsDirectory: ObjCBool = false

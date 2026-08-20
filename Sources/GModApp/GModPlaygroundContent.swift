@@ -19,10 +19,14 @@ final class GModPlaygroundContentModel: ObservableObject {
 
     func reload(bundle: Bundle = .main) {
         state = .loading
+        let resourceRootURL = bundle.resourceURL
         Task { [weak self] in
             do {
                 let result = try await Task.detached(priority: .userInitiated) {
-                    guard let pack = try GarrysPADContentPack.discover(in: bundle) else {
+                    guard let resourceRootURL,
+                          let pack = try GarrysPADContentPack.discover(
+                              resourceRootURL: resourceRootURL
+                          ) else {
                         return Optional<(GarrysPADContentPack, Data, Data?)>.none
                     }
                     let background = try pack.data(

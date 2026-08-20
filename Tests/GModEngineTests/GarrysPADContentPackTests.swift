@@ -42,6 +42,40 @@ final class GarrysPADContentPackTests: XCTestCase {
         }
     }
 
+    func testDiscoveryAcceptsPlaygroundsRootAndOneResourcesWrapper() throws {
+        let fixture = try makeTemporaryZIP(entries: [
+            ("garrysmod/maps/gm_construct.bsp", Data("construct".utf8), 0),
+            ("garrysmod/maps/gm_flatgrass.bsp", Data("flatgrass".utf8), 0),
+            ("garrysmod/html/img/bg.jpg", Data([0xFF, 0xD8, 0xFF, 0xD9]), 0),
+        ])
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("GarrysPAD-discovery-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let direct = root.appendingPathComponent("GarrysPAD_Content_Playable.zip")
+        try FileManager.default.copyItem(at: fixture, to: direct)
+        XCTAssertEqual(
+            try GarrysPADContentPack.discover(resourceRootURL: root)?.archiveURL,
+            direct.standardizedFileURL
+        )
+
+        try FileManager.default.removeItem(at: direct)
+        let wrappedRoot = root.appendingPathComponent("Resources")
+        try FileManager.default.createDirectory(
+            at: wrappedRoot,
+            withIntermediateDirectories: true
+        )
+        let wrapped = wrappedRoot.appendingPathComponent(
+            "GarrysPAD_Content_Playable.zip"
+        )
+        try FileManager.default.copyItem(at: fixture, to: wrapped)
+        XCTAssertEqual(
+            try GarrysPADContentPack.discover(resourceRootURL: root)?.archiveURL,
+            wrapped.standardizedFileURL
+        )
+    }
+
     func testConfiguredRealPackReadsBothStockMapsAndHomeBackground() throws {
         guard let path = ProcessInfo.processInfo.environment[
             "GMOD_CONTENT_PACK_DIAGNOSTIC_PATH"
