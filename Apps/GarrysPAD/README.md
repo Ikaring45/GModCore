@@ -4,6 +4,11 @@
 repository root. The application target links the local `GModApp` package
 product and presents `GModMainView` as its SwiftUI lifecycle root.
 
+Large GMod content packs are intentionally not application resources. On first
+launch, `GModMainView` opens the system Files picker and retains a
+security-scoped bookmark to the selected ZIP. Keeping the archive in Files or
+iCloud Drive avoids copying and signing several gigabytes into every app build.
+
 The checked-in defaults are intentionally generic:
 
 - iPad only, with an iPadOS 16.0 deployment floor;

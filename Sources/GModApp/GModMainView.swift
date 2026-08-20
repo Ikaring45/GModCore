@@ -3,6 +3,7 @@ import Foundation
 import GModEngine
 import GModGameAssets
 import GModMetal
+import UniformTypeIdentifiers
 
 #if canImport(UIKit)
 import UIKit
@@ -18,6 +19,7 @@ public struct GModMainView: View {
     @State private var resultLabel = "READY"
     @State private var showConsole = false
     @State private var showHomeMenu = true
+    @State private var isChoosingContentPack = false
 
     public init() {
         let factory = GModAppRuntimeFactory()
@@ -172,6 +174,19 @@ public struct GModMainView: View {
                 game.suspendInput()
             }
         }
+        .fileImporter(
+            isPresented: $isChoosingContentPack,
+            allowedContentTypes: [.zip],
+            allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case let .success(urls):
+                guard let url = urls.first else { return }
+                content.selectContentPack(url: url)
+            case let .failure(error):
+                content.reportSelectionFailure(error)
+            }
+        }
     }
 
     @ViewBuilder
@@ -229,23 +244,29 @@ public struct GModMainView: View {
         switch content.state {
         case .loading:
             contentPackNotice(
-                title: "Reading Garry's PAD content…",
-                detail: "Indexing the ZIP directly; no full extraction is performed.",
-                showsRetry: false
+                title: "Opening Garry's PAD content…",
+                detail:
+                    "Indexing the selected ZIP directly from Files; no app-bundle copy or " +
+                    "full extraction is performed.",
+                primaryActionTitle: nil,
+                showsForgetAction: false
             )
         case .missing:
             contentPackNotice(
-                title: "Content ZIP not found",
+                title: "Choose the content ZIP",
                 detail:
-                    "Put one GarrysPAD_Content_*.zip file in this Playground's " +
-                    "Resources folder, then run again.",
-                showsRetry: true
+                    "Keep GarrysPAD_Content_Playable.zip in Files or iCloud Drive. " +
+                    "Do not add the multi-gigabyte ZIP to Playground Resources; " +
+                    "choose it here and it will be read in place.",
+                primaryActionTitle: "Choose ZIP from Files",
+                showsForgetAction: false
             )
         case let .failed(message):
             contentPackNotice(
                 title: "Content ZIP could not be mounted",
                 detail: message,
-                showsRetry: true
+                primaryActionTitle: "Choose Another ZIP",
+                showsForgetAction: true
             )
         case let .ready(pack, background, logo):
             if showHomeMenu {
@@ -269,7 +290,8 @@ public struct GModMainView: View {
     private func contentPackNotice(
         title: String,
         detail: String,
-        showsRetry: Bool
+        primaryActionTitle: String?,
+        showsForgetAction: Bool
     ) -> some View {
         ZStack {
             Color(red: 0.07, green: 0.08, blue: 0.09).ignoresSafeArea()
@@ -283,13 +305,29 @@ public struct GModMainView: View {
                     .foregroundColor(.white.opacity(0.72))
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 620)
-                if showsRetry {
-                    Button("Scan Resources Again") {
-                        content.reload()
+                    .accessibilityIdentifier("garryspad.content.status")
+                if let warning = content.persistenceWarning {
+                    Text(warning)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundColor(Color(red: 1.0, green: 0.76, blue: 0.30))
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 620)
+                }
+                if let primaryActionTitle {
+                    Button(primaryActionTitle) {
+                        isChoosingContentPack = true
                     }
                     .buttonStyle(GModButtonStyle())
+                    .accessibilityIdentifier("garryspad.content.choose")
                 } else {
                     ProgressView().tint(.white)
+                }
+                if showsForgetAction {
+                    Button("Forget Saved ZIP") {
+                        content.forgetSelection()
+                    }
+                    .buttonStyle(GModButtonStyle())
+                    .accessibilityIdentifier("garryspad.content.forget")
                 }
             }
             .padding(30)

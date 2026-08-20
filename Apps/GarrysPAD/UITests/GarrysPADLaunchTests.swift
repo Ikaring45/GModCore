@@ -19,5 +19,12 @@ final class GarrysPADLaunchTests: XCTestCase {
             root.waitForExistence(timeout: 30),
             "GModMainView did not expose the host accessibility root"
         )
+
+        let chooseContent = app.buttons["garryspad.content.choose"]
+        XCTAssertTrue(
+            chooseContent.waitForExistence(timeout: 10),
+            "A resource-free app launch did not offer the external ZIP picker"
+        )
+        XCTAssertTrue(chooseContent.isHittable)
     }
 }
