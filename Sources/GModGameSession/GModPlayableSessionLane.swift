@@ -119,13 +119,26 @@ public enum GModPlayableSessionLaneError: Error, Sendable, Equatable,
     }
 }
 
+struct GModPlayableSessionLaneShutdownCleanupObservation: Sendable, Equatable {
+    let workerIdentity: String
+    let sessionIsClosed: Bool
+    let closeReport: GModPlayableSessionCloseReport?
+    let closeFailure: String?
+}
+
 /// Serialized ownership boundary for the non-Sendable Lua and Source runtime
 /// graph. Apple UI code may await this actor without blocking MainActor; no
 /// runtime, userdata, BSP provider, or transport endpoint crosses the actor.
 public actor GModPlayableSessionLane {
+    private nonisolated let dedicatedExecutor =
+        GModPlayableSessionDedicatedExecutor()
     private let textMeasurer: (any GMLuaTextMeasurer)?
     private let worldWalkCollisionProvider:
         (any SourceWorldWalkCollisionProvider)?
+    private let shutdownCleanupObserverForTesting:
+        (@Sendable (
+            GModPlayableSessionLaneShutdownCleanupObservation
+        ) -> Void)?
     private var session: GModPlayableSession?
     private var generation: UInt64 = 0
     private var pointerEpoch: UInt64 = 0
@@ -133,9 +146,14 @@ public actor GModPlayableSessionLane {
     private var pointerGestureActive = false
     private var lastPointerLocation: (x: Double, y: Double)?
 
+    public nonisolated var unownedExecutor: UnownedSerialExecutor {
+        dedicatedExecutor.asUnownedSerialExecutor()
+    }
+
     public init(textMeasurer: (any GMLuaTextMeasurer)? = nil) {
         self.textMeasurer = textMeasurer
         worldWalkCollisionProvider = nil
+        shutdownCleanupObserverForTesting = nil
     }
 
     /// Internal deterministic seam; the app-facing initializer always uses
@@ -147,6 +165,21 @@ public actor GModPlayableSessionLane {
     ) {
         self.textMeasurer = textMeasurer
         self.worldWalkCollisionProvider = worldWalkCollisionProvider
+        shutdownCleanupObserverForTesting = nil
+    }
+
+    /// Internal teardown observation seam. Production callers cannot install
+    /// callbacks into the worker-owned session graph.
+    init(
+        shutdownCleanupObserverForTesting:
+            @escaping @Sendable (
+                GModPlayableSessionLaneShutdownCleanupObservation
+            ) -> Void
+    ) {
+        textMeasurer = nil
+        worldWalkCollisionProvider = nil
+        self.shutdownCleanupObserverForTesting =
+            shutdownCleanupObserverForTesting
     }
 
     @discardableResult
@@ -157,6 +190,7 @@ public actor GModPlayableSessionLane {
             _ message: String
         ) -> Void = { _, _ in }
     ) throws -> GModPlayableSessionSnapshot {
+        dedicatedExecutor.preconditionIsCurrentWorker()
         generation &+= 1
         pointerEpoch &+= 1
         inputEpoch &+= 1
@@ -164,6 +198,7 @@ public actor GModPlayableSessionLane {
         lastPointerLocation = nil
         if let prior = session {
             _ = try prior.close()
+            dedicatedExecutor.clearShutdownCleanup()
             session = nil
         }
         let replacement = try GModPlayableSession(
@@ -173,6 +208,7 @@ public actor GModPlayableSessionLane {
             worldWalkCollisionProvider: worldWalkCollisionProvider
         )
         session = replacement
+        retainForShutdown(replacement)
         return GModPlayableSessionSnapshot(
             generation: generation,
             pointerEpoch: pointerEpoch,
@@ -194,6 +230,7 @@ public actor GModPlayableSessionLane {
         expectedInputEpoch: UInt64? = nil,
         maximumDeliveries: Int = 10_000
     ) throws -> GModPlayableHostFrameReport {
+        dedicatedExecutor.preconditionIsCurrentWorker()
         guard fixedTickCount >= 0 else {
             throw GModPlayableSessionLaneError.invalidFixedTickCount(
                 fixedTickCount
@@ -247,6 +284,7 @@ public actor GModPlayableSessionLane {
     public func renderClientVGUIFrame(
         expectedGeneration: UInt64? = nil
     ) throws -> GMLuaSurfaceFrameSnapshot {
+        dedicatedExecutor.preconditionIsCurrentWorker()
         guard let session else {
             throw GModPlayableSessionLaneError.notStarted
         }
@@ -263,6 +301,7 @@ public actor GModPlayableSessionLane {
         expectedPointerEpoch: UInt64? = nil,
         expectedInputEpoch: UInt64? = nil
     ) throws -> GModPlayableInputBoundaryReport {
+        dedicatedExecutor.preconditionIsCurrentWorker()
         guard let session else {
             throw GModPlayableSessionLaneError.notStarted
         }
@@ -309,6 +348,7 @@ public actor GModPlayableSessionLane {
         expectedGeneration: UInt64? = nil,
         expectedPointerEpoch: UInt64? = nil
     ) throws -> GMLuaPointerDispatchResult {
+        dedicatedExecutor.preconditionIsCurrentWorker()
         guard let session else {
             throw GModPlayableSessionLaneError.notStarted
         }
@@ -344,6 +384,7 @@ public actor GModPlayableSessionLane {
         expectedPointerEpoch: UInt64? = nil,
         expectedInputEpoch: UInt64? = nil
     ) throws -> GModPlayableInputBoundaryReport {
+        dedicatedExecutor.preconditionIsCurrentWorker()
         guard let session else {
             throw GModPlayableSessionLaneError.notStarted
         }
@@ -371,6 +412,7 @@ public actor GModPlayableSessionLane {
         _ text: String,
         expectedGeneration: UInt64? = nil
     ) throws -> Int? {
+        dedicatedExecutor.preconditionIsCurrentWorker()
         guard let session else {
             throw GModPlayableSessionLaneError.notStarted
         }
@@ -384,6 +426,7 @@ public actor GModPlayableSessionLane {
         sourceName: String = "=(ipad-console)",
         expectedGeneration: UInt64? = nil
     ) throws {
+        dedicatedExecutor.preconditionIsCurrentWorker()
         guard let session else {
             throw GModPlayableSessionLaneError.notStarted
         }
@@ -400,6 +443,7 @@ public actor GModPlayableSessionLane {
 
     @discardableResult
     public func close() throws -> GModPlayableSessionCloseReport {
+        dedicatedExecutor.preconditionIsCurrentWorker()
         guard let prior = session else {
             return GModPlayableSessionCloseReport(
                 clientFinalizerErrors: [],
@@ -407,6 +451,7 @@ public actor GModPlayableSessionLane {
             )
         }
         let report = try prior.close()
+        dedicatedExecutor.clearShutdownCleanup()
         session = nil
         generation &+= 1
         pointerEpoch &+= 1
@@ -414,6 +459,36 @@ public actor GModPlayableSessionLane {
         pointerGestureActive = false
         lastPointerLocation = nil
         return report
+    }
+
+    /// Internal deterministic seam proving that actor-isolated work entered
+    /// the same dedicated engine thread. No Thread object crosses the actor.
+    func executionThreadIdentityForTesting() -> String {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        return dedicatedExecutor.workerIdentity
+    }
+
+    private func retainForShutdown(_ session: GModPlayableSession) {
+        let observer = shutdownCleanupObserverForTesting
+        dedicatedExecutor.replaceShutdownCleanup { workerIdentity in
+            let closeReport: GModPlayableSessionCloseReport?
+            let closeFailure: String?
+            do {
+                closeReport = try session.close()
+                closeFailure = nil
+            } catch {
+                closeReport = nil
+                closeFailure = GMLuaRuntime.describe(error)
+            }
+            observer?(
+                GModPlayableSessionLaneShutdownCleanupObservation(
+                    workerIdentity: workerIdentity,
+                    sessionIsClosed: session.isClosed,
+                    closeReport: closeReport,
+                    closeFailure: closeFailure
+                )
+            )
+        }
     }
 
     private func validate(expectedGeneration: UInt64?) throws {

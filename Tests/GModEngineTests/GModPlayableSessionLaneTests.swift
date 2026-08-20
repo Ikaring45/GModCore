@@ -22,7 +22,168 @@ private struct UnsupportedContentsLaneWalkProvider:
     }
 }
 
+private final class LaneShutdownCleanupRecorder: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var storage: [
+        GModPlayableSessionLaneShutdownCleanupObservation
+    ] = []
+
+    func record(
+        _ observation: GModPlayableSessionLaneShutdownCleanupObservation
+    ) {
+        condition.lock()
+        storage.append(observation)
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    func waitForObservation(
+        timeout: TimeInterval = 10
+    ) -> GModPlayableSessionLaneShutdownCleanupObservation? {
+        let deadline = Date(timeIntervalSinceNow: timeout)
+        condition.lock()
+        while storage.isEmpty, condition.wait(until: deadline) {}
+        let observation = storage.first
+        condition.unlock()
+        return observation
+    }
+}
+
 final class GModPlayableSessionLaneTests: XCTestCase {
+    func testDroppedLaneClosesFinalizersOnWorkerAfterThrowAndCancellation()
+        async throws
+    {
+        let directRecorder = LaneShutdownCleanupRecorder()
+        var directLane: GModPlayableSessionLane? = GModPlayableSessionLane(
+            shutdownCleanupObserverForTesting: { observation in
+                directRecorder.record(observation)
+            }
+        )
+        let directIdentity = await directLane!
+            .executionThreadIdentityForTesting()
+        let directSnapshot = try await directLane!.start(
+            configuration: GModPlayableSessionConfiguration(map: .construct)
+        )
+        try await installDropFinalizer(
+            marker: "direct-drop-finalizer",
+            lane: directLane!,
+            generation: directSnapshot.generation
+        )
+        directLane = nil
+
+        let directObservation = try XCTUnwrap(
+            directRecorder.waitForObservation()
+        )
+        XCTAssertEqual(directObservation.workerIdentity, directIdentity)
+        XCTAssertTrue(directObservation.sessionIsClosed)
+        XCTAssertNil(directObservation.closeFailure)
+        XCTAssertTrue(
+            directObservation.closeReport?.clientFinalizerErrors.contains {
+                $0.contains("direct-drop-finalizer")
+            } == true
+        )
+
+        let cancelledRecorder = LaneShutdownCleanupRecorder()
+        let cancelledTask = Task {
+            () throws -> (identity: String, observedCancellation: Bool) in
+            var lane: GModPlayableSessionLane? = GModPlayableSessionLane(
+                shutdownCleanupObserverForTesting: { observation in
+                    cancelledRecorder.record(observation)
+                }
+            )
+            let identity = await lane!.executionThreadIdentityForTesting()
+            let snapshot = try await lane!.start(
+                configuration: GModPlayableSessionConfiguration(
+                    map: .flatgrass
+                )
+            )
+            try await self.installDropFinalizer(
+                marker: "cancelled-drop-finalizer",
+                lane: lane!,
+                generation: snapshot.generation
+            )
+
+            do {
+                try await lane!.execute(
+                    "error('must not execute')",
+                    realm: .menu,
+                    expectedGeneration: snapshot.generation
+                )
+                XCTFail("unsupported realm unexpectedly executed")
+            } catch {
+                XCTAssertEqual(
+                    error as? GModPlayableSessionLaneError,
+                    .unsupportedExecutionRealm(.menu)
+                )
+            }
+
+            do {
+                try Task.checkCancellation()
+                lane = nil
+                return (identity, false)
+            } catch is CancellationError {
+                lane = nil
+                return (identity, true)
+            }
+        }
+        cancelledTask.cancel()
+        let cancellation = try await cancelledTask.value
+        XCTAssertTrue(cancellation.observedCancellation)
+
+        let cancelledObservation = try XCTUnwrap(
+            cancelledRecorder.waitForObservation()
+        )
+        XCTAssertEqual(
+            cancelledObservation.workerIdentity,
+            cancellation.identity
+        )
+        XCTAssertTrue(cancelledObservation.sessionIsClosed)
+        XCTAssertNil(cancelledObservation.closeFailure)
+        XCTAssertTrue(
+            cancelledObservation.closeReport?.clientFinalizerErrors.contains {
+                $0.contains("cancelled-drop-finalizer")
+            } == true
+        )
+    }
+
+    func testDedicatedThreadOwnsConstructCloseFlatgrassCloseLifecycle() async throws {
+        let lane = GModPlayableSessionLane()
+        let identity = await lane.executionThreadIdentityForTesting()
+
+        let construct = try await lane.start(
+            configuration: GModPlayableSessionConfiguration(map: .construct)
+        )
+        let identityAfterConstruct =
+            await lane.executionThreadIdentityForTesting()
+        XCTAssertEqual(identityAfterConstruct, identity)
+        XCTAssertEqual(construct.startup.map, .construct)
+        _ = try await lane.runHostFrame(
+            fixedTickCount: 0,
+            renderClientFrame: false,
+            expectedGeneration: construct.generation,
+            expectedInputEpoch: construct.inputEpoch
+        )
+        let identityAfterFrame =
+            await lane.executionThreadIdentityForTesting()
+        XCTAssertEqual(identityAfterFrame, identity)
+        _ = try await lane.close()
+        let identityAfterConstructClose =
+            await lane.executionThreadIdentityForTesting()
+        XCTAssertEqual(identityAfterConstructClose, identity)
+
+        let flatgrass = try await lane.start(
+            configuration: GModPlayableSessionConfiguration(map: .flatgrass)
+        )
+        XCTAssertEqual(flatgrass.startup.map, .flatgrass)
+        let identityAfterFlatgrass =
+            await lane.executionThreadIdentityForTesting()
+        XCTAssertEqual(identityAfterFlatgrass, identity)
+        _ = try await lane.close()
+        let identityAfterFlatgrassClose =
+            await lane.executionThreadIdentityForTesting()
+        XCTAssertEqual(identityAfterFlatgrassClose, identity)
+    }
+
     func testUnsupportedMovementIsReportedWhileLaneAndRealmTimeContinue() async throws {
         let lane = GModPlayableSessionLane(
             worldWalkCollisionProvider:
@@ -553,5 +714,24 @@ final class GModPlayableSessionLaneTests: XCTestCase {
                 .notStarted
             )
         }
+    }
+
+    private func installDropFinalizer(
+        marker: String,
+        lane: GModPlayableSessionLane,
+        generation: UInt64
+    ) async throws {
+        try await lane.execute(
+            """
+            local dropped = newproxy(true)
+            getmetatable(dropped).__gc = function()
+                error('\(marker)')
+            end
+            DROPPED_LANE_FINALIZER = dropped
+            """,
+            realm: .client,
+            sourceName: "=(dropped lane finalizer)",
+            expectedGeneration: generation
+        )
     }
 }
