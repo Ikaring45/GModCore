@@ -8,10 +8,12 @@ public struct GModMainView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var console: GModConsoleModel
     @StateObject private var game: GModGameSessionModel
+    @StateObject private var content: GModPlaygroundContentModel
     @State private var stats = "Starting ARM engine..."
     @State private var isRunning = false
     @State private var resultLabel = "READY"
     @State private var showConsole = false
+    @State private var showHomeMenu = true
 
     public init() {
         let factory = GModAppRuntimeFactory()
@@ -27,6 +29,7 @@ public struct GModMainView: View {
                 }
             )
         )
+        _content = StateObject(wrappedValue: GModPlaygroundContentModel())
     }
 
     public var body: some View {
@@ -129,6 +132,8 @@ public struct GModMainView: View {
                 }
             }
             .padding(14)
+
+            contentOverlay
         }
         .preferredColorScheme(.dark)
         .onAppear {
@@ -151,6 +156,82 @@ public struct GModMainView: View {
                 game.suspendInput()
             }
         }
+    }
+
+    @ViewBuilder
+    private var contentOverlay: some View {
+        switch content.state {
+        case .loading:
+            contentPackNotice(
+                title: "Reading Garry's PAD content…",
+                detail: "Indexing the ZIP directly; no full extraction is performed.",
+                showsRetry: false
+            )
+        case .missing:
+            contentPackNotice(
+                title: "Content ZIP not found",
+                detail:
+                    "Put one GarrysPAD_Content_*.zip file in this Playground's " +
+                    "Resources folder, then run again.",
+                showsRetry: true
+            )
+        case let .failed(message):
+            contentPackNotice(
+                title: "Content ZIP could not be mounted",
+                detail: message,
+                showsRetry: true
+            )
+        case let .ready(pack, background, logo):
+            if showHomeMenu {
+                GModHomeMenuView(
+                    pack: pack,
+                    backgroundJPEG: background,
+                    logoPNG: logo,
+                    onSelectMap: { map in
+                        game.resumeInput()
+                        showHomeMenu = false
+                        game.start(map: map, contentPackURL: pack.archiveURL)
+                    }
+                )
+                .ignoresSafeArea()
+                .transition(.opacity)
+            }
+        }
+    }
+
+    private func contentPackNotice(
+        title: String,
+        detail: String,
+        showsRetry: Bool
+    ) -> some View {
+        ZStack {
+            Color(red: 0.07, green: 0.08, blue: 0.09).ignoresSafeArea()
+            VStack(spacing: 16) {
+                Text("Garry's PAD")
+                    .font(.system(size: 46, weight: .black, design: .rounded))
+                Text(title)
+                    .font(.title2.weight(.semibold))
+                Text(detail)
+                    .font(.system(size: 14, design: .monospaced))
+                    .foregroundColor(.white.opacity(0.72))
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 620)
+                if showsRetry {
+                    Button("Scan Resources Again") {
+                        content.reload()
+                    }
+                    .buttonStyle(GModButtonStyle())
+                } else {
+                    ProgressView().tint(.white)
+                }
+            }
+            .padding(30)
+        }
+    }
+
+    private var activeContentPackURL: URL? {
+        guard case let .ready(pack, _, _) = content.state else { return nil }
+        return pack.archiveURL
     }
 
     private var consoleWindow: some View {
@@ -310,13 +391,13 @@ public struct GModMainView: View {
     private var gameControls: some View {
         HStack(spacing: 8) {
             Button("gm_construct") {
-                game.start(map: .construct)
+                game.start(map: .construct, contentPackURL: activeContentPackURL)
             }
             .buttonStyle(GModButtonStyle())
             .disabled(game.isStarting)
 
             Button("gm_flatgrass") {
-                game.start(map: .flatgrass)
+                game.start(map: .flatgrass, contentPackURL: activeContentPackURL)
             }
             .buttonStyle(GModButtonStyle())
             .disabled(game.isStarting)
@@ -334,6 +415,12 @@ public struct GModMainView: View {
                 withAnimation(.easeInOut(duration: 0.16)) {
                     showConsole.toggle()
                 }
+            }
+            .buttonStyle(GModButtonStyle())
+
+            Button("Home") {
+                game.suspendInput()
+                showHomeMenu = true
             }
             .buttonStyle(GModButtonStyle())
 
