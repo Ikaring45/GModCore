@@ -52,10 +52,9 @@ if closing_index < 0:
 
 metal = swift_source[opening_index + 3 : closing_index]
 expected_functions = {
-    "vertexMain",
-    "fragmentMain",
     "worldVertexMain",
     "worldFragmentMain",
+    "worldTexturedFragmentMain",
     "surfaceVertexMain",
     "surfaceSolidFragmentMain",
     "surfaceTexturedFragmentMain",

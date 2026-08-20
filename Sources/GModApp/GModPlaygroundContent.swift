@@ -1,6 +1,7 @@
 import Combine
 import Foundation
 import GModGameAssets
+import GModGameSession
 
 @MainActor
 final class GModPlaygroundContentModel: ObservableObject {
@@ -12,14 +13,22 @@ final class GModPlaygroundContentModel: ObservableObject {
     }
 
     @Published private(set) var state: State = .loading
+    @Published private(set) var assetSource: GModContentPackAssetSource?
+    private let runtimeFactory: GModAppRuntimeFactory
 
-    init(bundle: Bundle = .main) {
+    init(
+        runtimeFactory: GModAppRuntimeFactory,
+        bundle: Bundle = .main
+    ) {
+        self.runtimeFactory = runtimeFactory
         reload(bundle: bundle)
     }
 
     func reload(bundle: Bundle = .main) {
         state = .loading
+        assetSource = nil
         let resourceRootURL = bundle.resourceURL
+        let runtimeFactory = self.runtimeFactory
         Task { [weak self] in
             do {
                 let result = try await Task.detached(priority: .userInitiated) {
@@ -27,7 +36,12 @@ final class GModPlaygroundContentModel: ObservableObject {
                           let pack = try GarrysPADContentPack.discover(
                               resourceRootURL: resourceRootURL
                           ) else {
-                        return Optional<(GarrysPADContentPack, Data, Data?)>.none
+                        return Optional<(
+                            GarrysPADContentPack,
+                            Data,
+                            Data?,
+                            GModContentPackAssetSource
+                        )>.none
                     }
                     let background = try pack.data(
                         for: "garrysmod/html/img/bg.jpg",
@@ -37,10 +51,12 @@ final class GModPlaygroundContentModel: ObservableObject {
                         for: "garrysmod/html/img/gmod_logo_brave.png",
                         maximumByteCount: 4 * 1_024 * 1_024
                     )
-                    return (pack, background, logo)
+                    let source = try runtimeFactory.mountContentPack(pack)
+                    return (pack, background, logo, source)
                 }.value
                 guard let self else { return }
                 if let result {
+                    assetSource = result.3
                     state = .ready(
                         result.0,
                         backgroundJPEG: result.1,

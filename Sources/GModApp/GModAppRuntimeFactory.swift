@@ -1,7 +1,26 @@
+import Foundation
 import GModEngine
 import GModGameAssets
 import GModGameSession
 import GModMetal
+
+private final class GModMountedContentSource: @unchecked Sendable {
+    private let lock = NSLock()
+    private var source: GModContentPackAssetSource?
+
+    func mount(_ replacement: GModContentPackAssetSource) {
+        lock.lock()
+        source = replacement
+        lock.unlock()
+    }
+
+    func data(for logicalPath: String) throws -> Data? {
+        lock.lock()
+        let current = source
+        lock.unlock()
+        return try current?.data(for: logicalPath)
+    }
+}
 
 /// Production construction seam shared by the server console runtime and the
 /// retained client surface runtime. Keeping one measurer here prevents the App
@@ -14,11 +33,16 @@ public final class GModAppRuntimeFactory: @unchecked Sendable {
 
     private let textMeasurer: any GMLuaTextMeasurer
 
+    private static let processMountedContentSource = GModMountedContentSource()
+
     // VMT/VTF/PNG decoding and CoreText glyph creation are relatively expensive. The
     // concrete resolvers are thread-safe and deliberately shared at process
     // scope so recreating a SwiftUI model does not discard immutable results.
     private static let processSurfaceTextureResolver =
         GModMetalSurfaceSourceMaterialResolver { logicalPath in
+            if let mounted = try processMountedContentSource.data(for: logicalPath) {
+                return mounted
+            }
             do {
                 return try GModGameAssets.clientContentData(
                     for: logicalPath
@@ -75,6 +99,16 @@ public final class GModAppRuntimeFactory: @unchecked Sendable {
             initialViewport: initialViewport,
             textMeasurer: textMeasurer
         )
+    }
+
+    @discardableResult
+    public func mountContentPack(
+        _ pack: GarrysPADContentPack
+    ) throws -> GModContentPackAssetSource {
+        let source = try GModContentPackAssetSource(pack: pack)
+        Self.processMountedContentSource.mount(source)
+        Self.processSurfaceTextureResolver.removeAllCachedTextures()
+        return source
     }
 
     public func makePlayableSession(

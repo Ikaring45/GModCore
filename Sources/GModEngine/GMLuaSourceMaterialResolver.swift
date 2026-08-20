@@ -98,8 +98,10 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
     public static let defaultMaximumEncodedTextureByteCount = 16 * 1_024 * 1_024
     public static let defaultMaximumTextureWidth = 4_096
     public static let defaultMaximumTextureHeight = 4_096
-    public static let defaultMaximumTexturePixelCount = 2_097_152
-    public static let defaultMaximumDecodedTextureByteCount = 8 * 1_024 * 1_024
+    // Stock gm_construct contains 2048x2048 base textures. Keep the resolver
+    // bounded, but admit that exact Source-era size for world rendering.
+    public static let defaultMaximumTexturePixelCount = 4_194_304
+    public static let defaultMaximumDecodedTextureByteCount = 16 * 1_024 * 1_024
 
     private struct Key: Hashable {
         let canonicalMaterialPath: String

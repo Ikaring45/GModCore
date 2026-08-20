@@ -165,6 +165,62 @@ final class GMLuaPlatformImageAndVPKTests: XCTestCase {
         XCTAssertEqual(try archive.data(for: "folder/inline.txt"), inlinePayload)
     }
 
+    func testVPKReadsExternalChunkThroughBoundedRandomAccessSource() throws {
+        let chunkPrefix = Data([0x11, 0x22, 0x33])
+        let preload = Data("zip-".utf8)
+        let payload = Data("range".utf8)
+        let entries = [
+            SyntheticVPKEntry(
+                fileExtension: "dat",
+                directory: "nested",
+                stem: "asset",
+                crc32: crc32(preload + payload),
+                preloadData: preload,
+                archiveIndex: 0,
+                offset: UInt32(chunkPrefix.count),
+                length: UInt32(payload.count)
+            ),
+        ]
+        let tree = makeVPKTree(entries)
+        var directoryFile = makeVPKHeader(
+            version: 2,
+            treeSize: tree.count,
+            fileDataSectionSize: 0
+        )
+        directoryFile.append(tree)
+        var chunkFile = chunkPrefix
+        chunkFile.append(payload)
+        let files: [String: Data] = [
+            "content/synthetic_dir.vpk": directoryFile,
+            "content/synthetic_000.vpk": chunkFile,
+        ]
+        let source = GMLuaVPKRandomAccessSource(
+            byteCount: { path in
+                files[path].map { UInt64($0.count) }
+            },
+            read: { path, offset, count in
+                guard let data = files[path],
+                      offset <= UInt64(data.count),
+                      count >= 0,
+                      UInt64(count) <= UInt64(data.count) - offset else {
+                    throw GMLuaVPKError.truncatedData(path)
+                }
+                let start = Int(offset)
+                return data.subdata(in: start..<(start + count))
+            }
+        )
+
+        let archive = try GMLuaVPKArchive(
+            directoryFilePath: "content/synthetic_dir.vpk",
+            randomAccessSource: source
+        )
+        XCTAssertEqual(archive.version, 2)
+        XCTAssertEqual(
+            try archive.data(for: "NESTED\\ASSET.DAT"),
+            preload + payload
+        )
+    }
+
     func testVPKMaterialResolverPrependsMaterialsAndCachesDecodedPNG() throws {
 #if os(Windows) || os(iOS) || os(macOS)
         let root = try makeTemporaryDirectory()

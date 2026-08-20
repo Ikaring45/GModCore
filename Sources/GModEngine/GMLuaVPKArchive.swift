@@ -21,6 +21,26 @@ public enum GMLuaVPKError: Error, Sendable, Equatable, CustomStringConvertible {
     }
 }
 
+/// Bounded random-access backing for a VPK family. This lets an iPad read VPK
+/// files stored inside the content ZIP without extracting multi-gigabyte
+/// archive chunks into the app container.
+public struct GMLuaVPKRandomAccessSource: Sendable {
+    public typealias ByteCount = @Sendable (_ path: String) throws -> UInt64?
+    public typealias Read = @Sendable (
+        _ path: String,
+        _ offset: UInt64,
+        _ count: Int
+    ) throws -> Data
+
+    fileprivate let byteCountImpl: ByteCount
+    fileprivate let readImpl: Read
+
+    public init(byteCount: @escaping ByteCount, read: @escaping Read) {
+        byteCountImpl = byteCount
+        readImpl = read
+    }
+}
+
 /// Read-only Valve VPK v1/v2 archive index.
 ///
 /// File payloads are stored verbatim in VPK archives, so Source assets can be
@@ -42,33 +62,85 @@ public final class GMLuaVPKArchive: @unchecked Sendable {
     public let fileCount: Int
 
     private let directoryDataOffset: UInt64
+    private let directoryFilePath: String
     private let chunkBaseName: String
     private let entries: [Data: Entry]
+    private let randomAccessSource: GMLuaVPKRandomAccessSource
 
-    public init(directoryFileURL: URL) throws {
-        self.directoryFileURL = directoryFileURL.standardizedFileURL
-        let fileName = self.directoryFileURL.lastPathComponent
+    public convenience init(directoryFileURL: URL) throws {
+        let standardized = directoryFileURL.standardizedFileURL
+        let root = standardized.deletingLastPathComponent()
+        let source = GMLuaVPKRandomAccessSource(
+            byteCount: { path in
+                let url = root.appendingPathComponent(path)
+                guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+                return try FileHandle(forReadingFrom: url).withClose { handle in
+                    try handle.seekToEnd()
+                }
+            },
+            read: { path, offset, count in
+                let url = root.appendingPathComponent(path)
+                let handle: FileHandle
+                do {
+                    handle = try FileHandle(forReadingFrom: url)
+                } catch {
+                    throw GMLuaVPKError.missingArchive(url.path)
+                }
+                return try handle.withClose { opened in
+                    try Self.readExactly(
+                        opened,
+                        offset: offset,
+                        count: count,
+                        path: url.path
+                    )
+                }
+            }
+        )
+        try self.init(
+            directoryFileURL: standardized,
+            directoryFilePath: standardized.lastPathComponent,
+            randomAccessSource: source
+        )
+    }
+
+    public convenience init(
+        directoryFilePath: String,
+        randomAccessSource: GMLuaVPKRandomAccessSource
+    ) throws {
+        try self.init(
+            directoryFileURL: URL(fileURLWithPath: directoryFilePath),
+            directoryFilePath: directoryFilePath,
+            randomAccessSource: randomAccessSource
+        )
+    }
+
+    private init(
+        directoryFileURL: URL,
+        directoryFilePath: String,
+        randomAccessSource: GMLuaVPKRandomAccessSource
+    ) throws {
+        self.directoryFileURL = directoryFileURL
+        self.directoryFilePath = directoryFilePath
+            .replacingOccurrences(of: "\\", with: "/")
+        self.randomAccessSource = randomAccessSource
+        let fileName = URL(fileURLWithPath: self.directoryFilePath).lastPathComponent
         guard fileName.lowercased().hasSuffix("_dir.vpk") else {
             throw GMLuaVPKError.invalidHeader("expected an *_dir.vpk file")
         }
         chunkBaseName = String(fileName.dropLast("_dir.vpk".count))
 
-        let handle: FileHandle
-        do {
-            handle = try FileHandle(forReadingFrom: self.directoryFileURL)
-        } catch {
-            throw GMLuaVPKError.missingArchive(self.directoryFileURL.path)
-        }
-        defer { try? handle.close() }
-
-        let directoryFileSize: UInt64
-        do {
-            directoryFileSize = try handle.seekToEnd()
-        } catch {
-            throw GMLuaVPKError.truncatedData(fileName)
+        guard let directoryFileSize = try randomAccessSource.byteCountImpl(
+            self.directoryFilePath
+        ) else {
+            throw GMLuaVPKError.missingArchive(self.directoryFilePath)
         }
 
-        let baseHeader = try Self.readExactly(handle, offset: 0, count: 12, path: fileName)
+        let baseHeader = try Self.readExactly(
+            randomAccessSource,
+            path: self.directoryFilePath,
+            offset: 0,
+            count: 12
+        )
         var headerCursor = ByteCursor(data: baseHeader)
         let parsedSignature = try headerCursor.readUInt32(context: "signature")
         guard parsedSignature == Self.signature else {
@@ -86,10 +158,10 @@ public final class GMLuaVPKArchive: @unchecked Sendable {
             declaredDirectoryDataLength = nil
         case 2:
             let extendedHeader = try Self.readExactly(
-                handle,
+                randomAccessSource,
+                path: self.directoryFilePath,
                 offset: 12,
-                count: 16,
-                path: fileName
+                count: 16
             )
             var extendedCursor = ByteCursor(data: extendedHeader)
             declaredDirectoryDataLength = UInt64(
@@ -113,10 +185,10 @@ public final class GMLuaVPKArchive: @unchecked Sendable {
             throw GMLuaVPKError.invalidHeader("tree is too large")
         }
         let treeData = try Self.readExactly(
-            handle,
+            randomAccessSource,
+            path: self.directoryFilePath,
             offset: headerSize,
-            count: Int(treeSize),
-            path: fileName
+            count: Int(treeSize)
         )
         directoryDataOffset = headerSize + UInt64(treeSize)
         guard directoryDataOffset <= directoryFileSize else {
@@ -209,38 +281,42 @@ public final class GMLuaVPKArchive: @unchecked Sendable {
         try data(for: LuaString(logicalPath))
     }
 
+    public func byteCount(for logicalPath: LuaString) throws -> UInt64? {
+        let normalized = try Self.normalizedPath(Data(logicalPath.bytes))
+        guard let entry = entries[normalized] else { return nil }
+        return UInt64(entry.preloadData.count) + UInt64(entry.length)
+    }
+
+    public func byteCount(for logicalPath: String) throws -> UInt64? {
+        try byteCount(for: LuaString(logicalPath))
+    }
+
     public func data(for logicalPath: LuaString) throws -> Data? {
         let normalized = try Self.normalizedPath(Data(logicalPath.bytes))
         guard let entry = entries[normalized] else { return nil }
 
         var result = entry.preloadData
         if entry.length > 0 {
-            let payloadURL: URL
+            let payloadPath: String
             let payloadOffset: UInt64
             if entry.archiveIndex == Self.directoryArchiveIndex {
-                payloadURL = directoryFileURL
+                payloadPath = directoryFilePath
                 payloadOffset = directoryDataOffset + UInt64(entry.offset)
             } else {
-                payloadURL = directoryFileURL
-                    .deletingLastPathComponent()
-                    .appendingPathComponent(
-                        "\(chunkBaseName)_\(String(format: "%03u", entry.archiveIndex)).vpk"
-                    )
+                let parent = (directoryFilePath as NSString)
+                    .deletingLastPathComponent
+                    .replacingOccurrences(of: "\\", with: "/")
+                let fileName =
+                    "\(chunkBaseName)_\(String(format: "%03u", entry.archiveIndex)).vpk"
+                payloadPath = parent.isEmpty ? fileName : "\(parent)/\(fileName)"
                 payloadOffset = UInt64(entry.offset)
             }
 
-            let handle: FileHandle
-            do {
-                handle = try FileHandle(forReadingFrom: payloadURL)
-            } catch {
-                throw GMLuaVPKError.missingArchive(payloadURL.path)
-            }
-            defer { try? handle.close() }
             let payload = try Self.readExactly(
-                handle,
+                randomAccessSource,
+                path: payloadPath,
                 offset: payloadOffset,
-                count: Int(entry.length),
-                path: Self.displayPath(normalized)
+                count: Int(entry.length)
             )
             result.append(payload)
         }
@@ -310,6 +386,26 @@ public final class GMLuaVPKArchive: @unchecked Sendable {
     }
 
     private static func readExactly(
+        _ source: GMLuaVPKRandomAccessSource,
+        path: String,
+        offset: UInt64,
+        count: Int
+    ) throws -> Data {
+        guard count >= 0 else { throw GMLuaVPKError.truncatedData(path) }
+        do {
+            let result = try source.readImpl(path, offset, count)
+            guard result.count == count else {
+                throw GMLuaVPKError.truncatedData(path)
+            }
+            return result
+        } catch let error as GMLuaVPKError {
+            throw error
+        } catch {
+            throw GMLuaVPKError.truncatedData(path)
+        }
+    }
+
+    private static func readExactly(
         _ handle: FileHandle,
         offset: UInt64,
         count: Int,
@@ -346,6 +442,13 @@ public final class GMLuaVPKArchive: @unchecked Sendable {
 
     private static func displayPath(_ bytes: Data) -> String {
         String(decoding: bytes, as: UTF8.self)
+    }
+}
+
+private extension FileHandle {
+    func withClose<T>(_ body: (FileHandle) throws -> T) throws -> T {
+        defer { try? close() }
+        return try body(self)
     }
 }
 

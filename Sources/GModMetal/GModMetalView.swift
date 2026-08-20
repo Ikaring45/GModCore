@@ -209,10 +209,10 @@ public struct GModMetalView:
         private var commandQueue:
             MTLCommandQueue?
 
-        private var trianglePipeline:
+        private var worldPipeline:
             MTLRenderPipelineState?
 
-        private var worldPipeline:
+        private var worldTexturedPipeline:
             MTLRenderPipelineState?
 
         private var surfaceSolidPipeline:
@@ -228,6 +228,9 @@ public struct GModMetalView:
             MTLDepthStencilState?
 
         private var surfaceSamplerState:
+            MTLSamplerState?
+
+        private var worldSamplerState:
             MTLSamplerState?
 
         private let pendingSceneLock = NSLock()
@@ -253,6 +256,7 @@ public struct GModMetalView:
         private struct WorldGPUVertex {
             let position: SIMD4<Float>
             let normal: SIMD4<Float>
+            let uv: SIMD2<Float>
         }
 
         private struct WorldUniforms {
@@ -304,12 +308,15 @@ public struct GModMetalView:
             case emptyVertices
             case mismatchedArrays(positions: Int, normals: Int)
             case convertedArrayMismatch
+            case textureCoordinateArrayMismatch
             case emptyIndices
             case incompleteTriangle(indexCount: Int)
             case invalidPosition(index: Int)
             case invalidNormal(index: Int)
             case zeroNormal(index: Int)
             case invalidIndex(index: UInt32, vertexCount: Int)
+            case invalidTextureCoordinate(index: Int)
+            case invalidMaterialRange(index: Int)
             case invalidCameraEye
             case invalidCameraForward
             case zeroCameraForward
@@ -326,6 +333,8 @@ public struct GModMetalView:
                     return "position/normal counts differ (\(positions)/\(normals))"
                 case .convertedArrayMismatch:
                     return "Source/Metal array counts differ"
+                case .textureCoordinateArrayMismatch:
+                    return "position/texture-coordinate counts differ"
                 case .emptyIndices:
                     return "mesh has no indices"
                 case let .incompleteTriangle(indexCount):
@@ -338,6 +347,10 @@ public struct GModMetalView:
                     return "vertex \(index) has a zero-length normal"
                 case let .invalidIndex(index, vertexCount):
                     return "index \(index) is outside 0..<\(vertexCount)"
+                case let .invalidTextureCoordinate(index):
+                    return "texture coordinate \(index) is non-finite"
+                case let .invalidMaterialRange(index):
+                    return "material range \(index) is invalid or overlaps the index buffer"
                 case .invalidCameraEye:
                     return "camera eye is non-finite"
                 case .invalidCameraForward:
@@ -366,6 +379,9 @@ public struct GModMetalView:
         private var cachedWorldMesh:
             CachedWorldMesh?
 
+        private var cachedWorldTextures:
+            [String: CachedSurfaceTexture] = [:]
+
         private var worldSceneIssue:
             String?
 
@@ -388,6 +404,8 @@ public struct GModMetalView:
             String?
 
         private var lastSurfaceDrawCount = 0
+
+        private var lastWorldTexturedRangeCount = 0
 
         private var lastSurfaceDroppedDrawCount = 0
 
@@ -461,19 +479,7 @@ public struct GModMetalView:
                     )
 
                 guard
-                    let triangleVertexFunction =
-                        library.makeFunction(
-                            name:
-                                "vertexMain"
-                        ),
-
-                    let triangleFragmentFunction =
-                        library.makeFunction(
-                            name:
-                                "fragmentMain"
-                        ),
-
-                    let worldVertexFunction =
+                let worldVertexFunction =
                         library.makeFunction(
                             name:
                                 "worldVertexMain"
@@ -483,6 +489,12 @@ public struct GModMetalView:
                         library.makeFunction(
                             name:
                                 "worldFragmentMain"
+                        ),
+
+                    let worldTexturedFragmentFunction =
+                        library.makeFunction(
+                            name:
+                                "worldTexturedFragmentMain"
                         ),
 
                     let surfaceVertexFunction =
@@ -511,30 +523,6 @@ public struct GModMetalView:
                     return
                 }
 
-                let triangleDescriptor =
-                    MTLRenderPipelineDescriptor()
-
-                triangleDescriptor.vertexFunction =
-                    triangleVertexFunction
-
-                triangleDescriptor.fragmentFunction =
-                    triangleFragmentFunction
-
-                triangleDescriptor
-                    .colorAttachments[0]
-                    .pixelFormat =
-                        colorPixelFormat
-
-                triangleDescriptor.depthAttachmentPixelFormat =
-                    depthPixelFormat
-
-                trianglePipeline =
-                    try device
-                        .makeRenderPipelineState(
-                            descriptor:
-                                triangleDescriptor
-                        )
-
                 let worldDescriptor =
                     MTLRenderPipelineDescriptor()
 
@@ -558,6 +546,19 @@ public struct GModMetalView:
                             descriptor:
                                 worldDescriptor
                         )
+
+                let worldTexturedDescriptor =
+                    MTLRenderPipelineDescriptor()
+                worldTexturedDescriptor.vertexFunction = worldVertexFunction
+                worldTexturedDescriptor.fragmentFunction =
+                    worldTexturedFragmentFunction
+                worldTexturedDescriptor.colorAttachments[0].pixelFormat =
+                    colorPixelFormat
+                worldTexturedDescriptor.depthAttachmentPixelFormat =
+                    depthPixelFormat
+                worldTexturedPipeline = try device.makeRenderPipelineState(
+                    descriptor: worldTexturedDescriptor
+                )
 
                 let surfaceSolidDescriptor =
                     Self.makeSurfacePipelineDescriptor(
@@ -649,6 +650,20 @@ public struct GModMetalView:
                 }
 
                 self.surfaceSamplerState = surfaceSamplerState
+
+                let worldSamplerDescriptor = MTLSamplerDescriptor()
+                worldSamplerDescriptor.minFilter = .linear
+                worldSamplerDescriptor.magFilter = .linear
+                worldSamplerDescriptor.mipFilter = .notMipmapped
+                worldSamplerDescriptor.sAddressMode = .repeat
+                worldSamplerDescriptor.tAddressMode = .repeat
+                guard let worldSamplerState = device.makeSamplerState(
+                    descriptor: worldSamplerDescriptor
+                ) else {
+                    publish("Failed to create Metal world sampler")
+                    return
+                }
+                self.worldSamplerState = worldSamplerState
 
                 engine.boot()
 
@@ -770,6 +785,8 @@ public struct GModMetalView:
             switch pending {
             case .clear:
                 activeWorldScene = nil
+                cachedWorldTextures.removeAll(keepingCapacity: true)
+                lastWorldTexturedRangeCount = 0
                 worldSceneIssue = nil
 
             case let .replace(scene):
@@ -786,6 +803,7 @@ public struct GModMetalView:
                             scene,
                             device: device
                         )
+                        cachedWorldTextures.removeAll(keepingCapacity: true)
                     }
 
                     activeWorldScene = scene
@@ -872,12 +890,11 @@ public struct GModMetalView:
         ) throws -> CachedWorldMesh {
             try validateMesh(scene)
 
-            let vertices = zip(scene.metalPositions, scene.metalNormals).map {
-                position, normal in
-
+            let vertices = scene.metalPositions.indices.map { index in
                 WorldGPUVertex(
-                    position: SIMD4<Float>(position, 1),
-                    normal: SIMD4<Float>(normal, 0)
+                    position: SIMD4<Float>(scene.metalPositions[index], 1),
+                    normal: SIMD4<Float>(scene.metalNormals[index], 0),
+                    uv: scene.sourceTextureCoordinates[index]
                 )
             }
 
@@ -943,6 +960,9 @@ public struct GModMetalView:
             else {
                 throw WorldSceneError.convertedArrayMismatch
             }
+            guard scene.sourceTextureCoordinates.count == scene.sourcePositions.count else {
+                throw WorldSceneError.textureCoordinateArrayMismatch
+            }
             guard !scene.indices.isEmpty else {
                 throw WorldSceneError.emptyIndices
             }
@@ -970,6 +990,10 @@ public struct GModMetalView:
                 else {
                     throw WorldSceneError.zeroNormal(index: index)
                 }
+                let uv = scene.sourceTextureCoordinates[index]
+                guard uv.x.isFinite, uv.y.isFinite else {
+                    throw WorldSceneError.invalidTextureCoordinate(index: index)
+                }
             }
 
             let vertexCount = scene.metalPositions.count
@@ -978,6 +1002,39 @@ public struct GModMetalView:
                     index: index,
                     vertexCount: vertexCount
                 )
+            }
+            var covered = 0
+            for (index, range) in scene.materialRanges.enumerated() {
+                guard range.firstIndex == covered,
+                      range.indexCount > 0,
+                      range.indexCount.isMultiple(of: 3),
+                      range.firstIndex <= scene.indices.count,
+                      range.indexCount <= scene.indices.count - range.firstIndex else {
+                    throw WorldSceneError.invalidMaterialRange(index: index)
+                }
+                covered += range.indexCount
+            }
+            guard scene.materialRanges.isEmpty || covered == scene.indices.count else {
+                throw WorldSceneError.invalidMaterialRange(
+                    index: scene.materialRanges.count
+                )
+            }
+        }
+
+        private struct WorldUploadBudget {
+            static let maximumTextureCount = 1
+            static let maximumByteCount = 16 * 1_024 * 1_024
+
+            var remainingTextureCount = maximumTextureCount
+            var remainingByteCount = maximumByteCount
+
+            mutating func reserve(byteCount: Int) -> Bool {
+                guard byteCount >= 0,
+                      remainingTextureCount > 0,
+                      byteCount <= remainingByteCount else { return false }
+                remainingTextureCount -= 1
+                remainingByteCount -= byteCount
+                return true
             }
         }
 
@@ -1021,13 +1078,14 @@ public struct GModMetalView:
 
             guard
                 let commandQueue,
-                let trianglePipeline,
                 let worldPipeline,
+                let worldTexturedPipeline,
                 let surfaceSolidPipeline,
                 let surfaceTexturedPipeline,
                 let depthState,
                 let surfaceDepthState,
                 let surfaceSamplerState,
+                let worldSamplerState,
                 let descriptor =
                     view.currentRenderPassDescriptor,
                 let drawable =
@@ -1114,12 +1172,10 @@ public struct GModMetalView:
                     scene: scene,
                     mesh: mesh,
                     viewport: drawableViewport,
-                    pipeline: worldPipeline,
-                    encoder: encoder
-                )
-            } else {
-                drawFallbackTriangle(
-                    pipeline: trianglePipeline,
+                    device: device,
+                    solidPipeline: worldPipeline,
+                    texturedPipeline: worldTexturedPipeline,
+                    sampler: worldSamplerState,
                     encoder: encoder
                 )
             }
@@ -1148,46 +1204,14 @@ public struct GModMetalView:
             commandBuffer.commit()
         }
 
-        private func drawFallbackTriangle(
-            pipeline: MTLRenderPipelineState,
-            encoder: MTLRenderCommandEncoder
-        ) {
-            let angle = Double(engine.rotation)
-            let cosine = Float(cos(angle))
-            let sine = Float(sin(angle))
-            let sourceVertices: [SIMD2<Float>] = [
-                SIMD2<Float>(0.0, 0.72),
-                SIMD2<Float>(-0.68, -0.60),
-                SIMD2<Float>(0.68, -0.60)
-            ]
-            let vertices = sourceVertices.map { vertex in
-                SIMD2<Float>(
-                    vertex.x * cosine - vertex.y * sine,
-                    vertex.x * sine + vertex.y * cosine
-                )
-            }
-
-            encoder.setRenderPipelineState(pipeline)
-            vertices.withUnsafeBytes { bytes in
-                guard let address = bytes.baseAddress else { return }
-                encoder.setVertexBytes(
-                    address,
-                    length: bytes.count,
-                    index: 0
-                )
-            }
-            encoder.drawPrimitives(
-                type: .triangle,
-                vertexStart: 0,
-                vertexCount: 3
-            )
-        }
-
         private func drawWorld(
             scene: GModMetalWorldScene,
             mesh: CachedWorldMesh,
             viewport: SIMD2<Int>,
-            pipeline: MTLRenderPipelineState,
+            device: MTLDevice,
+            solidPipeline: MTLRenderPipelineState,
+            texturedPipeline: MTLRenderPipelineState,
+            sampler: MTLSamplerState,
             encoder: MTLRenderCommandEncoder
         ) {
             let width = Swift.max(1, viewport.x)
@@ -1208,7 +1232,6 @@ public struct GModMetalView:
                 lightDirection: SIMD4<Float>(0.35, 0.80, 0.48, 0)
             )
 
-            encoder.setRenderPipelineState(pipeline)
             encoder.setVertexBuffer(
                 mesh.vertexBuffer,
                 offset: 0,
@@ -1227,13 +1250,81 @@ public struct GModMetalView:
                     index: 1
                 )
             }
-            encoder.drawIndexedPrimitives(
-                type: .triangle,
-                indexCount: mesh.indexCount,
-                indexType: .uint32,
-                indexBuffer: mesh.indexBuffer,
-                indexBufferOffset: 0
+            encoder.setFragmentSamplerState(sampler, index: 0)
+            var uploadBudget = WorldUploadBudget()
+            let ranges = scene.materialRanges.isEmpty
+                ? [
+                    GModMetalWorldMaterialRange(
+                        materialName: nil,
+                        firstIndex: 0,
+                        indexCount: mesh.indexCount,
+                        bitmap: nil
+                    )
+                ]
+                : scene.materialRanges
+            var texturedRangeCount = 0
+            for range in ranges {
+                if let bitmap = range.bitmap,
+                   let texture = worldTexture(
+                       for: bitmap,
+                       device: device,
+                       uploadBudget: &uploadBudget
+                   ) {
+                    encoder.setRenderPipelineState(texturedPipeline)
+                    encoder.setFragmentTexture(texture, index: 0)
+                    texturedRangeCount += 1
+                } else {
+                    encoder.setRenderPipelineState(solidPipeline)
+                    encoder.setFragmentTexture(nil, index: 0)
+                }
+                encoder.drawIndexedPrimitives(
+                    type: .triangle,
+                    indexCount: range.indexCount,
+                    indexType: .uint32,
+                    indexBuffer: mesh.indexBuffer,
+                    indexBufferOffset: range.firstIndex * MemoryLayout<UInt32>.stride
+                )
+            }
+            lastWorldTexturedRangeCount = texturedRangeCount
+        }
+
+        private func worldTexture(
+            for bitmap: GModMetalSurfaceBitmap,
+            device: MTLDevice,
+            uploadBudget: inout WorldUploadBudget
+        ) -> MTLTexture? {
+            let key = bitmap.cacheIdentifier
+            if let cached = cachedWorldTextures[key], cached.bitmap == bitmap {
+                return cached.texture
+            }
+            guard uploadBudget.reserve(
+                byteCount: bitmap.premultipliedRGBA8.count
+            ) else { return nil }
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .rgba8Unorm_srgb,
+                width: bitmap.width,
+                height: bitmap.height,
+                mipmapped: false
             )
+            descriptor.usage = .shaderRead
+            descriptor.storageMode = .shared
+            guard let texture = device.makeTexture(descriptor: descriptor) else {
+                return nil
+            }
+            bitmap.premultipliedRGBA8.withUnsafeBytes { bytes in
+                guard let base = bytes.baseAddress else { return }
+                texture.replace(
+                    region: MTLRegionMake2D(0, 0, bitmap.width, bitmap.height),
+                    mipmapLevel: 0,
+                    withBytes: base,
+                    bytesPerRow: bitmap.width * 4
+                )
+            }
+            cachedWorldTextures[key] = CachedSurfaceTexture(
+                bitmap: bitmap,
+                texture: texture
+            )
+            return texture
         }
 
         private func drawSurface(
@@ -1621,13 +1712,14 @@ public struct GModMetalView:
                mesh.identifier == scene.meshIdentifier
             {
                 rendererStats =
-                    "World: \(scene.meshIdentifier) (\(mesh.indexCount / 3) triangles)"
+                    "World: \(scene.meshIdentifier) (\(mesh.indexCount / 3) triangles; " +
+                    "\(lastWorldTexturedRangeCount)/\(scene.materialRanges.count) materials)"
             } else if let worldSceneIssue {
                 rendererStats =
-                    "Triangle fallback / rejected world: \(worldSceneIssue)"
+                    "World unavailable: \(worldSceneIssue)"
             } else {
                 rendererStats =
-                    "Triangle fallback"
+                    "World loading"
             }
 
             let surfaceStats: String
@@ -1690,39 +1782,11 @@ public struct GModMetalView:
 
         using namespace metal;
 
-        vertex float4 vertexMain(
-            const device float2 *positions
-                [[buffer(0)]],
-
-            uint vertexID
-                [[vertex_id]]
-        )
-        {
-            float2 p =
-                positions[vertexID];
-
-            return float4(
-                p.x,
-                p.y,
-                0.0,
-                1.0
-            );
-        }
-
-        fragment float4 fragmentMain()
-        {
-            return float4(
-                0.10,
-                0.75,
-                1.00,
-                1.00
-            );
-        }
-
         struct WorldVertex
         {
             float4 position;
             float4 normal;
+            float2 uv;
         };
 
         struct WorldUniforms
@@ -1735,6 +1799,7 @@ public struct GModMetalView:
         {
             float4 position [[position]];
             float3 normal;
+            float2 uv;
         };
 
         vertex WorldVertexOutput worldVertexMain(
@@ -1753,6 +1818,7 @@ public struct GModMetalView:
             output.position =
                 uniforms.viewProjection * sourceVertex.position;
             output.normal = sourceVertex.normal.xyz;
+            output.uv = sourceVertex.uv;
             return output;
         }
 
@@ -1770,6 +1836,26 @@ public struct GModMetalView:
             float brightness = min(1.0, hemisphere + diffuse * 0.72);
             float3 baseColor = float3(0.48, 0.61, 0.72);
             return float4(baseColor * brightness, 1.0);
+        }
+
+        fragment float4 worldTexturedFragmentMain(
+            WorldVertexOutput input [[stage_in]],
+
+            constant WorldUniforms &uniforms
+                [[buffer(1)]],
+
+            texture2d<float> baseTexture [[texture(0)]],
+
+            sampler baseSampler [[sampler(0)]]
+        )
+        {
+            float3 normal = normalize(input.normal);
+            float3 light = normalize(uniforms.lightDirection.xyz);
+            float diffuse = max(dot(normal, light), 0.0);
+            float hemisphere = 0.28 + 0.24 * (normal.y * 0.5 + 0.5);
+            float brightness = min(1.0, hemisphere + diffuse * 0.62);
+            float4 sample = baseTexture.sample(baseSampler, input.uv);
+            return float4(sample.rgb * brightness, 1.0);
         }
 
         struct SurfaceVertex

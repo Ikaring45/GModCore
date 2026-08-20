@@ -1,5 +1,24 @@
 import Foundation
 
+public struct GModMetalWorldMaterialRange: Sendable, Equatable {
+    public let materialName: String?
+    public let firstIndex: Int
+    public let indexCount: Int
+    public let bitmap: GModMetalSurfaceBitmap?
+
+    public init(
+        materialName: String?,
+        firstIndex: Int,
+        indexCount: Int,
+        bitmap: GModMetalSurfaceBitmap?
+    ) {
+        self.materialName = materialName
+        self.firstIndex = firstIndex
+        self.indexCount = indexCount
+        self.bitmap = bitmap
+    }
+}
+
 /// Immutable renderer input for one static Source world mesh and its camera.
 ///
 /// Source coordinates use +X forward, +Y left, and +Z up. Metal coordinates
@@ -12,9 +31,11 @@ public struct GModMetalWorldScene: Sendable, Equatable {
 
     public let sourcePositions: [SIMD3<Float>]
     public let sourceNormals: [SIMD3<Float>]
+    public let sourceTextureCoordinates: [SIMD2<Float>]
     public let metalPositions: [SIMD3<Float>]
     public let metalNormals: [SIMD3<Float>]
     public let indices: [UInt32]
+    public let materialRanges: [GModMetalWorldMaterialRange]
 
     /// Camera values in Source coordinates.
     public let cameraEye: SIMD3<Float>
@@ -28,16 +49,22 @@ public struct GModMetalWorldScene: Sendable, Equatable {
         meshIdentifier: String,
         sourcePositions: [SIMD3<Float>],
         sourceNormals: [SIMD3<Float>],
+        sourceTextureCoordinates: [SIMD2<Float>] = [],
         indices: [UInt32],
+        materialRanges: [GModMetalWorldMaterialRange] = [],
         cameraEye: SIMD3<Float>,
         cameraForward: SIMD3<Float>
     ) {
         self.meshIdentifier = meshIdentifier
         self.sourcePositions = sourcePositions
         self.sourceNormals = sourceNormals
+        self.sourceTextureCoordinates = sourceTextureCoordinates.isEmpty
+            ? Array(repeating: .zero, count: sourcePositions.count)
+            : sourceTextureCoordinates
         self.metalPositions = sourcePositions.map(Self.convertSourceVector)
         self.metalNormals = sourceNormals.map(Self.convertSourceVector)
         self.indices = indices
+        self.materialRanges = materialRanges
         self.cameraEye = cameraEye
         self.cameraForward = cameraForward
         self.metalCameraEye = Self.convertSourceVector(cameraEye)
@@ -54,9 +81,11 @@ public struct GModMetalWorldScene: Sendable, Equatable {
             meshIdentifier: meshIdentifier,
             sourcePositions: sourcePositions,
             sourceNormals: sourceNormals,
+            sourceTextureCoordinates: sourceTextureCoordinates,
             metalPositions: metalPositions,
             metalNormals: metalNormals,
             indices: indices,
+            materialRanges: materialRanges,
             cameraEye: eye,
             cameraForward: forward
         )
@@ -74,18 +103,22 @@ public struct GModMetalWorldScene: Sendable, Equatable {
         meshIdentifier: String,
         sourcePositions: [SIMD3<Float>],
         sourceNormals: [SIMD3<Float>],
+        sourceTextureCoordinates: [SIMD2<Float>],
         metalPositions: [SIMD3<Float>],
         metalNormals: [SIMD3<Float>],
         indices: [UInt32],
+        materialRanges: [GModMetalWorldMaterialRange],
         cameraEye: SIMD3<Float>,
         cameraForward: SIMD3<Float>
     ) {
         self.meshIdentifier = meshIdentifier
         self.sourcePositions = sourcePositions
         self.sourceNormals = sourceNormals
+        self.sourceTextureCoordinates = sourceTextureCoordinates
         self.metalPositions = metalPositions
         self.metalNormals = metalNormals
         self.indices = indices
+        self.materialRanges = materialRanges
         self.cameraEye = cameraEye
         self.cameraForward = cameraForward
         self.metalCameraEye = Self.convertSourceVector(cameraEye)

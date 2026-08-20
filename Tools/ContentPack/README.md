@@ -21,10 +21,8 @@ unsafe archive paths are rejected.
 
 ## Create the recommended pack
 
-For the current Swift Playgrounds home → map → movement slice, create the
-transfer-sized profile. It contains the original GMod HTML home artwork
-and the two stock map payloads; the package supplies the audited Lua/VGUI
-startup closure:
+For quick transfer testing, the smaller profile contains the original GMod
+HTML home artwork and the two stock map payloads:
 
 ```powershell
 pwsh -NoProfile -File .\Tools\ContentPack\New-GarrysPADContentPack.ps1 `
@@ -33,8 +31,8 @@ pwsh -NoProfile -File .\Tools\ContentPack\New-GarrysPADContentPack.ps1 `
   -Profile Playground
 ```
 
-The larger `Playable` profile is retained for the upcoming direct VPK material
-and audio mount:
+For the real GMod HTML/CSS/JS home, UI assets, particles, models, textures and
+non-voice sounds, use the recommended multi-gigabyte `Playable` profile:
 
 ```powershell
 pwsh -NoProfile -File .\Tools\ContentPack\New-GarrysPADContentPack.ps1 `
@@ -74,5 +72,7 @@ owner has separately approved redistribution of the packed game data.
 
 Follow [`Apps/GarrysPADPlayground/README.md`](../../Apps/GarrysPADPlayground/README.md).
 The runtime automatically discovers exactly one `GarrysPAD_Content_*.zip` in
-the App Playground Resources. It indexes the ZIP64 archive in place and reads
-the selected stock BSP and home artwork without fully extracting it.
+the App Playground Resources. It indexes the ZIP64 archive in place, serves the
+original home/loading HTML tree, reads the selected stock BSP, and range-mounts
+nested VPK chunks for VMT/VTF textures, map thumbnails, and UI sounds without
+fully extracting the pack.

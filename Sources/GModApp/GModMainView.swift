@@ -4,6 +4,10 @@ import GModEngine
 import GModGameAssets
 import GModMetal
 
+#if canImport(UIKit)
+import UIKit
+#endif
+
 public struct GModMainView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var console: GModConsoleModel
@@ -29,7 +33,9 @@ public struct GModMainView: View {
                 }
             )
         )
-        _content = StateObject(wrappedValue: GModPlaygroundContentModel())
+        _content = StateObject(
+            wrappedValue: GModPlaygroundContentModel(runtimeFactory: factory)
+        )
     }
 
     public var body: some View {
@@ -92,8 +98,14 @@ public struct GModMainView: View {
 
                             Spacer(minLength: 40)
 
-                            GModTouchLookPad { deltaX, deltaY in
-                                game.adjustLook(deltaX: deltaX, deltaY: deltaY)
+                            VStack(spacing: 14) {
+                                GModTouchActionButton(label: "JUMP") { pressed in
+                                    game.setJumpPressed(pressed)
+                                }
+
+                                GModTouchLookPad { deltaX, deltaY in
+                                    game.adjustLook(deltaX: deltaX, deltaY: deltaY)
+                                }
                             }
                         }
                         .padding(18)
@@ -134,6 +146,10 @@ public struct GModMainView: View {
             .padding(14)
 
             contentOverlay
+
+            if game.isStarting {
+                loadingOverlay
+            }
         }
         .preferredColorScheme(.dark)
         .onAppear {
@@ -156,6 +172,56 @@ public struct GModMainView: View {
                 game.suspendInput()
             }
         }
+    }
+
+    @ViewBuilder
+    private var loadingOverlay: some View {
+        Group {
+            if case let .ready(pack, _, _) = content.state,
+               let map = game.loadingMap {
+                GModStockLoadingView(
+                    pack: pack,
+                    assetSource: content.assetSource,
+                    map: map,
+                    status: game.status
+                )
+                .ignoresSafeArea()
+                .transition(.opacity)
+            } else {
+                ZStack {
+                    Color.black.ignoresSafeArea()
+#if canImport(UIKit)
+                    if case let .ready(_, background, _) = content.state,
+                       let image = UIImage(data: background) {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFill()
+                            .ignoresSafeArea()
+                            .overlay(Color.black.opacity(0.34))
+                    }
+#endif
+                    VStack(spacing: 18) {
+                        Spacer()
+                        HStack(spacing: 14) {
+                            ProgressView().tint(.white)
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("Loading…")
+                                    .font(.system(size: 28, weight: .light))
+                                Text(game.status)
+                                    .font(.system(size: 13, design: .monospaced))
+                                    .foregroundColor(.white.opacity(0.76))
+                            }
+                        }
+                        .padding(.horizontal, 28)
+                        .padding(.vertical, 18)
+                        .background(Color.black.opacity(0.68))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .transition(.opacity)
+            }
+        }
+        .accessibilityIdentifier("garryspad.loading")
     }
 
     @ViewBuilder
@@ -185,6 +251,7 @@ public struct GModMainView: View {
             if showHomeMenu {
                 GModHomeMenuView(
                     pack: pack,
+                    assetSource: content.assetSource,
                     backgroundJPEG: background,
                     logoPNG: logo,
                     onSelectMap: { map in
@@ -635,7 +702,7 @@ private struct GModTouchLookPad: View {
                 handleTouch(sample)
             }
         }
-        .frame(width: 150, height: 112)
+        .frame(width: 230, height: 150)
         .contentShape(Rectangle())
         .accessibilityLabel("Look control")
     }
@@ -647,5 +714,45 @@ private struct GModTouchLookPad: View {
         if let delta {
             onDelta(delta.x, delta.y)
         }
+    }
+}
+
+private struct GModTouchActionButton: View {
+    let label: String
+    let onPressedChanged: (Bool) -> Void
+    @State private var isPressed = false
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(Color.black.opacity(isPressed ? 0.58 : 0.32))
+                .overlay(
+                    Circle().stroke(
+                        Color.white.opacity(isPressed ? 0.9 : 0.55),
+                        lineWidth: 2
+                    )
+                )
+            Text(label)
+                .font(.system(size: 15, weight: .bold))
+                .foregroundColor(.white.opacity(0.9))
+            GModTouchInputBridge { sample in
+                switch sample.phase {
+                case .began:
+                    guard !isPressed else { return }
+                    isPressed = true
+                    onPressedChanged(true)
+                case .ended, .cancelled:
+                    guard isPressed else { return }
+                    isPressed = false
+                    onPressedChanged(false)
+                case .moved, .scroll:
+                    break
+                }
+            }
+            .contentShape(Circle())
+        }
+        .frame(width: 78, height: 78)
+        .contentShape(Circle())
+        .accessibilityLabel("Jump")
     }
 }

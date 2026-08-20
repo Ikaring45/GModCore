@@ -27,10 +27,12 @@ enum MetalPipelineSmoke {
             _ = commandQueue
 
             let library = try device.makeLibrary(source: shaderSource, options: nil)
-            let triangleVertex = try function(named: "vertexMain", in: library)
-            let triangleFragment = try function(named: "fragmentMain", in: library)
             let worldVertex = try function(named: "worldVertexMain", in: library)
             let worldFragment = try function(named: "worldFragmentMain", in: library)
+            let worldTextured = try function(
+                named: "worldTexturedFragmentMain",
+                in: library
+            )
             let surfaceVertex = try function(named: "surfaceVertexMain", in: library)
             let surfaceSolid = try function(
                 named: "surfaceSolidFragmentMain",
@@ -43,14 +45,14 @@ enum MetalPipelineSmoke {
 
             try makePipeline(
                 device: device,
-                vertex: triangleVertex,
-                fragment: triangleFragment,
+                vertex: worldVertex,
+                fragment: worldFragment,
                 blending: false
             )
             try makePipeline(
                 device: device,
                 vertex: worldVertex,
-                fragment: worldFragment,
+                fragment: worldTextured,
                 blending: false
             )
             try makePipeline(

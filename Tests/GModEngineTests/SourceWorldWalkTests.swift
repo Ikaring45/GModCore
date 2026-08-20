@@ -290,10 +290,6 @@ final class SourceWorldWalkTests: XCTestCase {
 
         let unsupportedCommands: [(SourceUserCommand, SourceWorldWalkError)] = [
             (
-                SourceUserCommand(commandNumber: 1, buttons: [.jump]),
-                .unsupported(.jump)
-            ),
-            (
                 SourceUserCommand(commandNumber: 1, buttons: [.duck]),
                 .unsupported(.duck)
             ),
@@ -310,7 +306,7 @@ final class SourceWorldWalkTests: XCTestCase {
         }
 
         XCTAssertTrue(SourceWorldWalkSolver.unsupportedFeatures.contains(.stepUp))
-        XCTAssertTrue(SourceWorldWalkSolver.unsupportedFeatures.contains(.jump))
+        XCTAssertFalse(SourceWorldWalkSolver.unsupportedFeatures.contains(.jump))
         XCTAssertTrue(SourceWorldWalkSolver.unsupportedFeatures.contains(.duck))
         XCTAssertTrue(SourceWorldWalkSolver.unsupportedFeatures.contains(.water))
         XCTAssertTrue(SourceWorldWalkSolver.unsupportedFeatures.contains(.ladder))
@@ -339,32 +335,65 @@ final class SourceWorldWalkTests: XCTestCase {
         }
     }
 
-    func testWaterAndLadderVolumesAreRejectedRatherThanTreatedAsDryAir() throws {
-        for (contents, expected) in [
-            (SourceContents.water, SourceWorldWalkError.unsupported(.water)),
-            (.ladder, .unsupported(.ladder)),
-        ] {
-            var world = floorWorld()
-            world.addAxisAlignedBox(
-                SourceAABBCollider(
-                    mins: SourceVector3(-100, -100, -10),
-                    maxs: SourceVector3(100, 100, 100),
-                    contents: contents,
-                    entityHandle: worldHandle
-                )
-            )
-            let solver = makeSolver(world: world, maximumSpeed: 200)
-            let state = SourceWorldWalkState(origin: SourceVector3(0, 0, 1))
+    func testGroundJumpUsesSourceHeightImpulseAndLeavesGround() throws {
+        let solver = makeSolver(world: floorWorld(), maximumSpeed: 200)
+        let state = SourceWorldWalkState(
+            origin: SourceVector3(0, 0, SourceCollisionConstants.distanceEpsilon),
+            isOnGround: true
+        )
 
-            XCTAssertThrowsError(
-                try solver.simulate(
-                    state: state,
-                    command: SourceUserCommand(commandNumber: 1)
-                )
-            ) {
-                XCTAssertEqual($0 as? SourceWorldWalkError, expected)
-            }
-            XCTAssertEqual(state.origin, SourceVector3(0, 0, 1))
+        let tick = try solver.simulate(
+            state: state,
+            command: SourceUserCommand(commandNumber: 1, buttons: [.jump])
+        )
+
+        XCTAssertFalse(tick.state.isOnGround)
+        XCTAssertGreaterThan(tick.state.origin.z, state.origin.z)
+        XCTAssertGreaterThan(tick.state.velocity.z, 0)
+        XCTAssertEqual(tick.commandNumber, 1)
+    }
+
+    func testWaterMovesAndJumpSwimsWhileLadderRemainsExplicit() throws {
+        var waterWorld = floorWorld()
+        waterWorld.addAxisAlignedBox(
+            SourceAABBCollider(
+                mins: SourceVector3(-100, -100, -10),
+                maxs: SourceVector3(100, 100, 100),
+                contents: .water,
+                entityHandle: worldHandle
+            )
+        )
+        let waterSolver = makeSolver(world: waterWorld, maximumSpeed: 200)
+        let state = SourceWorldWalkState(origin: SourceVector3(0, 0, 1))
+        let swimming = try waterSolver.simulate(
+            state: state,
+            command: SourceUserCommand(
+                commandNumber: 1,
+                forwardMove: 200,
+                buttons: [.jump]
+            )
+        )
+        XCTAssertGreaterThan(swimming.state.origin.x, state.origin.x)
+        XCTAssertGreaterThan(swimming.state.origin.z, state.origin.z)
+        XCTAssertFalse(swimming.state.isOnGround)
+
+        var ladderWorld = floorWorld()
+        ladderWorld.addAxisAlignedBox(
+            SourceAABBCollider(
+                mins: SourceVector3(-100, -100, -10),
+                maxs: SourceVector3(100, 100, 100),
+                contents: .ladder,
+                entityHandle: worldHandle
+            )
+        )
+        let ladderSolver = makeSolver(world: ladderWorld, maximumSpeed: 200)
+        XCTAssertThrowsError(
+            try ladderSolver.simulate(
+                state: state,
+                command: SourceUserCommand(commandNumber: 1)
+            )
+        ) {
+            XCTAssertEqual($0 as? SourceWorldWalkError, .unsupported(.ladder))
         }
     }
 

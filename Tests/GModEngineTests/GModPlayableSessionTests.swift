@@ -24,7 +24,7 @@ private struct UnsupportedContentsPlayableWalkProvider:
 }
 
 final class GModPlayableSessionTests: XCTestCase {
-    func testWaterAndLadderRejectMovementButAdvanceBothRealmClocks() throws {
+    func testWaterMovesAndLadderRejectsWhileBothRealmClocksAdvance() throws {
         let cases: [(SourceContents, SourceWorldWalkUnsupportedFeature)] = [
             (.water, .water),
             (.ladder, .ladder),
@@ -57,15 +57,26 @@ final class GModPlayableSessionTests: XCTestCase {
                 )
             )
 
-            guard case let .rejected(rejection) = report.movement else {
-                _ = try? session.close()
-                return XCTFail("\(feature) was reported as a successful move")
+            if feature == .water {
+                guard case let .advanced(tick) = report.movement else {
+                    _ = try? session.close()
+                    return XCTFail("bounded water movement was rejected")
+                }
+                XCTAssertEqual(tick.commandNumber, 1)
+                XCTAssertNotEqual(tick.state, stateBeforeTick)
+                XCTAssertEqual(report.movement.state, tick.state)
+                XCTAssertEqual(session.playerWalkState, tick.state)
+            } else {
+                guard case let .rejected(rejection) = report.movement else {
+                    _ = try? session.close()
+                    return XCTFail("\(feature) was reported as a successful move")
+                }
+                XCTAssertEqual(rejection.commandNumber, 1)
+                XCTAssertEqual(rejection.reason, .feature(feature))
+                XCTAssertEqual(rejection.preservedState, stateBeforeTick)
+                XCTAssertEqual(report.movement.state, stateBeforeTick)
+                XCTAssertEqual(session.playerWalkState, stateBeforeTick)
             }
-            XCTAssertEqual(rejection.commandNumber, 1)
-            XCTAssertEqual(rejection.reason, .feature(feature))
-            XCTAssertEqual(rejection.preservedState, stateBeforeTick)
-            XCTAssertEqual(report.movement.state, stateBeforeTick)
-            XCTAssertEqual(session.playerWalkState, stateBeforeTick)
             XCTAssertEqual(report.server.kind, .serverFixedTick)
             XCTAssertEqual(report.client.kind, .clientFixedTick)
             XCTAssertEqual(session.sourceAdapter.serverGlobals.tickCount, 1)
@@ -83,7 +94,7 @@ final class GModPlayableSessionTests: XCTestCase {
         }
     }
 
-    func testNonFiniteMovementRemainsFatalAfterRecoverableRejection() throws {
+    func testNonFiniteMovementRemainsFatalAfterWaterMovement() throws {
         let session = try GModPlayableSession(
             configuration: GModPlayableSessionConfiguration(map: .construct),
             textMeasurer: nil,
@@ -93,16 +104,14 @@ final class GModPlayableSessionTests: XCTestCase {
         )
         defer { _ = try? session.close() }
 
-        let preservedState = session.playerWalkState
-        let rejected = try session.runFixedTick()
-        XCTAssertEqual(
-            rejected.movement.rejection?.reason,
-            .feature(.water)
-        )
-        let serverTimeAfterRejection = try XCTUnwrap(
+        let advanced = try session.runFixedTick()
+        XCTAssertNil(advanced.movement.rejection)
+        let preservedState = advanced.movement.state
+        XCTAssertEqual(session.playerWalkState, preservedState)
+        let serverTimeAfterMovement = try XCTUnwrap(
             session.serverRuntime.timerScheduler
         ).currentTime
-        let clientTimeAfterRejection = try XCTUnwrap(
+        let clientTimeAfterMovement = try XCTUnwrap(
             session.clientRuntime.timerScheduler
         ).currentTime
 
@@ -118,11 +127,11 @@ final class GModPlayableSessionTests: XCTestCase {
         XCTAssertEqual(session.sourceAdapter.serverGlobals.tickCount, 1)
         XCTAssertEqual(
             try XCTUnwrap(session.serverRuntime.timerScheduler).currentTime,
-            serverTimeAfterRejection
+            serverTimeAfterMovement
         )
         XCTAssertEqual(
             try XCTUnwrap(session.clientRuntime.timerScheduler).currentTime,
-            clientTimeAfterRejection
+            clientTimeAfterMovement
         )
     }
 
@@ -144,7 +153,7 @@ final class GModPlayableSessionTests: XCTestCase {
             session.spawnPoint.angles,
             SourceQAngle(pitch: 0, yaw: 180, roll: 0)
         )
-        XCTAssertEqual(session.worldMesh.triangleCount, 25_732)
+        XCTAssertEqual(session.worldMesh.triangleCount, 20_560)
         XCTAssertEqual(session.worldIdentity.index, 0)
         XCTAssertTrue(session.startupReport.clientStartup.playerConnectionModeled)
         XCTAssertEqual(session.sharedSession.connectedClientCount, 1)
@@ -198,7 +207,7 @@ final class GModPlayableSessionTests: XCTestCase {
             SourceVector3(-512, 576, -12_287)
         )
         XCTAssertEqual(session.spawnPoint.angles, .zero)
-        XCTAssertEqual(session.worldMesh.triangleCount, 6_637)
+        XCTAssertEqual(session.worldMesh.triangleCount, 3_872)
         XCTAssertEqual(session.bsp.header.mapRevision, 146)
         try assertWorldTrace(in: session, expectedFloorZ: -12_287.968_75)
 
