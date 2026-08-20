@@ -21,6 +21,21 @@ unsafe archive paths are rejected.
 
 ## Create the recommended pack
 
+For the current Swift Playgrounds home → map → movement slice, create the
+transfer-sized profile. It contains the original GMod HTML home artwork
+and the two stock map payloads; the package supplies the audited Lua/VGUI
+startup closure:
+
+```powershell
+pwsh -NoProfile -File .\Tools\ContentPack\New-GarrysPADContentPack.ps1 `
+  -GModInstallRoot 'C:\Program Files (x86)\Steam\steamapps\common\GarrysMod' `
+  -OutputPath 'H:\GarrysPAD_Content_Playground.zip' `
+  -Profile Playground
+```
+
+The larger `Playable` profile is retained for the upcoming direct VPK material
+and audio mount:
+
 ```powershell
 pwsh -NoProfile -File .\Tools\ContentPack\New-GarrysPADContentPack.ps1 `
   -GModInstallRoot 'C:\Program Files (x86)\Steam\steamapps\common\GarrysMod' `
@@ -42,8 +57,9 @@ pwsh -NoProfile -File .\Tools\ContentPack\New-GarrysPADContentPack.ps1 `
 ## Verify a pack
 
 Verification rereads and hashes every uncompressed payload, checks the exact
-manifest/file relationship, rejects unsafe or excluded paths, and requires the
-GMod, HL2, texture, sound, platform, HTML, and two-map roots:
+manifest/file relationship, and rejects unsafe or excluded paths. Every
+profile requires the HTML and two-map roots; the larger profiles additionally
+require the GMod, HL2, texture, sound, and platform VPK roots:
 
 ```powershell
 pwsh -NoProfile -File .\Tools\ContentPack\Test-GarrysPADContentPack.ps1 `

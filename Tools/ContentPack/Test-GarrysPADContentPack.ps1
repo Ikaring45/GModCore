@@ -60,7 +60,7 @@ try {
     if ([int] $manifest.schemaVersion -ne 1 -or [string] $manifest.format -cne 'GarrysPADContentPack') {
         throw 'Unsupported content-pack manifest.'
     }
-    if ([string] $manifest.profile -notin @('Playable', 'CompleteBase')) {
+    if ([string] $manifest.profile -notin @('Playground', 'Playable', 'CompleteBase')) {
         throw "Unsupported content-pack profile: $($manifest.profile)"
     }
 
@@ -124,17 +124,27 @@ try {
         throw 'Manifest aggregate byte count is incorrect.'
     }
 
+    $requiredPaths = [System.Collections.Generic.List[string]]::new()
     foreach ($required in @(
-        'garrysmod/garrysmod_dir.vpk',
         'garrysmod/html/menu.html',
         'garrysmod/maps/gm_construct.bsp',
-        'garrysmod/maps/gm_flatgrass.bsp',
-        'sourceengine/content_hl2_dir.vpk',
-        'sourceengine/hl2_misc_dir.vpk',
-        'sourceengine/hl2_sound_misc_dir.vpk',
-        'sourceengine/hl2_textures_dir.vpk',
-        'platform/platform_misc_dir.vpk'
+        'garrysmod/maps/gm_flatgrass.bsp'
     )) {
+        $requiredPaths.Add($required)
+    }
+    if ([string] $manifest.profile -ne 'Playground') {
+        foreach ($required in @(
+            'garrysmod/garrysmod_dir.vpk',
+            'sourceengine/content_hl2_dir.vpk',
+            'sourceengine/hl2_misc_dir.vpk',
+            'sourceengine/hl2_sound_misc_dir.vpk',
+            'sourceengine/hl2_textures_dir.vpk',
+            'platform/platform_misc_dir.vpk'
+        )) {
+            $requiredPaths.Add($required)
+        }
+    }
+    foreach ($required in $requiredPaths) {
         if (-not $byName.ContainsKey($required)) {
             throw "Required playable content is missing: $required"
         }

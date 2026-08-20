@@ -30,7 +30,11 @@ Run `Tools/ContentPack/New-GarrysPADContentPack.ps1` from the repository, then
 copy its output to Files/iCloud Drive and add that ZIP to the App Playground's
 Resources. The recommended filename is:
 
-`GarrysPAD_Content_Playable.zip`
+`GarrysPAD_Content_Playground.zip`
+
+Use the packer's `-Profile Playground` option. This is currently about 93 MB
+for the stock installation, versus roughly 4.84 GB for the future-facing VPK
+`Playable` profile.
 
 The current direct reader consumes stored maps and home images without a
 second multi-gigabyte extraction. Deflated text entries and the full VPK-backed

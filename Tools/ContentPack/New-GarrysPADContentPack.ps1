@@ -5,7 +5,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $OutputPath,
 
-    [ValidateSet('Playable', 'CompleteBase')]
+    [ValidateSet('Playground', 'Playable', 'CompleteBase')]
     [string] $Profile = 'Playable',
 
     [switch] $PlanOnly,
@@ -164,17 +164,23 @@ function New-PackSelection {
 
     # Loose, Valve/GMod-provided content roots. Deliberately excluded roots are
     # listed in the generated manifest and never discovered recursively.
-    foreach ($directory in @(
-        'backgrounds',
-        'gamemodes',
-        'html',
-        'lua',
-        'materials',
-        'media',
-        'particles',
-        'resource',
-        'scenes'
-    )) {
+    $looseDirectories = if ($SelectedProfile -eq 'Playground') {
+        @('html')
+    }
+    else {
+        @(
+            'backgrounds',
+            'gamemodes',
+            'html',
+            'lua',
+            'materials',
+            'media',
+            'particles',
+            'resource',
+            'scenes'
+        )
+    }
+    foreach ($directory in $looseDirectories) {
         Add-PackDirectory `
             -Selection $selection `
             -SourceRoot (Join-Path $garrysmod $directory) `
@@ -197,6 +203,14 @@ function New-PackSelection {
             -Selection $selection `
             -SourcePath $source `
             -LogicalPath "garrysmod/$relativePath"
+    }
+
+    # The current Playgrounds vertical slice reads the original HTML artwork
+    # and stock BSPs directly from the ZIP while the Swift package supplies its
+    # audited Lua/VGUI startup closure. Keep this transfer-sized profile free
+    # of VPK families until direct VPK mounting/audio is connected.
+    if ($SelectedProfile -eq 'Playground') {
+        return $selection
     }
 
     foreach ($name in @(
