@@ -255,7 +255,7 @@ final class GModGameSessionModel: ObservableObject {
         }
     }
 
-    func start(map: GModBundledMap) {
+    func start(map: GModBundledMap, contentPackURL: URL? = nil) {
         guard !isStarting else { return }
         invalidateSurfaceRequests()
         isStarting = true
@@ -287,7 +287,10 @@ final class GModGameSessionModel: ObservableObject {
             guard let self else { return }
             do {
                 let snapshot = try await lane.start(
-                    configuration: GModPlayableSessionConfiguration(map: map),
+                    configuration: GModPlayableSessionConfiguration(
+                        map: map,
+                        contentPackURL: contentPackURL
+                    ),
                     logger: { [weak self] realm, message in
                         Task { @MainActor [weak self] in
                             guard let self,

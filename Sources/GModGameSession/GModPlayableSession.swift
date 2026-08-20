@@ -4,7 +4,8 @@ import GModGameAssets
 import GModLua
 
 /// Host facts used to construct one local, paired SERVER/CLIENT game session.
-/// The map and client content are resolved only from GModGameAssets.
+/// A Playgrounds content pack can supply the selected map directly from its
+/// ZIP; the audited base Lua/UI closure remains the deterministic fallback.
 public struct GModPlayableSessionConfiguration: Sendable, Equatable {
     public let map: GModBundledMap
     public let gamemodeName: String
@@ -12,6 +13,7 @@ public struct GModPlayableSessionConfiguration: Sendable, Equatable {
     public let playerEntityIndex: Int
     public let playerUserID: Int
     public let initialViewport: GMLuaViewportSize
+    public let contentPackURL: URL?
 
     public init(
         map: GModBundledMap = .construct,
@@ -19,7 +21,8 @@ public struct GModPlayableSessionConfiguration: Sendable, Equatable {
         maxPlayers: Int = 32,
         playerEntityIndex: Int = 1,
         playerUserID: Int = 1,
-        initialViewport: GMLuaViewportSize = .logicalDesktopDefault
+        initialViewport: GMLuaViewportSize = .logicalDesktopDefault,
+        contentPackURL: URL? = nil
     ) {
         self.map = map
         self.gamemodeName = gamemodeName
@@ -27,6 +30,7 @@ public struct GModPlayableSessionConfiguration: Sendable, Equatable {
         self.playerEntityIndex = playerEntityIndex
         self.playerUserID = playerUserID
         self.initialViewport = initialViewport
+        self.contentPackURL = contentPackURL
     }
 }
 
@@ -225,10 +229,18 @@ public final class GModPlayableSession {
             )
         }
 
-        let bspData = try GModGameAssets.data(
-            for: configuration.map,
-            kind: .bsp
-        )
+        let bspData: Data
+        if let contentPackURL = configuration.contentPackURL {
+            let pack = try GarrysPADContentPack(url: contentPackURL)
+            bspData = try pack.data(
+                for: "garrysmod/maps/\(configuration.map.rawValue).bsp"
+            )
+        } else {
+            bspData = try GModGameAssets.data(
+                for: configuration.map,
+                kind: .bsp
+            )
+        }
         let loadedBSP = try SourceBSP(data: bspData)
         let loadedWorldMesh = try GModWorldRenderMesh.build(from: loadedBSP)
         let loadedSpawn = try Self.firstPlayerStart(

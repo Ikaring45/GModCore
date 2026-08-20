@@ -53,3 +53,10 @@ pwsh -NoProfile -File .\Tools\ContentPack\Test-GarrysPADContentPack.ps1 `
 The ZIP contains no game executable and cannot be launched by itself. It is a
 content source for Garry's PAD's importer. Keep it private unless the project
 owner has separately approved redistribution of the packed game data.
+
+## Use in Swift Playgrounds
+
+Follow [`Apps/GarrysPADPlayground/README.md`](../../Apps/GarrysPADPlayground/README.md).
+The runtime automatically discovers exactly one `GarrysPAD_Content_*.zip` in
+the App Playground Resources. It indexes the ZIP64 archive in place and reads
+the selected stock BSP and home artwork without fully extracting it.
