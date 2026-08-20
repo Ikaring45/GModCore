@@ -1,5 +1,11 @@
 import Foundation
+#if canImport(GModImageDecode)
 import GModImageDecode
+#elseif canImport(CoreGraphics) && canImport(ImageIO)
+import CoreFoundation
+import CoreGraphics
+import ImageIO
+#endif
 import GModLua
 
 public enum GMLuaImageDecodeError: Error, Sendable, Equatable, CustomStringConvertible {
@@ -61,6 +67,7 @@ public enum GMLuaPlatformImageDecoder {
     public static func decode(_ encodedImage: Data) throws -> GMLuaDecodedRGBAImage {
         guard !encodedImage.isEmpty else { throw GMLuaImageDecodeError.invalidArgument }
 
+#if canImport(GModImageDecode)
         var decoded = GModDecodedRGBAImage(
             pixels: nil,
             width: 0,
@@ -102,6 +109,76 @@ public enum GMLuaPlatformImageDecoder {
             bytesPerRow: bytesPerRow,
             rgbaBytes: rgbaBytes
         )
+#elseif canImport(CoreGraphics) && canImport(ImageIO)
+        guard let source = CGImageSourceCreateWithData(encodedImage as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            throw GMLuaImageDecodeError.malformedImage
+        }
+        let width = image.width
+        let height = image.height
+        guard width > 0,
+              height > 0,
+              width <= Int.max / 4 else {
+            throw GMLuaImageDecodeError.malformedImage
+        }
+        let bytesPerRow = width * 4
+        guard height <= Int.max / bytesPerRow else {
+            throw GMLuaImageDecodeError.malformedImage
+        }
+        var rgbaBytes = Data(count: height * bytesPerRow)
+        let rendered = rgbaBytes.withUnsafeMutableBytes { storage -> Bool in
+            guard let baseAddress = storage.baseAddress,
+                  let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+                  let context = CGContext(
+                      data: baseAddress,
+                      width: width,
+                      height: height,
+                      bitsPerComponent: 8,
+                      bytesPerRow: bytesPerRow,
+                      space: colorSpace,
+                      bitmapInfo:
+                          CGImageAlphaInfo.premultipliedLast.rawValue |
+                          CGBitmapInfo.byteOrder32Big.rawValue
+                  ) else {
+                return false
+            }
+            context.draw(
+                image,
+                in: CGRect(x: 0, y: 0, width: width, height: height)
+            )
+            return true
+        }
+        guard rendered else { throw GMLuaImageDecodeError.platformFailure }
+
+        // CGBitmapContext produces premultiplied RGBA. The material API uses
+        // straight RGBA, matching the Windows WIC implementation.
+        rgbaBytes.withUnsafeMutableBytes { storage in
+            let pixels = storage.bindMemory(to: UInt8.self)
+            for offset in stride(from: 0, to: pixels.count, by: 4) {
+                let alpha = UInt32(pixels[offset + 3])
+                if alpha == 0 {
+                    pixels[offset] = 0
+                    pixels[offset + 1] = 0
+                    pixels[offset + 2] = 0
+                } else if alpha != 255 {
+                    for component in 0..<3 {
+                        let straight =
+                            (UInt32(pixels[offset + component]) * 255 + alpha / 2) /
+                            alpha
+                        pixels[offset + component] = UInt8(min(straight, 255))
+                    }
+                }
+            }
+        }
+        return GMLuaDecodedRGBAImage(
+            width: width,
+            height: height,
+            bytesPerRow: bytesPerRow,
+            rgbaBytes: rgbaBytes
+        )
+#else
+        throw GMLuaImageDecodeError.unsupportedPlatform
+#endif
     }
 }
 

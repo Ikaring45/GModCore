@@ -9,7 +9,25 @@ var products: [Product] = [
     )
 ]
 
-var targets: [Target] = [
+var engineDependencies: [Target.Dependency] = ["GModLua"]
+var platformImageDecodeTargets: [Target] = []
+
+#if os(Windows) || os(Linux)
+engineDependencies.append("GModImageDecode")
+platformImageDecodeTargets.append(
+    .target(
+        name: "GModImageDecode",
+        path: "Sources/GModImageDecode",
+        publicHeadersPath: "include",
+        linkerSettings: [
+            .linkedLibrary("ole32", .when(platforms: [.windows])),
+            .linkedLibrary("windowscodecs", .when(platforms: [.windows]))
+        ]
+    )
+)
+#endif
+
+var targets: [Target] = platformImageDecodeTargets + [
     .target(
         name: "GModGameAssets",
         path: "Sources/GModGameAssets",
@@ -23,29 +41,13 @@ var targets: [Target] = [
     ),
 
     .target(
-        name: "GModImageDecode",
-        path: "Sources/GModImageDecode",
-        publicHeadersPath: "include",
-        linkerSettings: [
-            .linkedLibrary("ole32", .when(platforms: [.windows])),
-            .linkedLibrary("windowscodecs", .when(platforms: [.windows])),
-            .linkedFramework("CoreFoundation", .when(platforms: [.iOS, .macOS])),
-            .linkedFramework("CoreGraphics", .when(platforms: [.iOS, .macOS])),
-            .linkedFramework("ImageIO", .when(platforms: [.iOS, .macOS]))
-        ]
-    ),
-
-    .target(
         name: "GModLua",
         path: "Sources/GModLua"
     ),
 
     .target(
         name: "GModEngine",
-        dependencies: [
-            "GModLua",
-            "GModImageDecode"
-        ],
+        dependencies: engineDependencies,
         path: "Sources/GModEngine",
         resources: [
             .copy("Resources/Lua51Tests")
@@ -54,7 +56,10 @@ var targets: [Target] = [
             // Windows ships SQLite as winsqlite3 while Apple platforms and
             // Linux expose the same C ABI from sqlite3.
             .linkedLibrary("winsqlite3", .when(platforms: [.windows])),
-            .linkedLibrary("sqlite3", .when(platforms: [.iOS, .macOS, .linux]))
+            .linkedLibrary("sqlite3", .when(platforms: [.iOS, .macOS, .linux])),
+            .linkedFramework("CoreFoundation", .when(platforms: [.iOS, .macOS])),
+            .linkedFramework("CoreGraphics", .when(platforms: [.iOS, .macOS])),
+            .linkedFramework("ImageIO", .when(platforms: [.iOS, .macOS]))
         ]
     ),
 
