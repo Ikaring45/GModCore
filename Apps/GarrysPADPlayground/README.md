@@ -10,11 +10,13 @@ one local ZIP and is never committed to GitHub.
 2. Add the Swift package `https://github.com/Ikaring45/GModCore` and enable its
    `GModApp` product.
 3. Replace the generated `ContentView.swift` with the file beside this README.
-4. Add exactly one `GarrysPAD_Content_*.zip` to the App Playground's Resources
-   using the project navigator. Do not unzip it.
-5. Run the app.
+4. Keep `GarrysPAD_Content_Playable.zip` in **Files** or **iCloud Drive**. Do
+   not add the multi-gigabyte ZIP to the App Playground's Resources.
+5. Run the app, tap **Choose ZIP from Files**, and select the ZIP. Do not unzip
+   it. The saved Files permission is reused on later launches.
 
-At launch the app reads the ZIP64 directory without extracting the archive,
+After selection the app reads the ZIP64 directory without copying or extracting
+the archive,
 shows GMod's original HTML/CSS/JS home, then presents `gm_construct` and
 `gm_flatgrass`. Selecting a world shows the original GMod loading document,
 reads that BSP directly from the ZIP, resolves its VMT/VTF materials from the
@@ -30,8 +32,8 @@ content.
 ## Creating the ZIP on the Windows PC
 
 Run `Tools/ContentPack/New-GarrysPADContentPack.ps1` from the repository, then
-copy its output to Files/iCloud Drive and add that ZIP to the App Playground's
-Resources. The recommended filename is:
+copy its output to Files/iCloud Drive. Select it from Garry's PAD on first
+launch. The recommended filename is:
 
 `GarrysPAD_Content_Playable.zip`
 
@@ -40,7 +42,8 @@ is about 4.88 GB. The smaller `Playground` profile remains useful only for ZIP
 transfer and home/BSP diagnostics; it deliberately omits the VPK families and
 therefore cannot provide the real world textures or UI sounds.
 
-The direct reader mounts the ZIP64 directory in place. Maps and HTML are read
+The direct reader mounts the Files/iCloud Drive ZIP64 directory in place. Maps
+and HTML are read
 as stored ZIP entries, while nested VPK directory/chunk files are read by exact
 byte range; the iPad does not create a second multi-gigabyte extracted copy.
 The audited Lua/VGUI/font startup closure is still supplied by `GModApp`.

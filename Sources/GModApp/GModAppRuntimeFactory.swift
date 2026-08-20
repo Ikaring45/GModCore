@@ -105,10 +105,20 @@ public final class GModAppRuntimeFactory: @unchecked Sendable {
     public func mountContentPack(
         _ pack: GarrysPADContentPack
     ) throws -> GModContentPackAssetSource {
-        let source = try GModContentPackAssetSource(pack: pack)
+        let source = try prepareContentPack(pack)
+        activateContentPack(source)
+        return source
+    }
+
+    func prepareContentPack(
+        _ pack: GarrysPADContentPack
+    ) throws -> GModContentPackAssetSource {
+        try GModContentPackAssetSource(pack: pack)
+    }
+
+    func activateContentPack(_ source: GModContentPackAssetSource) {
         Self.processMountedContentSource.mount(source)
         Self.processSurfaceTextureResolver.removeAllCachedTextures()
-        return source
     }
 
     public func makePlayableSession(

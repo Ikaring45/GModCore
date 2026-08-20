@@ -71,8 +71,10 @@ owner has separately approved redistribution of the packed game data.
 ## Use in Swift Playgrounds
 
 Follow [`Apps/GarrysPADPlayground/README.md`](../../Apps/GarrysPADPlayground/README.md).
-The runtime automatically discovers exactly one `GarrysPAD_Content_*.zip` in
-the App Playground Resources. It indexes the ZIP64 archive in place, serves the
-original home/loading HTML tree, reads the selected stock BSP, and range-mounts
-nested VPK chunks for VMT/VTF textures, map thumbnails, and UI sounds without
-fully extracting the pack.
+Keep the generated ZIP in Files or iCloud Drive instead of embedding it in the
+App Playground Resources. On first launch, choose the ZIP with the system file
+picker; the app retains a security-scoped bookmark for later launches. It
+indexes the ZIP64 archive in place, serves the original home/loading HTML tree,
+reads the selected stock BSP, and range-mounts nested VPK chunks for VMT/VTF
+textures, map thumbnails, and UI sounds without fully extracting or copying
+the pack.

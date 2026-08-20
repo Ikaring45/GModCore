@@ -35,8 +35,10 @@ public enum GarrysPADContentPackError: Error, Sendable, Equatable, CustomStringC
     }
 }
 
-/// Random-access reader for a Garry's PAD content ZIP placed in an app or
-/// Swift Playgrounds resource bundle.
+/// Random-access reader for a Garry's PAD content ZIP. Swift Playgrounds opens
+/// large packs through a security-scoped Files URL so the archive is not copied
+/// into the signed app bundle; small diagnostic hosts may still use a resource
+/// bundle URL.
 ///
 /// The packer stores large maps, images, audio, and VPK payloads without ZIP
 /// compression. This reader therefore needs only the ZIP/ZIP64 index and reads
