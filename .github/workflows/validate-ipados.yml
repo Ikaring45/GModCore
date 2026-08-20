@@ -144,6 +144,11 @@ jobs:
               "GModEngine",
           }
           target_names = {target["name"] for target in manifest.get("targets", [])}
+          if "GModImageDecode" in target_names:
+              raise SystemExit(
+                  "Apple manifest must not expose the C-based GModImageDecode "
+                  "target; Swift Playgrounds rejects C-family package targets"
+              )
           missing_targets = sorted(required_library_targets - target_names)
           if missing_targets:
               raise SystemExit(
