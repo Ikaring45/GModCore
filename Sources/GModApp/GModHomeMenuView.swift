@@ -144,7 +144,7 @@ struct GModHomeMenuView: UIViewRepresentable {
             )
         }
 
-        func installBackground(into container: GModHomeMenuContainerView) {
+        fileprivate func installBackground(into container: GModHomeMenuContainerView) {
             backgroundContainer = container
             let data = preferredBackgroundData()
             container.setBackgroundImage(data.flatMap(UIImage.init(data:)))
