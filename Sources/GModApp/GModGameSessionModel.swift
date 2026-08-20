@@ -962,7 +962,7 @@ final class GModGameSessionModel: ObservableObject {
         )
     }
 
-    private static func makeWorldScene(
+    nonisolated private static func makeWorldScene(
         map: GModBundledMap,
         mesh: GModWorldRenderMesh,
         playerOrigin: SourceVector3,
@@ -971,7 +971,7 @@ final class GModGameSessionModel: ObservableObject {
     ) throws -> GModMetalWorldScene {
         let maximumRetainedTextureBytes = 128 * 1_024 * 1_024
         var retainedTextureBytes = 0
-        let ranges = mesh.materialRanges.map { range in
+        let ranges: [GModMetalWorldMaterialRange] = mesh.materialRanges.map { range in
             let bitmap: GModMetalSurfaceBitmap?
             if let name = range.materialName,
                let resolved = try? textureResolver.resolveSurfaceTexture(
@@ -984,7 +984,7 @@ final class GModGameSessionModel: ObservableObject {
             } else {
                 bitmap = nil
             }
-            GModMetalWorldMaterialRange(
+            return GModMetalWorldMaterialRange(
                 materialName: range.materialName,
                 firstIndex: range.firstIndex,
                 indexCount: range.indexCount,
@@ -1009,11 +1009,15 @@ final class GModGameSessionModel: ObservableObject {
         )
     }
 
-    private static func cameraEye(for origin: SourceVector3) -> SIMD3<Float> {
+    nonisolated private static func cameraEye(
+        for origin: SourceVector3
+    ) -> SIMD3<Float> {
         SIMD3<Float>(origin.x, origin.y, origin.z + 64)
     }
 
-    private static func cameraForward(for angles: SourceQAngle) -> SIMD3<Float> {
+    nonisolated private static func cameraForward(
+        for angles: SourceQAngle
+    ) -> SIMD3<Float> {
         let degreesToRadians = Double.pi / 180
         let pitch = Double(angles.pitch) * degreesToRadians
         let yaw = Double(angles.yaw) * degreesToRadians

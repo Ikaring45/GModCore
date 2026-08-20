@@ -28,9 +28,9 @@ final class GModPlaygroundContentModel: ObservableObject {
         state = .loading
         assetSource = nil
         let resourceRootURL = bundle.resourceURL
+        let runtimeFactory = self.runtimeFactory
         Task { [weak self] in
             do {
-                let runtimeFactory = self.runtimeFactory
                 let result = try await Task.detached(priority: .userInitiated) {
                     guard let resourceRootURL,
                           let pack = try GarrysPADContentPack.discover(

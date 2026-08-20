@@ -176,48 +176,50 @@ public struct GModMainView: View {
 
     @ViewBuilder
     private var loadingOverlay: some View {
-        if case let .ready(pack, _, _) = content.state,
-           let map = game.loadingMap {
-            GModStockLoadingView(
-                pack: pack,
-                assetSource: content.assetSource,
-                map: map,
-                status: game.status
-            )
-            .ignoresSafeArea()
-            .transition(.opacity)
-        } else {
-            ZStack {
-                Color.black.ignoresSafeArea()
+        Group {
+            if case let .ready(pack, _, _) = content.state,
+               let map = game.loadingMap {
+                GModStockLoadingView(
+                    pack: pack,
+                    assetSource: content.assetSource,
+                    map: map,
+                    status: game.status
+                )
+                .ignoresSafeArea()
+                .transition(.opacity)
+            } else {
+                ZStack {
+                    Color.black.ignoresSafeArea()
 #if canImport(UIKit)
-                if case let .ready(_, background, _) = content.state,
-                   let image = UIImage(data: background) {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFill()
-                        .ignoresSafeArea()
-                        .overlay(Color.black.opacity(0.34))
-                }
-#endif
-                VStack(spacing: 18) {
-                    Spacer()
-                    HStack(spacing: 14) {
-                        ProgressView().tint(.white)
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text("Loading…")
-                                .font(.system(size: 28, weight: .light))
-                            Text(game.status)
-                                .font(.system(size: 13, design: .monospaced))
-                                .foregroundColor(.white.opacity(0.76))
-                        }
+                    if case let .ready(_, background, _) = content.state,
+                       let image = UIImage(data: background) {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFill()
+                            .ignoresSafeArea()
+                            .overlay(Color.black.opacity(0.34))
                     }
-                    .padding(.horizontal, 28)
-                    .padding(.vertical, 18)
-                    .background(Color.black.opacity(0.68))
-                    .frame(maxWidth: .infinity, alignment: .leading)
+#endif
+                    VStack(spacing: 18) {
+                        Spacer()
+                        HStack(spacing: 14) {
+                            ProgressView().tint(.white)
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("Loading…")
+                                    .font(.system(size: 28, weight: .light))
+                                Text(game.status)
+                                    .font(.system(size: 13, design: .monospaced))
+                                    .foregroundColor(.white.opacity(0.76))
+                            }
+                        }
+                        .padding(.horizontal, 28)
+                        .padding(.vertical, 18)
+                        .background(Color.black.opacity(0.68))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
+                .transition(.opacity)
             }
-            .transition(.opacity)
         }
         .accessibilityIdentifier("garryspad.loading")
     }

@@ -83,7 +83,7 @@ struct GModHomeMenuView: UIViewRepresentable {
 
     final class Coordinator: NSObject, WKScriptMessageHandler {
         static let messageName = "garrysPAD"
-        let contentHandler: ContentSchemeHandler
+        fileprivate let contentHandler: ContentSchemeHandler
         var onSelectMap: (GModBundledMap) -> Void
         private let assetSource: GModContentPackAssetSource?
         private var soundPlayers: [String: AVAudioPlayer] = [:]
@@ -95,7 +95,7 @@ struct GModHomeMenuView: UIViewRepresentable {
         ) {
             let source = assetSource
             contentHandler = ContentSchemeHandler(pack: pack, assetSource: source)
-            assetSource = source
+            self.assetSource = source
             self.onSelectMap = onSelectMap
             super.init()
             try? AVAudioSession.sharedInstance().setCategory(
@@ -299,7 +299,7 @@ struct GModStockLoadingView: UIViewRepresentable {
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate {
-        let contentHandler: ContentSchemeHandler
+        fileprivate let contentHandler: ContentSchemeHandler
         private var map: GModBundledMap
         private var status: String
 
