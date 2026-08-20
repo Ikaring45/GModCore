@@ -160,20 +160,33 @@ public final class GarrysPADContentPack: @unchecked Sendable {
         return result
     }
 
-    /// Finds exactly one Garry's PAD ZIP in a resource bundle. This is shallow
-    /// by design: Swift Playgrounds places user resources at the bundle root.
+    /// Finds exactly one Garry's PAD ZIP in a resource bundle. Swift
+    /// Playgrounds normally copies user resources to the bundle root; local
+    /// SwiftPM hosts may preserve one `Resources` wrapper, so both exact
+    /// locations are accepted without recursively scanning the app container.
     public static func discover(in bundle: Bundle = .main) throws -> GarrysPADContentPack? {
         guard let root = bundle.resourceURL else { return nil }
-        let candidates = try FileManager.default.contentsOfDirectory(
-            at: root,
-            includingPropertiesForKeys: [.isRegularFileKey],
-            options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
-        ).filter {
+        var searchRoots = [root]
+        let wrapped = root.appendingPathComponent("Resources", isDirectory: true)
+        var wrappedIsDirectory: ObjCBool = false
+        if FileManager.default.fileExists(
+            atPath: wrapped.path,
+            isDirectory: &wrappedIsDirectory
+        ), wrappedIsDirectory.boolValue {
+            searchRoots.append(wrapped)
+        }
+        let candidates = try searchRoots.flatMap { searchRoot in
+            try FileManager.default.contentsOfDirectory(
+                at: searchRoot,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
+            )
+        }.filter {
             $0.pathExtension.caseInsensitiveCompare("zip") == .orderedSame &&
                 $0.deletingPathExtension().lastPathComponent.hasPrefix(
                     preferredFileNamePrefix
                 )
-        }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+        }.sorted { $0.path < $1.path }
         guard !candidates.isEmpty else { return nil }
         guard candidates.count == 1 else {
             throw GarrysPADContentPackError.invalidArchive(
