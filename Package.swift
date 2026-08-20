@@ -11,6 +11,18 @@ var products: [Product] = [
 
 var targets: [Target] = [
     .target(
+        name: "GModGameAssets",
+        path: "Sources/GModGameAssets",
+        resources: [
+            .copy("Resources/ClientContent"),
+            .copy("Resources/Maps"),
+            .copy("Resources/GModClientContentManifest.json"),
+            .copy("Resources/GModGameAssetManifest.json"),
+            .copy("Resources/GModSourceMaterialAllowlist.json")
+        ]
+    ),
+
+    .target(
         name: "GModImageDecode",
         path: "Sources/GModImageDecode",
         publicHeadersPath: "include",
@@ -35,12 +47,25 @@ var targets: [Target] = [
             "GModImageDecode"
         ],
         path: "Sources/GModEngine",
+        resources: [
+            .copy("Resources/Lua51Tests")
+        ],
         linkerSettings: [
             // Windows ships SQLite as winsqlite3 while Apple platforms and
             // Linux expose the same C ABI from sqlite3.
             .linkedLibrary("winsqlite3", .when(platforms: [.windows])),
             .linkedLibrary("sqlite3", .when(platforms: [.iOS, .macOS, .linux]))
         ]
+    ),
+
+    .target(
+        name: "GModGameSession",
+        dependencies: [
+            "GModEngine",
+            "GModGameAssets",
+            "GModLua"
+        ],
+        path: "Sources/GModGameSession"
     ),
 
     .executableTarget(
@@ -64,7 +89,9 @@ var targets: [Target] = [
         name: "GModEngineTests",
         dependencies: [
             "GModEngine",
-            "GModLua"
+            "GModLua",
+            "GModGameAssets",
+            "GModGameSession"
         ],
         path: "Tests/GModEngineTests",
         resources: [
@@ -92,19 +119,41 @@ targets.insert(
             dependencies: [
                 "GModEngine"
             ],
-            path: "Sources/GModMetal"
+            path: "Sources/GModMetal",
+            linkerSettings: [
+                .linkedFramework("CoreGraphics"),
+                .linkedFramework("CoreText")
+            ]
         ),
 
         .target(
             name: "GModApp",
             dependencies: [
                 "GModEngine",
-                "GModMetal"
+                "GModLua",
+                "GModMetal",
+                "GModGameAssets",
+                "GModGameSession"
             ],
             path: "Sources/GModApp",
             resources: [
                 .process("Resources")
+            ],
+            linkerSettings: [
+                .linkedFramework("CoreGraphics"),
+                .linkedFramework("CoreText")
             ]
+        ),
+
+        .testTarget(
+            name: "GModAppTests",
+            dependencies: [
+                "GModApp",
+                "GModEngine",
+                "GModLua",
+                "GModMetal"
+            ],
+            path: "Tests/GModAppTests"
         )
     ],
     at: 2

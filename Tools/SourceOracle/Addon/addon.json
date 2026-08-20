@@ -1,0 +1,6 @@
+{
+  "title": "Garry's PAD Source Oracle",
+  "type": "tool",
+  "tags": ["testing"],
+  "ignore": [".source_oracle_owned_mount_v1"]
+}

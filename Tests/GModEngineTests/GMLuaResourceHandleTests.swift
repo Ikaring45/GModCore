@@ -32,6 +32,10 @@ final class GMLuaResourceHandleTests: XCTestCase {
         try state.execute(
             """
             local unresolved = Material("synthetic/atlas.png", "smooth")
+            assert(unresolved:GetShader() == "shader_error")
+            assert(unresolved:GetTexture("$basetexture") == nil)
+            assert(Material("synthetic/unparsed_vmt"):GetShader() == "shader_error")
+            assert(Material("synthetic/unparsed_vmt"):GetTexture("$basetexture") == nil)
             local statusOK, statusMessage = pcall(function() return unresolved:IsError() end)
             assert(not statusOK)
             assert(string.find(statusMessage, "without authoritative asset resolution", 1, true))
@@ -47,6 +51,10 @@ final class GMLuaResourceHandleTests: XCTestCase {
             """
             local material = Material("synthetic/atlas.png", "smooth")
             assert(not material:IsError())
+            assert(material:GetShader() == "UnlitGeneric")
+            assert(Material(
+                "synthetic/atlas.png", "vertexlitgeneric smooth"
+            ):GetShader() == "VertexLitGeneric")
             assert(material:Width() == 3 and material:Height() == 2)
 
             local color = material:GetColor(1.9, 1.8)
@@ -67,7 +75,7 @@ final class GMLuaResourceHandleTests: XCTestCase {
             """,
             sourceName: "@GMLuaResolvedMaterialPixel.lua"
         )
-        XCTAssertEqual(registry.materialCount, 1)
+        XCTAssertEqual(registry.materialCount, 3)
         XCTAssertEqual(registry.textureCount, 1)
 
         registry.setMaterialPixelResolver(nil)
@@ -168,6 +176,14 @@ final class GMLuaResourceHandleTests: XCTestCase {
             assert(first == second)
             assert(first:GetName() == "synthetic/history")
 
+            assert(RT_SIZE_NO_CHANGE == 0)
+            assert(MATERIAL_RT_DEPTH_SEPARATE == 1)
+            assert(IMAGE_FORMAT_BGRA8888 == 12)
+            local simple = GetRenderTarget("GModToolgunScreen", 256, 128)
+            assert(type(simple) == "ITexture")
+            assert(simple == GetRenderTarget("GModToolgunScreen", 1024, 512))
+            assert(simple:GetName() == "GModToolgunScreen")
+
             local ok, message = pcall(function()
                 material:SetTexture("$detail", "not a texture")
             end)
@@ -190,12 +206,25 @@ final class GMLuaResourceHandleTests: XCTestCase {
         XCTAssertEqual(request.textureFlags, 2)
         XCTAssertEqual(request.renderTargetFlags, 3)
         XCTAssertEqual(request.imageFormat, -1)
+        let simple = try XCTUnwrap(
+            registry.namedTextureDescriptor(name: "GModToolgunScreen")
+        )
+        guard case let .renderTarget(simpleRequest) = simple.kind else {
+            return XCTFail("GetRenderTarget did not retain its fixed-policy request")
+        }
+        XCTAssertEqual(simpleRequest.width, 256)
+        XCTAssertEqual(simpleRequest.height, 128)
+        XCTAssertEqual(simpleRequest.sizeMode, 0)
+        XCTAssertEqual(simpleRequest.depthMode, 1)
+        XCTAssertEqual(simpleRequest.textureFlags, 258)
+        XCTAssertEqual(simpleRequest.renderTargetFlags, 0)
+        XCTAssertEqual(simpleRequest.imageFormat, 12)
         XCTAssertEqual(
             registry.namedTextureDescriptor(name: "_RT_SMALLFB0")?.kind,
             .engineRenderTarget(name: "_rt_SmallFB0")
         )
         XCTAssertEqual(registry.materialCount, 1)
-        XCTAssertEqual(registry.textureCount, 8)
+        XCTAssertEqual(registry.textureCount, 9)
     }
 
     func testRegistriesAndUserdataIdentityAreStateLocal() throws {
@@ -278,6 +307,146 @@ final class GMLuaResourceHandleTests: XCTestCase {
             ["server_synthetic_particle"]
         )
     }
+
+    func testMaterialGetTextureReturnsNothingForAbsentOrUnresolvedBaseTexture() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let registry = try GMLuaResources.install(
+            into: state,
+            typeSystem: typeSystem,
+            realm: .client
+        )
+        let sourceFiles: [String: Data] = [
+            "materials/synthetic/no_base.vmt": Data(
+                "UnlitGeneric { \"$vertexcolor\" \"1\" }".utf8
+            ),
+            "materials/synthetic/missing_base.vmt": Data(
+                "UnlitGeneric { \"$basetexture\" \"synthetic/not_installed\" }".utf8
+            ),
+        ]
+        registry.setMaterialPixelResolver(GMLuaSourceMaterialResolver { logicalPath in
+            sourceFiles[logicalPath]
+        })
+
+        try state.execute(
+            """
+            assert(Material("synthetic/not_installed"):GetTexture("$basetexture") == nil)
+            assert(Material("synthetic/no_base"):GetTexture("$basetexture") == nil)
+            assert(Material("synthetic/missing_base"):GetTexture("$basetexture") == nil)
+            assert(Material("synthetic/missing_base"):GetTexture("$detail") == nil)
+            """,
+            sourceName: "@GMLuaMaterialGetTextureMissing.lua"
+        )
+        XCTAssertEqual(registry.textureCount, 0)
+    }
+
+    func testGameAddParticlesRetainsOrderedByteExactPCFRequestsInBothRealms() throws {
+        for realm in [GMLuaRealm.server, .client] {
+            let state = LuaState(output: { _ in })
+            let typeSystem = try GMLuaTypeSystem.install(
+                into: state,
+                utilityLayer: .bundledFallback
+            )
+            let registry = try GMLuaResources.install(
+                into: state,
+                typeSystem: typeSystem,
+                realm: realm
+            )
+
+            try state.execute(
+                """
+                assert(game.AddParticles("particles/hunter_flechette.pcf") == nil)
+                game.AddParticles("particles/hunter_projectile.pcf")
+                game.AddParticles("particles/hunter_flechette.pcf")
+                game.AddParticles(string.char(255) .. ".pcf")
+                """,
+                sourceName: "@GameAddParticlesSourceShape.lua"
+            )
+
+            XCTAssertEqual(
+                registry.particleManifestRequests.map(\.path),
+                [
+                    "particles/hunter_flechette.pcf",
+                    "particles/hunter_projectile.pcf",
+                    LuaString(bytes: [255, 46, 112, 99, 102]),
+                ],
+                realm.rawValue
+            )
+            XCTAssertTrue(
+                registry.particleManifestRequests.allSatisfy { !$0.hasAssetBacking },
+                realm.rawValue
+            )
+        }
+
+        let menu = LuaState(output: { _ in })
+        let menuTypes = try GMLuaTypeSystem.install(
+            into: menu,
+            utilityLayer: .bundledFallback
+        )
+        _ = try GMLuaResources.install(
+            into: menu,
+            typeSystem: menuTypes,
+            realm: .menu
+        )
+        try menu.execute(
+            "assert(game.AddParticles == nil and PrecacheParticleSystem == nil)"
+        )
+    }
+
+    func testGameAddDecalRetainsFirstByteExactRegistrationInGameRealms() throws {
+        for realm in [GMLuaRealm.server, .client] {
+            let state = LuaState(output: { _ in })
+            let typeSystem = try GMLuaTypeSystem.install(
+                into: state,
+                utilityLayer: .bundledFallback
+            )
+            let registry = try GMLuaResources.install(
+                into: state,
+                typeSystem: typeSystem,
+                realm: realm
+            )
+
+            try state.execute(
+                """
+                assert(game.AddDecal("Eye", "decals/eye") == nil)
+                game.AddDecal("Dark", "decals/dark")
+                game.AddDecal("Eye", "decals/replacement-must-not-be-invented")
+                game.AddDecal(string.char(255), string.char(254))
+                """,
+                sourceName: "@GameAddDecalSourceShape.lua"
+            )
+
+            XCTAssertEqual(
+                registry.decalRegistrations.map(\.name),
+                ["Eye", "Dark", LuaString(bytes: [255])],
+                realm.rawValue
+            )
+            XCTAssertEqual(
+                registry.decalRegistrations.map(\.material),
+                ["decals/eye", "decals/dark", LuaString(bytes: [254])],
+                realm.rawValue
+            )
+            XCTAssertTrue(
+                registry.decalRegistrations.allSatisfy { !$0.hasAssetBacking },
+                realm.rawValue
+            )
+        }
+
+        let menu = LuaState(output: { _ in })
+        let menuTypes = try GMLuaTypeSystem.install(
+            into: menu,
+            utilityLayer: .bundledFallback
+        )
+        _ = try GMLuaResources.install(
+            into: menu,
+            typeSystem: menuTypes,
+            realm: .menu
+        )
+        try menu.execute("assert(game.AddDecal == nil)")
+    }
 }
 
 private struct SyntheticMaterialPixelResolver: GMLuaMaterialPixelResolver {
@@ -286,7 +455,8 @@ private struct SyntheticMaterialPixelResolver: GMLuaMaterialPixelResolver {
         encodedParameters: LuaString?
     ) throws -> GMLuaImageDimensions? {
         guard materialPath == "synthetic/atlas.png",
-              encodedParameters == "smooth" else { return nil }
+              encodedParameters == "smooth" ||
+                encodedParameters == "vertexlitgeneric smooth" else { return nil }
         return GMLuaImageDimensions(width: 3, height: 2)
     }
 

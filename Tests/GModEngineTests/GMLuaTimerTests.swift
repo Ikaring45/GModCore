@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-import GModEngine
+@testable import GModEngine
 import GModLua
 
 final class GMLuaTimerTests: XCTestCase {
@@ -150,5 +150,36 @@ final class GMLuaTimerTests: XCTestCase {
                 sourceName: "@RuntimeTimerCheck.lua"
             )
         }
+    }
+
+    func testAbsoluteAdvanceIsNondecreasingAndPreservesRelativeScheduling() throws {
+        let state = LuaState(output: { _ in })
+        let scheduler = try GMLuaTimer.install(into: state)
+        try state.execute(
+            """
+            ABSOLUTE_TIMER_COUNT = 0
+            timer.Create("absolute", 0.5, 1, function()
+                ABSOLUTE_TIMER_COUNT = ABSOLUTE_TIMER_COUNT + 1
+                ABSOLUTE_TIMER_TIME = CurTime()
+            end)
+            """,
+            sourceName: "@TimerAbsoluteSetup.lua"
+        )
+
+        XCTAssertTrue(try scheduler.advance(to: 0.25).isEmpty)
+        XCTAssertEqual(scheduler.currentTime, 0.25)
+        try state.execute("assert(ABSOLUTE_TIMER_COUNT == 0)")
+        XCTAssertTrue(try scheduler.advance(to: 0.5).isEmpty)
+        XCTAssertEqual(scheduler.currentTime, 0.5)
+        try state.execute(
+            "assert(ABSOLUTE_TIMER_COUNT == 1 and ABSOLUTE_TIMER_TIME == 0.5)"
+        )
+
+        XCTAssertThrowsError(try scheduler.advance(to: 0.49))
+        XCTAssertEqual(scheduler.currentTime, 0.5)
+        XCTAssertTrue(try scheduler.advance(to: 0.5).isEmpty)
+        XCTAssertTrue(try scheduler.advance(by: 0.25).isEmpty)
+        XCTAssertEqual(scheduler.currentTime, 0.75)
+        try state.execute("assert(ABSOLUTE_TIMER_COUNT == 1)")
     }
 }

@@ -64,6 +64,12 @@ final class LuaGarbageCollector {
     // sweep while explicit collectgarbage("step") retains fine-grained control.
     private static let minimumAutomaticThresholdBytes = 4 * 1024 * 1024
     private var collectionThresholdBytes = LuaGarbageCollector.minimumAutomaticThresholdBytes
+    // LuaString is a byte-value backed by Swift ARC, so it is not retained in
+    // the explicit mark/sweep object maps below. Runtime string construction
+    // still creates real heap pressure. Preserve that allocation debt until a
+    // collection commits so string-only loops can drive automatic collection
+    // of otherwise unreachable Lua reference objects.
+    private var stringAllocationDebtBytes = 0
     private var incrementalRemainingBytes: Int?
     private var isCollecting = false
     private var bornDuringCollection = Set<ObjectIdentifier>()
@@ -96,7 +102,14 @@ final class LuaGarbageCollector {
 
     func memoryKilobytes() -> Double {
         lock.lock(); defer { lock.unlock() }
-        return Double(estimatedBytes) / 1024.0
+        return Double(estimatedLiveBytes) / 1024.0
+    }
+
+    func accountStringAllocation(_ string: LuaString) {
+        lock.lock(); defer { lock.unlock() }
+        guard closeReport == nil else { return }
+        let bytes = string.estimatedHeapByteCount
+        stringAllocationDebtBytes = saturatingAdd(stringAllocationDebtBytes, bytes)
     }
 
     /// Finalizes the complete state, including userdata still reachable from
@@ -114,6 +127,14 @@ final class LuaGarbageCollector {
                 additionalPasses: 0,
                 deferredNewFinalizerCount: 0,
                 errorMessages: ["recursive LuaState.close() ignored"]
+            )
+        }
+        if isCollecting {
+            return LuaCloseReport(
+                finalizedUserdataCount: 0,
+                additionalPasses: 0,
+                deferredNewFinalizerCount: 0,
+                errorMessages: ["LuaState.close() rejected during active garbage collection"]
             )
         }
         guard let state else {
@@ -194,6 +215,7 @@ final class LuaGarbageCollector {
         finalizedUserdata.removeAll(keepingCapacity: false)
         finalizerGrace.removeAll(keepingCapacity: false)
         bornDuringCollection.removeAll(keepingCapacity: false)
+        stringAllocationDebtBytes = 0
         incrementalRemainingBytes = nil
     }
 
@@ -227,7 +249,8 @@ final class LuaGarbageCollector {
     /// assigned to their Lua environment and are visible to root enumeration.
     func safePoint() throws {
         lock.lock(); defer { lock.unlock() }
-        guard running, !isCollecting, estimatedBytes >= collectionThresholdBytes,
+        guard running, !isCollecting,
+              automaticCollectionPressureBytes >= collectionThresholdBytes,
               let state else { return }
         _ = try collect(state: state)
     }
@@ -236,6 +259,10 @@ final class LuaGarbageCollector {
     func fullCollection() throws -> Int {
         lock.lock(); defer { lock.unlock() }
         guard let state else { return 0 }
+        // LUA_GCCOLLECT runs a complete cycle and leaves the threshold active
+        // again even when LUA_GCSTOP preceded it. The official gc.lua and
+        // locals.lua suites rely on collectgarbage() restoring automatic GC.
+        running = true
         return try collect(state: state)
     }
 
@@ -246,11 +273,13 @@ final class LuaGarbageCollector {
         lock.lock(); defer { lock.unlock() }
         guard let state else { return true }
         if incrementalRemainingBytes == nil {
-            incrementalRemainingBytes = max(1, estimatedBytes)
+            incrementalRemainingBytes = max(1, automaticCollectionPressureBytes)
         }
         let multiplier = max(1, stepMultiplier)
         let baseKilobytes = sizeKilobytes > 0 ? sizeKilobytes : 1
-        let workBytes = max(1, baseKilobytes * 1024 * multiplier / 200)
+        let byteBudget = saturatingMultiply(baseKilobytes, 1024)
+        let scaledBudget = saturatingMultiply(byteBudget, multiplier)
+        let workBytes = max(1, scaledBudget / 200)
         let remaining = incrementalRemainingBytes ?? 0
         if workBytes < remaining {
             incrementalRemainingBytes = remaining - workBytes
@@ -261,7 +290,7 @@ final class LuaGarbageCollector {
         return true
     }
 
-    private var estimatedBytes: Int {
+    private var estimatedLiveBytes: Int {
         // Deliberately stable estimates: collectgarbage("count") is specified as
         // an approximate heap size, not the host allocator's resident-set size.
         tables.count * 1024
@@ -270,6 +299,22 @@ final class LuaGarbageCollector {
             + userdatas.count * 256
             + threads.count * 512
             + environments.count * 256
+    }
+
+    private var automaticCollectionPressureBytes: Int {
+        saturatingAdd(estimatedLiveBytes, stringAllocationDebtBytes)
+    }
+
+    private func saturatingAdd(_ lhs: Int, _ rhs: Int) -> Int {
+        precondition(lhs >= 0 && rhs >= 0)
+        let (value, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? Int.max : value
+    }
+
+    private func saturatingMultiply(_ lhs: Int, _ rhs: Int) -> Int {
+        precondition(lhs >= 0 && rhs >= 0)
+        let (value, overflow) = lhs.multipliedReportingOverflow(by: rhs)
+        return overflow ? Int.max : value
     }
 
     private func adopt(
@@ -362,6 +407,7 @@ final class LuaGarbageCollector {
 
     private func collect(state: LuaState) throws -> Int {
         guard !isCollecting else { return 0 }
+        let collectedStringAllocationDebt = stringAllocationDebtBytes
         isCollecting = true
         bornDuringCollection.removeAll(keepingCapacity: true)
         defer { isCollecting = false }
@@ -456,10 +502,16 @@ final class LuaGarbageCollector {
         sweep(retaining: retainedObjects, retainedEnvironments: retainedEnvironments)
         finalizerGrace = graceKeys
         bornDuringCollection.removeAll(keepingCapacity: true)
+        // A finalizer can allocate strings while this atomic collection is in
+        // progress. Retire only the debt that existed when the cycle began.
+        stringAllocationDebtBytes = max(
+            0,
+            stringAllocationDebtBytes - collectedStringAllocationDebt
+        )
         incrementalRemainingBytes = nil
         collectionThresholdBytes = max(
             Self.minimumAutomaticThresholdBytes,
-            estimatedBytes * max(1, pause) / 100
+            saturatingMultiply(estimatedLiveBytes, max(1, pause)) / 100
         )
 
         if let firstFinalizerError { throw firstFinalizerError }

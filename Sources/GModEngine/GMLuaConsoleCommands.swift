@@ -28,6 +28,33 @@ public typealias GMLuaConsoleCommandHostHandler = @Sendable (
     GMLuaConsoleCommandInvocation
 ) throws -> GMLuaConsoleCommandHostDisposition
 
+/// Internal typed boundary for an interactive remote command. Only expected
+/// user-action outcomes belong here; host-handler throws and dispatcher
+/// invariants continue to use Swift error propagation.
+enum GMLuaRemoteConsoleCommandDispatchOutcome: Sendable, Equatable {
+    case handled
+    case actionFailure(message: String)
+}
+
+/// Carries a host/lifecycle/invariant error through a nested Lua call without
+/// flattening its concrete type or object identity into a Lua error string.
+private final class GMLuaConsoleFatalSentinel: Error, @unchecked Sendable {
+    let underlying: Error
+
+    init(_ underlying: Error) {
+        self.underlying = underlying
+    }
+}
+
+/// Thread-scoped side channel paired with the sentinel. Lua `pcall` may catch
+/// arbitrary Swift errors and convert them to Lua values; retaining the first
+/// fatal sentinel here ensures that cannot downgrade a host invariant into a
+/// successful or recoverable user action.
+private final class GMLuaConsoleReportingContext: @unchecked Sendable {
+    var depth = 0
+    var firstFatal: GMLuaConsoleFatalSentinel?
+}
+
 /// State-local bridge for Lua ConVars, Lua console commands, and real engine
 /// commands supplied by an embedding host.
 public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
@@ -161,7 +188,13 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
         }()
 
         if let handler {
-            switch try handler(invocation) {
+            let disposition: GMLuaConsoleCommandHostDisposition
+            do {
+                disposition = try handler(invocation)
+            } catch {
+                throw nestedFatalError(error)
+            }
+            switch disposition {
             case .handled:
                 return []
             case .unhandled:
@@ -201,7 +234,13 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
             return remoteServerHandler
         }()
         if realm == .client, let remoteHandler {
-            switch try remoteHandler(invocation) {
+            let disposition: GMLuaConsoleCommandHostDisposition
+            do {
+                disposition = try remoteHandler(invocation)
+            } catch {
+                throw nestedFatalError(error)
+            }
+            switch disposition {
             case .handled:
                 return []
             case .unhandled:
@@ -229,6 +268,50 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
         arguments: [String],
         caller: LuaValue
     ) throws {
+        let call: (function: LuaValue, arguments: [LuaValue])
+        do {
+            call = try makeLuaCommandCall(
+                command: command,
+                arguments: arguments,
+                caller: caller
+            )
+        } catch {
+            // During a reporting body this is a nested dispatcher invariant;
+            // outside that scope the original strict error is returned as-is.
+            throw nestedFatalError(error)
+        }
+        _ = try state.call(call.function, arguments: call.arguments)
+    }
+
+    private func dispatchLuaCommandReportingBodyFailure(
+        command: String,
+        arguments: [String],
+        caller: LuaValue
+    ) throws -> GMLuaRemoteConsoleCommandDispatchOutcome {
+        // Missing concommand.Run or failure to build the call is a dispatcher
+        // invariant and therefore occurs outside the action-failure catch.
+        let call = try makeLuaCommandCall(
+            command: command,
+            arguments: arguments,
+            caller: caller
+        )
+        do {
+            _ = try withReportingLuaCommandBody {
+                try state.call(call.function, arguments: call.arguments)
+            }
+            return .handled
+        } catch let sentinel as GMLuaConsoleFatalSentinel {
+            throw sentinel.underlying
+        } catch {
+            return .actionFailure(message: GMLuaRuntime.describe(error))
+        }
+    }
+
+    private func makeLuaCommandCall(
+        command: String,
+        arguments: [String],
+        caller: LuaValue
+    ) throws -> (function: LuaValue, arguments: [LuaValue]) {
         guard case let .table(concommand) = state.getGlobal("concommand") else {
             throw LuaError.runtime(
                 "RunConsoleCommand cannot dispatch Lua command '\(command)' " +
@@ -251,8 +334,8 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
                 in: argumentTable
             )
         }
-        _ = try state.call(
-            runner,
+        return (
+            function: runner,
             arguments: [
                 caller,
                 .string(LuaString(command)),
@@ -271,6 +354,38 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
         arguments: [String],
         caller: LuaValue
     ) throws {
+        let outcome = try dispatchRemoteCommandClassifyingActionFailures(
+            command: command,
+            arguments: arguments,
+            caller: caller,
+            reportActionFailures: false
+        )
+        if case let .actionFailure(message) = outcome {
+            // The strict path throws action failures at their original branch;
+            // this is a defensive exhaustiveness guard.
+            throw LuaError.runtime(message)
+        }
+    }
+
+    func dispatchRemoteCommandReportingActionFailures(
+        command: String,
+        arguments: [String],
+        caller: LuaValue
+    ) throws -> GMLuaRemoteConsoleCommandDispatchOutcome {
+        try dispatchRemoteCommandClassifyingActionFailures(
+            command: command,
+            arguments: arguments,
+            caller: caller,
+            reportActionFailures: true
+        )
+    }
+
+    private func dispatchRemoteCommandClassifyingActionFailures(
+        command: String,
+        arguments: [String],
+        caller: LuaValue,
+        reportActionFailures: Bool
+    ) throws -> GMLuaRemoteConsoleCommandDispatchOutcome {
         guard realm == .server else {
             throw LuaError.runtime("remote console command destination is not SERVER")
         }
@@ -283,7 +398,7 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
         } else {
             handledLuaConVar = false
         }
-        if handledLuaConVar { return }
+        if handledLuaConVar { return .handled }
 
         let invocation = GMLuaConsoleCommandInvocation(
             realm: .server,
@@ -296,34 +411,98 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
             return hostHandler
         }()
         if let handler {
+            // A throwing engine host is an invariant/lifecycle error, not an
+            // expected rejected action. Keep it outside every reporting catch.
             switch try handler(invocation) {
             case .handled:
-                return
+                return .handled
             case .unhandled:
                 break
             case let .rejected(reason):
-                throw LuaError.runtime(
-                    "RunConsoleCommand host rejected command '\(command)': \(reason)"
+                return try actionFailure(
+                    "RunConsoleCommand host rejected command '\(command)': \(reason)",
+                    report: reportActionFailures
                 )
             }
         }
         if isRegistered(command) {
+            if reportActionFailures {
+                return try dispatchLuaCommandReportingBodyFailure(
+                    command: command,
+                    arguments: arguments,
+                    caller: caller
+                )
+            }
             try dispatchLuaCommand(
                 command: command,
                 arguments: arguments,
                 caller: caller
             )
-            return
+            return .handled
         }
         if handler != nil {
-            throw LuaError.runtime(
-                "RunConsoleCommand host did not recognize engine command '\(command)'"
+            return try actionFailure(
+                "RunConsoleCommand host did not recognize engine command '\(command)'",
+                report: reportActionFailures
             )
         }
-        throw LuaError.runtime(
+        return try actionFailure(
             "RunConsoleCommand cannot execute SERVER command '\(command)' " +
-            "because no console host or Lua concommand owns it"
+                "because no console host or Lua concommand owns it",
+            report: reportActionFailures
         )
+    }
+
+    private func actionFailure(
+        _ message: String,
+        report: Bool
+    ) throws -> GMLuaRemoteConsoleCommandDispatchOutcome {
+        if report { return .actionFailure(message: message) }
+        throw LuaError.runtime(message)
+    }
+
+    private var reportingContextThreadKey: String {
+        "GMLuaConsoleCommandDispatcher.reporting.\(ObjectIdentifier(self))"
+    }
+
+    private func withReportingLuaCommandBody<T>(
+        _ body: () throws -> T
+    ) throws -> T {
+        let dictionary = Thread.current.threadDictionary
+        let key = reportingContextThreadKey
+        let existing = dictionary[key] as? GMLuaConsoleReportingContext
+        let context = existing ?? GMLuaConsoleReportingContext()
+        if existing == nil { dictionary[key] = context }
+        context.depth += 1
+        defer {
+            context.depth -= 1
+            if context.depth == 0 {
+                dictionary.removeObject(forKey: key)
+            }
+        }
+
+        do {
+            let result = try body()
+            if let fatal = context.firstFatal { throw fatal }
+            return result
+        } catch {
+            if let fatal = context.firstFatal { throw fatal }
+            throw error
+        }
+    }
+
+    /// Wraps only while a reporting Lua body is active. This makes the strict
+    /// dispatcher path preserve the original concrete error and identity.
+    private func nestedFatalError(_ error: Error) -> Error {
+        let dictionary = Thread.current.threadDictionary
+        guard let context = dictionary[reportingContextThreadKey]
+            as? GMLuaConsoleReportingContext else {
+            return error
+        }
+        let sentinel = (error as? GMLuaConsoleFatalSentinel)
+            ?? GMLuaConsoleFatalSentinel(error)
+        if context.firstFatal == nil { context.firstFatal = sentinel }
+        return sentinel
     }
 
     private func isRegistered(_ name: String) -> Bool {

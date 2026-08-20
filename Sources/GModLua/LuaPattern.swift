@@ -127,10 +127,10 @@ final class LuaPatternMatcher {
                 throw LuaError.runtime("missing '[' after '%f' in pattern")
             }
             let setEnd = try classEnd(from: pi + 2)
-            let previous: UInt8? = si == 0 ? nil : subject[si - 1]
-            let current: UInt8? = si == subject.count ? nil : subject[si]
-            let prevIn = previous.map { matchBracketClass($0, start: pi + 2, end: setEnd) } ?? false
-            let curIn = current.map { matchBracketClass($0, start: pi + 2, end: setEnd) } ?? false
+            let previous: UInt8 = si == 0 ? 0 : subject[si - 1]
+            let current: UInt8 = si == subject.count ? 0 : subject[si]
+            let prevIn = matchBracketClass(previous, start: pi + 2, end: setEnd)
+            let curIn = matchBracketClass(current, start: pi + 2, end: setEnd)
             guard !prevIn && curIn else { return nil }
             return try match(si: si, pi: setEnd, captures: captures)
         }

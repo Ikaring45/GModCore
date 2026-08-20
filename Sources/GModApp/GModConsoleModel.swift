@@ -3,7 +3,20 @@ import Combine
 import GModEngine
 
 @MainActor
+private final class GModConsoleLogSink {
+    weak var target: GModConsoleModel?
+
+    func publish(_ message: String) {
+        target?.append(message)
+    }
+}
+
+@MainActor
 final class GModConsoleModel: ObservableObject {
+    enum Submission {
+        case clear
+        case source(String)
+    }
     struct Line: Identifiable, Equatable {
         enum Kind {
             case normal
@@ -25,17 +38,66 @@ final class GModConsoleModel: ObservableObject {
     ]
     @Published var input = ""
     @Published var removeContaining = ""
+    @Published private(set) var fontRegistrationReport: GModBundledFontRegistrationReport?
 
+    private let runtimeFactory: GModAppRuntimeFactory
+    private let clientSurfaceRuntime: GMLuaRuntime
+    private let runtimeLogSink = GModConsoleLogSink()
     private lazy var runtime: GMLuaRuntime = {
-        GMLuaRuntime(
+        let sink = runtimeLogSink
+        return runtimeFactory.makeRuntime(
             realm: .server,
-            logger: { [weak self] message in
+            logger: { message in
                 Task { @MainActor in
-                    self?.append(message)
+                    sink.publish(message)
                 }
             }
         )
     }()
+
+    init(runtimeFactory factory: GModAppRuntimeFactory = GModAppRuntimeFactory()) {
+        runtimeFactory = factory
+        clientSurfaceRuntime = factory.makeRuntime(
+            realm: .client,
+            logger: { _ in }
+        )
+        fontRegistrationReport = factory.fontRegistrationReport
+        runtimeLogSink.target = self
+
+        if let report = factory.fontRegistrationReport {
+            let summary = "[FONT] bundled=\(report.bundledFileCount) " +
+                "registered=\(report.registeredFileCount) " +
+                "already=\(report.alreadyRegisteredFileCount) " +
+                "failed=\(report.failures.count)"
+            lines.append(
+                Line(
+                    text: summary,
+                    kind: report.succeeded ? .success : .warning
+                )
+            )
+            for failure in report.failures {
+                lines.append(
+                    Line(
+                        text: "[FONT][WARN] \(failure.bundleFile): \(failure.message)",
+                        kind: .warning
+                    )
+                )
+            }
+        }
+        if let fidelity = clientSurfaceRuntime.surfaceCommandState?
+            .textMeasurementFidelity {
+            lines.append(
+                Line(
+                    text: "[FONT] CLIENT surface measurement=\(fidelity.rawValue)",
+                    kind: .info
+                )
+            )
+        }
+    }
+
+    var clientSurfaceMeasurementFidelity: GMLuaTextMeasurementFidelity? {
+        clientSurfaceRuntime.surfaceCommandState?.textMeasurementFidelity
+    }
 
     var visibleLines: [Line] {
         let filter = removeContaining.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -75,28 +137,31 @@ final class GModConsoleModel: ObservableObject {
     }
 
     func submit() {
-        let raw = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !raw.isEmpty else { return }
-        input = ""
-        appendCommand(raw)
-
-        if raw.caseInsensitiveCompare("clear") == .orderedSame {
-            clear()
-            return
-        }
-
-        let source: String
-        if raw.hasPrefix("lua_run ") {
-            source = String(raw.dropFirst("lua_run ".count))
-        } else {
-            source = raw
-        }
+        guard let submission = takeSubmission() else { return }
+        guard case let .source(source) = submission else { return }
 
         do {
             try runtime.execute(source, sourceName: "=Console")
         } catch {
             append("[ERROR] \(error)")
         }
+    }
+
+    func takeSubmission() -> Submission? {
+        let raw = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return nil }
+        input = ""
+        appendCommand(raw)
+
+        if raw.caseInsensitiveCompare("clear") == .orderedSame {
+            clear()
+            return .clear
+        }
+
+        if raw.hasPrefix("lua_run ") {
+            return .source(String(raw.dropFirst("lua_run ".count)))
+        }
+        return .source(raw)
     }
 
     func advanceSimulation(ticks: Int) {

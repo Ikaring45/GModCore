@@ -59,6 +59,8 @@ private final class SharedSessionAsyncResult: @unchecked Sendable {
     }
 }
 
+private final class SharedSessionHostIdentityError: Error, @unchecked Sendable {}
+
 final class GMLuaSharedSessionTests: XCTestCase {
     func testConnectionCreatesCanonicalRealmLocalPlayersAndSendToServerUsesServerMirror() throws {
         let pair = makePair()
@@ -186,6 +188,195 @@ final class GMLuaSharedSessionTests: XCTestCase {
         try pair.server.execute("assert(table.concat(FIFO_EVENTS, ',') == 'A:3,B:3')")
         XCTAssertEqual(try pair.session.pump(), 1)
         try pair.server.execute("assert(table.concat(FIFO_EVENTS, ',') == 'A:3,B:3,C:3')")
+    }
+
+    func testReportingPumpClassifiesActionsAndPropagatesHostInvariants() throws {
+        let pair = makePair()
+        let hostIdentityError = SharedSessionHostIdentityError()
+        defer {
+            _ = pair.client.close()
+            _ = pair.server.close()
+        }
+        try pair.server.execute(
+            """
+            concommand = {}
+            function concommand.Run(sender, command, arguments)
+                assert(sender == Player(90))
+                if command == "reported_failure" then
+                    error("intentional forwarded action failure")
+                end
+                if command == "reported_nested_host" then
+                    RunConsoleCommand("throwing_host_handler")
+                    return
+                end
+                if command == "reported_nested_lifecycle" then
+                    local ok = pcall(RunConsoleCommand, "nested_lifecycle_host")
+                    NESTED_LIFECYCLE_PCALL_RETURNED = true
+                    NESTED_LIFECYCLE_PCALL_OK = ok
+                    return
+                end
+                assert(command == "after_reported_failure")
+                assert(arguments[1] == "still-ran")
+                AFTER_REPORTED_FAILURE = true
+            end
+            AddConsoleCommand("reported_failure")
+            AddConsoleCommand("reported_nested_host")
+            AddConsoleCommand("reported_nested_lifecycle")
+            AddConsoleCommand("after_reported_failure")
+            """
+        )
+        try XCTUnwrap(pair.server.consoleCommandDispatcher).connectHost {
+            invocation in
+            switch invocation.command {
+            case "explicitly_rejected":
+                return .rejected(reason: "expected permission rejection")
+            case "throwing_host_handler":
+                throw hostIdentityError
+            case "nested_lifecycle_host":
+                try pair.session.disconnect(client: pair.client)
+                return .handled
+            default:
+                return .unhandled
+            }
+        }
+        try pair.session.connect(
+            server: pair.server,
+            client: pair.client,
+            playerIndex: 9,
+            userID: 90
+        )
+        try pair.client.execute(
+            """
+            RunConsoleCommand("reported_failure", "requested")
+            RunConsoleCommand("explicitly_rejected")
+            RunConsoleCommand("unowned_action")
+            RunConsoleCommand("after_reported_failure", "still-ran")
+            """
+        )
+
+        let report = try pair.session
+            .pumpReportingForwardedConsoleFailures()
+        XCTAssertEqual(report.processedDeliveries, 4)
+        XCTAssertEqual(report.successfulDeliveries, 1)
+        XCTAssertEqual(report.forwardedConsoleFailures.count, 3)
+        let failure = try XCTUnwrap(report.forwardedConsoleFailures.first)
+        XCTAssertEqual(failure.command, "reported_failure")
+        XCTAssertEqual(failure.arguments, ["requested"])
+        XCTAssertTrue(
+            failure.message.contains("intentional forwarded action failure")
+        )
+        XCTAssertEqual(
+            report.forwardedConsoleFailures.map(\.command),
+            ["reported_failure", "explicitly_rejected", "unowned_action"]
+        )
+        XCTAssertTrue(
+            report.forwardedConsoleFailures[1].message.contains(
+                "expected permission rejection"
+            )
+        )
+        XCTAssertTrue(
+            report.forwardedConsoleFailures[2].message.contains(
+                "host did not recognize engine command"
+            )
+        )
+        XCTAssertEqual(pair.session.netTransport.pendingDeliveryCount, 0)
+        try pair.server.execute("assert(AFTER_REPORTED_FAILURE == true)")
+
+        // The original API remains strict for callers that require it.
+        try pair.client.execute(
+            "RunConsoleCommand('reported_failure', 'strict')"
+        )
+        XCTAssertThrowsError(try pair.session.pump()) { error in
+            XCTAssertTrue(
+                GMLuaRuntime.describe(error).contains(
+                    "intentional forwarded action failure"
+                )
+            )
+        }
+
+        // A host implementation throwing directly is not an expected
+        // user-action rejection and retains its concrete error identity.
+        try pair.client.execute(
+            "RunConsoleCommand('throwing_host_handler')"
+        )
+        XCTAssertThrowsError(
+            try pair.session.pumpReportingForwardedConsoleFailures()
+        ) { error in
+            XCTAssertTrue(
+                (error as? SharedSessionHostIdentityError)
+                    === hostIdentityError
+            )
+        }
+
+        // The same host error can originate inside a forwarded Lua concommand.
+        // It must cross state.call without becoming an action-failure string,
+        // while the following FIFO item stays queued.
+        try pair.server.execute("AFTER_REPORTED_FAILURE = false")
+        try pair.client.execute(
+            """
+            RunConsoleCommand('reported_nested_host')
+            RunConsoleCommand('after_reported_failure', 'still-ran')
+            """
+        )
+        XCTAssertThrowsError(
+            try pair.session.pumpReportingForwardedConsoleFailures()
+        ) { error in
+            XCTAssertTrue(
+                (error as? SharedSessionHostIdentityError)
+                    === hostIdentityError
+            )
+        }
+        XCTAssertEqual(pair.session.netTransport.pendingDeliveryCount, 1)
+        let recoveredAfterHost = try pair.session
+            .pumpReportingForwardedConsoleFailures()
+        XCTAssertEqual(recoveredAfterHost.processedDeliveries, 1)
+        XCTAssertEqual(recoveredAfterHost.successfulDeliveries, 1)
+        XCTAssertEqual(recoveredAfterHost.forwardedConsoleFailures, [])
+        try pair.server.execute("assert(AFTER_REPORTED_FAILURE == true)")
+
+        // Strict pumping never installs the reporting sentinel context, so it
+        // also propagates the exact original host error object.
+        try pair.client.execute("RunConsoleCommand('reported_nested_host')")
+        XCTAssertThrowsError(try pair.session.pump()) { error in
+            XCTAssertTrue(
+                (error as? SharedSessionHostIdentityError)
+                    === hostIdentityError
+            )
+        }
+
+        // Even Lua pcall must not downgrade a lifecycle violation nested in a
+        // forwarded command body. The side channel rethrows it after the Lua
+        // body returns and leaves the following FIFO delivery untouched.
+        try pair.server.execute("AFTER_REPORTED_FAILURE = false")
+        try pair.client.execute(
+            """
+            RunConsoleCommand('reported_nested_lifecycle')
+            RunConsoleCommand('after_reported_failure', 'still-ran')
+            """
+        )
+        XCTAssertThrowsError(
+            try pair.session.pumpReportingForwardedConsoleFailures()
+        ) { error in
+            guard case let .lifecycleDuringPump(operation)? =
+                error as? GMLuaSharedSessionError else {
+                return XCTFail("nested lifecycle error lost its concrete type")
+            }
+            XCTAssertEqual(operation, "disconnect")
+        }
+        XCTAssertEqual(pair.session.netTransport.pendingDeliveryCount, 1)
+        try pair.server.execute(
+            """
+            assert(NESTED_LIFECYCLE_PCALL_RETURNED == true)
+            assert(NESTED_LIFECYCLE_PCALL_OK == false)
+            """
+        )
+        let recoveredAfterLifecycle = try pair.session
+            .pumpReportingForwardedConsoleFailures()
+        XCTAssertEqual(recoveredAfterLifecycle.processedDeliveries, 1)
+        XCTAssertEqual(recoveredAfterLifecycle.successfulDeliveries, 1)
+        XCTAssertEqual(recoveredAfterLifecycle.forwardedConsoleFailures, [])
+        try pair.server.execute("assert(AFTER_REPORTED_FAILURE == true)")
+        XCTAssertEqual(pair.session.connectedClientCount, 1)
     }
 
     func testServerTargetedSendSupportsSinglePlayerAndDeduplicatedPlayerTable() throws {

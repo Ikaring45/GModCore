@@ -222,6 +222,91 @@ final class GMLuaPlatformImageAndVPKTests: XCTestCase {
 #endif
     }
 
+    func testSourceMaterialResolverExpandsPatchAndDecodesOnlyStaticBaseVTF() throws {
+        let rgba: [UInt8] = [
+            10, 20, 30, 40,
+            50, 60, 70, 80,
+        ]
+        let files: [String: Data] = [
+            "materials/synthetic/base.vmt": Data(
+                "\"UnlitGeneric\" { \"$basetexture\" \"synthetic/atlas\" }".utf8
+            ),
+            "materials/synthetic/patched.vmt": Data(
+                (
+                    "\"Patch\" { \"include\" \"materials/synthetic/base.vmt\" " +
+                        "\"replace\" { \"$basetexture\" \"synthetic/atlas\" } }"
+                ).utf8
+            ),
+            "materials/synthetic/dynamic.vmt": Data(
+                "\"screenspace_general\" { \"$basetexture\" \"_rt_fullframefb\" }".utf8
+            ),
+            "materials/synthetic/atlas.vtf": makeRGBA8888VTF(
+                width: 2,
+                height: 1,
+                pixels: rgba
+            ),
+        ]
+        let loads = SourceMaterialLoadRecorder()
+        let resolver = GMLuaSourceMaterialResolver(
+            maximumCachedEntryCount: 2,
+            maximumCachedByteCount: 16
+        ) { path in
+            loads.record(path)
+            return files[path.lowercased()]
+        }
+
+        let patched = try resolver.resolve(named: "SYNTHETIC\\PATCHED")
+        XCTAssertEqual(patched.metadata.materialPath, "materials/SYNTHETIC/PATCHED.vmt")
+        XCTAssertEqual(patched.metadata.shaderName, "UnlitGeneric")
+        XCTAssertEqual(
+            patched.metadata.baseTextureName,
+            "materials/synthetic/atlas.vtf"
+        )
+        XCTAssertEqual(
+            patched.metadata.dimensions,
+            GMLuaImageDimensions(width: 2, height: 1)
+        )
+        XCTAssertFalse(patched.metadata.isError)
+        XCTAssertEqual(patched.metadata.status, .resolved)
+        XCTAssertEqual(patched.sourceTextureFormat, .rgba8888)
+        XCTAssertEqual(patched.rgbaBytes, Data(rgba))
+        XCTAssertEqual(
+            patched.pixel(x: 1, y: 0),
+            GMLuaRGBA8(red: 50, green: 60, blue: 70, alpha: 80)
+        )
+
+        _ = try resolver.resolve(named: "synthetic/patched")
+        XCTAssertEqual(
+            loads.count(for: "materials/SYNTHETIC/PATCHED.vmt"),
+            1,
+            "the second case-folded lookup must hit cache"
+        )
+
+        let dynamic = try resolver.resolve(named: "synthetic/dynamic")
+        XCTAssertEqual(dynamic.metadata.shaderName, "screenspace_general")
+        XCTAssertEqual(
+            dynamic.metadata.baseTextureName,
+            "materials/_rt_fullframefb.vtf"
+        )
+        XCTAssertEqual(dynamic.metadata.status, .baseTextureMissing)
+        XCTAssertFalse(dynamic.metadata.isError)
+        XCTAssertNil(dynamic.rgbaBytes)
+
+        let missing = try resolver.resolve(named: "synthetic/missing")
+        XCTAssertEqual(missing.metadata.status, .materialMissing)
+        XCTAssertEqual(missing.metadata.shaderName, "shader_error")
+        XCTAssertTrue(missing.metadata.isError)
+        XCTAssertNil(missing.metadata.dimensions)
+        XCTAssertLessThanOrEqual(resolver.cachedEntryCount, 2)
+        XCTAssertLessThanOrEqual(resolver.cachedImageByteCount, 16)
+
+        XCTAssertThrowsError(try resolver.resolve(named: "../escape")) { error in
+            guard case GMLuaSourceMaterialError.unsafeLogicalPath = error else {
+                return XCTFail("expected unsafeLogicalPath, got \(error)")
+            }
+        }
+    }
+
     func testVPKRejectsChecksumMismatchAndV2FileDataSectionOverrun() throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -403,4 +488,54 @@ private extension Data {
         append(UInt8(truncatingIfNeeded: value >> 16))
         append(UInt8(truncatingIfNeeded: value >> 24))
     }
+}
+
+private final class SourceMaterialLoadRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var counts: [String: Int] = [:]
+
+    func record(_ path: String) {
+        lock.lock()
+        counts[path, default: 0] += 1
+        lock.unlock()
+    }
+
+    func count(for path: String) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return counts[path] ?? 0
+    }
+}
+
+private func makeRGBA8888VTF(
+    width: Int,
+    height: Int,
+    pixels: [UInt8]
+) -> Data {
+    precondition(width > 0 && height > 0 && pixels.count == width * height * 4)
+    var bytes = [UInt8](repeating: 0, count: 80)
+    func write(_ value: UInt16, at offset: Int) {
+        bytes[offset] = UInt8(truncatingIfNeeded: value)
+        bytes[offset + 1] = UInt8(truncatingIfNeeded: value >> 8)
+    }
+    func write(_ value: UInt32, at offset: Int) {
+        bytes[offset] = UInt8(truncatingIfNeeded: value)
+        bytes[offset + 1] = UInt8(truncatingIfNeeded: value >> 8)
+        bytes[offset + 2] = UInt8(truncatingIfNeeded: value >> 16)
+        bytes[offset + 3] = UInt8(truncatingIfNeeded: value >> 24)
+    }
+    bytes.replaceSubrange(0..<4, with: [0x56, 0x54, 0x46, 0x00])
+    write(UInt32(7), at: 4)
+    write(UInt32(2), at: 8)
+    write(UInt32(80), at: 12)
+    write(UInt16(width), at: 16)
+    write(UInt16(height), at: 18)
+    write(UInt16(1), at: 24)
+    write(Float(1).bitPattern, at: 48)
+    write(UInt32(bitPattern: SourceVTFImageFormat.rgba8888.rawValue), at: 52)
+    bytes[56] = 1
+    write(UInt32(bitPattern: SourceVTFImageFormat.unknown.rawValue), at: 57)
+    write(UInt16(1), at: 63)
+    bytes.append(contentsOf: pixels)
+    return Data(bytes)
 }

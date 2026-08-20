@@ -264,11 +264,40 @@ public final class GMLuaMountedFileSystem: LuaVirtualFileSystem, @unchecked Send
     private static let whiteoutDirectory = ".garrys-pad-vfs-whiteouts"
     private static let whiteoutVersion = "v1"
 
-    private let mounts: [GMLuaFileMount]
+    private var mounts: [GMLuaFileMount]
     private let lock = NSRecursiveLock()
 
     public init(mounts: [GMLuaFileMount]) {
-        self.mounts = mounts.enumerated().sorted { lhs, rhs in
+        self.mounts = Self.priorityOrdered(mounts)
+    }
+
+    /// Returns an immutable view of the current mount stack without the named
+    /// internal projection. The snapshot keeps the same backing file systems,
+    /// but later mount replacements on this object cannot recursively route
+    /// back through the projection being rebuilt.
+    func snapshot(excludingMountNamed excludedName: String) -> GMLuaMountedFileSystem {
+        lock.lock()
+        defer { lock.unlock() }
+        return GMLuaMountedFileSystem(mounts: mounts.filter {
+            $0.name.caseInsensitiveCompare(excludedName) != .orderedSame
+        })
+    }
+
+    /// Atomically installs one internal projection. A same-named prior mount
+    /// is replaced, so repeated startup attempts cannot accumulate overlays.
+    func replaceMount(_ mount: GMLuaFileMount) {
+        lock.lock()
+        defer { lock.unlock() }
+        let retained = mounts.filter {
+            $0.name.caseInsensitiveCompare(mount.name) != .orderedSame
+        }
+        // Keep the replacement first when another host mount also uses the
+        // maximum priority. This is an engine-owned namespace projection.
+        mounts = Self.priorityOrdered([mount] + retained)
+    }
+
+    private static func priorityOrdered(_ mounts: [GMLuaFileMount]) -> [GMLuaFileMount] {
+        mounts.enumerated().sorted { lhs, rhs in
             if lhs.element.priority != rhs.element.priority {
                 return lhs.element.priority > rhs.element.priority
             }

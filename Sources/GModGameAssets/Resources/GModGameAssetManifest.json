@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "sourceScope": "Project-authorized Garry's Mod base-game files; Workshop and addon content excluded",
+  "assets": [
+    {
+      "logicalPath": "maps/gm_construct.bsp",
+      "byteCount": 36735656,
+      "sha256": "4d1c027f2b93fa9100bcc4cb08b1dfdda437cadf4cf7d01d4b515dc2caa5a6a2"
+    },
+    {
+      "logicalPath": "maps/gm_construct.nav",
+      "byteCount": 7242376,
+      "sha256": "e839c5ef26dfaaa852d8c23b7b434515f975021aa36be9f7371bda70f08f76b8"
+    },
+    {
+      "logicalPath": "maps/graphs/gm_construct.ain",
+      "byteCount": 104021,
+      "sha256": "f45fe80ebc173944c569a12fbf9ca5ef7675be67920ff50e00f1408a300d6082"
+    },
+    {
+      "logicalPath": "maps/gm_flatgrass.bsp",
+      "byteCount": 47430424,
+      "sha256": "4dfd95ecb8f77a093e3079697b04c5be5675e8595c05639aaf57ad1541024d76"
+    },
+    {
+      "logicalPath": "maps/gm_flatgrass.nav",
+      "byteCount": 276845,
+      "sha256": "545d8873b5444b5cba378a063274b4e1089653ccb3f5bb4eb672e91aea8166a4"
+    },
+    {
+      "logicalPath": "maps/graphs/gm_flatgrass.ain",
+      "byteCount": 24659,
+      "sha256": "7070e8517d5b921bb8efb688bb2145a613690ade4f0571a816db6a87240d2973"
+    }
+  ]
+}

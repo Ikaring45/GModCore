@@ -1,0 +1,720 @@
+{
+	"schema": 1,
+	"prediction_sequence": [
+		{
+			"tick_count": 0,
+			"cur_time": 1.2147177495062351,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.014999999664723873,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 0,
+			"name": "StartCommand"
+		},
+		{
+			"tick_count": 0,
+			"cur_time": 1.2147177495062351,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.014999999664723873,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 0,
+			"name": "CreateMove"
+		},
+		{
+			"cur_time": 1.2147177495062351,
+			"first_time_predicted": false,
+			"name": "Think",
+			"frame_time": 0.014999999664723873
+		},
+		{
+			"cur_time": 1.2147177495062351,
+			"first_time_predicted": false,
+			"name": "Tick",
+			"frame_time": 0.014999999664723873
+		},
+		{
+			"tick_count": 80,
+			"cur_time": 1.2147177495062351,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.014999999664723873,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 13,
+			"name": "StartCommand"
+		},
+		{
+			"tick_count": 80,
+			"cur_time": 1.2147177495062351,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.014999999664723873,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 13,
+			"name": "CreateMove"
+		},
+		{
+			"tick_count": 0,
+			"cur_time": 1.229717749170959,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.014999999664723873,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 0,
+			"name": "StartCommand"
+		},
+		{
+			"tick_count": 0,
+			"cur_time": 1.229717749170959,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.014999999664723873,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 0,
+			"name": "CreateMove"
+		},
+		{
+			"cur_time": 1.229717749170959,
+			"first_time_predicted": false,
+			"name": "Think",
+			"frame_time": 0.014999999664723873
+		},
+		{
+			"cur_time": 1.229717749170959,
+			"first_time_predicted": false,
+			"name": "Tick",
+			"frame_time": 0.014999999664723873
+		},
+		{
+			"tick_count": 81,
+			"cur_time": 1.229717749170959,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.014999999664723873,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 14,
+			"name": "StartCommand"
+		},
+		{
+			"tick_count": 81,
+			"cur_time": 1.229717749170959,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.014999999664723873,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 14,
+			"name": "CreateMove"
+		},
+		{
+			"tick_count": 0,
+			"cur_time": 1.2380511490628123,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008333399891853333,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 0,
+			"name": "StartCommand"
+		},
+		{
+			"tick_count": 0,
+			"cur_time": 1.2380511490628123,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008333399891853333,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 0,
+			"name": "CreateMove"
+		},
+		{
+			"cur_time": 1.2380511490628123,
+			"first_time_predicted": false,
+			"name": "Think",
+			"frame_time": 0.008333399891853333
+		},
+		{
+			"cur_time": 1.2380511490628123,
+			"first_time_predicted": false,
+			"name": "Tick",
+			"frame_time": 0.008333399891853333
+		},
+		{
+			"tick_count": 82,
+			"cur_time": 1.2380511490628123,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008333399891853333,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 15,
+			"name": "StartCommand"
+		},
+		{
+			"tick_count": 82,
+			"cur_time": 1.2380511490628123,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008333399891853333,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 15,
+			"name": "CreateMove"
+		},
+		{
+			"tick_count": 0,
+			"cur_time": 1.2463845489546657,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008333399891853333,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 0,
+			"name": "StartCommand"
+		},
+		{
+			"tick_count": 0,
+			"cur_time": 1.2463845489546657,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008333399891853333,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 0,
+			"name": "CreateMove"
+		},
+		{
+			"cur_time": 1.2463845489546657,
+			"first_time_predicted": false,
+			"name": "Think",
+			"frame_time": 0.008333399891853333
+		},
+		{
+			"cur_time": 1.2463845489546657,
+			"first_time_predicted": false,
+			"name": "Tick",
+			"frame_time": 0.008333399891853333
+		},
+		{
+			"tick_count": 0,
+			"cur_time": 1.254717948846519,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008333399891853333,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 0,
+			"name": "StartCommand"
+		},
+		{
+			"tick_count": 0,
+			"cur_time": 1.254717948846519,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008333399891853333,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 0,
+			"name": "CreateMove"
+		},
+		{
+			"cur_time": 1.254717948846519,
+			"first_time_predicted": false,
+			"name": "Think",
+			"frame_time": 0.008333399891853333
+		},
+		{
+			"tick_count": 83,
+			"cur_time": 1.254717948846519,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008333399891853333,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 16,
+			"name": "StartCommand"
+		},
+		{
+			"tick_count": 83,
+			"cur_time": 1.254717948846519,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008333399891853333,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 16,
+			"name": "CreateMove"
+		},
+		{
+			"tick_count": 0,
+			"cur_time": 1.2630513487383723,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008333399891853333,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 0,
+			"name": "StartCommand"
+		},
+		{
+			"tick_count": 0,
+			"cur_time": 1.2630513487383723,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008333399891853333,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 0,
+			"name": "CreateMove"
+		},
+		{
+			"cur_time": 1.2630513487383723,
+			"first_time_predicted": false,
+			"name": "Think",
+			"frame_time": 0.008333399891853333
+		},
+		{
+			"cur_time": 1.2630513487383723,
+			"first_time_predicted": false,
+			"name": "Tick",
+			"frame_time": 0.008333399891853333
+		},
+		{
+			"tick_count": 0,
+			"cur_time": 1.2713847486302257,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008333399891853333,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 0,
+			"name": "StartCommand"
+		},
+		{
+			"tick_count": 0,
+			"cur_time": 1.2713847486302257,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008333399891853333,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 0,
+			"name": "CreateMove"
+		},
+		{
+			"cur_time": 1.2713847486302257,
+			"first_time_predicted": false,
+			"name": "Think",
+			"frame_time": 0.008333399891853333
+		},
+		{
+			"tick_count": 84,
+			"cur_time": 1.2713847486302257,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008333399891853333,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 17,
+			"name": "StartCommand"
+		},
+		{
+			"tick_count": 84,
+			"cur_time": 1.2713847486302257,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008333399891853333,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 17,
+			"name": "CreateMove"
+		},
+		{
+			"tick_count": 0,
+			"cur_time": 1.279718148522079,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008333399891853333,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 0,
+			"name": "StartCommand"
+		},
+		{
+			"tick_count": 0,
+			"cur_time": 1.279718148522079,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008333399891853333,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 0,
+			"name": "CreateMove"
+		},
+		{
+			"cur_time": 1.279718148522079,
+			"first_time_predicted": false,
+			"name": "Think",
+			"frame_time": 0.008333399891853333
+		},
+		{
+			"cur_time": 1.279718148522079,
+			"first_time_predicted": false,
+			"name": "Tick",
+			"frame_time": 0.008333399891853333
+		},
+		{
+			"tick_count": 0,
+			"cur_time": 1.2880515484139323,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008333399891853333,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 0,
+			"name": "StartCommand"
+		},
+		{
+			"tick_count": 0,
+			"cur_time": 1.2880515484139323,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008333399891853333,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 0,
+			"name": "CreateMove"
+		},
+		{
+			"cur_time": 1.2880515484139323,
+			"first_time_predicted": false,
+			"name": "Think",
+			"frame_time": 0.008333399891853333
+		},
+		{
+			"tick_count": 85,
+			"cur_time": 1.2880515484139323,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008333399891853333,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 18,
+			"name": "StartCommand"
+		},
+		{
+			"tick_count": 85,
+			"cur_time": 1.2880515484139323,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008333399891853333,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 18,
+			"name": "CreateMove"
+		},
+		{
+			"tick_count": 0,
+			"cur_time": 1.2964012483134866,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008349699899554253,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 0,
+			"name": "StartCommand"
+		},
+		{
+			"tick_count": 0,
+			"cur_time": 1.2964012483134866,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008349699899554253,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 0,
+			"name": "CreateMove"
+		},
+		{
+			"cur_time": 1.2964012483134866,
+			"first_time_predicted": false,
+			"name": "Think",
+			"frame_time": 0.008349699899554253
+		},
+		{
+			"cur_time": 1.2964012483134866,
+			"first_time_predicted": false,
+			"name": "Tick",
+			"frame_time": 0.008349699899554253
+		},
+		{
+			"tick_count": 0,
+			"cur_time": 1.30473464820534,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008333399891853333,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 0,
+			"name": "StartCommand"
+		},
+		{
+			"tick_count": 0,
+			"cur_time": 1.30473464820534,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008333399891853333,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 0,
+			"name": "CreateMove"
+		},
+		{
+			"cur_time": 1.30473464820534,
+			"first_time_predicted": false,
+			"name": "Think",
+			"frame_time": 0.008333399891853333
+		},
+		{
+			"tick_count": 86,
+			"cur_time": 1.30473464820534,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008333399891853333,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 19,
+			"name": "StartCommand"
+		},
+		{
+			"tick_count": 86,
+			"cur_time": 1.30473464820534,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008333399891853333,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 19,
+			"name": "CreateMove"
+		},
+		{
+			"tick_count": 0,
+			"cur_time": 1.3131227483972907,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008388100191950798,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 0,
+			"name": "StartCommand"
+		},
+		{
+			"tick_count": 0,
+			"cur_time": 1.3131227483972907,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008388100191950798,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 0,
+			"name": "CreateMove"
+		},
+		{
+			"cur_time": 1.3131227483972907,
+			"first_time_predicted": false,
+			"name": "Think",
+			"frame_time": 0.008388100191950798
+		},
+		{
+			"cur_time": 1.3131227483972907,
+			"first_time_predicted": false,
+			"name": "Tick",
+			"frame_time": 0.008388100191950798
+		},
+		{
+			"tick_count": 87,
+			"cur_time": 1.3131227483972907,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008388100191950798,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 20,
+			"name": "StartCommand"
+		},
+		{
+			"tick_count": 87,
+			"cur_time": 1.3131227483972907,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008388100191950798,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 20,
+			"name": "CreateMove"
+		},
+		{
+			"tick_count": 0,
+			"cur_time": 1.321456148289144,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008333399891853333,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 0,
+			"name": "StartCommand"
+		},
+		{
+			"tick_count": 0,
+			"cur_time": 1.321456148289144,
+			"forward_move": 0,
+			"buttons": 0,
+			"frame_time": 0.008333399891853333,
+			"up_move": 0,
+			"first_time_predicted": false,
+			"side_move": 0,
+			"command_number": 0,
+			"name": "CreateMove"
+		},
+		{
+			"cur_time": 1.321456148289144,
+			"first_time_predicted": false,
+			"name": "Think",
+			"frame_time": 0.008333399891853333
+		},
+		{
+			"cur_time": 1.321456148289144,
+			"first_time_predicted": false,
+			"name": "Tick",
+			"frame_time": 0.008333399891853333
+		}
+	],
+	"finish_reason": "complete",
+	"filesystem": {
+		"find_files": [
+			"CaseProbe.txt"
+		],
+		"lua_case_probe": "GARRYS_PAD_SOURCE_CLIENT_ORACLE_CASE_OK\n\n",
+		"find_directories": []
+	},
+	"material": {
+		"width": 64,
+		"is_error": false,
+		"shader": "VertexLitGeneric",
+		"name": "models/debug/debugwhite",
+		"height": 64
+	},
+	"network": {
+		"float": 0.3333333432674408,
+		"reply_bit_length": 303,
+		"color": {
+			"r": 1,
+			"b": 3,
+			"a": 4,
+			"g": 2
+		},
+		"unsigned": 165,
+		"vector": {
+			"y": -2.5,
+			"x": 1.25,
+			"z": 3.75
+		},
+		"nul_string": "oracle",
+		"signed": -17,
+		"received_reply": true,
+		"server_received_bit_length": 274,
+		"entity_index": 1,
+		"angle": {
+			"roll": 30.28125,
+			"pitch": 10.09375,
+			"yaw": -20.1875
+		}
+	},
+	"realm": "CLIENT",
+	"vgui": {
+		"last_layout_width": 103,
+		"x": 13,
+		"y": 17,
+		"layout_count_after_immediate": 1,
+		"layout_count_after_deferred_request": 1,
+		"layout_count_after_deferred_tick": 2,
+		"label_width": 78,
+		"layout_count_before": 0,
+		"last_layout_height": 57,
+		"label_height": 13,
+		"height": 57,
+		"width": 103
+	},
+	"runtime": {
+		"version_string": "2026.08.13",
+		"version": 260813,
+		"single_player": true,
+		"branch": "x86-64",
+		"jit_arch": "x64",
+		"map": "gm_flatgrass"
+	},
+	"clock": {
+		"finish_cur_time": 2.714999939315021,
+		"start_cur_time": 1.1999999731779099,
+		"finish_frame_time": 0.014999999664723873,
+		"first_time_predicted_outside_move": false,
+		"frame_time": 0.029999999329447746,
+		"tick_interval": 0.014999999664723873,
+		"real_frame_time": 0
+	},
+	"entities": {
+		"world_valid": false,
+		"local_player_index": 1,
+		"local_player_valid": true,
+		"null_ent_index": 0
+	}
+}

@@ -1,7 +1,4 @@
 import Foundation
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
 import GModLua
 
 public struct Lua51ConformanceReport: Sendable {
@@ -9,7 +6,7 @@ public struct Lua51ConformanceReport: Sendable {
     public let finalOKFound: Bool
     public let elapsedSeconds: Double
     public let loadedFiles: [String]
-    public let fetchedFiles: Int
+    public let availableFiles: Int
     public let skippedFiles: [String]
     public let outputLines: [String]
     public let failure: String?
@@ -22,7 +19,7 @@ public struct Lua51ConformanceReport: Sendable {
         lines.append("Mode: _U=true")
         lines.append("Result: \(passed ? "PASS" : "FAIL")")
         lines.append(String(format: "Elapsed: %.2fs", elapsedSeconds))
-        lines.append("Fetched test files: \(fetchedFiles)")
+        lines.append("Available test files: \(availableFiles)")
         lines.append("Loaded files: \(loadedFiles.count)")
         lines.append("Skipped classified files: \(skippedFiles.count)")
         lines.append("final OK: \(finalOKFound ? "YES" : "NO")")
@@ -30,6 +27,9 @@ public struct Lua51ConformanceReport: Sendable {
         if let failure { lines.append("Failure: \(failure)") }
         return lines.joined(separator: "\n")
     }
+
+    @available(*, deprecated, renamed: "availableFiles")
+    public var fetchedFiles: Int { availableFiles }
 
     public var fullText: String {
         let maxLines = 800
@@ -44,8 +44,6 @@ public struct Lua51ConformanceReport: Sendable {
 }
 
 public enum Lua51ConformanceRunner {
-    private static let mirrorRoot = "_lua5.1-tests"
-
     public static func runBasicSuite(
         sourceDirectory: URL? = nil,
         progress: @escaping @Sendable (String) -> Void = { _ in }
@@ -54,7 +52,7 @@ public enum Lua51ConformanceRunner {
         var output: [String] = []
         var loadedFiles: [String] = []
         var failure: String?
-        var fetchedFiles = 0
+        var availableFiles = 0
         let skippedFiles = [
             "main.lua [CLI-only]",
             "api.lua [C-API-only]"
@@ -76,11 +74,11 @@ public enum Lua51ConformanceRunner {
                 append("[CONFORMANCE] loading official Lua 5.1 tests from \(sourceDirectory.path)")
                 sources = try loadLocalLuaSources(from: sourceDirectory) { line in append(line) }
             } else {
-                append("[CONFORMANCE] fetching official Lua 5.1 test mirror…")
-                sources = try await fetchOfficialLuaSources { line in append(line) }
+                append("[CONFORMANCE] loading bundled official Lua 5.1 tests")
+                sources = try loadBundledOfficialLuaSources { line in append(line) }
             }
-            fetchedFiles = sources.count
-            append("[CONFORMANCE] fetched \(sources.count) Lua files")
+            availableFiles = sources.count
+            append("[CONFORMANCE] available source set contains \(sources.count) Lua files")
 
             let loader: (String) throws -> String = { requestedPath in
                 let normalized = normalizePath(requestedPath)
@@ -150,7 +148,7 @@ public enum Lua51ConformanceRunner {
             finalOKFound: finalOK,
             elapsedSeconds: Date().timeIntervalSince(started),
             loadedFiles: loadedFiles,
-            fetchedFiles: fetchedFiles,
+            availableFiles: availableFiles,
             skippedFiles: skippedFiles,
             outputLines: output,
             failure: failure
@@ -181,7 +179,18 @@ public enum Lua51ConformanceRunner {
         return result
     }
 
-    // MARK: - Official network fetch
+    // MARK: - Official suite sources
+
+    private static func loadBundledOfficialLuaSources(
+        progress: (String) -> Void
+    ) throws -> [String: String] {
+        guard let resourceRoot = Bundle.module.resourceURL else {
+            throw Lua51ConformanceResourceError.missing("bundled resource root")
+        }
+        let suiteRoot = resourceRoot.appendingPathComponent("Lua51Tests", isDirectory: true)
+        progress("[BUNDLED] \(suiteRoot.path)")
+        return try loadLocalLuaSources(from: suiteRoot, progress: progress)
+    }
 
     private static func loadLocalLuaSources(
         from directory: URL,
@@ -217,111 +226,6 @@ public enum Lua51ConformanceRunner {
         return result
     }
 
-    private static func fetchOfficialLuaSources(
-        progress: @escaping (String) -> Void
-    ) async throws -> [String: String] {
-        var result: [String: String] = [:]
-        try await fetchDirectory(
-            repositoryPath: mirrorRoot,
-            relativePath: "",
-            into: &result,
-            progress: progress
-        )
-
-        guard result["all.lua"] != nil else {
-            throw Lua51ConformanceDownloadError.missingAllLua
-        }
-
-        return result
-    }
-
-    private static func fetchDirectory(
-        repositoryPath: String,
-        relativePath: String,
-        into result: inout [String: String],
-        progress: @escaping (String) -> Void
-    ) async throws {
-        let items = try await listGitHubDirectory(path: repositoryPath)
-
-        for item in items {
-            let childRelative = relativePath.isEmpty ? item.name : "\(relativePath)/\(item.name)"
-
-            switch item.type {
-            case "dir":
-                try await fetchDirectory(
-                    repositoryPath: item.path,
-                    relativePath: childRelative,
-                    into: &result,
-                    progress: progress
-                )
-
-            case "file":
-                guard item.name.lowercased().hasSuffix(".lua") else { continue }
-                guard let downloadURL = item.downloadURL else { continue }
-
-                let source = try await fetchText(url: downloadURL)
-                result[normalizePath(childRelative)] = source
-                progress("[FETCH] \(childRelative)")
-
-            default:
-                continue
-            }
-        }
-    }
-
-    private static func listGitHubDirectory(path: String) async throws -> [GitHubContentItem] {
-        let encodedPath = path
-            .split(separator: "/")
-            .map { String($0).addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }
-            .joined(separator: "/")
-
-        guard let url = URL(
-            string: "https://api.github.com/repos/yuin/gopher-lua/contents/\(encodedPath)?ref=master"
-        ) else {
-            throw Lua51ConformanceDownloadError.invalidURL(path)
-        }
-
-        var request = URLRequest(url: url)
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        request.setValue("GModLua-Conformance/1.2", forHTTPHeaderField: "User-Agent")
-        request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        try validate(response: response, data: data, context: path)
-
-        do {
-            return try JSONDecoder().decode([GitHubContentItem].self, from: data)
-        } catch {
-            throw Lua51ConformanceDownloadError.invalidDirectoryResponse(path, String(describing: error))
-        }
-    }
-
-    private static func fetchText(url: URL) async throws -> String {
-        var request = URLRequest(url: url)
-        request.setValue("GModLua-Conformance/1.2", forHTTPHeaderField: "User-Agent")
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        try validate(response: response, data: data, context: url.lastPathComponent)
-
-        // The official Lua 5.1 test corpus is byte-oriented and contains
-        // legacy single-byte source text (for example db.lua). Requiring
-        // UTF-8 here incorrectly rejects valid Lua 5.1 test files before
-        // the Lua runtime even sees them.
-        if let text = LuaSourceDecoder.decode(data) { return text }
-
-        throw Lua51ConformanceDownloadError.cannotDecode(url.lastPathComponent)
-    }
-
-    private static func validate(response: URLResponse, data: Data, context: String) throws {
-        guard let http = response as? HTTPURLResponse else {
-            throw Lua51ConformanceDownloadError.invalidResponse(context)
-        }
-        guard (200..<300).contains(http.statusCode) else {
-            let body = String(data: data, encoding: .utf8) ?? ""
-            throw Lua51ConformanceDownloadError.http(http.statusCode, context, body)
-        }
-    }
-
     // MARK: - Helpers
 
     private static func describe(_ error: Error) -> String {
@@ -347,43 +251,16 @@ public enum Lua51ConformanceRunner {
 
 }
 
-private struct GitHubContentItem: Decodable {
-    let name: String
-    let path: String
-    let type: String
-    let downloadURL: URL?
-
-    enum CodingKeys: String, CodingKey {
-        case name
-        case path
-        case type
-        case downloadURL = "download_url"
-    }
-}
-
 enum Lua51ConformanceDownloadError: Error, CustomStringConvertible {
-    case invalidURL(String)
-    case invalidResponse(String)
-    case http(Int, String, String)
-    case invalidDirectoryResponse(String, String)
     case cannotDecode(String)
     case missingAllLua
 
     var description: String {
         switch self {
-        case let .invalidURL(path):
-            return "cannot build GitHub URL for \(path)"
-        case let .invalidResponse(context):
-            return "invalid network response while fetching \(context)"
-        case let .http(status, context, body):
-            let shortBody = String(body.prefix(240))
-            return "HTTP \(status) while fetching \(context): \(shortBody)"
-        case let .invalidDirectoryResponse(path, reason):
-            return "cannot decode GitHub directory \(path): \(reason)"
         case let .cannotDecode(path):
             return "cannot decode official Lua test source: \(path)"
         case .missingAllLua:
-            return "download completed but all.lua was not found"
+            return "official Lua test source set does not contain all.lua"
         }
     }
 }

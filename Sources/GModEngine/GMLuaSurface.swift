@@ -83,11 +83,52 @@ public enum GMLuaSurfaceDrawCommand: Sendable, Equatable {
     )
 }
 
+public struct GMLuaSurfaceCommandCaptureDiagnostics: Sendable, Equatable {
+    public let attemptedCommandCount: Int
+    public let retainedCommandCount: Int
+    public let droppedCommandCount: Int
+    public let estimatedRetainedByteCount: Int
+    public let maximumCommandCount: Int
+    public let maximumEstimatedByteCount: Int
+
+    public var overflowed: Bool { droppedCommandCount > 0 }
+}
+
+/// Persistent surface registries cannot silently substitute a different
+/// texture or font without breaking GLua identity semantics. Once a registry
+/// is full, only a new unique registration is rejected; existing handles and
+/// same-name font redefinitions remain valid.
+public enum GMLuaSurfacePersistentResourceOverflowPolicy: String, Sendable, Equatable {
+    case rejectNewUniqueRegistrationWithLuaRuntimeError
+}
+
+public struct GMLuaSurfacePersistentResourceDiagnostics: Sendable, Equatable {
+    public let allocatedTextureCount: Int
+    public let maximumTextureCount: Int
+    public let registeredFontCount: Int
+    public let maximumRegisteredFontCount: Int
+    public let customFontCount: Int
+    public let maximumCustomFontCount: Int
+    public let rejectedTextureRegistrationCount: Int
+    public let rejectedFontRegistrationCount: Int
+    public let overflowPolicy: GMLuaSurfacePersistentResourceOverflowPolicy
+
+    public var rejectedRegistrationCount: Int {
+        let sum = rejectedTextureRegistrationCount.addingReportingOverflow(
+            rejectedFontRegistrationCount
+        )
+        return sum.overflow ? Int.max : sum.partialValue
+    }
+
+    public var overflowed: Bool { rejectedRegistrationCount > 0 }
+}
+
 public struct GMLuaSurfaceFrameSnapshot: Sendable, Equatable {
     public let viewportWidth: Int
     public let viewportHeight: Int
     public let commands: [GMLuaSurfaceDrawCommand]
     public let textureCount: Int
+    public let captureDiagnostics: GMLuaSurfaceCommandCaptureDiagnostics
 
     public var drawCallCount: Int { commands.count }
 }
@@ -126,12 +167,55 @@ public struct GMLuaLogicalTextMeasurer: GMLuaTextMeasurer {
     }
 }
 
+/// Converts Source's `FontData.size` contract (font tall in pixels) to and
+/// from platform text metrics. Apple text APIs consume point sizes, whose
+/// ascent/descent/leading total is not generally equal to that point size.
+public enum GMLuaSourceFontTallMetrics {
+    public static func scaledPointSize(
+        unscaledPointSize: Double,
+        unscaledLineHeight: Double,
+        requestedTall: Int
+    ) -> Double {
+        let tall = Double(max(1, requestedTall))
+        guard unscaledPointSize.isFinite,
+              unscaledPointSize > 0,
+              unscaledLineHeight.isFinite,
+              unscaledLineHeight > 0 else {
+            return tall
+        }
+        let scaled = unscaledPointSize * tall / unscaledLineHeight
+        return scaled.isFinite && scaled > 0 ? scaled : tall
+    }
+
+    public static func exactTextHeight(
+        lineCount: Int,
+        requestedTall: Int
+    ) -> Int {
+        let normalizedLineCount = max(1, lineCount)
+        let normalizedTall = max(1, requestedTall)
+        let (height, overflow) = normalizedLineCount
+            .multipliedReportingOverflow(by: normalizedTall)
+        return overflow ? Int.max : height
+    }
+}
+
 /// State retained by the client/menu portion of GLua's `surface` API.
 ///
 /// Texture IDs and fonts are logical descriptors only. Resolving VMT/VTF
 /// assets, rasterizing glyphs, and submitting draw commands to Metal are
 /// deliberately outside this layer.
 public final class GMLuaSurfaceCommandState: @unchecked Sendable {
+    /// Large enough for the stock Spawn Menu with ample headroom, while still
+    /// preventing an addon Paint loop from allocating an unbounded command
+    /// stream or issuing an unbounded number of Metal draws.
+    public static let defaultMaximumDrawCommandCount = 16_384
+    public static let defaultMaximumEstimatedCommandByteCount = 8 * 1_024 * 1_024
+    /// Persistent registries deliberately have separate limits from a frame's
+    /// draw-command budget. These defaults leave ample room for stock Derma
+    /// while bounding a long-running addon's unique-name churn.
+    public static let defaultMaximumPersistentTextureCount = 16_384
+    public static let defaultMaximumCustomFontCount = 4_096
+
     private struct PaintContext {
         let originX: Double
         let originY: Double
@@ -146,20 +230,47 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
     private var selectedTexture: Int?
     private var fontDescriptors: [LuaString: GMLuaFontDescriptor] = [:]
     private var customFontKeys: Set<LuaString> = []
+    private var builtInFontDescriptorCount = 0
+    private var rejectedTextureRegistrationCount = 0
+    private var rejectedFontRegistrationCount = 0
     private var selectedFontKey: LuaString?
     private var drawColor = GMLuaSurfaceColor(red: 255, green: 255, blue: 255, alpha: 255)
     private var textColor = GMLuaSurfaceColor(red: 255, green: 255, blue: 255, alpha: 255)
     private var textPosition = GMLuaCursorPosition(x: 0, y: 0)
     private var contexts: [PaintContext] = []
     private var commands: [GMLuaSurfaceDrawCommand] = []
+    private var attemptedCommandCount = 0
+    private var droppedCommandCount = 0
+    private var estimatedCommandByteCount = 0
     private var viewportWidth = 0
     private var viewportHeight = 0
     private var clippingDisabled = false
     private let textMeasurer: any GMLuaTextMeasurer
+    private let maximumDrawCommandCount: Int
+    private let maximumEstimatedCommandByteCount: Int
+    private let maximumPersistentTextureCount: Int
+    private let maximumCustomFontCount: Int
 
-    fileprivate init(textMeasurer: any GMLuaTextMeasurer) {
+    fileprivate init(
+        textMeasurer: any GMLuaTextMeasurer,
+        maximumDrawCommandCount: Int,
+        maximumEstimatedCommandByteCount: Int,
+        maximumPersistentTextureCount: Int,
+        maximumCustomFontCount: Int
+    ) {
         self.textMeasurer = textMeasurer
+        self.maximumDrawCommandCount = max(0, maximumDrawCommandCount)
+        self.maximumEstimatedCommandByteCount = max(
+            0,
+            maximumEstimatedCommandByteCount
+        )
+        self.maximumPersistentTextureCount = max(
+            0,
+            maximumPersistentTextureCount
+        )
+        self.maximumCustomFontCount = max(0, maximumCustomFontCount)
         installBuiltInFontDescriptors()
+        builtInFontDescriptorCount = fontDescriptors.count
         selectedFontKey = Self.canonicalFontName("Default")
     }
 
@@ -185,6 +296,28 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return fontDescriptors.count
+    }
+
+    /// Cumulative lifetime diagnostics. Unlike command-capture diagnostics,
+    /// these counts intentionally survive `beginFrame` because the underlying
+    /// texture/font registries survive it too.
+    public var persistentResourceDiagnostics: GMLuaSurfacePersistentResourceDiagnostics {
+        lock.lock()
+        defer { lock.unlock() }
+        return GMLuaSurfacePersistentResourceDiagnostics(
+            allocatedTextureCount: textureIDs.count,
+            maximumTextureCount: maximumPersistentTextureCount,
+            registeredFontCount: fontDescriptors.count,
+            maximumRegisteredFontCount: Self.saturatingAdd(
+                builtInFontDescriptorCount,
+                maximumCustomFontCount
+            ),
+            customFontCount: customFontKeys.count,
+            maximumCustomFontCount: maximumCustomFontCount,
+            rejectedTextureRegistrationCount: rejectedTextureRegistrationCount,
+            rejectedFontRegistrationCount: rejectedFontRegistrationCount,
+            overflowPolicy: .rejectNewUniqueRegistrationWithLuaRuntimeError
+        )
     }
 
     public var selectedFontName: LuaString? {
@@ -217,11 +350,40 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
         return textMeasurer.measure(text, using: descriptor)
     }
 
+    /// Measures with a named font without changing `surface`'s selected font.
+    /// VGUI controls own their font selection independently from the immediate
+    /// mode surface API, so consulting a Label must not leak into later draws.
+    public func measureText(
+        _ text: LuaString,
+        usingFontNamed name: LuaString,
+        fallbackFontNamed fallbackName: LuaString? = nil
+    ) throws -> GMLuaTextMeasurement {
+        let descriptor: GMLuaFontDescriptor
+        lock.lock()
+        if let selected = fontDescriptors[Self.canonicalFontName(name)] {
+            descriptor = selected
+            lock.unlock()
+        } else if let fallbackName,
+                  let fallback = fontDescriptors[Self.canonicalFontName(fallbackName)] {
+            descriptor = fallback
+            lock.unlock()
+        } else {
+            lock.unlock()
+            throw LuaError.runtime(
+                "surface text measurement: invalid font '\(name.utf8String)'"
+            )
+        }
+        return textMeasurer.measure(text, using: descriptor)
+    }
+
     public func beginFrame(viewportWidth: Int, viewportHeight: Int) {
         lock.lock()
         self.viewportWidth = max(0, viewportWidth)
         self.viewportHeight = max(0, viewportHeight)
         commands.removeAll(keepingCapacity: true)
+        attemptedCommandCount = 0
+        droppedCommandCount = 0
+        estimatedCommandByteCount = 0
         contexts.removeAll(keepingCapacity: true)
         clippingDisabled = false
         lock.unlock()
@@ -234,7 +396,15 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
             viewportWidth: viewportWidth,
             viewportHeight: viewportHeight,
             commands: commands,
-            textureCount: textureIDs.count
+            textureCount: textureIDs.count,
+            captureDiagnostics: GMLuaSurfaceCommandCaptureDiagnostics(
+                attemptedCommandCount: attemptedCommandCount,
+                retainedCommandCount: commands.count,
+                droppedCommandCount: droppedCommandCount,
+                estimatedRetainedByteCount: estimatedCommandByteCount,
+                maximumCommandCount: maximumDrawCommandCount,
+                maximumEstimatedByteCount: maximumEstimatedCommandByteCount
+            )
         )
     }
 
@@ -268,34 +438,66 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
             GMLuaSurfaceColor(red: $0.red, green: $0.green, blue: $0.blue, alpha: $0.alpha)
         } ?? GMLuaSurfaceColor(red: 230, green: 230, blue: 230, alpha: 255)
         let measurement = textMeasurer.measure(panel.text, using: descriptor)
+        // Valve Label::Paint applies the horizontal inset from the aligned
+        // edge (add for west, subtract for east, ignore for centered text),
+        // and always adds the vertical inset after vertical alignment.
+        // Integer center division truncates toward zero. Preserve negative
+        // aligned origins so oversized text clips at the panel edge instead
+        // of being incorrectly pinned to its top-left.
         let horizontal: Double
         switch panel.contentAlignment {
         case 2, 5, 8:
-            horizontal = floor((panel.frame.width - Double(measurement.width)) * 0.5)
+            horizontal = (
+                (panel.frame.width - Double(measurement.width)) * 0.5
+            ).rounded(.towardZero)
         case 3, 6, 9:
             horizontal = panel.frame.width - Double(measurement.width)
+                - Double(panel.textInsetX)
         default:
-            horizontal = 0
+            horizontal = Double(panel.textInsetX)
         }
         let vertical: Double
         switch panel.contentAlignment {
         case 4, 5, 6:
-            vertical = floor((panel.frame.height - Double(measurement.height)) * 0.5)
+            vertical = (
+                (panel.frame.height - Double(measurement.height)) * 0.5
+            ).rounded(.towardZero)
         case 1, 2, 3:
             vertical = panel.frame.height - Double(measurement.height)
         default:
             vertical = 0
         }
-        commands.append(.text(
+        let position = GMLuaCursorPosition(
+            x: panel.frame.x + horizontal,
+            y: panel.frame.y + vertical + Double(panel.textInsetY)
+        )
+        var pendingCommands: [GMLuaSurfaceDrawCommand] = []
+        if let shadow = panel.expensiveShadow, shadow.distance != 0 {
+            let shadowColor = GMLuaSurfaceColor(
+                red: shadow.color.red,
+                green: shadow.color.green,
+                blue: shadow.color.blue,
+                alpha: shadow.color.alpha
+            )
+            pendingCommands.append(.text(
+                value: panel.text,
+                position: GMLuaCursorPosition(
+                    x: position.x + shadow.distance,
+                    y: position.y + shadow.distance
+                ),
+                font: descriptor,
+                color: multipliedAlpha(shadowColor, panel.alpha / 255),
+                clip: panel.clipRect
+            ))
+        }
+        pendingCommands.append(.text(
             value: panel.text,
-            position: GMLuaCursorPosition(
-                x: panel.frame.x + max(0, horizontal),
-                y: panel.frame.y + max(0, vertical)
-            ),
+            position: position,
             font: descriptor,
             color: multipliedAlpha(color, panel.alpha / 255),
             clip: panel.clipRect
         ))
+        appendCommandsWithinBudget(pendingCommands)
         lock.unlock()
     }
 
@@ -317,6 +519,16 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
 
         if let existing = textureIDs[name] {
             return existing
+        }
+        guard textureIDs.count < maximumPersistentTextureCount else {
+            rejectedTextureRegistrationCount = Self.saturatingAdd(
+                rejectedTextureRegistrationCount,
+                1
+            )
+            throw LuaError.runtime(
+                "surface.GetTextureID: persistent texture registry limit " +
+                    "(\(maximumPersistentTextureCount)) exceeded"
+            )
         }
         guard nextTextureID <= Int(Int32.max) else {
             throw LuaError.runtime("surface texture ID space exhausted")
@@ -373,7 +585,7 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
             lock.unlock()
             return
         }
-        commands.append(.rectangle(
+        appendCommandsWithinBudget([.rectangle(
             frame: GMLuaPanelRect(
                 x: context.originX + x,
                 y: context.originY + y,
@@ -382,7 +594,7 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
             ),
             color: multipliedAlpha(drawColor, context.alphaMultiplier),
             clip: effectiveClip(context)
-        ))
+        )])
         lock.unlock()
     }
 
@@ -399,7 +611,7 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
             lock.unlock()
             return
         }
-        commands.append(.texturedRectangle(
+        appendCommandsWithinBudget([.texturedRectangle(
             frame: GMLuaPanelRect(
                 x: context.originX + x,
                 y: context.originY + y,
@@ -410,7 +622,7 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
             textureName: textureName,
             color: multipliedAlpha(drawColor, context.alphaMultiplier),
             clip: effectiveClip(context)
-        ))
+        )])
         lock.unlock()
     }
 
@@ -424,7 +636,7 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
             throw LuaError.runtime("surface.DrawText called without a selected font or panel paint context")
         }
         descriptor = selected
-        commands.append(.text(
+        appendCommandsWithinBudget([.text(
             value: value,
             position: GMLuaCursorPosition(
                 x: context.originX + textPosition.x,
@@ -433,7 +645,7 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
             font: descriptor,
             color: multipliedAlpha(textColor, context.alphaMultiplier),
             clip: effectiveClip(context)
-        ))
+        )])
         lock.unlock()
     }
 
@@ -458,9 +670,84 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
         )
     }
 
-    fileprivate func registerFont(_ descriptor: GMLuaFontDescriptor) {
+    /// Requires `lock` to be held. A multi-command logical operation (for
+    /// example Label shadow + main glyphs) is admitted atomically so overflow
+    /// never leaves only the decorative half of the operation in the frame.
+    private func appendCommandsWithinBudget(
+        _ candidates: [GMLuaSurfaceDrawCommand]
+    ) {
+        guard !candidates.isEmpty else { return }
+        attemptedCommandCount = Self.saturatingAdd(
+            attemptedCommandCount,
+            candidates.count
+        )
+
+        var candidateBytes = 0
+        for candidate in candidates {
+            candidateBytes = Self.saturatingAdd(
+                candidateBytes,
+                Self.estimatedByteCount(of: candidate)
+            )
+        }
+        let countFits = candidates.count <= maximumDrawCommandCount &&
+            commands.count <= maximumDrawCommandCount - candidates.count
+        let bytesFit = candidateBytes <= maximumEstimatedCommandByteCount &&
+            estimatedCommandByteCount <=
+                maximumEstimatedCommandByteCount - candidateBytes
+        guard countFits, bytesFit else {
+            droppedCommandCount = Self.saturatingAdd(
+                droppedCommandCount,
+                candidates.count
+            )
+            return
+        }
+        commands.append(contentsOf: candidates)
+        estimatedCommandByteCount += candidateBytes
+    }
+
+    private static func estimatedByteCount(
+        of command: GMLuaSurfaceDrawCommand
+    ) -> Int {
+        switch command {
+        case .rectangle:
+            return 128
+        case let .texturedRectangle(_, _, textureName, _, _):
+            return saturatingAdd(160, textureName.count)
+        case let .text(value, _, font, _, _):
+            return saturatingAdd(
+                192,
+                saturatingAdd(
+                    value.count,
+                    saturatingAdd(font.name.count, font.font.count)
+                )
+            )
+        }
+    }
+
+    private static func saturatingAdd(_ lhs: Int, _ rhs: Int) -> Int {
+        let sum = lhs.addingReportingOverflow(rhs)
+        return sum.overflow ? Int.max : sum.partialValue
+    }
+
+    fileprivate func registerFont(_ descriptor: GMLuaFontDescriptor) throws {
         let key = Self.canonicalFontName(descriptor.name)
         lock.lock()
+        if customFontKeys.contains(key) {
+            fontDescriptors[key] = descriptor
+            lock.unlock()
+            return
+        }
+        guard customFontKeys.count < maximumCustomFontCount else {
+            rejectedFontRegistrationCount = Self.saturatingAdd(
+                rejectedFontRegistrationCount,
+                1
+            )
+            lock.unlock()
+            throw LuaError.runtime(
+                "surface.CreateFont: persistent custom font registry limit " +
+                    "(\(maximumCustomFontCount)) exceeded"
+            )
+        }
         fontDescriptors[key] = descriptor
         customFontKeys.insert(key)
         lock.unlock()
@@ -573,9 +860,23 @@ public enum GMLuaSurface {
     @discardableResult
     public static func install(
         into state: LuaState,
-        textMeasurer: any GMLuaTextMeasurer = GMLuaLogicalTextMeasurer()
+        textMeasurer: any GMLuaTextMeasurer = GMLuaLogicalTextMeasurer(),
+        maximumDrawCommandCount: Int =
+            GMLuaSurfaceCommandState.defaultMaximumDrawCommandCount,
+        maximumEstimatedCommandByteCount: Int =
+            GMLuaSurfaceCommandState.defaultMaximumEstimatedCommandByteCount,
+        maximumPersistentTextureCount: Int =
+            GMLuaSurfaceCommandState.defaultMaximumPersistentTextureCount,
+        maximumCustomFontCount: Int =
+            GMLuaSurfaceCommandState.defaultMaximumCustomFontCount
     ) throws -> GMLuaSurfaceCommandState {
-        let commandState = GMLuaSurfaceCommandState(textMeasurer: textMeasurer)
+        let commandState = GMLuaSurfaceCommandState(
+            textMeasurer: textMeasurer,
+            maximumDrawCommandCount: maximumDrawCommandCount,
+            maximumEstimatedCommandByteCount: maximumEstimatedCommandByteCount,
+            maximumPersistentTextureCount: maximumPersistentTextureCount,
+            maximumCustomFontCount: maximumCustomFontCount
+        )
         let surfaceTable: LuaTable
         if case let .table(existing) = state.getGlobal("surface") {
             surfaceTable = existing
@@ -632,7 +933,7 @@ public enum GMLuaSurface {
                     throw LuaError.runtime("bad argument #2 to 'CreateFont' (table expected)")
                 }
                 let descriptor = try fontDescriptor(name: name, data: data, state: state)
-                commandState.registerFont(descriptor)
+                try commandState.registerFont(descriptor)
                 return []
             },
             debugName: "surface.CreateFont"

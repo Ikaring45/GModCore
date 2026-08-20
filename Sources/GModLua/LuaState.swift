@@ -187,7 +187,8 @@ public final class LuaState {
     let globalTable = LuaTable()
     let registryTable = LuaTable()
     let garbageCollector = LuaGarbageCollector()
-    var dumpRegistry: [LuaString: LuaFunction] = [:]
+    var dumpRegistry: [LuaString: LuaDumpedFunction] = [:]
+    let dumpRegistryNonce = UUID()
     var dumpSerial: UInt64 = 0
     var randomState: UInt64 = 0x4D595DF4D0F33173
     let mainDebugHookState = LuaDebugHookState()
@@ -395,26 +396,7 @@ public final class LuaState {
     }
 
     public func compile(_ source: String, sourceName: String = "=(loadstring)") throws -> LuaFunction {
-        try ensureOpen()
-        let chunk: LuaChunk
-        do {
-            let tokens = try LuaLexer(source: source).tokenize()
-            chunk = try LuaParser(tokens: tokens).parse()
-        } catch let LuaError.lexer(line, column, message) {
-            throw LuaError.syntax(
-                source: syntaxSourceDescription(sourceName),
-                line: line,
-                message: message,
-                near: syntaxNearToken(source: source, line: line, column: column)
-            )
-        } catch let LuaError.parser(line, column, message) {
-            throw LuaError.syntax(
-                source: syntaxSourceDescription(sourceName),
-                line: line,
-                message: message,
-                near: syntaxNearToken(source: source, line: line, column: column)
-            )
-        }
+        let chunk = try parseSourceChunk(source, sourceName: sourceName)
         let activeEnvironment = currentThreadEnvironmentTable
         let root = LuaEnvironment(globalTable: activeEnvironment, inheritVarargs: false)
         let function = LuaFunction(
@@ -430,6 +412,50 @@ public final class LuaState {
         )
         garbageCollector.adopt(.luaFunction(function))
         return function
+    }
+
+    /// Parses without creating or adopting a closure. `load(reader)` uses
+    /// this to stop requesting source as soon as a syntax error becomes
+    /// definitive, matching lua_load's pull-based reader contract.
+    func parseSourceChunk(_ source: String, sourceName: String) throws -> LuaChunk {
+        try ensureOpen()
+        do {
+            return try parseRawSourceChunk(source)
+        } catch {
+            throw syntaxDiagnostic(
+                for: error,
+                source: source,
+                sourceName: sourceName
+            )
+        }
+    }
+
+    func parseRawSourceChunk(_ source: String) throws -> LuaChunk {
+        let tokens = try LuaLexer(source: source).tokenize()
+        return try LuaParser(tokens: tokens).parse()
+    }
+
+    func syntaxDiagnostic(
+        for error: Error,
+        source: String,
+        sourceName: String
+    ) -> Error {
+        switch error {
+        case let LuaError.lexer(line, column, message),
+             let LuaError.parser(line, column, message):
+            return LuaError.syntax(
+                source: syntaxSourceDescription(sourceName),
+                line: line,
+                message: message,
+                near: syntaxNearToken(source: source, line: line, column: column)
+            )
+        default:
+            return error
+        }
+    }
+
+    func sourceTokenNear(_ source: String, line: Int, column: Int) -> String {
+        syntaxNearToken(source: source, line: line, column: column)
     }
 
     private func ensureOpen() throws {
@@ -1589,9 +1615,21 @@ public final class LuaState {
     private func primitiveConcatString(_ value: LuaValue) -> LuaString? {
         switch value {
         case let .string(string): return string
-        case .number: return LuaString(value.printable)
+        case .number: return allocatedLuaString(value.printable)
         default: return nil
         }
+    }
+
+    private func allocatedLuaString(_ value: String) -> LuaString {
+        let string = LuaString(value)
+        garbageCollector.accountStringAllocation(string)
+        return string
+    }
+
+    private func allocatedLuaString(bytes: [UInt8]) -> LuaString {
+        let string = LuaString(bytes: bytes)
+        garbageCollector.accountStringAllocation(string)
+        return string
     }
 
     private func evaluateConcatenation(
@@ -1627,7 +1665,7 @@ public final class LuaState {
             var bytes: [UInt8] = []
             bytes.reserveCapacity(Int(total))
             for piece in pieces { bytes.append(contentsOf: piece.bytes) }
-            return .string(LuaString(bytes: bytes))
+            return .string(allocatedLuaString(bytes: bytes))
         }
 
         guard var result = values.last else { return .string("") }
@@ -1637,7 +1675,7 @@ public final class LuaState {
                 guard count <= UInt64(UInt32.max) else {
                     throw LuaError.runtime("string length overflow")
                 }
-                result = .string(LuaString(bytes: a.bytes + b.bytes))
+                result = .string(allocatedLuaString(bytes: a.bytes + b.bytes))
             } else if let metamethodResult = try callBinaryMetamethod(value, result, name: "__concat") {
                 result = metamethodResult
             } else {
@@ -1815,7 +1853,6 @@ public final class LuaState {
             mainDebugHookState.function
         ]
         values.append(contentsOf: primitiveMetatables.values.map(LuaValue.table))
-        values.append(contentsOf: dumpRegistry.values.map(LuaValue.luaFunction))
         values.append(contentsOf: externalGarbageCollectionRoots())
         if let currentThread = LuaThread.current { values.append(.thread(currentThread)) }
 
@@ -1848,12 +1885,20 @@ public final class LuaState {
     }
 
     func failureFramesForCurrentThread() -> [LuaCallFrame]? {
-        LuaThread.current?.failureFramesSnapshot() ?? mainFailureFrames
+        if let thread = LuaThread.current {
+            return thread.failureFramesSnapshot()
+        }
+        return mainFailureFrames
     }
 
     func clearFailureFramesForCurrentThread() {
         if let thread = LuaThread.current { thread.clearFailureFrames() }
         else { mainFailureFrames = nil }
+    }
+
+    func restoreFailureFramesForCurrentThread(_ frames: [LuaCallFrame]?) {
+        clearFailureFramesForCurrentThread()
+        if let frames { captureFailureFrames(frames) }
     }
 
     func currentLuaFunction(level: Int = 1) -> LuaFunction? {

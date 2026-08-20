@@ -22,6 +22,13 @@ public struct LuaString: Hashable, Comparable, Sendable, ExpressibleByStringLite
     public var utf8: [UInt8] { bytes }
     public var isEmpty: Bool { bytes.isEmpty }
 
+    /// Stable accounting estimate for a Lua string allocation. Swift owns the
+    /// byte buffer through ARC rather than Lua's mark/sweep heap, but creating
+    /// it is still mutator allocation work that must advance Lua's GC debt.
+    /// The fixed component approximates the value and array-storage headers;
+    /// exact allocator capacity is intentionally not part of the public count.
+    var estimatedHeapByteCount: Int { 32 + bytes.count }
+
     public var description: String {
         String(decoding: bytes, as: UTF8.self)
     }

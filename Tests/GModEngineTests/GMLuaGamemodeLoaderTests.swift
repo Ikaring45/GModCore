@@ -28,13 +28,15 @@ final class GMLuaGamemodeLoaderTests: XCTestCase {
             """
             local base = assert(gamemode.Get("base"))
             local derived = assert(gamemode.Get("derived"))
-            assert(GM == derived and GAMEMODE == derived)
+            assert(GM == GAMEMODE and gmod.GetGamemode() == GAMEMODE)
+            assert(GAMEMODE != derived)
             assert(GAMEMODE_NAME == "derived")
             assert(base.FolderName == "base")
             assert(base.Folder == "gamemodes/base" and base.Base == "")
             assert(derived.FolderName == "derived")
             assert(derived.Folder == "gamemodes/derived" and derived.Base == "base")
             assert(derived.BaseClass == base)
+            assert(GAMEMODE.BaseClass == base)
             assert(derived.BaseSeenDuringLoad == base)
             assert(derived.BaseValue == "base-shared")
             assert(derived.DerivedValue == "derived-shared")
@@ -55,6 +57,107 @@ final class GMLuaGamemodeLoaderTests: XCTestCase {
         XCTAssertEqual(secondReport.loadOrder, ["base", "derived"])
         XCTAssertEqual(secondReport.newlyLoaded, [])
         XCTAssertEqual(loader.loadedGamemodeNames, ["base", "derived"])
+    }
+
+    func testBaseCachedHookUsesStableActiveIdentityAfterTargetActivation() throws {
+        let files = try LuaMemoryFileSystem(initialFiles: [
+            "gamemodes/base/base.txt": data("\"base\" { \"base\" \"\" }"),
+            "gamemodes/base/gamemode/init.lua": data(
+                "function GM:IdentityProbe() return 'base', self end"
+            ),
+            "gamemodes/derived/derived.txt": data(
+                "\"derived\" { \"base\" \"base\" }"
+            ),
+            "gamemodes/derived/gamemode/init.lua": data(
+                """
+                GM.NestedContract = {
+                    target = true,
+                    nested = { target = true }
+                }
+                function GM:IdentityProbe() return 'derived', self end
+                """
+            )
+        ])
+        let (runtime, loader) = try makeRuntime(
+            fileSystem: files,
+            realm: .server
+        )
+        defer { _ = runtime.close() }
+        try installSyntheticGamemodeLibrary(in: runtime)
+        try runtime.execute(
+            """
+            hook = {}
+            local currentGM
+            function hook.Call(name, gm, ...)
+                local callback = gm and gm[name]
+                if callback then return callback(gm, ...) end
+            end
+            function hook.Run(name, ...)
+                if not currentGM then currentGM = gmod.GetGamemode() end
+                return hook.Call(name, currentGM, ...)
+            end
+            """,
+            sourceName: "=(faithful cached gamemode hook fixture)"
+        )
+
+        _ = try loader.loadBaseGamemode()
+        try runtime.execute(
+            """
+            BASE_ACTIVE_IDENTITY = GAMEMODE
+            GAMEMODE.PretargetSentinel = { retained = true }
+            GAMEMODE.NestedContract = {
+                pretarget = true,
+                nested = { pretarget = true }
+            }
+            PRETARGET_SENTINEL_IDENTITY = GAMEMODE.PretargetSentinel
+            PRETARGET_NESTED_IDENTITY = GAMEMODE.NestedContract
+            PRETARGET_NESTED_CHILD_IDENTITY = GAMEMODE.NestedContract.nested
+            local value, receiver = hook.Run("IdentityProbe")
+            assert(value == "base" and receiver == BASE_ACTIVE_IDENTITY)
+            assert(gmod.GetGamemode() == BASE_ACTIVE_IDENTITY)
+            assert(gamemode.Get("base") != BASE_ACTIVE_IDENTITY)
+            """,
+            sourceName: "=(base cached hook checkpoint)"
+        )
+
+        _ = try loader.loadTargetGamemode(named: "derived")
+        try runtime.execute(
+            """
+            local value, receiver = hook.Run("IdentityProbe")
+            assert(value == "derived")
+            assert(receiver == BASE_ACTIVE_IDENTITY)
+            assert(GAMEMODE == BASE_ACTIVE_IDENTITY)
+            assert(GM == GAMEMODE and gmod.GetGamemode() == GAMEMODE)
+            assert(GAMEMODE.FolderName == "derived")
+            assert(GAMEMODE.BaseClass == gamemode.Get("base"))
+            assert(gamemode.Get("derived") != GAMEMODE)
+            assert(GAMEMODE.PretargetSentinel == PRETARGET_SENTINEL_IDENTITY)
+            assert(GAMEMODE.PretargetSentinel.retained)
+            assert(GAMEMODE.NestedContract == PRETARGET_NESTED_IDENTITY)
+            assert(GAMEMODE.NestedContract.nested == PRETARGET_NESTED_CHILD_IDENTITY)
+            assert(GAMEMODE.NestedContract.pretarget and GAMEMODE.NestedContract.target)
+            assert(GAMEMODE.NestedContract.nested.pretarget)
+            assert(GAMEMODE.NestedContract.nested.target)
+            """,
+            sourceName: "=(target cached hook checkpoint)"
+        )
+
+        try runtime.execute(
+            """
+            GAMEMODE.LiveScalar = "runtime mutation"
+            GAMEMODE.NestedContract.pretarget = "runtime nested mutation"
+            """,
+            sourceName: "=(active gamemode runtime mutation)"
+        )
+        _ = try loader.loadTargetGamemode(named: "derived")
+        try runtime.execute(
+            """
+            assert(GAMEMODE == BASE_ACTIVE_IDENTITY)
+            assert(GAMEMODE.LiveScalar == "runtime mutation")
+            assert(GAMEMODE.NestedContract.pretarget == "runtime nested mutation")
+            """,
+            sourceName: "=(repeated active gamemode load checkpoint)"
+        )
     }
 
     func testClientRealmSelectsClientEntriesInTheSameHierarchy() throws {

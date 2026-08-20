@@ -22,9 +22,11 @@ public final class GMLuaRuntime {
     let state: LuaState
     private(set) var typeSystem: GMLuaTypeSystem?
     public private(set) var entityRegistry: GMLuaEntityRegistry?
+    public private(set) var achievements: GMLuaAchievements?
     public private(set) var chat: GMLuaChat?
     public private(set) var input: GMLuaInput?
     public private(set) var sound: GMLuaSound?
+    public private(set) var languageRegistry: GMLuaLanguageRegistry?
     public private(set) var conVarRegistry: GMLuaConVarRegistry?
     public private(set) var engineConVarCatalog: GMLuaEngineConVarCatalog?
     public private(set) var surfaceCommandState: GMLuaSurfaceCommandState?
@@ -41,6 +43,8 @@ public final class GMLuaRuntime {
     public private(set) var networkedGlobals: GMLuaNetworkedGlobals?
     public private(set) var netTransport: GMLuaNetTransport?
     public private(set) var netEndpoint: GMLuaNetEndpoint?
+    public private(set) var traceBridge: GMLuaTraceBridge?
+    public private(set) var systemTimeSource: (any GMLuaSystemTimeSource)?
     private let logger: (String) -> Void
     private let fileLoader: ((String) throws -> String)?
     private let virtualFileSystem: LuaVirtualFileSystem?
@@ -66,12 +70,16 @@ public final class GMLuaRuntime {
         virtualFileSystem: LuaVirtualFileSystem? = nil,
         bootstrapMode: GMLuaBootstrapMode = .strict,
         initialViewport: GMLuaViewportSize = .logicalDesktopDefault,
+        textMeasurer: (any GMLuaTextMeasurer)? = nil,
         gameEnvironmentConfiguration: GMLuaGameEnvironmentConfiguration? = nil,
         engineConfiguration: GMLuaEngineConfiguration? = nil,
         engineConVarCatalog: GMLuaEngineConVarCatalog? = nil,
         networkedGlobalTransport: GMLuaNetworkedGlobalTransport? = nil,
         netTransport: GMLuaNetTransport? = nil,
+        traceProvider: (any GMLuaTraceProvider)? = nil,
+        systemTimeSource: any GMLuaSystemTimeSource = GMLuaMonotonicSystemTimeSource.process,
         inputConfiguration: GMLuaInputConfiguration = GMLuaInputConfiguration(),
+        languageConfiguration: GMLuaLanguageConfiguration = .empty,
         cursorWarpSink: GMLuaCursorWarpSink? = nil
     ) {
         self.init(
@@ -81,12 +89,16 @@ public final class GMLuaRuntime {
             virtualFileSystem: virtualFileSystem,
             bootstrapMode: bootstrapMode,
             initialViewport: initialViewport,
+            textMeasurer: textMeasurer,
             gameEnvironmentConfiguration: gameEnvironmentConfiguration,
             engineConfiguration: engineConfiguration,
             engineConVarCatalog: engineConVarCatalog,
             networkedGlobalTransport: networkedGlobalTransport,
             netTransport: netTransport,
+            traceProvider: traceProvider,
+            systemTimeSource: systemTimeSource,
             inputConfiguration: inputConfiguration,
+            languageConfiguration: languageConfiguration,
             cursorWarpSink: cursorWarpSink,
             typeSystemInstaller: { state in
                 try GMLuaTypeSystem.install(
@@ -104,12 +116,16 @@ public final class GMLuaRuntime {
         virtualFileSystem: LuaVirtualFileSystem? = nil,
         bootstrapMode: GMLuaBootstrapMode = .strict,
         initialViewport: GMLuaViewportSize = .logicalDesktopDefault,
+        textMeasurer: (any GMLuaTextMeasurer)? = nil,
         gameEnvironmentConfiguration: GMLuaGameEnvironmentConfiguration? = nil,
         engineConfiguration: GMLuaEngineConfiguration? = nil,
         engineConVarCatalog: GMLuaEngineConVarCatalog? = nil,
         networkedGlobalTransport: GMLuaNetworkedGlobalTransport? = nil,
         netTransport: GMLuaNetTransport? = nil,
+        traceProvider: (any GMLuaTraceProvider)? = nil,
+        systemTimeSource: any GMLuaSystemTimeSource = GMLuaMonotonicSystemTimeSource.process,
         inputConfiguration: GMLuaInputConfiguration = GMLuaInputConfiguration(),
+        languageConfiguration: GMLuaLanguageConfiguration = .empty,
         cursorWarpSink: GMLuaCursorWarpSink? = nil,
         typeSystemInstaller: @escaping TypeSystemInstaller
     ) {
@@ -126,12 +142,16 @@ public final class GMLuaRuntime {
         installGLuaBootstrapSurface(
             typeSystemInstaller: typeSystemInstaller,
             initialViewport: initialViewport,
+            textMeasurer: textMeasurer,
             gameEnvironmentConfiguration: gameEnvironmentConfiguration,
             engineConfiguration: engineConfiguration,
             engineConVarCatalog: engineConVarCatalog,
             networkedGlobalTransport: networkedGlobalTransport,
             netTransport: netTransport,
+            traceProvider: traceProvider,
+            systemTimeSource: systemTimeSource,
             inputConfiguration: inputConfiguration,
+            languageConfiguration: languageConfiguration,
             cursorWarpSink: cursorWarpSink
         )
         if let virtualFileSystem {
@@ -185,12 +205,16 @@ public final class GMLuaRuntime {
     private func installGLuaBootstrapSurface(
         typeSystemInstaller: TypeSystemInstaller,
         initialViewport: GMLuaViewportSize,
+        textMeasurer: (any GMLuaTextMeasurer)?,
         gameEnvironmentConfiguration: GMLuaGameEnvironmentConfiguration?,
         engineConfiguration: GMLuaEngineConfiguration?,
         engineConVarCatalog explicitEngineConVarCatalog: GMLuaEngineConVarCatalog?,
         networkedGlobalTransport: GMLuaNetworkedGlobalTransport?,
         netTransport explicitNetTransport: GMLuaNetTransport?,
+        traceProvider: (any GMLuaTraceProvider)?,
+        systemTimeSource: any GMLuaSystemTimeSource,
         inputConfiguration: GMLuaInputConfiguration,
+        languageConfiguration: GMLuaLanguageConfiguration,
         cursorWarpSink: GMLuaCursorWarpSink?
     ) {
         state.setGlobal("SERVER", value: .boolean(realm == .server))
@@ -204,6 +228,10 @@ public final class GMLuaRuntime {
         state.setGlobal("__gmod_discovery", value: .boolean(bootstrapMode == .discovery))
         GMLuaAnimationEnums.install(into: state)
         GMLuaNPCEnums.install(into: state, realm: realm)
+        self.systemTimeSource = GMLuaSystemTime.install(
+            into: state,
+            source: systemTimeSource
+        )
 
         do {
             // Install only GMod's native type/metatable ABI here. The real
@@ -221,6 +249,16 @@ public final class GMLuaRuntime {
                 realm: realm
             )
             entityRegistry = installedEntityRegistry
+            achievements = try GMLuaAchievements.install(
+                into: state,
+                realm: realm
+            )
+            traceBridge = try GMLuaUtilTrace.install(
+                into: state,
+                typeSystem: installedTypeSystem,
+                entityRegistry: installedEntityRegistry,
+                provider: traceProvider
+            )
             chat = try GMLuaChat.install(
                 into: state,
                 realm: realm,
@@ -233,6 +271,11 @@ public final class GMLuaRuntime {
                 cursorWarpSink: cursorWarpSink
             )
             sound = try GMLuaSound.install(into: state, realm: realm)
+            languageRegistry = try GMLuaLanguageRegistry.install(
+                into: state,
+                realm: realm,
+                configuration: languageConfiguration
+            )
             if realm != .menu {
                 if let explicitNetTransport, let networkedGlobalTransport,
                    explicitNetTransport.networkedGlobalTransport !== networkedGlobalTransport {
@@ -304,10 +347,16 @@ public final class GMLuaRuntime {
                     initialViewport: initialViewport
                 )
                 screenMetrics = installedScreenMetrics
+                let installedSurfaceCommandState = try GMLuaSurface.install(
+                    into: state,
+                    textMeasurer: textMeasurer ?? GMLuaLogicalTextMeasurer()
+                )
+                surfaceCommandState = installedSurfaceCommandState
                 let installedVGUIRegistry = try GMLuaVGUI.install(
                     into: state,
                     typeSystem: installedTypeSystem,
-                    screenMetrics: installedScreenMetrics
+                    screenMetrics: installedScreenMetrics,
+                    surfaceCommandState: installedSurfaceCommandState
                 )
                 vguiRegistry = installedVGUIRegistry
                 dermaRegistry = try GMLuaDerma.install(
@@ -324,7 +373,6 @@ public final class GMLuaRuntime {
                     into: state,
                     fileSystem: presetFileSystem
                 )
-                surfaceCommandState = try GMLuaSurface.install(into: state)
             }
         } catch {
             // Initialization stays source-compatible with existing callers;

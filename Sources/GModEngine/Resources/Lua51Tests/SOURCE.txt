@@ -1,0 +1,14 @@
+Official Lua 5.1 test suite
+Source: https://www.lua.org/tests/lua5.1-tests.tar.gz
+SHA-256: 49e4ca6561f82ea605908c5041ab5fad66ed9930fa0686675bd51b02767f18ad
+Official test-suite page: https://www.lua.org/tests/
+Installed by: Tools/Install-Lua51OfficialTests.ps1
+
+This bundle contains the byte-exact 24 top-level .lua files used by the basic
+suite. The archive's libs/ and etc/ support trees are intentionally not bundled.
+At execution time only, the embedded-core harness classifies the all.lua calls
+to main.lua (standalone CLI) and api.lua (PUC C API); it does not edit the files.
+
+The Lua test suite is distributed under the Lua MIT license. LUA_LICENSE.txt
+reproduces the required notice.
+See https://www.lua.org/license.html

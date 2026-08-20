@@ -238,7 +238,9 @@ final class GMLuaNetTransportTests: XCTestCase {
             """
         )
 
-        XCTAssertThrowsError(try transport.pump()) { error in
+        XCTAssertThrowsError(
+            try transport.pumpReportingForwardedConsoleFailures()
+        ) { error in
             XCTAssertTrue(GMLuaRuntime.describe(error).contains("intentional receiver failure"))
         }
         XCTAssertEqual(transport.pendingDeliveryCount, 1)

@@ -3,7 +3,8 @@
 Garry's PAD is an experimental compatibility runtime for running Garry's Mod
 Lua, gamemodes, and Source assets natively on iPad. It is not a Windows
 emulator or a remote-play client. The shipping architecture is Swift ARM64 +
-Metal, hosted by Swift Playgrounds.
+Metal, with a checked-in iPadOS app host and a Swift Playgrounds-compatible
+package.
 
 The objective is compatibility, not a mobile sandbox that merely resembles
 Garry's Mod. Wherever practical, the original Lua gamemode and Spawnmenu code
@@ -30,12 +31,13 @@ No skipped or unfinished feature is reported as a pass. See
 [`LUA51_CONFORMANCE_STATUS.md`](LUA51_CONFORMANCE_STATUS.md) for the exact
 verification boundary.
 
-The native GLua bootstrap now includes M4's measured CLIENT UI order and a
-paired-realm host session. CLIENT loads Derma before Base, then realm-correct
-autorun, the installed postprocess/VGUI/matproxy directories, the real Default
-skin, and the target gamemode. The Default skin samples
-`gwenskin/GModDefault.png` directly from a legally installed VPK through a
-cached platform decoder; no game asset or hard-coded palette is bundled.
+The post-0.1.45 integration branch now carries the paired GLua runtime into a
+bounded playable Sandbox slice. It owns one SERVER and one CLIENT, loads the
+original bundled Base/Sandbox/Derma/Spawnmenu Lua in measured order, creates
+the real `g_SpawnMenu`, and renders its logical Surface commands through the
+Metal overlay boundary. Pointer capture, stock DButton click ownership,
+logical point-space viewport sizing, label metrics/insets, and background input
+cancellation are modeled without replacing Spawnmenu with a separate Swift UI.
 
 A deterministic one-SERVER/many-CLIENT session now provides canonical Player
 mirrors, `LocalPlayer`, client-to-server and targeted server-to-client net
@@ -45,24 +47,37 @@ tables with exact `GetTable`/`SetTable` identity, method precedence, stale/NULL
 behavior, and GC roots. `Player(number)` correctly uses UserID while
 `Entity(number)` uses EntIndex.
 
-Strict paired Sandbox and TTT both exit 0 through the SERVER and CLIENT
-`InitPostEntity` stages represented by the harness; the TTT run delivers four
-queued cross-realm events. This is a modeled startup result, not a claim that
-either gamemode is playable. Addon discovery, Steam authentication, live
-engine entity readiness, real sockets/channels, prediction, and desktop
-startup completion remain false/SKIP boundaries. Spawnmenu Lua is loaded and
-registered, but the runner does not dispatch `OnGamemodeLoaded` to instantiate
-the menu.
+The Source compatibility adapter supplies generation-safe Entity handles,
+SERVER fixed ticks, independent CLIENT frame/fixed-tick clocks, world-brush
+traces, a bounded ground-walk slice, and coarse world meshes. The authorized
+`gm_construct` and `gm_flatgrass` BSP/NAV/AIN fixtures are bundled and both run
+the same 16-tick walk regression. The installable iPadOS 16 host lives under
+`Apps/GarrysPAD` and presents `GModMainView`; the package-only host is no longer
+the sole application entry point.
 
-The logical VGUI/Surface layer now covers measured docking, render-command,
-text, focus, and pointer plumbing, but it is not yet connected to the existing
-app/Metal platform view or draw backend. General VMT/VTF shader/material
-resolution is also incomplete; the installed Default PNG atlas path is
-narrower than full material/rendering compatibility. VPK/image inputs are
-trusted installed content in this milestone, not a hardened untrusted-Workshop
-ingestion path.
+The repository includes a manifest-locked subset of project-authorized base
+GMod content needed by this slice: fonts, client Lua, PNGs, 72 VMTs, 46 VTFs,
+and the two maps. It deliberately excludes Workshop/cache/addon content and
+does not broaden the bundle from arbitrary runtime paths. VMT/VTF and bitmap
+decoding, Surface capture, CPU caches, and per-frame GPU upload all have
+explicit allocation limits.
 
-The 0.1.45 release commit passes 170/170 Swift tests and the complete Engine
+This is not full Garry's Mod playability yet. Addon mounting, dynamic
+addon-material rendering, Steam/authentication, sockets, prediction-facing Lua
+`CUserCmd`, displacement collision, step/jump/water/ladder movement, dynamic
+entity physics, and model rendering remain explicit boundaries. Spawnmenu can
+open and paint, but clicking a stock SpawnIcon reaches the still-unimplemented
+prop/entity creation API family and must not be advertised as supported.
+
+The current Windows integration gate passes 357 XCTest cases with one optional
+owned-MDL diagnostic skipped, plus 11/11 Swift Testing Source filesystem cases.
+That run reads the installed `garrysmod_dir.vpk`, `platform_misc_dir.vpk`, and
+`gm_construct.bsp`; it also verifies every declared bundled material payload.
+Engine and GameSession strict-concurrency builds pass with warnings treated as
+errors. Apple package/app/Metal build, Simulator launch, and physical-iPad
+behavior are CI/device gates and were not executed by this Windows validation.
+
+The released 0.1.45 commit separately passes 170/170 Swift tests and the complete Engine
 strict-concurrency gate with warnings treated as errors. Its GC-enabled
 official Lua 5.1 run exits 0 through `final OK` in 92.84 seconds, with 38 chunk
 loads and two classified skips. The installed-GMod parser gate passes 259/259
@@ -73,28 +88,30 @@ are recorded in
 [`LUA51_CONFORMANCE_STATUS.md`](LUA51_CONFORMANCE_STATUS.md) and the 0.1.45
 release notes.
 
-## Verified native path
+## Native path
 
-- iPad / Swift Playgrounds host
+- checked-in iPadOS application host plus Swift Playgrounds-compatible library
 - ARM64 Swift runtime
-- Metal rendering on Apple M5 GPU
-- approximately 120 render FPS in the current preview
+- existing Metal preview previously exercised on Apple M5 GPU
+- the new Sandbox world/Surface integration still requires its physical-iPad gate
 - fixed simulation interval `0.015` seconds (approximately 66.67 ticks/s)
 - render and simulation clocks are independent
 - GMod-style developer console with direct Lua and `lua_run` input
 
-Windows is used for fast Lua compatibility iteration only. The same pure-Swift
-runtime source is consumed by Swift Playgrounds; final UI, Metal, filesystem,
-and sandbox behavior still require iPad validation.
+Windows is used for fast runtime compatibility iteration. Final SwiftUI,
+Metal, lifecycle, touch-cancellation, glyph, and performance behavior still
+requires the checked-in Apple CI and a physical-iPad validation pass.
 
 ## Architecture
 
 ```text
-Swift Playgrounds / iPadOS
-├─ GModApp       console, app lifecycle, input
-├─ GModMetal     ARM64 Metal renderer
-├─ GModEngine    realms, VFS mounts, include/require boot flow
-└─ GModLua       pure-Swift Lua 5.1 + GLua compatibility runtime
+Apps/GarrysPAD / Swift Playgrounds / iPadOS
+├─ GModApp          SwiftUI lifecycle, input, diagnostics
+├─ GModMetal        ARM64 world and Surface renderer
+├─ GModGameSession  paired Sandbox actor lane and map runtime
+├─ GModGameAssets   manifest-locked authorized content
+├─ GModEngine       Source/GLua realms, VFS, net, VGUI, trace
+└─ GModLua          pure-Swift Lua 5.1 compatibility runtime
 ```
 
 The existing `GModCore` C ABI remains available for native engine experiments,
@@ -130,8 +147,9 @@ assertions. A CORE failure returns a non-zero process exit code.
 
 ## GMod compatibility research
 
-The repository contains reproducible analysis and a regression harness, but no
-copied Garry's Mod Lua corpus or proprietary assets:
+The repository contains reproducible analysis, a regression harness, and an
+explicitly authorized/manifested base-content subset. It does not contain an
+unbounded installed-game corpus or Workshop/addon cache:
 
 - [`Docs/GLuaAnalysis/01_BOOTSTRAP_MODULES.md`](Docs/GLuaAnalysis/01_BOOTSTRAP_MODULES.md)
 - [`Docs/GLuaAnalysis/02_EXTENSIONS.md`](Docs/GLuaAnalysis/02_EXTENSIONS.md)
@@ -140,6 +158,8 @@ copied Garry's Mod Lua corpus or proprietary assets:
 - [`Docs/GLuaAnalysis/05_NATIVE_BOOTSTRAP_M2.md`](Docs/GLuaAnalysis/05_NATIVE_BOOTSTRAP_M2.md)
 - [`Docs/GLuaAnalysis/06_REALM_NETWORKING_M3.md`](Docs/GLuaAnalysis/06_REALM_NETWORKING_M3.md)
 - [`Docs/GLuaAnalysis/08_DERMA_SHARED_SESSION_M4.md`](Docs/GLuaAnalysis/08_DERMA_SHARED_SESSION_M4.md)
+- [`Docs/GLuaAnalysis/09_SOURCE_MATERIAL_BOUNDARY.md`](Docs/GLuaAnalysis/09_SOURCE_MATERIAL_BOUNDARY.md)
+- [`Docs/GLuaAnalysis/10_IPAD_PLAYABLE_SLICE.md`](Docs/GLuaAnalysis/10_IPAD_PLAYABLE_SLICE.md)
 - [`GMOD_BOOT_SEQUENCE.md`](GMOD_BOOT_SEQUENCE.md)
 - [`Tests/GModCorpus/README.md`](Tests/GModCorpus/README.md)
 
@@ -178,7 +198,9 @@ GModCore is independent research and is not affiliated with or endorsed by
 Facepunch Studios, Valve Corporation, or Garry Newman. Garry's Mod, Source,
 Steam, and related names and trademarks belong to their respective owners.
 
-This repository does not include Garry's Mod game assets, Valve game assets,
-proprietary engine binaries, leaked source code, or Workshop content. Users are
-responsible for supplying legally obtained content for local compatibility
-testing.
+This repository includes only the project-authorized base-game files declared
+by its asset manifests and required by the current iPad slice. It does not
+include proprietary engine binaries, leaked source, Workshop/cache/addon
+content, or undeclared installed-game files. Expansion of that whitelist is an
+explicit provenance and review operation, never an automatic copy of a user's
+installation.

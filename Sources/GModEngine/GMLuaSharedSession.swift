@@ -114,6 +114,65 @@ public final class GMLuaSharedSession: @unchecked Sendable {
         return clientByUserID.keys.sorted()
     }
 
+    /// Publishes one connected player's current Source button word into every
+    /// realm-local mirror. The caller supplies the already-decided digital
+    /// buttons; this boundary never infers them from analog movement axes.
+    public func updatePlayerInputButtons(
+        for client: GMLuaRuntime,
+        buttons: SourceInputButtons
+    ) throws {
+        connectionMutationLock.lock()
+        defer { connectionMutationLock.unlock() }
+
+        let clientIdentifier = ObjectIdentifier(client)
+        let record: ConnectionRecord
+        let connectedRecords: [ConnectionRecord]
+        lock.lock()
+        guard let connected = connectionsByClient[clientIdentifier] else {
+            lock.unlock()
+            throw GMLuaSharedSessionError.clientNotConnected
+        }
+        record = connected
+        connectedRecords = Array(connectionsByClient.values)
+        lock.unlock()
+
+        guard let serverRegistry = record.server?.entityRegistry else {
+            throw GMLuaSharedSessionError.missingRuntimeSurface(
+                .server,
+                "Entity registry for Player(\(record.userID)) input"
+            )
+        }
+        guard serverRegistry.setPlayerInputButtons(
+            index: record.playerIndex,
+            generation: record.generation,
+            buttons: buttons
+        ) else {
+            throw GMLuaSharedSessionError.missingRuntimeSurface(
+                .server,
+                "current Player(\(record.userID)) input mirror"
+            )
+        }
+
+        for connected in connectedRecords {
+            guard let registry = connected.client?.entityRegistry else {
+                throw GMLuaSharedSessionError.missingRuntimeSurface(
+                    .client,
+                    "Entity registry for Player(\(record.userID)) input"
+                )
+            }
+            guard registry.setPlayerInputButtons(
+                index: record.playerIndex,
+                generation: record.generation,
+                buttons: buttons
+            ) else {
+                throw GMLuaSharedSessionError.missingRuntimeSurface(
+                    .client,
+                    "current Player(\(record.userID)) input mirror"
+                )
+            }
+        }
+    }
+
     /// Activates one client connection. Call this at a host lifecycle boundary,
     /// normally the StartupOrchestrator player-connection stage.
     public func connect(
@@ -361,6 +420,17 @@ public final class GMLuaSharedSession: @unchecked Sendable {
     @discardableResult
     public func pump(maxDeliveries: Int = .max) throws -> Int {
         try netTransport.pump(maxDeliveries: maxDeliveries)
+    }
+
+    /// Interactive-host variant that preserves transport/lifecycle failures
+    /// while reporting a forwarded SERVER console command body's failure as a
+    /// value and continuing through the same deterministic FIFO.
+    public func pumpReportingForwardedConsoleFailures(
+        maxDeliveries: Int = .max
+    ) throws -> GMLuaNetPumpReport {
+        try netTransport.pumpReportingForwardedConsoleFailures(
+            maxDeliveries: maxDeliveries
+        )
     }
 
     private func cleanupConnection(

@@ -70,11 +70,16 @@ private func gpad_sqlite3_set_authorizer(
     _ context: UnsafeMutableRawPointer?
 ) -> Int32
 
+#if !os(iOS)
+// iOS system SQLite omits extension loading and does not export this symbol.
+// Other supported system libraries export it, so keep explicitly disabling
+// extension loading there as an additional boundary.
 @_silgen_name("sqlite3_enable_load_extension")
 private func gpad_sqlite3_enable_load_extension(
     _ database: OpaquePointer?,
     _ enabled: Int32
 ) -> Int32
+#endif
 
 @_silgen_name("sqlite3_limit")
 private func gpad_sqlite3_limit(
@@ -147,12 +152,14 @@ private final class GMLuaSQLiteDatabase: @unchecked Sendable {
         }
         handle = opened
 
+        #if !os(iOS)
         let extensionResult = gpad_sqlite3_enable_load_extension(handle, 0)
         guard extensionResult == sqliteOK else {
             let message = Self.errorMessage(from: handle, fallbackCode: extensionResult)
             _ = gpad_sqlite3_close_v2(handle)
             throw GMLuaSQLiteError(description: message)
         }
+        #endif
         _ = gpad_sqlite3_limit(handle, sqliteLimitAttached, 0)
 
         let authorizerResult = gpad_sqlite3_set_authorizer(handle, gpadSQLiteAuthorizer, nil)

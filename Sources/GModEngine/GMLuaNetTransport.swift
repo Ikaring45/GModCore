@@ -100,6 +100,49 @@ private enum GMLuaTransportDelivery: Sendable {
     }
 }
 
+/// One CLIENT-originated console command that reached the SERVER command
+/// surface but had an expected user-action failure: a Lua concommand body
+/// failed, the host explicitly rejected it, or no command owner existed.
+/// Transport/lifecycle validation, throwing host handlers, and net receiver
+/// failures are deliberately not represented by this value.
+public struct GMLuaForwardedConsoleCommandFailure: Sendable, Equatable {
+    public let sequence: UInt64
+    public let command: String
+    public let arguments: [String]
+    public let message: String
+
+    public init(
+        sequence: UInt64,
+        command: String,
+        arguments: [String],
+        message: String
+    ) {
+        self.sequence = sequence
+        self.command = command
+        self.arguments = arguments
+        self.message = message
+    }
+}
+
+/// Result of the opt-in pump path used by an interactive host. A failed
+/// forwarded command counts as processed (and therefore against the delivery
+/// budget) but not as a successful delivery.
+public struct GMLuaNetPumpReport: Sendable, Equatable {
+    public let processedDeliveries: Int
+    public let successfulDeliveries: Int
+    public let forwardedConsoleFailures: [GMLuaForwardedConsoleCommandFailure]
+
+    public init(
+        processedDeliveries: Int,
+        successfulDeliveries: Int,
+        forwardedConsoleFailures: [GMLuaForwardedConsoleCommandFailure]
+    ) {
+        self.processedDeliveries = processedDeliveries
+        self.successfulDeliveries = successfulDeliveries
+        self.forwardedConsoleFailures = forwardedConsoleFailures
+    }
+}
+
 /// Realm-local native net binding owned by a ``GMLuaNetTransport`` session.
 ///
 /// Lua retains only native closures. The host session owns packet routing and
@@ -600,6 +643,43 @@ public final class GMLuaNetEndpoint: @unchecked Sendable {
         arguments: [String],
         senderPlayerIndex: Int
     ) throws {
+        let destination = try consoleCommandDestination(
+            senderPlayerIndex: senderPlayerIndex
+        )
+        try destination.dispatcher.dispatchRemoteCommand(
+            command: command,
+            arguments: arguments,
+            caller: destination.sender
+        )
+    }
+
+    /// Returns only a typed expected user-action failure from the SERVER
+    /// dispatcher. Every transport prerequisite, dispatcher invariant, and
+    /// throwing host handler remains outside that value boundary.
+    fileprivate func invokeConsoleCommandReportingCommandFailure(
+        command: String,
+        arguments: [String],
+        senderPlayerIndex: Int
+    ) throws -> String? {
+        let destination = try consoleCommandDestination(
+            senderPlayerIndex: senderPlayerIndex
+        )
+        switch try destination.dispatcher
+            .dispatchRemoteCommandReportingActionFailures(
+            command: command,
+            arguments: arguments,
+            caller: destination.sender
+        ) {
+        case .handled:
+            return nil
+        case let .actionFailure(message):
+            return message
+        }
+    }
+
+    private func consoleCommandDestination(
+        senderPlayerIndex: Int
+    ) throws -> (dispatcher: GMLuaConsoleCommandDispatcher, sender: LuaValue) {
         guard realm == .server,
               let entityRegistry,
               let dispatcher = consoleCommandDispatcher else {
@@ -613,11 +693,7 @@ public final class GMLuaNetEndpoint: @unchecked Sendable {
                 "SERVER console command sender Player mirror is unavailable"
             )
         }
-        try dispatcher.dispatchRemoteCommand(
-            command: command,
-            arguments: arguments,
-            caller: sender
-        )
+        return (dispatcher, sender)
     }
 
     private func recipientPlayerIndices(_ value: LuaValue?) throws -> [Int] {
@@ -1176,7 +1252,37 @@ public final class GMLuaNetTransport: @unchecked Sendable {
     /// deliveries remain queued for a subsequent host pump.
     @discardableResult
     public func pump(maxDeliveries: Int = .max) throws -> Int {
-        guard maxDeliveries > 0 else { return 0 }
+        try pump(
+            maxDeliveries: maxDeliveries,
+            reportForwardedConsoleFailures: false
+        ).successfulDeliveries
+    }
+
+    /// Drains the same FIFO as ``pump``, but turns only typed expected SERVER
+    /// action failures from forwarded console packets into values and
+    /// continues. Connection-generation checks, endpoint/Player/dispatcher
+    /// invariants, throwing host handlers, re-entry, and all net receiver
+    /// failures retain the throwing contract.
+    public func pumpReportingForwardedConsoleFailures(
+        maxDeliveries: Int = .max
+    ) throws -> GMLuaNetPumpReport {
+        try pump(
+            maxDeliveries: maxDeliveries,
+            reportForwardedConsoleFailures: true
+        )
+    }
+
+    private func pump(
+        maxDeliveries: Int,
+        reportForwardedConsoleFailures: Bool
+    ) throws -> GMLuaNetPumpReport {
+        guard maxDeliveries > 0 else {
+            return GMLuaNetPumpReport(
+                processedDeliveries: 0,
+                successfulDeliveries: 0,
+                forwardedConsoleFailures: []
+            )
+        }
         guard !isPumpingOnCurrentThread() else {
             throw LuaError.runtime(
                 "GMLuaNetTransport.pump cannot be re-entered from a Lua delivery callback"
@@ -1184,8 +1290,10 @@ public final class GMLuaNetTransport: @unchecked Sendable {
         }
         beginExclusiveBoundary(markPumpThread: true)
         defer { endExclusiveBoundary(markPumpThread: true) }
-        var delivered = 0
-        while delivered < maxDeliveries {
+        var processed = 0
+        var successful = 0
+        var consoleFailures: [GMLuaForwardedConsoleCommandFailure] = []
+        while processed < maxDeliveries {
             let next: (GMLuaNetEndpoint, GMLuaTransportDelivery)?
             lock.lock()
             if deliveries.isEmpty {
@@ -1229,15 +1337,41 @@ public final class GMLuaNetTransport: @unchecked Sendable {
                     senderPlayerIndex: packet.senderPlayerIndex,
                     generation: packet.connectionGeneration
                 )
-                try endpoint.invokeConsoleCommand(
-                    command: packet.command,
-                    arguments: packet.arguments,
-                    senderPlayerIndex: packet.senderPlayerIndex
-                )
+                if reportForwardedConsoleFailures {
+                    if let message = try endpoint
+                        .invokeConsoleCommandReportingCommandFailure(
+                        command: packet.command,
+                        arguments: packet.arguments,
+                        senderPlayerIndex: packet.senderPlayerIndex
+                    ) {
+                        consoleFailures.append(
+                            GMLuaForwardedConsoleCommandFailure(
+                                sequence: packet.sequence,
+                                command: packet.command,
+                                arguments: packet.arguments,
+                                message: message
+                            )
+                        )
+                    } else {
+                        successful += 1
+                    }
+                } else {
+                    try endpoint.invokeConsoleCommand(
+                        command: packet.command,
+                        arguments: packet.arguments,
+                        senderPlayerIndex: packet.senderPlayerIndex
+                    )
+                    successful += 1
+                }
             }
-            delivered += 1
+            if case .net = delivery { successful += 1 }
+            processed += 1
         }
-        return delivered
+        return GMLuaNetPumpReport(
+            processedDeliveries: processed,
+            successfulDeliveries: successful,
+            forwardedConsoleFailures: consoleFailures
+        )
     }
 
     private func validateConnectionGeneration(
