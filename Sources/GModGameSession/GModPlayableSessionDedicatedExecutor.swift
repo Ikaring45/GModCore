@@ -160,22 +160,10 @@ final class GModPlayableSessionDedicatedExecutor: SerialExecutor,
         enqueueImpl(job)
     }
 
-    #if compiler(>=5.9)
     #if os(Windows) || os(Linux)
     func enqueue(_ job: consuming ExecutorJob) {
         enqueueImpl(UnownedJob(job))
     }
-    #else
-    @available(
-        macOS 14.0,
-        iOS 17.0,
-        tvOS 17.0,
-        watchOS 10.0,
-        *)
-    func enqueue(_ job: consuming ExecutorJob) {
-        enqueueImpl(UnownedJob(job))
-    }
-    #endif
     #endif
 
     func asUnownedSerialExecutor() -> UnownedSerialExecutor {
