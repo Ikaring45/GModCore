@@ -32,9 +32,20 @@ private struct GModContentPackBookmarkStore {
             return nil
         }
         var isStale = false
+        #if os(iOS)
+        // The document picker supplies iOS security scope. Foundation marks
+        // the macOS-only explicit security-scope bookmark option unavailable
+        // on iOS, so preserve the picker's implicit scope in a normal bookmark.
+        let resolutionOptions: URL.BookmarkResolutionOptions = [.withoutUI]
+        #else
+        let resolutionOptions: URL.BookmarkResolutionOptions = [
+            .withSecurityScope,
+            .withoutUI,
+        ]
+        #endif
         let url = try URL(
             resolvingBookmarkData: bookmark,
-            options: [.withSecurityScope, .withoutUI],
+            options: resolutionOptions,
             relativeTo: nil,
             bookmarkDataIsStale: &isStale
         )
@@ -42,8 +53,16 @@ private struct GModContentPackBookmarkStore {
     }
 
     func save(url: URL) throws {
+        #if os(iOS)
+        let creationOptions: URL.BookmarkCreationOptions = []
+        #else
+        let creationOptions: URL.BookmarkCreationOptions = [
+            .withSecurityScope,
+            .securityScopeAllowOnlyReadAccess,
+        ]
+        #endif
         let bookmark = try url.bookmarkData(
-            options: [.withSecurityScope, .securityScopeAllowOnlyReadAccess],
+            options: creationOptions,
             includingResourceValuesForKeys: nil,
             relativeTo: nil
         )
