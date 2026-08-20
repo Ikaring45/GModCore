@@ -481,7 +481,7 @@ final class GModPlayableSessionLaneTests: XCTestCase {
         )
         XCTAssertEqual(snapshot.startup.map, .construct)
         XCTAssertEqual(snapshot.startup.spawnPoint.angles.yaw, 180)
-        XCTAssertEqual(snapshot.worldMesh.triangleCount, 25_732)
+        XCTAssertEqual(snapshot.worldMesh.triangleCount, 20_560)
         XCTAssertEqual(
             snapshot.playerWalkState.origin,
             snapshot.startup.spawnPoint.origin

@@ -1989,7 +1989,10 @@ public enum GMLuaVGUI {
             }),
             ("SetVisible", { arguments in
                 let panel = try requiredPanel(arguments, "SetVisible")
-                panel.isVisible = try requiredBoolean(arguments, 1, "SetVisible")
+                // Native VGUI uses Lua truth-value conversion. Stock
+                // dtree_node.lua passes nil when both expander predicates are
+                // false, which lua_toboolean correctly treats as false.
+                panel.isVisible = luaTruthValue(arguments, 1)
                 return []
             }),
             ("IsVisible", { arguments in
@@ -2424,6 +2427,18 @@ private func requiredBoolean(
         throw LuaError.runtime("bad argument #\(index) to '\(function)' (boolean expected)")
     }
     return value
+}
+
+private func luaTruthValue(_ arguments: [LuaValue], _ index: Int) -> Bool {
+    guard arguments.indices.contains(index) else { return false }
+    switch arguments[index] {
+    case .nilValue:
+        return false
+    case let .boolean(value):
+        return value
+    default:
+        return true
+    }
 }
 
 private func optionalBoolean(

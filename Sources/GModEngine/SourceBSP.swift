@@ -110,6 +110,8 @@ public enum SourceBSPLumpKind: Int, CaseIterable, Sendable {
     case leafBrushes = 17
     case brushes = 18
     case brushSides = 19
+    case textureStringData = 43
+    case textureStringTable = 44
 }
 
 public struct SourceBSPLumpDescriptor: Sendable, Equatable {
@@ -338,6 +340,9 @@ public struct SourceBSP: Sendable, Equatable {
     public let leafBrushes: [UInt16]
     public let brushes: [SourceBSPBrush]
     public let brushSides: [SourceBSPBrushSide]
+    /// Material names from LUMP_TEXDATA_STRING_DATA/TABLE, indexed by
+    /// `SourceBSPTextureData.nameStringTableID`.
+    public let textureNames: [String]
 
     public init(
         data: Data,
@@ -632,6 +637,52 @@ public struct SourceBSP: Sendable, Equatable {
             )
         }
 
+        let textureStringDataLump =
+            parsedLumps[SourceBSPLumpKind.textureStringData.rawValue]
+        try Self.requireVersion(textureStringDataLump, supported: [0])
+        let textureStringBytes = textureStringDataLump.data
+        let textureStringOffsets = try Self.parseRecords(
+            parsedLumps[SourceBSPLumpKind.textureStringTable.rawValue],
+            recordByteCount: 4,
+            supportedVersions: [0]
+        ) { cursor in
+            try cursor.readInt32(context: "texdata string offset")
+        }
+        textureNames = try textureStringOffsets.enumerated().map { index, rawOffset in
+            guard rawOffset >= 0 else {
+                throw SourceBSPError.invalidValue(
+                    context: "texdata string table \(index) offset",
+                    value: Int64(rawOffset)
+                )
+            }
+            let offset = Int(rawOffset)
+            guard offset < textureStringBytes.count else {
+                throw SourceBSPError.invalidReference(
+                    context: "texdata string table \(index) byte",
+                    index: Int64(rawOffset),
+                    availableCount: textureStringBytes.count
+                )
+            }
+            let start = textureStringBytes.index(
+                textureStringBytes.startIndex,
+                offsetBy: offset
+            )
+            guard let terminator = textureStringBytes[start...]
+                .firstIndex(of: 0) else {
+                throw SourceBSPError.unexpectedEnd(
+                    context: "texdata string table \(index) name"
+                )
+            }
+            let encoded = textureStringBytes.subdata(in: start..<terminator)
+            guard let name = String(data: encoded, encoding: .utf8) else {
+                throw SourceBSPError.invalidValue(
+                    context: "texdata string table \(index) UTF-8",
+                    value: Int64(rawOffset)
+                )
+            }
+            return name
+        }
+
         try Self.validateReferences(
             planes: planes,
             textureData: textureData,
@@ -648,6 +699,26 @@ public struct SourceBSP: Sendable, Equatable {
             brushes: brushes,
             brushSides: brushSides
         )
+
+        if !textureNames.isEmpty {
+            for (index, data) in textureData.enumerated() {
+                guard data.nameStringTableID >= 0,
+                      Int(data.nameStringTableID) < textureNames.count else {
+                    throw SourceBSPError.invalidReference(
+                        context: "texdata \(index) material name",
+                        index: Int64(data.nameStringTableID),
+                        availableCount: textureNames.count
+                    )
+                }
+            }
+        }
+    }
+
+    public func textureName(forTextureDataIndex index: Int) -> String? {
+        guard textureData.indices.contains(index) else { return nil }
+        let tableIndex = Int(textureData[index].nameStringTableID)
+        guard textureNames.indices.contains(tableIndex) else { return nil }
+        return textureNames[tableIndex]
     }
 
     public func lump(at index: Int) throws -> SourceBSPLump {

@@ -89,6 +89,61 @@ public final class GarrysPADContentPack: @unchecked Sendable {
         entries[try Self.normalizedPath(logicalPath)]
     }
 
+    public func byteCount(for logicalPath: String) throws -> UInt64? {
+        try entry(for: logicalPath)?.uncompressedByteCount
+    }
+
+    /// Reads one bounded range from a stored entry without allocating or
+    /// checksumming the complete nested VPK. The nested VPK reader validates
+    /// each returned asset against its own CRC32.
+    public func data(
+        for logicalPath: String,
+        offset: UInt64,
+        count: Int
+    ) throws -> Data {
+        let path = try Self.normalizedPath(logicalPath)
+        guard let entry = entries[path] else {
+            throw GarrysPADContentPackError.missingRequiredEntry(path)
+        }
+        guard entry.compressionMethod == 0 else {
+            throw GarrysPADContentPackError.unsupportedCompression(
+                path: path,
+                method: entry.compressionMethod
+            )
+        }
+        guard count >= 0 else {
+            throw GarrysPADContentPackError.invalidArchive(
+                "negative range count for \(path)"
+            )
+        }
+        let requested = UInt64(count)
+        guard offset <= entry.uncompressedByteCount,
+              requested <= entry.uncompressedByteCount - offset else {
+            throw GarrysPADContentPackError.truncatedEntry(path)
+        }
+
+        lock.lock()
+        defer { lock.unlock() }
+        let handle: FileHandle
+        do {
+            handle = try FileHandle(forReadingFrom: archiveURL)
+        } catch {
+            throw GarrysPADContentPackError.fileNotFound(archiveURL.path)
+        }
+        defer { try? handle.close() }
+        let dataOffset = try Self.entryDataOffset(
+            handle: handle,
+            entry: entry,
+            path: path
+        )
+        return try Self.readExactly(
+            handle,
+            offset: dataOffset + offset,
+            count: count,
+            context: path
+        )
+    }
+
     /// Reads a stored entry. `maximumByteCount` is an allocation boundary, not
     /// a claim about the ZIP entry's trustworthiness.
     public func data(
@@ -128,26 +183,11 @@ public final class GarrysPADContentPack: @unchecked Sendable {
         }
         defer { try? handle.close() }
 
-        let header = try Self.readExactly(
-            handle,
-            offset: entry.localHeaderOffset,
-            count: 30,
-            context: path
+        let dataOffset = try Self.entryDataOffset(
+            handle: handle,
+            entry: entry,
+            path: path
         )
-        guard Self.u32(header, 0) == 0x0403_4B50 else {
-            throw GarrysPADContentPackError.invalidArchive(
-                "local header signature is invalid for \(path)"
-            )
-        }
-        let localMethod = Self.u16(header, 8)
-        guard localMethod == entry.compressionMethod else {
-            throw GarrysPADContentPackError.invalidArchive(
-                "local and central compression methods differ for \(path)"
-            )
-        }
-        let nameLength = UInt64(Self.u16(header, 26))
-        let extraLength = UInt64(Self.u16(header, 28))
-        let dataOffset = entry.localHeaderOffset + 30 + nameLength + extraLength
         let result = try Self.readExactly(
             handle,
             offset: dataOffset,
@@ -158,6 +198,33 @@ public final class GarrysPADContentPack: @unchecked Sendable {
             throw GarrysPADContentPackError.checksumMismatch(path)
         }
         return result
+    }
+
+    private static func entryDataOffset(
+        handle: FileHandle,
+        entry: Entry,
+        path: String
+    ) throws -> UInt64 {
+        let header = try readExactly(
+            handle,
+            offset: entry.localHeaderOffset,
+            count: 30,
+            context: path
+        )
+        guard u32(header, 0) == 0x0403_4B50 else {
+            throw GarrysPADContentPackError.invalidArchive(
+                "local header signature is invalid for \(path)"
+            )
+        }
+        let localMethod = u16(header, 8)
+        guard localMethod == entry.compressionMethod else {
+            throw GarrysPADContentPackError.invalidArchive(
+                "local and central compression methods differ for \(path)"
+            )
+        }
+        let nameLength = UInt64(u16(header, 26))
+        let extraLength = UInt64(u16(header, 28))
+        return entry.localHeaderOffset + 30 + nameLength + extraLength
     }
 
     /// Finds exactly one Garry's PAD ZIP in a resource bundle. Swift

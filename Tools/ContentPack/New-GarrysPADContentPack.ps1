@@ -275,10 +275,9 @@ function New-PackSelection {
 function Get-CompressionLevel {
     param([string] $LogicalPath)
 
-    $extension = [System.IO.Path]::GetExtension($LogicalPath).ToLowerInvariant()
-    if ($extension -in @('.txt', '.lua', '.html', '.css', '.js', '.res', '.vdf', '.json')) {
-        return [System.IO.Compression.CompressionLevel]::Optimal
-    }
+    # The iPad mounts the ZIP as a random-access GMod filesystem. Storing every
+    # payload keeps HTML templates, Lua, CSS, sounds, maps and nested VPK chunks
+    # directly seekable without expanding a second multi-gigabyte copy.
     return [System.IO.Compression.CompressionLevel]::NoCompression
 }
 

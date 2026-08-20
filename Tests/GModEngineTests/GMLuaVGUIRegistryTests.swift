@@ -865,6 +865,27 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
         XCTAssertFalse(tree.contains(where: { $0.alpha == 0 }))
     }
 
+    func testSetVisibleUsesNativeLuaTruthConversionForStockTreeNodes() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        _ = try GMLuaVGUI.install(into: state, typeSystem: typeSystem)
+        try state.execute(
+            """
+            PANEL = vgui.Create("Panel")
+            PANEL:SetVisible(nil)
+            assert(PANEL:IsVisible() == false)
+            PANEL:SetVisible(1)
+            assert(PANEL:IsVisible() == true)
+            PANEL:SetVisible(false)
+            assert(PANEL:IsVisible() == false)
+            """,
+            sourceName: "@GMLuaSetVisibleTruthinessRegression.lua"
+        )
+    }
+
     func testTopLevelDockingUsesImplicitWorldPanelAndVisibilityAlphaRules() throws {
         let state = LuaState(output: { _ in })
         let typeSystem = try GMLuaTypeSystem.install(

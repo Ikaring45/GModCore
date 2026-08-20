@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+import GModEngine
 import GModGameAssets
 import GModGameSession
 
@@ -18,6 +19,18 @@ final class GarrysPADContentPackTests: XCTestCase {
         XCTAssertEqual(
             try pack.data(for: "garrysmod/maps/gm_flatgrass.bsp"),
             Data("flatgrass".utf8)
+        )
+        XCTAssertEqual(
+            try pack.data(
+                for: "garrysmod/maps/gm_flatgrass.bsp",
+                offset: 2,
+                count: 4
+            ),
+            Data("atgr".utf8)
+        )
+        XCTAssertEqual(
+            try pack.byteCount(for: "garrysmod/maps/gm_flatgrass.bsp"),
+            9
         )
     }
 
@@ -90,6 +103,41 @@ final class GarrysPADContentPackTests: XCTestCase {
         }
         let background = try pack.data(for: "garrysmod/html/img/bg.jpg")
         XCTAssertEqual(Array(background.prefix(2)), [0xFF, 0xD8])
+
+        let source = try GModContentPackAssetSource(pack: pack)
+        let material = try XCTUnwrap(
+            source.data(
+                for: "materials/gm_construct/construct_concrete_ground.vmt"
+            )
+        )
+        XCTAssertFalse(material.isEmpty)
+        let texture = try XCTUnwrap(
+            source.data(
+                for: "materials/gm_construct/construct_concrete_ground.vtf"
+            )
+        )
+        XCTAssertEqual(Array(texture.prefix(4)), [0x56, 0x54, 0x46, 0x00])
+        let resolver = GMLuaSourceMaterialResolver { logicalPath in
+            try source.data(for: logicalPath)
+        }
+        let resolvedMaterial = try resolver.resolve(
+            named: "gm_construct/construct_concrete_ground"
+        )
+        XCTAssertEqual(resolvedMaterial.metadata.status, .resolved)
+        XCTAssertGreaterThan(resolvedMaterial.metadata.dimensions?.width ?? 0, 0)
+        XCTAssertGreaterThan(resolvedMaterial.metadata.dimensions?.height ?? 0, 0)
+        XCTAssertFalse(try XCTUnwrap(resolvedMaterial.rgbaBytes).isEmpty)
+        let dermaAtlas = try XCTUnwrap(
+            source.data(for: "materials/gwenskin/gmoddefault.png")
+        )
+        XCTAssertEqual(
+            Array(dermaAtlas.prefix(4)),
+            [0x89, 0x50, 0x4E, 0x47]
+        )
+        let click = try XCTUnwrap(
+            source.data(for: "sound/garrysmod/ui_click.wav")
+        )
+        XCTAssertEqual(Array(click.prefix(4)), Array("RIFF".utf8))
     }
 
     func testConfiguredRealPackStartsSandboxAndAdvancesMovement() throws {
@@ -107,6 +155,55 @@ final class GarrysPADContentPackTests: XCTestCase {
         let origin = session.playerWalkState.origin
         let tick = try session.runFixedTick(movementInput: .init(forwardMove: 200))
         XCTAssertNotEqual(tick.movement.state.origin, origin)
+    }
+
+    func testConfiguredRealPackResolvesStockWorldMaterialBudget() throws {
+        guard let path = ProcessInfo.processInfo.environment[
+            "GMOD_CONTENT_PACK_DIAGNOSTIC_PATH"
+        ], !path.isEmpty else {
+            throw XCTSkip("GMOD_CONTENT_PACK_DIAGNOSTIC_PATH is not configured")
+        }
+        let pack = try GarrysPADContentPack(url: URL(fileURLWithPath: path))
+        let source = try GModContentPackAssetSource(pack: pack)
+        let resolver = GMLuaSourceMaterialResolver { logicalPath in
+            try source.data(for: logicalPath)
+        }
+
+        for map in GModBundledMap.allCases {
+            let bsp = try SourceBSP(data: GModGameAssets.data(for: map, kind: .bsp))
+            let mesh = try GModWorldRenderMesh.build(from: bsp)
+            var resolvedCount = 0
+            var decodedByteCount = 0
+            var allocationFailures: [String] = []
+            for name in mesh.materialRanges.compactMap(\.materialName) {
+                do {
+                    let material = try resolver.resolve(named: name)
+                    if let pixels = material.rgbaBytes {
+                        resolvedCount += 1
+                        decodedByteCount += pixels.count
+                    }
+                } catch let error as SourceVTFError {
+                    if case .allocationLimitExceeded = error {
+                        allocationFailures.append("\(name): \(error)")
+                    }
+                }
+            }
+            XCTAssertTrue(
+                allocationFailures.isEmpty,
+                "\(map.rawValue) exceeded bounded texture limits: " +
+                    allocationFailures.joined(separator: "; ")
+            )
+            XCTAssertGreaterThan(
+                resolvedCount,
+                map == .construct ? 10 : 2
+            )
+            XCTAssertLessThanOrEqual(decodedByteCount, 128 * 1_024 * 1_024)
+            print(
+                "\(map.rawValue): resolved \(resolvedCount)/" +
+                    "\(mesh.materialRanges.count) world materials, " +
+                    "\(decodedByteCount) decoded bytes"
+            )
+        }
     }
 
     private func makeTemporaryZIP(

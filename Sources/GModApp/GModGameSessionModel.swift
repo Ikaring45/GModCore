@@ -194,6 +194,7 @@ private final class GModGamePointerMailbox: @unchecked Sendable {
 final class GModGameSessionModel: ObservableObject {
     @Published private(set) var status = "Choose a bundled map to start Sandbox"
     @Published private(set) var activeMap: GModBundledMap?
+    @Published private(set) var loadingMap: GModBundledMap?
     @Published private(set) var isStarting = false
     @Published private(set) var isReady = false
     @Published private(set) var fixedTickCount: UInt64 = 0
@@ -227,6 +228,7 @@ final class GModGameSessionModel: ObservableObject {
         GModMetalCoreTextRasterizer
     private var forwardAxis: Float = 0
     private var sideAxis: Float = 0
+    private var jumpPressed = false
     private var sessionGeneration: UInt64 = 0
     private var laneGeneration: UInt64?
     private var pointerEpoch: UInt64?
@@ -261,6 +263,7 @@ final class GModGameSessionModel: ObservableObject {
         isStarting = true
         isReady = false
         activeMap = nil
+        loadingMap = map
         worldScene = nil
         surfaceScene = nil
         surfaceDiagnostics = nil
@@ -274,6 +277,7 @@ final class GModGameSessionModel: ObservableObject {
         lastSurfaceFailure = nil
         lastPointerFailure = nil
         lastMovementRejectionReason = nil
+        jumpPressed = false
         sessionGeneration &+= 1
         let requestedGeneration = sessionGeneration
         laneGeneration = nil
@@ -314,13 +318,23 @@ final class GModGameSessionModel: ObservableObject {
                 viewAngles = snapshot.playerWalkState.viewAngles
                 forwardAxis = 0
                 sideAxis = 0
+                jumpPressed = false
                 publishMovementInput()
-                worldScene = Self.makeWorldScene(
-                    map: map,
-                    mesh: snapshot.worldMesh,
-                    playerOrigin: playerOrigin,
-                    viewAngles: viewAngles
-                )
+                let textureResolver = surfaceTextureResolver
+                let preparedWorldScene = try await Task.detached(
+                    priority: .userInitiated
+                ) {
+                    defer { textureResolver.removeAllCachedTextures() }
+                    return try Self.makeWorldScene(
+                        map: map,
+                        mesh: snapshot.worldMesh,
+                        playerOrigin: snapshot.playerWalkState.origin,
+                        viewAngles: snapshot.playerWalkState.viewAngles,
+                        textureResolver: textureResolver
+                    )
+                }.value
+                guard requestedGeneration == sessionGeneration else { return }
+                worldScene = preparedWorldScene
                 surfaceStatus = "VGUI surface awaiting first client frame"
                 let spawn = snapshot.startup.spawnPoint.origin
                 status = "READY \(map.rawValue) spawn=(\(spawn.x), \(spawn.y), \(spawn.z))"
@@ -337,6 +351,7 @@ final class GModGameSessionModel: ObservableObject {
                 status = "START FAILED: \(GMLuaRuntime.describe(error))"
                 appendLog(status)
             }
+            loadingMap = nil
             isStarting = false
         }
     }
@@ -381,9 +396,15 @@ final class GModGameSessionModel: ObservableObject {
         publishMovementInput()
     }
 
+    func setJumpPressed(_ pressed: Bool) {
+        guard !isInputSuspended else { return }
+        jumpPressed = pressed
+        publishMovementInput()
+    }
+
     func adjustLook(deltaX: Float, deltaY: Float) {
         guard !isInputSuspended else { return }
-        let sensitivity: Float = 0.12
+        let sensitivity: Float = 0.34
         var yaw = viewAngles.yaw + deltaX * sensitivity
         yaw.formTruncatingRemainder(dividingBy: 360)
         viewAngles = SourceQAngle(
@@ -406,6 +427,7 @@ final class GModGameSessionModel: ObservableObject {
         isInputSuspended = true
         forwardAxis = 0
         sideAxis = 0
+        jumpPressed = false
         publishMovementInput()
         invalidateSurfaceRequests()
         frameMailbox.disable()
@@ -444,6 +466,7 @@ final class GModGameSessionModel: ObservableObject {
         if replacement {
             forwardAxis = 0
             sideAxis = 0
+            jumpPressed = false
             publishMovementInput()
         } else {
             pointerMailbox.setEnabled(false)
@@ -920,6 +943,7 @@ final class GModGameSessionModel: ObservableObject {
         if forwardAxis < 0 { buttons.insert(.back) }
         if sideAxis > 0 { buttons.insert(.moveRight) }
         if sideAxis < 0 { buttons.insert(.moveLeft) }
+        if jumpPressed { buttons.insert(.jump) }
         frameMailbox.setMovementInput(
             GModPlayableMovementInput(
                 viewAngles: viewAngles,
@@ -942,9 +966,32 @@ final class GModGameSessionModel: ObservableObject {
         map: GModBundledMap,
         mesh: GModWorldRenderMesh,
         playerOrigin: SourceVector3,
-        viewAngles: SourceQAngle
-    ) -> GModMetalWorldScene {
-        GModMetalWorldScene(
+        viewAngles: SourceQAngle,
+        textureResolver: GModMetalSurfaceSourceMaterialResolver
+    ) throws -> GModMetalWorldScene {
+        let maximumRetainedTextureBytes = 128 * 1_024 * 1_024
+        var retainedTextureBytes = 0
+        let ranges = mesh.materialRanges.map { range in
+            let bitmap: GModMetalSurfaceBitmap?
+            if let name = range.materialName,
+               let resolved = try? textureResolver.resolveSurfaceTexture(
+                   named: name
+               ),
+               resolved.premultipliedRGBA8.count <=
+                    maximumRetainedTextureBytes - retainedTextureBytes {
+                bitmap = resolved
+                retainedTextureBytes += resolved.premultipliedRGBA8.count
+            } else {
+                bitmap = nil
+            }
+            GModMetalWorldMaterialRange(
+                materialName: range.materialName,
+                firstIndex: range.firstIndex,
+                indexCount: range.indexCount,
+                bitmap: bitmap
+            )
+        }
+        return GModMetalWorldScene(
             meshIdentifier: "\(map.rawValue):\(mesh.vertices.count):\(mesh.indices.count)",
             sourcePositions: mesh.vertices.map {
                 SIMD3<Float>($0.position.x, $0.position.y, $0.position.z)
@@ -952,7 +999,11 @@ final class GModGameSessionModel: ObservableObject {
             sourceNormals: mesh.vertices.map {
                 SIMD3<Float>($0.normal.x, $0.normal.y, $0.normal.z)
             },
+            sourceTextureCoordinates: mesh.vertices.map {
+                SIMD2<Float>($0.textureCoordinate.u, $0.textureCoordinate.v)
+            },
             indices: mesh.indices,
+            materialRanges: ranges,
             cameraEye: cameraEye(for: playerOrigin),
             cameraForward: cameraForward(for: viewAngles)
         )
