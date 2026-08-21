@@ -460,6 +460,10 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
                 into: serverRuntime,
                 host: self
             )
+            try SourceCanonicalEntityNetworkVariableGLuaBridge.install(
+                into: serverRuntime,
+                serverHost: self
+            )
         }
     }
 
@@ -519,6 +523,71 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
             return try canonicalEntities.update(
                 identity,
                 mutation,
+                publishing: { [unowned self] snapshot in
+                    _ = try self.requiredServerRegistryLocked()
+                        .applyAuthoritativeSnapshot(snapshot)
+                    self.canonicalMutationJournal.append(.update(snapshot))
+                }
+            )
+        }
+    }
+
+    /// Commits one legacy NW string through the same prospective
+    /// snapshot/registry/journal transaction as every canonical Entity field.
+    /// Repeating the exact key/value bytes is a no-op and consumes neither a
+    /// revision nor a replication operation.
+    @discardableResult
+    public func setCanonicalNetworkedString(
+        _ value: SourceNetworkVariableString,
+        forKey key: SourceNetworkVariableString,
+        on identity: SourceCanonicalEntityIdentity
+    ) throws -> SourceCanonicalEntitySnapshot {
+        try withMutationBoundary {
+            try requireCanonicalServerProjectionLocked(identity)
+            guard let current = canonicalEntities.snapshot(for: identity) else {
+                throw GMLuaSourceRuntimeAdapterError.unknownEntity(identity)
+            }
+            guard current.networkVariables.string(forKey: key) != value else {
+                return current
+            }
+            try preflightCanonicalMutationJournalLocked(additionalOperations: 1)
+            return try canonicalEntities.update(
+                identity,
+                { candidate in
+                    _ = candidate.networkVariables.setString(value, forKey: key)
+                },
+                publishing: { [unowned self] snapshot in
+                    _ = try self.requiredServerRegistryLocked()
+                        .applyAuthoritativeSnapshot(snapshot)
+                    self.canonicalMutationJournal.append(.update(snapshot))
+                }
+            )
+        }
+    }
+
+    /// `SetNWInt` stores the documented Source float bits without rounding.
+    /// An identical bit pattern is a no-op; a changed value is published
+    /// atomically to SERVER and the pending FIFO journal.
+    @discardableResult
+    public func setCanonicalNetworkedInt(
+        _ value: SourceNetworkedIntValue,
+        forKey key: SourceNetworkVariableString,
+        on identity: SourceCanonicalEntityIdentity
+    ) throws -> SourceCanonicalEntitySnapshot {
+        try withMutationBoundary {
+            try requireCanonicalServerProjectionLocked(identity)
+            guard let current = canonicalEntities.snapshot(for: identity) else {
+                throw GMLuaSourceRuntimeAdapterError.unknownEntity(identity)
+            }
+            guard current.networkVariables.int(forKey: key) != value else {
+                return current
+            }
+            try preflightCanonicalMutationJournalLocked(additionalOperations: 1)
+            return try canonicalEntities.update(
+                identity,
+                { candidate in
+                    _ = candidate.networkVariables.setInt(value, forKey: key)
+                },
                 publishing: { [unowned self] snapshot in
                     _ = try self.requiredServerRegistryLocked()
                         .applyAuthoritativeSnapshot(snapshot)
@@ -811,6 +880,9 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
             guard let registry = client.entityRegistry else {
                 throw GMLuaSourceRuntimeAdapterError.missingRuntimeSurface(.client, "Entity registry")
             }
+            try SourceCanonicalEntityNetworkVariableGLuaBridge.install(
+                into: client
+            )
 
             var registered: [GMLuaSourceEntityIdentity] = []
             do {

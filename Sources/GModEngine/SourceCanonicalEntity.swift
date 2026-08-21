@@ -117,6 +117,150 @@ public enum SourceCanonicalEntityLifecycle: UInt8, CaseIterable, Equatable, Send
     case removed
 }
 
+/// One GLua string preserved as bytes across the engine-owned NW-variable
+/// state. Lua strings are byte sequences, so canonical snapshots must not
+/// collapse distinct non-UTF-8 keys or values through a Swift `String` round
+/// trip.
+public struct SourceNetworkVariableString: Equatable, Hashable, Sendable {
+    public let bytes: [UInt8]
+
+    public init(bytes: [UInt8]) {
+        self.bytes = bytes
+    }
+
+    public init(_ value: String) {
+        bytes = Array(value.utf8)
+    }
+
+    fileprivate func precedes(_ other: Self) -> Bool {
+        bytes.lexicographicallyPrecedes(other.bytes)
+    }
+}
+
+/// `Entity:SetNWInt` is historically named as an integer API, but Garry's
+/// Mod documents that the value is transported as a float and is not rounded.
+/// Keeping the exact Source float bits makes NaN and signed zero deterministic
+/// Equatable snapshot values instead of inventing an integer conversion.
+public struct SourceNetworkedIntValue: Equatable, Sendable {
+    public let sourceFloatBitPattern: UInt32
+
+    public init(luaNumber: Double) {
+        sourceFloatBitPattern = Float(luaNumber).bitPattern
+    }
+
+    public init(sourceFloatBitPattern: UInt32) {
+        self.sourceFloatBitPattern = sourceFloatBitPattern
+    }
+
+    public var luaNumber: Double {
+        Double(Float(bitPattern: sourceFloatBitPattern))
+    }
+}
+
+/// Type-specific, key-sorted NW state carried by every canonical Entity
+/// snapshot. The arrays are maintained in raw Lua-byte order, so replication
+/// and equality never depend on Dictionary iteration order.
+public struct SourceEntityNetworkVariables: Equatable, Sendable {
+    public struct StringEntry: Equatable, Sendable {
+        public let key: SourceNetworkVariableString
+        public let value: SourceNetworkVariableString
+
+        public init(
+            key: SourceNetworkVariableString,
+            value: SourceNetworkVariableString
+        ) {
+            self.key = key
+            self.value = value
+        }
+    }
+
+    public struct IntEntry: Equatable, Sendable {
+        public let key: SourceNetworkVariableString
+        public let value: SourceNetworkedIntValue
+
+        public init(
+            key: SourceNetworkVariableString,
+            value: SourceNetworkedIntValue
+        ) {
+            self.key = key
+            self.value = value
+        }
+    }
+
+    public private(set) var stringEntries: [StringEntry]
+    public private(set) var intEntries: [IntEntry]
+
+    public init(
+        stringEntries: [StringEntry] = [],
+        intEntries: [IntEntry] = []
+    ) {
+        self.stringEntries = []
+        self.intEntries = []
+        for entry in stringEntries {
+            _ = setString(entry.value, forKey: entry.key)
+        }
+        for entry in intEntries {
+            _ = setInt(entry.value, forKey: entry.key)
+        }
+    }
+
+    public func string(
+        forKey key: SourceNetworkVariableString
+    ) -> SourceNetworkVariableString? {
+        stringEntries.first { $0.key == key }?.value
+    }
+
+    public func int(
+        forKey key: SourceNetworkVariableString
+    ) -> SourceNetworkedIntValue? {
+        intEntries.first { $0.key == key }?.value
+    }
+
+    /// Returns false only when the exact key/value bytes were already stored.
+    @discardableResult
+    public mutating func setString(
+        _ value: SourceNetworkVariableString,
+        forKey key: SourceNetworkVariableString
+    ) -> Bool {
+        let replacement = StringEntry(key: key, value: value)
+        for index in stringEntries.indices {
+            if stringEntries[index].key == key {
+                guard stringEntries[index].value != value else { return false }
+                stringEntries[index] = replacement
+                return true
+            }
+            if key.precedes(stringEntries[index].key) {
+                stringEntries.insert(replacement, at: index)
+                return true
+            }
+        }
+        stringEntries.append(replacement)
+        return true
+    }
+
+    /// Returns false only when the exact Source float bits were already stored.
+    @discardableResult
+    public mutating func setInt(
+        _ value: SourceNetworkedIntValue,
+        forKey key: SourceNetworkVariableString
+    ) -> Bool {
+        let replacement = IntEntry(key: key, value: value)
+        for index in intEntries.indices {
+            if intEntries[index].key == key {
+                guard intEntries[index].value != value else { return false }
+                intEntries[index] = replacement
+                return true
+            }
+            if key.precedes(intEntries[index].key) {
+                intEntries.insert(replacement, at: index)
+                return true
+            }
+        }
+        intEntries.append(replacement)
+        return true
+    }
+}
+
 /// Mutable state used by one atomic engine-owned update transaction.
 ///
 /// Lifecycle and EHANDLE identity are intentionally absent. Callers may alter
@@ -146,6 +290,10 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
     /// state; neither relationship is reduced to an entry index.
     public var vehicle: SourceCanonicalEntityIdentity?
     public var creator: SourceCanonicalEntityIdentity?
+    /// Legacy `SetNW*` values are part of the engine-owned Entity, not a
+    /// realm-local Lua side table. CLIENT receives this value only inside the
+    /// existing full-EHANDLE snapshot FIFO.
+    public var networkVariables: SourceEntityNetworkVariables
 
     public init(
         transform: SourceEntityTransform = .identity,
@@ -158,7 +306,8 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
         bodyValue: Int = 0,
         viewOffset: SourceVector3 = .zero,
         vehicle: SourceCanonicalEntityIdentity? = nil,
-        creator: SourceCanonicalEntityIdentity? = nil
+        creator: SourceCanonicalEntityIdentity? = nil,
+        networkVariables: SourceEntityNetworkVariables = .init()
     ) {
         self.transform = transform
         self.motion = motion
@@ -171,6 +320,7 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
         self.viewOffset = viewOffset
         self.vehicle = vehicle
         self.creator = creator
+        self.networkVariables = networkVariables
     }
 
     /// Converts the canonical Player state into the existing movement core's
@@ -272,6 +422,7 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
     public let viewOffset: SourceVector3
     public let vehicle: SourceCanonicalEntityIdentity?
     public let creator: SourceCanonicalEntityIdentity?
+    public let networkVariables: SourceEntityNetworkVariables
     public let lifecycle: SourceCanonicalEntityLifecycle
     public let isNetworkable: Bool
     public let revision: UInt64
@@ -293,7 +444,8 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         bodyValue: Int = 0,
         viewOffset: SourceVector3 = .zero,
         vehicle: SourceCanonicalEntityIdentity? = nil,
-        creator: SourceCanonicalEntityIdentity? = nil
+        creator: SourceCanonicalEntityIdentity? = nil,
+        networkVariables: SourceEntityNetworkVariables = .init()
     ) {
         self.identity = identity
         self.kind = kind
@@ -309,6 +461,7 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         self.viewOffset = viewOffset
         self.vehicle = vehicle
         self.creator = creator
+        self.networkVariables = networkVariables
         self.lifecycle = lifecycle
         self.isNetworkable = isNetworkable
         self.revision = revision
@@ -461,7 +614,8 @@ public final class SourceCanonicalEntity: SourceEntity {
             bodyValue: state.bodyValue,
             viewOffset: state.viewOffset,
             vehicle: state.vehicle,
-            creator: state.creator
+            creator: state.creator,
+            networkVariables: state.networkVariables
         )
     }
 }
