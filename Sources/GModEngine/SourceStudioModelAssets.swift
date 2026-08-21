@@ -918,14 +918,14 @@ private enum SourceStudioModelAssetFormat {
 
         func uint16(at offset: Int, field: String) throws -> UInt16 {
             try require(offset: offset, byteCount: 2, field: field)
-            return data.withUnsafeBytes { raw in
+            return data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> UInt16 in
                 UInt16(raw[offset]) | (UInt16(raw[offset + 1]) << 8)
             }
         }
 
         func uint32(at offset: Int, field: String) throws -> UInt32 {
             try require(offset: offset, byteCount: 4, field: field)
-            return data.withUnsafeBytes { raw in
+            return data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> UInt32 in
                 UInt32(raw[offset])
                     | (UInt32(raw[offset + 1]) << 8)
                     | (UInt32(raw[offset + 2]) << 16)
