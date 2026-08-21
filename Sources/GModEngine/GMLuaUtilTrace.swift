@@ -324,7 +324,9 @@ public enum GMLuaUtilTrace {
                     )
                 }
                 let worldValue = entityRegistry.entity(at: 0)
-                guard let worldIdentity = entityRegistry.sourceMirrorIdentity(for: worldValue) else {
+                guard let worldIdentity =
+                        entityRegistry.canonicalIdentity(for: worldValue) ??
+                        entityRegistry.sourceMirrorIdentity(for: worldValue) else {
                     throw LuaError.runtime(
                         "\(functionName) failed: \(GMLuaTraceBridgeError.canonicalWorldUnavailable)"
                     )
@@ -342,7 +344,8 @@ public enum GMLuaUtilTrace {
                 } catch {
                     throw LuaError.runtime("\(functionName) failed: \(String(describing: error))")
                 }
-                guard entityRegistry.sourceMirrorIdentity(for: worldValue) == worldIdentity else {
+                guard (entityRegistry.canonicalIdentity(for: worldValue) ??
+                        entityRegistry.sourceMirrorIdentity(for: worldValue)) == worldIdentity else {
                     throw LuaError.runtime(
                         "\(functionName) failed: Entity(0) changed during the trace"
                     )
@@ -361,7 +364,8 @@ public enum GMLuaUtilTrace {
                     state: state,
                     typeSystem: typeSystem
                 )
-                guard entityRegistry.sourceMirrorIdentity(for: worldValue) == worldIdentity else {
+                guard (entityRegistry.canonicalIdentity(for: worldValue) ??
+                        entityRegistry.sourceMirrorIdentity(for: worldValue)) == worldIdentity else {
                     throw LuaError.runtime(
                         "\(functionName) failed: Entity(0) changed while writing the trace result"
                     )
