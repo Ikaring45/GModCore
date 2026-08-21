@@ -67,6 +67,7 @@ public struct GModMetalView:
 
     @Binding private var stats: String
     private let worldScene: GModMetalWorldScene?
+    private let dynamicEntityScene: GModMetalDynamicEntityScene?
     private let surfaceScene: GModMetalSurfaceScene?
     private let preferredFramesPerSecond: Int
     private let onFrame: @Sendable (GModMetalFrameRequest) -> Void
@@ -76,6 +77,7 @@ public struct GModMetalView:
     public init(
         stats: Binding<String>,
         worldScene: GModMetalWorldScene? = nil,
+        dynamicEntityScene: GModMetalDynamicEntityScene? = nil,
         surfaceScene: GModMetalSurfaceScene? = nil,
         preferredFramesPerSecond: Int = 120,
         onFrame: @escaping @Sendable (GModMetalFrameRequest) -> Void = { _ in },
@@ -85,6 +87,7 @@ public struct GModMetalView:
     ) {
         self._stats = stats
         self.worldScene = worldScene
+        self.dynamicEntityScene = dynamicEntityScene
         self.surfaceScene = surfaceScene
         self.preferredFramesPerSecond = preferredFramesPerSecond <= 60 ? 60 : 120
         self.onFrame = onFrame
@@ -98,6 +101,7 @@ public struct GModMetalView:
         Coordinator(
             stats: $stats,
             worldScene: worldScene,
+            dynamicEntityScene: dynamicEntityScene,
             surfaceScene: surfaceScene,
             onFrame: onFrame,
             onWorldFrameEvent: onWorldFrameEvent,
@@ -192,6 +196,7 @@ public struct GModMetalView:
         )
         context.coordinator.submit(
             worldScene: worldScene,
+            dynamicEntityScene: dynamicEntityScene,
             surfaceScene: surfaceScene
         )
     }
@@ -353,6 +358,12 @@ public struct GModMetalView:
         private var worldMissingMaterialPipeline:
             MTLRenderPipelineState?
 
+        private var dynamicEntityTexturedPipeline:
+            MTLRenderPipelineState?
+
+        private var dynamicEntityMissingMaterialPipeline:
+            MTLRenderPipelineState?
+
         private var worldSkyboxPipeline:
             MTLRenderPipelineState?
 
@@ -407,6 +418,11 @@ public struct GModMetalView:
             case clear
         }
 
+        private enum PendingDynamicEntityScene {
+            case replace(GModMetalDynamicEntityScene)
+            case clear
+        }
+
         private struct CachedWorldMesh {
             let identifier: String
             let vertexCount: Int
@@ -432,6 +448,129 @@ public struct GModMetalView:
             let fogColorAndAlpha: SIMD4<Float>
             /// Unit scroll direction, real VMT rate, and frozen Source time.
             let scrollDirectionRateAndTime: SIMD4<Float>
+        }
+
+        /// Resource-local Studio vertex. The entity pose is supplied separately
+        /// so transform-only publications never rebuild or upload geometry.
+        private struct DynamicEntityGPUVertex {
+            let position: SIMD4<Float>
+            let normal: SIMD4<Float>
+            let uv: SIMD2<Float>
+        }
+
+        private struct DynamicEntityTransformUniforms {
+            let metalXAxis: SIMD4<Float>
+            let metalYAxis: SIMD4<Float>
+            let metalZAxis: SIMD4<Float>
+            let metalTranslation: SIMD4<Float>
+        }
+
+        private struct CachedDynamicEntityGeometry {
+            let resourceID: GModMetalDynamicEntityResourceID
+            let vertexCount: Int
+            let indexCount: Int
+            let byteCount: Int
+            let vertexBuffer: MTLBuffer
+            let indexBuffer: MTLBuffer
+        }
+
+        private struct DynamicEntityTextureKey: Hashable {
+            let bitmapCacheIdentifier: String
+        }
+
+        private struct CachedDynamicEntityTexture {
+            let bitmap: GModMetalSurfaceBitmap
+            let byteCount: Int
+            let texture: MTLTexture
+        }
+
+        private struct DynamicEntityGeometryFailure {
+            let resourceID: GModMetalDynamicEntityResourceID
+            let reason: String
+        }
+
+        private struct DynamicEntityTextureFailure {
+            let bitmap: GModMetalSurfaceBitmap
+            let reason: String
+        }
+
+        private enum DynamicEntitySceneIssue: CustomStringConvertible {
+            case staleGeneration(
+                received: GModMetalDynamicEntitySceneGeneration,
+                active: GModMetalDynamicEntitySceneGeneration
+            )
+            case staleRevision(received: UInt64, active: UInt64)
+            case geometryCapacity(String)
+            case geometryUpload(
+                resourceID: GModMetalDynamicEntityResourceID,
+                reason: String
+            )
+            case textureUpload(key: DynamicEntityTextureKey, reason: String)
+
+            var description: String {
+                switch self {
+                case let .staleGeneration(received, active):
+                    return "ignored stale dynamic generation " +
+                        "\(Self.label(received)); active is \(Self.label(active))"
+                case let .staleRevision(received, active):
+                    return "ignored stale dynamic revision \(received); " +
+                        "active is \(active)"
+                case let .geometryCapacity(reason):
+                    return reason
+                case let .geometryUpload(resourceID, reason):
+                    return "\(Self.resourceLabel(resourceID)): \(reason)"
+                case let .textureUpload(key, reason):
+                    return "texture \(key.bitmapCacheIdentifier): \(reason)"
+                }
+            }
+
+            private static func label(
+                _ generation: GModMetalDynamicEntitySceneGeneration
+            ) -> String {
+                "\(generation.application)/\(generation.lane)/" +
+                    "\(generation.sourceConnection.rawValue)"
+            }
+
+            private static func resourceLabel(
+                _ id: GModMetalDynamicEntityResourceID
+            ) -> String {
+                "\(id.normalizedModelPath)#\(id.checksum):" +
+                    "body=\(id.bodyValue):skin=\(id.skinFamilyIndex)"
+            }
+        }
+
+        private enum DynamicEntityGPUCachePolicy {
+            static let maximumGeometryByteCount = 128 * 1_024 * 1_024
+            static let maximumTextureCount = 512
+            static let maximumTextureByteCount = 64 * 1_024 * 1_024
+        }
+
+        private struct DynamicEntityUploadBudget {
+            static let maximumResourceCount = 1
+            static let maximumByteCount = 16 * 1_024 * 1_024
+
+            private(set) var remainingResourceCount = maximumResourceCount
+            private(set) var remainingByteCount = maximumByteCount
+
+            mutating func reserve(byteCount: Int) -> Bool {
+                guard byteCount >= 0, remainingResourceCount > 0 else {
+                    return false
+                }
+                if byteCount > remainingByteCount {
+                    // A resource larger than the ordinary per-frame allowance
+                    // is admitted alone so retained data cannot stall forever.
+                    guard remainingResourceCount == Self.maximumResourceCount,
+                          remainingByteCount == Self.maximumByteCount else {
+                        return false
+                    }
+                    remainingResourceCount = 0
+                    remainingByteCount = 0
+                    return true
+                }
+                remainingResourceCount -= 1
+                remainingByteCount -= byteCount
+                return true
+            }
         }
 
         private struct SurfaceGPUVertex {
@@ -596,9 +735,43 @@ public struct GModMetalView:
         private var pendingSurfaceScene:
             PendingSurfaceScene?
 
+        private var pendingDynamicEntityScene:
+            PendingDynamicEntityScene?
+
         /// Accessed only by MTKView's serialized draw callback.
         private var activeWorldScene:
             GModMetalWorldScene?
+
+        /// Accessed only by MTKView's serialized draw callback.
+        private var activeDynamicEntityScene:
+            GModMetalDynamicEntityScene?
+
+        private var cachedDynamicEntityGeometry:
+            [GModMetalDynamicEntityResourceID: CachedDynamicEntityGeometry] = [:]
+
+        private var cachedDynamicEntityGeometryByteCount = 0
+
+        private var dynamicEntityGeometryFailures:
+            [GModMetalDynamicEntityResourceID: DynamicEntityGeometryFailure] = [:]
+
+        private var cachedDynamicEntityTextures:
+            [DynamicEntityTextureKey: CachedDynamicEntityTexture] = [:]
+
+        private var cachedDynamicEntityTextureOrder:
+            [DynamicEntityTextureKey] = []
+
+        private var cachedDynamicEntityTextureByteCount = 0
+
+        private var dynamicEntityTextureFailures:
+            [DynamicEntityTextureKey: DynamicEntityTextureFailure] = [:]
+
+        private var dynamicEntitySceneIssue: DynamicEntitySceneIssue?
+
+        private var lastDynamicEntityInstanceDrawCount = 0
+
+        private var lastDynamicEntityRangeDrawCount = 0
+
+        private var lastDynamicEntityCheckerRangeCount = 0
 
         /// Accessed only by MTKView's serialized draw callback.
         private var cachedWorldMesh:
@@ -685,6 +858,7 @@ public struct GModMetalView:
         init(
             stats: Binding<String>,
             worldScene: GModMetalWorldScene?,
+            dynamicEntityScene: GModMetalDynamicEntityScene? = nil,
             surfaceScene: GModMetalSurfaceScene? = nil,
             onFrame: @escaping @Sendable (GModMetalFrameRequest) -> Void,
             onWorldFrameEvent: @escaping @Sendable
@@ -706,6 +880,11 @@ public struct GModMetalView:
                 pendingSurfaceScene = .replace(surfaceScene)
             } else {
                 pendingSurfaceScene = .clear
+            }
+            if let dynamicEntityScene {
+                pendingDynamicEntityScene = .replace(dynamicEntityScene)
+            } else {
+                pendingDynamicEntityScene = .clear
             }
         }
 
@@ -749,6 +928,12 @@ public struct GModMetalView:
                         library.makeFunction(
                             name:
                                 "worldVertexMain"
+                        ),
+
+                    let dynamicEntityVertexFunction =
+                        library.makeFunction(
+                            name:
+                                "dynamicEntityVertexMain"
                         ),
 
                     let worldFragmentFunction =
@@ -898,6 +1083,35 @@ public struct GModMetalView:
                 worldMissingMaterialPipeline = try device.makeRenderPipelineState(
                     descriptor: worldMissingDescriptor
                 )
+
+                let dynamicEntityTexturedDescriptor =
+                    MTLRenderPipelineDescriptor()
+                dynamicEntityTexturedDescriptor.vertexFunction =
+                    dynamicEntityVertexFunction
+                dynamicEntityTexturedDescriptor.fragmentFunction =
+                    worldTexturedFragmentFunction
+                dynamicEntityTexturedDescriptor.colorAttachments[0].pixelFormat =
+                    colorPixelFormat
+                dynamicEntityTexturedDescriptor.depthAttachmentPixelFormat =
+                    depthPixelFormat
+                dynamicEntityTexturedPipeline = try device.makeRenderPipelineState(
+                    descriptor: dynamicEntityTexturedDescriptor
+                )
+
+                let dynamicEntityMissingDescriptor =
+                    MTLRenderPipelineDescriptor()
+                dynamicEntityMissingDescriptor.vertexFunction =
+                    dynamicEntityVertexFunction
+                dynamicEntityMissingDescriptor.fragmentFunction =
+                    worldMissingMaterialFragmentFunction
+                dynamicEntityMissingDescriptor.colorAttachments[0].pixelFormat =
+                    colorPixelFormat
+                dynamicEntityMissingDescriptor.depthAttachmentPixelFormat =
+                    depthPixelFormat
+                dynamicEntityMissingMaterialPipeline =
+                    try device.makeRenderPipelineState(
+                        descriptor: dynamicEntityMissingDescriptor
+                    )
 
                 let worldSkyboxDescriptor = MTLRenderPipelineDescriptor()
                 worldSkyboxDescriptor.vertexFunction = worldVertexFunction
@@ -1180,10 +1394,11 @@ public struct GModMetalView:
             pendingSceneLock.unlock()
         }
 
-        /// Atomically replaces both renderer inputs so a SwiftUI update cannot
-        /// pair a new world camera with an older surface frame.
+        /// Atomically replaces renderer inputs so a SwiftUI update cannot pair
+        /// a new world camera with an older entity or Surface publication.
         func submit(
             worldScene: GModMetalWorldScene?,
+            dynamicEntityScene: GModMetalDynamicEntityScene?,
             surfaceScene: GModMetalSurfaceScene?
         ) {
             pendingSceneLock.lock()
@@ -1197,7 +1412,23 @@ public struct GModMetalView:
             } else {
                 pendingSurfaceScene = .clear
             }
+            if let dynamicEntityScene {
+                pendingDynamicEntityScene = .replace(dynamicEntityScene)
+            } else {
+                pendingDynamicEntityScene = .clear
+            }
             pendingSceneLock.unlock()
+        }
+
+        func submit(
+            worldScene: GModMetalWorldScene?,
+            surfaceScene: GModMetalSurfaceScene?
+        ) {
+            submit(
+                worldScene: worldScene,
+                dynamicEntityScene: nil,
+                surfaceScene: surfaceScene
+            )
         }
 
         /// One-slot handoff for a fully materialized surface frame. It carries
@@ -1214,14 +1445,90 @@ public struct GModMetalView:
 
         private func takePendingScenes() -> (
             world: PendingWorldScene?,
+            dynamicEntity: PendingDynamicEntityScene?,
             surface: PendingSurfaceScene?
         ) {
             pendingSceneLock.lock()
-            let result = (pendingWorldScene, pendingSurfaceScene)
+            let result = (
+                pendingWorldScene,
+                pendingDynamicEntityScene,
+                pendingSurfaceScene
+            )
             pendingWorldScene = nil
+            pendingDynamicEntityScene = nil
             pendingSurfaceScene = nil
             pendingSceneLock.unlock()
             return result
+        }
+
+        private func applyPendingDynamicEntityScene(
+            _ pending: PendingDynamicEntityScene?
+        ) {
+            guard let pending else { return }
+            guard case let .replace(scene) = pending else {
+                activeDynamicEntityScene = nil
+                resetDynamicEntityCaches()
+                dynamicEntitySceneIssue = nil
+                lastDynamicEntityInstanceDrawCount = 0
+                lastDynamicEntityRangeDrawCount = 0
+                lastDynamicEntityCheckerRangeCount = 0
+                return
+            }
+            guard scene.retainedGeometryByteCount <=
+                    DynamicEntityGPUCachePolicy.maximumGeometryByteCount else {
+                dynamicEntitySceneIssue =
+                    .geometryCapacity(
+                        "dynamic geometry publication exceeds 128 MiB renderer cap"
+                    )
+                return
+            }
+
+            if let active = activeDynamicEntityScene {
+                if active.generation == scene.generation {
+                    guard scene.revision > active.revision else {
+                        if scene.revision < active.revision {
+                            dynamicEntitySceneIssue = .staleRevision(
+                                received: scene.revision,
+                                active: active.revision
+                            )
+                        }
+                        return
+                    }
+                    activeDynamicEntityScene = scene
+                    pruneDynamicEntityCaches(for: scene)
+                } else {
+                    guard !Self.dynamicEntityGeneration(
+                        scene.generation,
+                        precedes: active.generation
+                    ) else {
+                        dynamicEntitySceneIssue = .staleGeneration(
+                            received: scene.generation,
+                            active: active.generation
+                        )
+                        return
+                    }
+                    resetDynamicEntityCaches()
+                    activeDynamicEntityScene = scene
+                }
+            } else {
+                resetDynamicEntityCaches()
+                activeDynamicEntityScene = scene
+            }
+            dynamicEntitySceneIssue = nil
+            lastDynamicEntityInstanceDrawCount = 0
+            lastDynamicEntityRangeDrawCount = 0
+            lastDynamicEntityCheckerRangeCount = 0
+        }
+
+        private static func dynamicEntityGeneration(
+            _ lhs: GModMetalDynamicEntitySceneGeneration,
+            precedes rhs: GModMetalDynamicEntitySceneGeneration
+        ) -> Bool {
+            if lhs.application != rhs.application {
+                return lhs.application < rhs.application
+            }
+            if lhs.lane != rhs.lane { return lhs.lane < rhs.lane }
+            return lhs.sourceConnection.rawValue < rhs.sourceConnection.rawValue
         }
 
         private func applyPendingWorldScene(
@@ -1375,6 +1682,81 @@ public struct GModMetalView:
                 lastSurfaceDrawCount = 0
                 lastSurfaceDroppedDrawCount = 0
             }
+        }
+
+        private func resetDynamicEntityCaches() {
+            cachedDynamicEntityGeometry.removeAll(keepingCapacity: true)
+            cachedDynamicEntityGeometryByteCount = 0
+            dynamicEntityGeometryFailures.removeAll(keepingCapacity: true)
+            cachedDynamicEntityTextures.removeAll(keepingCapacity: true)
+            cachedDynamicEntityTextureOrder.removeAll(keepingCapacity: true)
+            cachedDynamicEntityTextureByteCount = 0
+            dynamicEntityTextureFailures.removeAll(keepingCapacity: true)
+        }
+
+        private func pruneDynamicEntityCaches(
+            for scene: GModMetalDynamicEntityScene
+        ) {
+            let retainedResourceIDs = Set(scene.resources.map(\.id))
+            for key in Array(cachedDynamicEntityGeometry.keys) where
+                !retainedResourceIDs.contains(key) {
+                removeCachedDynamicEntityGeometry(for: key)
+            }
+            dynamicEntityGeometryFailures =
+                dynamicEntityGeometryFailures.filter {
+                    retainedResourceIDs.contains($0.key)
+                }
+
+            let retainedTextureKeys = Set(scene.resources.flatMap { resource in
+                resource.drawRanges.compactMap { range in
+                    guard let bitmap = range.materialResolution.bitmap else {
+                        return nil
+                    }
+                    return Self.dynamicEntityTextureKey(
+                        bitmap: bitmap
+                    )
+                }
+            })
+            for key in Array(cachedDynamicEntityTextures.keys) where
+                !retainedTextureKeys.contains(key) {
+                removeCachedDynamicEntityTexture(for: key)
+            }
+            dynamicEntityTextureFailures =
+                dynamicEntityTextureFailures.filter {
+                    retainedTextureKeys.contains($0.key)
+                }
+        }
+
+        private func removeCachedDynamicEntityGeometry(
+            for resourceID: GModMetalDynamicEntityResourceID
+        ) {
+            guard let removed = cachedDynamicEntityGeometry.removeValue(
+                forKey: resourceID
+            ) else { return }
+            cachedDynamicEntityGeometryByteCount = Swift.max(
+                0,
+                cachedDynamicEntityGeometryByteCount - removed.byteCount
+            )
+        }
+
+        private func removeCachedDynamicEntityTexture(
+            for key: DynamicEntityTextureKey
+        ) {
+            if let removed = cachedDynamicEntityTextures.removeValue(forKey: key) {
+                cachedDynamicEntityTextureByteCount = Swift.max(
+                    0,
+                    cachedDynamicEntityTextureByteCount - removed.byteCount
+                )
+            }
+            cachedDynamicEntityTextureOrder.removeAll { $0 == key }
+        }
+
+        private static func dynamicEntityTextureKey(
+            bitmap: GModMetalSurfaceBitmap
+        ) -> DynamicEntityTextureKey {
+            DynamicEntityTextureKey(
+                bitmapCacheIdentifier: bitmap.cacheIdentifier
+            )
         }
 
         private static func makeSurfacePipelineDescriptor(
@@ -1844,6 +2226,7 @@ public struct GModMetalView:
             }
             let pendingScenes = takePendingScenes()
             applyPendingWorldScene(pendingScenes.world, device: device)
+            applyPendingDynamicEntityScene(pendingScenes.dynamicEntity)
             applyPendingSurfaceScene(pendingScenes.surface)
 
             if let scene = activeWorldScene,
@@ -1862,6 +2245,8 @@ public struct GModMetalView:
                 let worldLightmappedPipeline,
                 let worldTexturedLightmappedPipeline,
                 let worldMissingMaterialPipeline,
+                let dynamicEntityTexturedPipeline,
+                let dynamicEntityMissingMaterialPipeline,
                 let worldSkyboxPipeline,
                 let worldWaterSolidPipeline,
                 let worldWaterNormalPipeline,
@@ -2046,6 +2431,9 @@ public struct GModMetalView:
                     lightmappedPipeline: worldLightmappedPipeline,
                     texturedLightmappedPipeline: worldTexturedLightmappedPipeline,
                     missingMaterialPipeline: worldMissingMaterialPipeline,
+                    dynamicEntityTexturedPipeline: dynamicEntityTexturedPipeline,
+                    dynamicEntityMissingMaterialPipeline:
+                        dynamicEntityMissingMaterialPipeline,
                     skyboxPipeline: worldSkyboxPipeline,
                     waterSolidPipeline: worldWaterSolidPipeline,
                     waterNormalPipeline: worldWaterNormalPipeline,
@@ -2385,6 +2773,8 @@ public struct GModMetalView:
             lightmappedPipeline: MTLRenderPipelineState,
             texturedLightmappedPipeline: MTLRenderPipelineState,
             missingMaterialPipeline: MTLRenderPipelineState,
+            dynamicEntityTexturedPipeline: MTLRenderPipelineState,
+            dynamicEntityMissingMaterialPipeline: MTLRenderPipelineState,
             skyboxPipeline: MTLRenderPipelineState,
             waterSolidPipeline: MTLRenderPipelineState,
             waterNormalPipeline: MTLRenderPipelineState,
@@ -2538,6 +2928,26 @@ public struct GModMetalView:
                 draw(range)
             }
 
+            // Source opaque entities share the ordinary-world depth lifetime:
+            // they draw after opaque BSP and before translucent water.
+            if let dynamicScene = activeDynamicEntityScene {
+                drawDynamicEntities(
+                    scene: dynamicScene,
+                    device: device,
+                    texturedPipeline: dynamicEntityTexturedPipeline,
+                    missingMaterialPipeline:
+                        dynamicEntityMissingMaterialPipeline,
+                    depthState: worldDepthState,
+                    encoder: encoder
+                )
+                // Water ranges are indexed against the BSP-local buffers.
+                encoder.setVertexBuffer(mesh.vertexBuffer, offset: 0, index: 0)
+            } else {
+                lastDynamicEntityInstanceDrawCount = 0
+                lastDynamicEntityRangeDrawCount = 0
+                lastDynamicEntityCheckerRangeCount = 0
+            }
+
             encoder.setDepthStencilState(waterDepthState)
             encoder.setFragmentSamplerState(worldSampler, index: 0)
             var waterRenderedRangeCount = 0
@@ -2646,6 +3056,362 @@ public struct GModMetalView:
                 requiredTextureCount: requiredTextures.count,
                 failureReason: worldTextureUploadFailureReason
             )
+        }
+
+        private func drawDynamicEntities(
+            scene: GModMetalDynamicEntityScene,
+            device: MTLDevice,
+            texturedPipeline: MTLRenderPipelineState,
+            missingMaterialPipeline: MTLRenderPipelineState,
+            depthState: MTLDepthStencilState,
+            encoder: MTLRenderCommandEncoder
+        ) {
+            let referencedResourceIDs = Set(scene.instances.map(\.resourceID))
+            var geometryUploadBudget = DynamicEntityUploadBudget()
+            var textureUploadBudget = DynamicEntityUploadBudget()
+            uploadNextDynamicEntityGeometry(
+                scene: scene,
+                referencedResourceIDs: referencedResourceIDs,
+                device: device,
+                uploadBudget: &geometryUploadBudget
+            )
+            uploadNextDynamicEntityTexture(
+                scene: scene,
+                referencedResourceIDs: referencedResourceIDs,
+                device: device,
+                uploadBudget: &textureUploadBudget
+            )
+
+            let resources = Dictionary(
+                uniqueKeysWithValues: scene.resources.map { ($0.id, $0) }
+            )
+            var instanceDrawCount = 0
+            var rangeDrawCount = 0
+            var checkerRangeCount = 0
+            encoder.setDepthStencilState(depthState)
+            encoder.setCullMode(.none)
+
+            for instance in scene.instances {
+                guard let resource = resources[instance.resourceID],
+                      let geometry = cachedDynamicEntityGeometry[
+                        instance.resourceID
+                      ],
+                      geometry.resourceID == instance.resourceID,
+                      geometry.vertexCount == resource.vertices.count,
+                      geometry.indexCount == resource.indices.count else {
+                    continue
+                }
+
+                // The scene's identity is a complete EHANDLE (entry + serial).
+                // It deliberately remains distinct even when an entry is reused.
+                _ = instance.identity.handle.rawValue
+                let transform = instance.metalTransform
+                var transformUniforms = DynamicEntityTransformUniforms(
+                    metalXAxis: SIMD4<Float>(transform.metalXAxis, 0),
+                    metalYAxis: SIMD4<Float>(transform.metalYAxis, 0),
+                    metalZAxis: SIMD4<Float>(transform.metalZAxis, 0),
+                    metalTranslation: SIMD4<Float>(transform.metalTranslation, 1)
+                )
+                encoder.setVertexBuffer(
+                    geometry.vertexBuffer,
+                    offset: 0,
+                    index: 0
+                )
+                withUnsafeBytes(of: &transformUniforms) { bytes in
+                    guard let address = bytes.baseAddress else { return }
+                    encoder.setVertexBytes(
+                        address,
+                        length: bytes.count,
+                        index: 2
+                    )
+                }
+
+                var drewInstance = false
+                for range in resource.drawRanges {
+                    var drawsChecker = true
+                    if case let .resolved(_, bitmap) =
+                        range.materialResolution,
+                       bitmap.alphaRepresentation == .straight {
+                        let key = Self.dynamicEntityTextureKey(
+                            bitmap: bitmap
+                        )
+                        if let cached = cachedDynamicEntityTextures[key],
+                           cached.bitmap == bitmap {
+                            encoder.setRenderPipelineState(texturedPipeline)
+                            encoder.setFragmentTexture(cached.texture, index: 0)
+                            let configuration =
+                                GModMetalWorldSamplerConfiguration(
+                                    bitmap: bitmap,
+                                    renderLayer: .world
+                                )
+                            encoder.setFragmentSamplerState(
+                                samplerStateForWorldTexture(
+                                    for: configuration,
+                                    device: device
+                                ),
+                                index: 0
+                            )
+                            drawsChecker = false
+                        }
+                    }
+                    if drawsChecker {
+                        // Missing, failed, unsupported-alpha, and upload-pending
+                        // Source materials all remain visible as the checker.
+                        encoder.setRenderPipelineState(missingMaterialPipeline)
+                        encoder.setFragmentTexture(nil, index: 0)
+                        encoder.setFragmentSamplerState(nil, index: 0)
+                        checkerRangeCount += 1
+                    }
+                    encoder.drawIndexedPrimitives(
+                        type: .triangle,
+                        indexCount: range.indexCount,
+                        indexType: .uint32,
+                        indexBuffer: geometry.indexBuffer,
+                        indexBufferOffset:
+                            range.firstIndex * MemoryLayout<UInt32>.stride
+                    )
+                    rangeDrawCount += 1
+                    drewInstance = true
+                }
+                if drewInstance { instanceDrawCount += 1 }
+            }
+
+            lastDynamicEntityInstanceDrawCount = instanceDrawCount
+            lastDynamicEntityRangeDrawCount = rangeDrawCount
+            lastDynamicEntityCheckerRangeCount = checkerRangeCount
+        }
+
+        private func uploadNextDynamicEntityGeometry(
+            scene: GModMetalDynamicEntityScene,
+            referencedResourceIDs: Set<GModMetalDynamicEntityResourceID>,
+            device: MTLDevice,
+            uploadBudget: inout DynamicEntityUploadBudget
+        ) {
+            for resource in scene.resources where
+                referencedResourceIDs.contains(resource.id) {
+                if cachedDynamicEntityGeometry[resource.id] != nil { continue }
+                if dynamicEntityGeometryFailures[resource.id] != nil { continue }
+
+                let vertexBytes = resource.vertices.count
+                    .multipliedReportingOverflow(
+                        by: MemoryLayout<DynamicEntityGPUVertex>.stride
+                    )
+                let indexBytes = resource.indices.count
+                    .multipliedReportingOverflow(
+                        by: MemoryLayout<UInt32>.stride
+                    )
+                let totalBytes = vertexBytes.partialValue
+                    .addingReportingOverflow(indexBytes.partialValue)
+                guard !vertexBytes.overflow, !indexBytes.overflow,
+                      !totalBytes.overflow,
+                      totalBytes.partialValue == resource.geometryByteCount,
+                      totalBytes.partialValue <=
+                        DynamicEntityGPUCachePolicy.maximumGeometryByteCount,
+                      cachedDynamicEntityGeometryByteCount <=
+                        DynamicEntityGPUCachePolicy.maximumGeometryByteCount -
+                            totalBytes.partialValue else {
+                    recordDynamicEntityGeometryFailure(
+                        resourceID: resource.id,
+                        reason: "geometry byte count violates 128 MiB GPU cap"
+                    )
+                    continue
+                }
+                guard uploadBudget.reserve(byteCount: totalBytes.partialValue) else {
+                    return
+                }
+
+                let vertices = resource.vertices.map { vertex in
+                    DynamicEntityGPUVertex(
+                        position: SIMD4<Float>(vertex.metalLocalPosition, 1),
+                        normal: SIMD4<Float>(vertex.metalLocalNormal, 0),
+                        uv: vertex.textureCoordinate
+                    )
+                }
+                let vertexBuffer = vertices.withUnsafeBytes { bytes -> MTLBuffer? in
+                    guard let address = bytes.baseAddress else { return nil }
+                    return device.makeBuffer(
+                        bytes: address,
+                        length: bytes.count,
+                        options: .storageModeShared
+                    )
+                }
+                let indexBuffer = resource.indices.withUnsafeBytes {
+                    bytes -> MTLBuffer? in
+                    guard let address = bytes.baseAddress else { return nil }
+                    return device.makeBuffer(
+                        bytes: address,
+                        length: bytes.count,
+                        options: .storageModeShared
+                    )
+                }
+                guard let vertexBuffer, let indexBuffer else {
+                    recordDynamicEntityGeometryFailure(
+                        resourceID: resource.id,
+                        reason: "Metal resource-local buffer allocation failed"
+                    )
+                    return
+                }
+                let label = Self.dynamicEntityResourceLabel(resource.id)
+                vertexBuffer.label = "Dynamic prop vertices \(label)"
+                indexBuffer.label = "Dynamic prop indices \(label)"
+                cachedDynamicEntityGeometry[resource.id] =
+                    CachedDynamicEntityGeometry(
+                        resourceID: resource.id,
+                        vertexCount: vertices.count,
+                        indexCount: resource.indices.count,
+                        byteCount: totalBytes.partialValue,
+                        vertexBuffer: vertexBuffer,
+                        indexBuffer: indexBuffer
+                    )
+                cachedDynamicEntityGeometryByteCount += totalBytes.partialValue
+                return
+            }
+        }
+
+        private func uploadNextDynamicEntityTexture(
+            scene: GModMetalDynamicEntityScene,
+            referencedResourceIDs: Set<GModMetalDynamicEntityResourceID>,
+            device: MTLDevice,
+            uploadBudget: inout DynamicEntityUploadBudget
+        ) {
+            var visited = Set<DynamicEntityTextureKey>()
+            for resource in scene.resources where
+                referencedResourceIDs.contains(resource.id) {
+                for range in resource.drawRanges {
+                    guard case let .resolved(_, bitmap) =
+                            range.materialResolution else { continue }
+                    let key = Self.dynamicEntityTextureKey(
+                        bitmap: bitmap
+                    )
+                    guard visited.insert(key).inserted else { continue }
+                    if let cached = cachedDynamicEntityTextures[key],
+                       cached.bitmap == bitmap {
+                        continue
+                    }
+                    if cachedDynamicEntityTextures[key] != nil {
+                        removeCachedDynamicEntityTexture(for: key)
+                    }
+                    if let failure = dynamicEntityTextureFailures[key],
+                       failure.bitmap == bitmap {
+                        continue
+                    }
+                    dynamicEntityTextureFailures.removeValue(forKey: key)
+
+                    guard bitmap.alphaRepresentation == .straight else {
+                        recordDynamicEntityTextureFailure(
+                            key: key,
+                            bitmap: bitmap,
+                            reason: "dynamic Source bitmap is not straight-alpha"
+                        )
+                        continue
+                    }
+                    let byteCount = bitmap.totalByteCount
+                    guard byteCount <=
+                            DynamicEntityGPUCachePolicy.maximumTextureByteCount else {
+                        recordDynamicEntityTextureFailure(
+                            key: key,
+                            bitmap: bitmap,
+                            reason: "dynamic texture exceeds 64 MiB GPU cache cap"
+                        )
+                        continue
+                    }
+                    guard uploadBudget.reserve(byteCount: byteCount) else { return }
+                    makeRoomForDynamicEntityTexture(byteCount: byteCount)
+
+                    let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                        pixelFormat: .rgba8Unorm_srgb,
+                        width: bitmap.width,
+                        height: bitmap.height,
+                        mipmapped: bitmap.mipLevels.count > 1
+                    )
+                    descriptor.mipmapLevelCount = bitmap.mipLevels.count
+                    descriptor.usage = .shaderRead
+                    descriptor.storageMode = .shared
+                    guard let texture = device.makeTexture(descriptor: descriptor)
+                    else {
+                        recordDynamicEntityTextureFailure(
+                            key: key,
+                            bitmap: bitmap,
+                            reason: "Metal dynamic texture allocation failed"
+                        )
+                        return
+                    }
+                    for (level, mip) in bitmap.mipLevels.enumerated() {
+                        mip.premultipliedRGBA8.withUnsafeBytes { bytes in
+                            guard let base = bytes.baseAddress else { return }
+                            texture.replace(
+                                region: MTLRegionMake2D(
+                                    0,
+                                    0,
+                                    mip.width,
+                                    mip.height
+                                ),
+                                mipmapLevel: level,
+                                withBytes: base,
+                                bytesPerRow: mip.width * 4
+                            )
+                        }
+                    }
+                    texture.label =
+                        "Dynamic prop texture \(Self.dynamicEntityResourceLabel(resource.id))"
+                    cachedDynamicEntityTextures[key] =
+                        CachedDynamicEntityTexture(
+                            bitmap: bitmap,
+                            byteCount: byteCount,
+                            texture: texture
+                        )
+                    cachedDynamicEntityTextureOrder.append(key)
+                    cachedDynamicEntityTextureByteCount += byteCount
+                    return
+                }
+            }
+        }
+
+        private func makeRoomForDynamicEntityTexture(byteCount: Int) {
+            while !cachedDynamicEntityTextureOrder.isEmpty &&
+                (cachedDynamicEntityTextures.count >=
+                    DynamicEntityGPUCachePolicy.maximumTextureCount ||
+                 cachedDynamicEntityTextureByteCount >
+                    DynamicEntityGPUCachePolicy.maximumTextureByteCount -
+                        byteCount) {
+                removeCachedDynamicEntityTexture(
+                    for: cachedDynamicEntityTextureOrder[0]
+                )
+            }
+        }
+
+        private func recordDynamicEntityGeometryFailure(
+            resourceID: GModMetalDynamicEntityResourceID,
+            reason: String
+        ) {
+            dynamicEntityGeometryFailures[resourceID] =
+                DynamicEntityGeometryFailure(
+                    resourceID: resourceID,
+                    reason: reason
+                )
+            dynamicEntitySceneIssue = .geometryUpload(
+                resourceID: resourceID,
+                reason: reason
+            )
+        }
+
+        private func recordDynamicEntityTextureFailure(
+            key: DynamicEntityTextureKey,
+            bitmap: GModMetalSurfaceBitmap,
+            reason: String
+        ) {
+            dynamicEntityTextureFailures[key] = DynamicEntityTextureFailure(
+                bitmap: bitmap,
+                reason: reason
+            )
+            dynamicEntitySceneIssue = .textureUpload(key: key, reason: reason)
+        }
+
+        private static func dynamicEntityResourceLabel(
+            _ id: GModMetalDynamicEntityResourceID
+        ) -> String {
+            "\(id.normalizedModelPath)#\(id.checksum):" +
+                "body=\(id.bodyValue):skin=\(id.skinFamilyIndex)"
         }
 
         private func worldTexture(
@@ -3189,6 +3955,25 @@ public struct GModMetalView:
                     "World loading"
             }
 
+            let dynamicEntityStats: String
+            if let scene = activeDynamicEntityScene {
+                dynamicEntityStats =
+                    "Props: \(lastDynamicEntityInstanceDrawCount)/" +
+                    "\(scene.instances.count) instances, " +
+                    "\(lastDynamicEntityRangeDrawCount) ranges, " +
+                    "checker \(lastDynamicEntityCheckerRangeCount); " +
+                    "GPU geometry \(cachedDynamicEntityGeometry.count) / " +
+                    "\(cachedDynamicEntityGeometryByteCount) bytes, textures " +
+                    "\(cachedDynamicEntityTextures.count)/" +
+                    "\(DynamicEntityGPUCachePolicy.maximumTextureCount) / " +
+                    "\(cachedDynamicEntityTextureByteCount) bytes" +
+                    (dynamicEntitySceneIssue.map { "; issue: \($0)" } ?? "")
+            } else if let dynamicEntitySceneIssue {
+                dynamicEntityStats = "Props rejected: \(dynamicEntitySceneIssue)"
+            } else {
+                dynamicEntityStats = "Props: no publication"
+            }
+
             let surfaceStats: String
             if let scene = activeSurfaceScene {
                 let diagnostics = scene.diagnostics
@@ -3222,6 +4007,7 @@ public struct GModMetalView:
                 ARM64 Swift + Metal
                 GPU: \(deviceName)
                 \(rendererStats)
+                \(dynamicEntityStats)
                 \(surfaceStats)
                 \(numericStats)
                 """
@@ -3258,6 +4044,21 @@ public struct GModMetalView:
             float4 normal;
             float2 uv;
             float2 lightmapUV;
+        };
+
+        struct DynamicEntityVertex
+        {
+            float4 position;
+            float4 normal;
+            float2 uv;
+        };
+
+        struct DynamicEntityTransform
+        {
+            float4 metalXAxis;
+            float4 metalYAxis;
+            float4 metalZAxis;
+            float4 metalTranslation;
         };
 
         struct WorldUniforms
@@ -3298,6 +4099,39 @@ public struct GModMetalView:
             output.normal = sourceVertex.normal.xyz;
             output.uv = sourceVertex.uv;
             output.lightmapUV = sourceVertex.lightmapUV;
+            return output;
+        }
+
+        vertex WorldVertexOutput dynamicEntityVertexMain(
+            const device DynamicEntityVertex *vertices
+                [[buffer(0)]],
+
+            constant WorldUniforms &uniforms
+                [[buffer(1)]],
+
+            constant DynamicEntityTransform &model
+                [[buffer(2)]],
+
+            uint vertexID
+                [[vertex_id]]
+        )
+        {
+            DynamicEntityVertex sourceVertex = vertices[vertexID];
+            float3 worldPosition = model.metalTranslation.xyz
+                + model.metalXAxis.xyz * sourceVertex.position.x
+                + model.metalYAxis.xyz * sourceVertex.position.y
+                + model.metalZAxis.xyz * sourceVertex.position.z;
+            float3 worldNormal = normalize(
+                model.metalXAxis.xyz * sourceVertex.normal.x
+                + model.metalYAxis.xyz * sourceVertex.normal.y
+                + model.metalZAxis.xyz * sourceVertex.normal.z
+            );
+            WorldVertexOutput output;
+            output.position = uniforms.viewProjection
+                * float4(worldPosition, 1.0);
+            output.normal = worldNormal;
+            output.uv = sourceVertex.uv;
+            output.lightmapUV = float2(0.0);
             return output;
         }
 

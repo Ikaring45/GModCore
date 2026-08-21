@@ -79,6 +79,7 @@ metal = (
 )
 expected_functions = {
     "worldVertexMain",
+    "dynamicEntityVertexMain",
     "worldFragmentMain",
     "worldTexturedFragmentMain",
     "worldLightmappedFragmentMain",
@@ -121,6 +122,20 @@ required_pipeline_contract = {
     "GModMetalSky3DProjectionContract.bakedClipPlanes",
     "GModMetalSurfaceTextureUploadContract.mipmapLevelCount",
     "$0.renderLayer == .sky3D && $0.waterSurface != nil",
+    "private let dynamicEntityScene: GModMetalDynamicEntityScene?",
+    "case clear",
+    "static let maximumGeometryByteCount = 128 * 1_024 * 1_024",
+    "static let maximumTextureCount = 512",
+    "static let maximumTextureByteCount = 64 * 1_024 * 1_024",
+    "private struct DynamicEntityUploadBudget",
+    "static let maximumResourceCount = 1",
+    "static let maximumByteCount = 16 * 1_024 * 1_024",
+    "bitmap.alphaRepresentation == .straight",
+    "GModMetalWorldSamplerConfiguration(",
+    "renderLayer: .world",
+    "resourceID: GModMetalDynamicEntityResourceID",
+    "instance.identity.handle.rawValue",
+    "constant DynamicEntityTransform &model [[buffer(2)]]",
 }
 missing_contract = sorted(
     phrase for phrase in required_pipeline_contract if phrase not in normalized_swift
@@ -131,10 +146,51 @@ if missing_contract:
         + ", ".join(missing_contract)
     )
 
+texture_key_match = re.search(
+    r"private struct DynamicEntityTextureKey: Hashable \{([^}]*)\}",
+    swift_source,
+    re.DOTALL,
+)
+if texture_key_match is None:
+    raise SystemExit("Dynamic texture digest key declaration is missing")
+if "resourceID" in texture_key_match.group(1):
+    raise SystemExit(
+        "Dynamic textures must deduplicate by bitmap digest, not resource ID"
+    )
+
+opaque_loop = normalized_swift.find(
+    "for range in ranges where range.renderLayer == .world && "
+    "range.waterSurface == nil"
+)
+dynamic_draw = normalized_swift.find(
+    "drawDynamicEntities(",
+    opaque_loop if opaque_loop >= 0 else 0,
+)
+water_pass = normalized_swift.find(
+    "encoder.setDepthStencilState(waterDepthState)",
+    dynamic_draw if dynamic_draw >= 0 else 0,
+)
+if not (0 <= opaque_loop < dynamic_draw < water_pass):
+    raise SystemExit(
+        "Dynamic prop pass must remain after opaque BSP and before water"
+    )
+world_call = normalized_swift.find("let drawResult = drawWorld(")
+surface_pass = normalized_swift.find(
+    "if let surfaceScene = activeSurfaceScene",
+    world_call if world_call >= 0 else 0,
+)
+if not (0 <= world_call < surface_pass):
+    raise SystemExit("Surface pass must remain after the world composite pass")
+
 output_path.write_text(metal, encoding="utf-8", newline="\n")
 print(f"Extracted {len(metal.encode('utf-8'))} bytes from {source_path}")
 print("Embedded Metal functions:", ", ".join(sorted(expected_functions)))
 PY
+
+if [[ "${GMOD_METAL_STATIC_ONLY:-0}" == "1" ]]; then
+  echo "Embedded Metal static contract passed (Apple compile intentionally skipped)"
+  exit 0
+fi
 
 xcrun --sdk iphoneos metal \
   -Werror \

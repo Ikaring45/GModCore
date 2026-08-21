@@ -28,6 +28,10 @@ enum MetalPipelineSmoke {
 
             let library = try device.makeLibrary(source: shaderSource, options: nil)
             let worldVertex = try function(named: "worldVertexMain", in: library)
+            let dynamicEntityVertex = try function(
+                named: "dynamicEntityVertexMain",
+                in: library
+            )
             let worldFragment = try function(named: "worldFragmentMain", in: library)
             let worldTextured = try function(
                 named: "worldTexturedFragmentMain",
@@ -99,6 +103,18 @@ enum MetalPipelineSmoke {
             )
             try makePipeline(
                 device: device,
+                vertex: dynamicEntityVertex,
+                fragment: worldTextured,
+                blending: false
+            )
+            try makePipeline(
+                device: device,
+                vertex: dynamicEntityVertex,
+                fragment: worldMissingMaterial,
+                blending: false
+            )
+            try makePipeline(
+                device: device,
                 vertex: worldVertex,
                 fragment: worldSkybox,
                 blending: false
@@ -129,7 +145,7 @@ enum MetalPipelineSmoke {
             )
 
             print(
-                "Runtime Metal library and ten render pipelines passed on "
+                "Runtime Metal library and twelve render pipelines passed on "
                     + device.name
             )
         } catch {
