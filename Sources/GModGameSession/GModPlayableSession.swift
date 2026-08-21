@@ -681,6 +681,7 @@ public final class GModPlayableSession {
             adapter = sourceAdapter
             try sourceAdapter.installCanonicalEntityLuaBridge()
             try sourceAdapter.installCanonicalPhysicsObjectLuaBridge()
+            try SourceCanonicalSinglePlayerGLuaBridge.install(into: server)
             // This attachment owns only CLIENT Tick/Think clocking. The
             // adapter has no legacy entities in this session, and canonical
             // Entity state reaches CLIENT exclusively through SharedSession's
