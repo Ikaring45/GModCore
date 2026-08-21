@@ -378,13 +378,24 @@ public final class GModPlayableSession {
     public let worldIdentity: GMLuaSourceEntityIdentity
     public let spawnPoint: GModMapSpawnPoint
     public let startupReport: GModPlayableSessionStartupReport
-    public private(set) var playerWalkState: SourceWorldWalkState
 
     private let serverFileSystem: GMLuaMountedFileSystem
     private let clientFileSystem: GMLuaMountedFileSystem
     private let worldWalkSolver: SourceWorldWalkSolver
+    private let playerIdentity: SourceCanonicalEntityIdentity
     private var nextCommandNumber: Int32 = 1
     private var closedStorage = false
+
+    /// The host reads movement from the engine-owned canonical Player. There
+    /// is no second mutable session copy that can diverge from Entity/Player.
+    public var playerWalkState: SourceWorldWalkState {
+        guard let snapshot = sourceAdapter.canonicalSnapshot(
+            for: playerIdentity
+        ) else {
+            preconditionFailure("canonical Player is unavailable")
+        }
+        return Self.playerWalkState(from: snapshot)
+    }
 
     public convenience init(
         configuration: GModPlayableSessionConfiguration = .init(),
@@ -557,11 +568,22 @@ public final class GModPlayableSession {
                 serverRuntime: server
             )
             adapter = sourceAdapter
+            // This attachment owns only CLIENT Tick/Think clocking. The
+            // adapter has no legacy entities in this session, and canonical
+            // Entity state reaches CLIENT exclusively through SharedSession's
+            // ordered replication FIFO.
             try sourceAdapter.attach(client: client)
-            let sourceWorldIdentity = try sourceAdapter.spawnNetworkableEntity(
-                SourceEntity(className: "worldspawn"),
+            let createdSourceWorld = try sourceAdapter.createCanonicalEntity(
+                kind: .world,
                 at: 0
             )
+            _ = try sourceAdapter.spawnCanonicalEntity(
+                createdSourceWorld.identity
+            )
+            let sourceWorld = try sourceAdapter.activateCanonicalEntity(
+                createdSourceWorld.identity
+            )
+            let sourceWorldIdentity = sourceWorld.identity
 
             try server.loadFile("lua/includes/init.lua")
             progress(.init(stage: .loadingServerSandbox))
@@ -569,26 +591,54 @@ public final class GModPlayableSession {
                 runtime: server,
                 fileSystem: serverFiles
             ).start(targetGamemodeNamed: trimmedGamemode)
+            var playerState = SourceCanonicalEntityState.defaults(for: .player)
+            playerState.applyPlayerWalkState(SourceWorldWalkState(
+                origin: loadedSpawn.origin,
+                viewAngles: loadedSpawn.angles
+            ))
+            let createdSourcePlayer = try sourceAdapter.createCanonicalEntity(
+                kind: .player,
+                at: configuration.playerEntityIndex,
+                state: playerState,
+                playerUserID: configuration.playerUserID
+            )
+            _ = try sourceAdapter.spawnCanonicalEntity(
+                createdSourcePlayer.identity
+            )
+            let sourcePlayer = try sourceAdapter.activateCanonicalEntity(
+                createdSourcePlayer.identity
+            )
             progress(.init(stage: .startingClientLua))
 
             try client.loadFile("lua/includes/init.lua")
             progress(.init(stage: .loadingClientSandbox))
+            var playerConnectionDeliveries = 0
             let clientStartup = try GMLuaStartupOrchestrator(
                 runtime: client,
                 fileSystem: clientFiles,
                 playerConnection: {
-                    try session.connect(
+                    try session.connectCanonical(
                         server: server,
                         client: client,
-                        playerIndex: configuration.playerEntityIndex,
-                        userID: configuration.playerUserID
+                        playerIdentity: sourcePlayer.identity,
+                        userID: configuration.playerUserID,
+                        authoritativeSnapshots:
+                            sourceAdapter.canonicalEntitySnapshots
+                    )
+                    // StartupOrchestrator invokes this boundary after
+                    // Initialize and before InitPostEntity. Pump the initial
+                    // snapshot here so original CLIENT Lua observes the exact
+                    // canonical world and LocalPlayer during InitPostEntity.
+                    playerConnectionDeliveries += try Self.drain(
+                        session,
+                        maximumDeliveries: 10_000
                     )
                 }
             ).start(targetGamemodeNamed: trimmedGamemode)
-            let delivered = try Self.drain(
+            let delivered = playerConnectionDeliveries + (try Self.drain(
                 session,
                 maximumDeliveries: 10_000
-            )
+            ))
             progress(.init(stage: .preparingMaterials))
 
             self.configuration = configuration
@@ -603,10 +653,7 @@ public final class GModPlayableSession {
             worldWalkSolver = SourceWorldWalkSolver(
                 collisionProvider: loadedWorldWalkCollisionProvider
             )
-            playerWalkState = SourceWorldWalkState(
-                origin: loadedSpawn.origin,
-                viewAngles: loadedSpawn.angles
-            )
+            playerIdentity = sourcePlayer.identity
             serverFileSystem = serverFiles
             clientFileSystem = clientFiles
             startupReport = GModPlayableSessionStartupReport(
@@ -676,7 +723,16 @@ public final class GModPlayableSession {
                 state: stateBeforeMovement,
                 command: command
             )
-            playerWalkState = tick.state
+            if tick.state != stateBeforeMovement {
+                let playerSnapshot = try sourceAdapter.updateCanonicalEntity(
+                    playerIdentity
+                ) { state in
+                    state.applyPlayerWalkState(tick.state)
+                }
+                _ = try sharedSession.publishCanonicalEntityUpdates([
+                    .update(playerSnapshot),
+                ])
+            }
             movement = .advanced(tick)
         } catch let error as SourceWorldWalkError {
             guard let reason = error.recoverableUnsupportedReason else {
@@ -908,6 +964,18 @@ public final class GModPlayableSession {
     private static func isASCIILetter(_ scalar: Unicode.Scalar) -> Bool {
         (scalar.value >= 65 && scalar.value <= 90) ||
             (scalar.value >= 97 && scalar.value <= 122)
+    }
+
+    private static func playerWalkState(
+        from snapshot: SourceCanonicalEntitySnapshot
+    ) -> SourceWorldWalkState {
+        SourceCanonicalEntityState(
+            transform: snapshot.transform,
+            motion: snapshot.motion,
+            model: snapshot.model,
+            solidType: snapshot.solidType,
+            moveType: snapshot.moveType
+        ).playerWalkState
     }
 
     private static func makeMountedContentFileSystem() throws

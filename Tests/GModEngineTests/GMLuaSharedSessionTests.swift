@@ -74,7 +74,10 @@ final class GMLuaSharedSessionTests: XCTestCase {
         let prop = try store.create(kind: .propPhysics, at: 20)
         let serverRegistry = try XCTUnwrap(pair.server.entityRegistry)
         for snapshot in store.orderedSnapshots {
-            _ = try serverRegistry.applyAuthoritativeSnapshot(snapshot)
+            _ = try serverRegistry.applyAuthoritativeSnapshot(
+                snapshot,
+                userID: snapshot.kind == .player ? 70 : nil
+            )
         }
         XCTAssertEqual(serverRegistry.canonicalIdentity(at: 7), player.identity)
         XCTAssertNotEqual(
@@ -87,18 +90,19 @@ final class GMLuaSharedSessionTests: XCTestCase {
             server: pair.server,
             client: pair.client,
             playerIdentity: player.identity,
+            userID: 70,
             authoritativeSnapshots: store.orderedSnapshots
         )
 
         let clientRegistry = try XCTUnwrap(pair.client.entityRegistry)
         XCTAssertEqual(pair.session.connectedPlayerIndices, [7])
-        XCTAssertEqual(pair.session.connectedUserIDs, [7])
+        XCTAssertEqual(pair.session.connectedUserIDs, [70])
         XCTAssertEqual(pair.session.netTransport.pendingDeliveryCount, 1)
         XCTAssertNil(clientRegistry.canonicalSnapshot(at: world.identity.entryIndex))
         XCTAssertNil(clientRegistry.canonicalSnapshot(at: player.identity.entryIndex))
         XCTAssertNil(clientRegistry.canonicalSnapshot(at: prop.identity.entryIndex))
         try pair.client.execute(
-            "assert(LocalPlayer() == NULL and Entity(7) == NULL and Player(7) == NULL)"
+            "assert(LocalPlayer() == NULL and Entity(7) == NULL and Player(70) == NULL)"
         )
 
         // This is the host boundary used after Initialize and before
@@ -108,7 +112,7 @@ final class GMLuaSharedSessionTests: XCTestCase {
         XCTAssertEqual(clientRegistry.canonicalSnapshot(at: 7), player)
         XCTAssertEqual(clientRegistry.canonicalSnapshot(at: 20), prop)
         try pair.client.execute(
-            "assert(LocalPlayer() == Entity(7) and LocalPlayer() == Player(7))"
+            "assert(LocalPlayer() == Entity(7) and LocalPlayer() == Player(70) and Player(7) == NULL)"
         )
         let firstClientPlayer = clientRegistry.player(at: 7)
         XCTAssertEqual(
@@ -120,15 +124,9 @@ final class GMLuaSharedSessionTests: XCTestCase {
             state.transform.origin = SourceVector3(64, 0, 0)
         }
         _ = try serverRegistry.applyAuthoritativeSnapshot(updatedProp)
-        let delayedPacket = SourceEntityReplicationPacket(
-            connectionGeneration: SourceEntityReplicationConnectionGeneration(rawValue: 1),
-            sequence: 2,
-            payload: .delta([.update(updatedProp)])
-        )
-        try pair.session.netTransport.enqueueEntityReplication(
-            delayedPacket,
-            from: try XCTUnwrap(pair.server.netEndpoint),
-            to: try XCTUnwrap(pair.client.netEndpoint)
+        XCTAssertEqual(
+            try pair.session.publishCanonicalEntityUpdates([.update(updatedProp)]),
+            1
         )
         XCTAssertEqual(pair.session.netTransport.pendingDeliveryCount, 1)
 
@@ -148,6 +146,7 @@ final class GMLuaSharedSessionTests: XCTestCase {
             server: pair.server,
             client: pair.client,
             playerIdentity: player.identity,
+            userID: 70,
             authoritativeSnapshots: store.orderedSnapshots
         )
         XCTAssertEqual(pair.session.netTransport.pendingDeliveryCount, 1)
@@ -155,7 +154,9 @@ final class GMLuaSharedSessionTests: XCTestCase {
         XCTAssertEqual(try pair.session.pump(), 1)
         XCTAssertEqual(clientRegistry.canonicalIdentity(at: 7), player.identity)
         XCTAssertEqual(clientRegistry.canonicalSnapshot(at: 20), updatedProp)
-        try pair.client.execute("assert(LocalPlayer() == Entity(7))")
+        try pair.client.execute(
+            "assert(LocalPlayer() == Entity(7) and LocalPlayer() == Player(70) and Player(7) == NULL)"
+        )
     }
 
     func testConnectionCreatesCanonicalRealmLocalPlayersAndSendToServerUsesServerMirror() throws {

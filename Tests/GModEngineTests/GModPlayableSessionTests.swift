@@ -462,7 +462,10 @@ final class GModPlayableSessionTests: XCTestCase {
         let failedActionTick = try session.runFixedTick()
         XCTAssertEqual(failedActionTick.server.kind, .serverFixedTick)
         XCTAssertEqual(failedActionTick.client.kind, .clientFixedTick)
-        XCTAssertEqual(failedActionTick.deliveredMessages, 0)
+        // The first authoritative Player ground-state update is one successful
+        // entity FIFO delivery; the gm_spawn command itself remains the single
+        // contained action failure below.
+        XCTAssertEqual(failedActionTick.deliveredMessages, 1)
         XCTAssertEqual(failedActionTick.actionFailures.count, 1)
         let failure = try XCTUnwrap(failedActionTick.actionFailures.first)
         XCTAssertEqual(failure.command, "gm_spawn")

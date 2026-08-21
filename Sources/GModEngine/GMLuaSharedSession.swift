@@ -198,10 +198,10 @@ public final class GMLuaSharedSession: @unchecked Sendable {
             )
         }
 
-        // Canonical CLIENT state is changed only by ordered entity packets.
-        // The legacy path below remains until its PlayableSession caller has
-        // migrated to engine-owned Player snapshots.
-        guard !record.usesCanonicalReplication else { return }
+        // Input buttons are transient host input, not canonical transform,
+        // motion, model, or lifecycle state. Keeping this narrow direct mirror
+        // preserves KeyDown semantics without letting CLIENT overwrite its
+        // replicated Source entity snapshot.
         for connected in connectedRecords {
             guard let registry = connected.client?.entityRegistry else {
                 throw GMLuaSharedSessionError.missingRuntimeSurface(
@@ -261,6 +261,7 @@ public final class GMLuaSharedSession: @unchecked Sendable {
         server: GMLuaRuntime,
         client: GMLuaRuntime,
         playerIdentity: SourceCanonicalEntityIdentity,
+        userID: Int? = nil,
         authoritativeSnapshots: [SourceCanonicalEntitySnapshot]
     ) throws {
         guard !netTransport.isPumpingOnCurrentThread() else {
@@ -273,6 +274,7 @@ public final class GMLuaSharedSession: @unchecked Sendable {
                 server: server,
                 client: client,
                 playerIdentity: playerIdentity,
+                userID: userID ?? playerIdentity.entryIndex,
                 authoritativeSnapshots: authoritativeSnapshots
             )
         }
@@ -282,6 +284,7 @@ public final class GMLuaSharedSession: @unchecked Sendable {
         server: GMLuaRuntime,
         client: GMLuaRuntime,
         playerIdentity: SourceCanonicalEntityIdentity,
+        userID: Int,
         authoritativeSnapshots: [SourceCanonicalEntitySnapshot]
     ) throws {
         guard server.realm == .server, client.realm == .client else {
@@ -297,9 +300,11 @@ public final class GMLuaSharedSession: @unchecked Sendable {
             throw GMLuaSharedSessionError.closedRuntime(.client)
         }
         let playerIndex = playerIdentity.entryIndex
-        let userID = playerIndex
         guard playerIndex > 0 else {
             throw GMLuaSharedSessionError.invalidPlayerIndex(playerIndex)
+        }
+        guard userID > 0 else {
+            throw GMLuaSharedSessionError.invalidUserID(userID)
         }
         guard server.netTransport === netTransport else {
             throw GMLuaSharedSessionError.transportMismatch(.server)
@@ -331,7 +336,10 @@ public final class GMLuaSharedSession: @unchecked Sendable {
             )
         }
         guard serverRegistry.canonicalIdentity(at: playerIndex) == playerIdentity,
-              Self.hasLiveEntity(serverRegistry.player(at: playerIndex)) else {
+              Self.hasLiveEntity(serverRegistry.player(at: playerIndex)),
+              serverRegistry.canonicalIdentity(
+                  for: serverRegistry.player(forUserID: userID)
+              ) == playerIdentity else {
             throw GMLuaSharedSessionError.missingRuntimeSurface(
                 .server,
                 "authoritative canonical Player EHANDLE \(playerIdentity.handle.rawValue)"
@@ -410,7 +418,8 @@ public final class GMLuaSharedSession: @unchecked Sendable {
         var transportConnected = false
         do {
             guard try clientRegistry.beginEntityReplication(
-                generation: connectionGeneration
+                generation: connectionGeneration,
+                playerUserIDs: [playerIndex: userID]
             ) else {
                 throw GMLuaSharedSessionError.missingRuntimeSurface(
                     .client,
@@ -480,6 +489,60 @@ public final class GMLuaSharedSession: @unchecked Sendable {
                 connectionGeneration: connectionGeneration
             )
             throw error
+        }
+    }
+
+    /// Enqueues one ordered SERVER entity delta for every canonical CLIENT.
+    /// Each connection keeps its own packet sequence while the existing
+    /// transport remains the sole global net/console/entity FIFO.
+    @discardableResult
+    public func publishCanonicalEntityUpdates(
+        _ operations: [SourceEntityReplicationOperation]
+    ) throws -> Int {
+        guard !operations.isEmpty else { return 0 }
+        guard !netTransport.isPumpingOnCurrentThread() else {
+            throw GMLuaSharedSessionError.lifecycleDuringPump(
+                "publish canonical entity updates"
+            )
+        }
+        return try netTransport.withExclusiveLifecycleBoundary {
+            connectionMutationLock.lock()
+            defer { connectionMutationLock.unlock() }
+
+            let records: [ConnectionRecord]
+            lock.lock()
+            records = connectionsByClient.values
+                .filter(\.usesCanonicalReplication)
+                .sorted { $0.playerIndex < $1.playerIndex }
+            lock.unlock()
+
+            var enqueued = 0
+            for record in records {
+                guard let server = record.server, !server.isClosed else {
+                    throw GMLuaSharedSessionError.closedRuntime(.server)
+                }
+                guard let serverEndpoint = server.netEndpoint else {
+                    throw GMLuaSharedSessionError.missingRuntimeSurface(
+                        .server,
+                        "net endpoint for canonical entity replication"
+                    )
+                }
+                guard var stream = record.replicationStream else {
+                    throw GMLuaSharedSessionError.missingRuntimeSurface(
+                        .server,
+                        "canonical entity replication stream"
+                    )
+                }
+                let packet = try stream.makeDelta(operations)
+                try netTransport.enqueueEntityReplication(
+                    packet,
+                    from: serverEndpoint,
+                    to: record.clientEndpoint
+                )
+                record.replicationStream = stream
+                enqueued += 1
+            }
+            return enqueued
         }
     }
 

@@ -86,6 +86,7 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
     private var playerIdentityByUserID: [Int: (index: Int, generation: UInt64)] = [:]
     private var localPlayerIdentity: (index: Int, generation: UInt64)?
     private var entityReplicationState = SourceEntityReplicationClientState()
+    private var entityReplicationPlayerUserIDs: [Int: Int] = [:]
 
     private init(
         state: LuaState,
@@ -406,10 +407,24 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
     /// drops every userdata owned by the previous replicated snapshot.
     @discardableResult
     public func beginEntityReplication(
-        generation: SourceEntityReplicationConnectionGeneration
+        generation: SourceEntityReplicationConnectionGeneration,
+        playerUserIDs: [Int: Int] = [:]
     ) throws -> Bool {
         guard realm == .client else {
             throw GMLuaCanonicalEntityRegistryError.clientRealmRequired
+        }
+        for (index, userID) in playerUserIDs {
+            guard index > 0 else {
+                throw GMLuaCanonicalEntityRegistryError.invalidEntityIndex(
+                    kind: .player,
+                    index: index
+                )
+            }
+            guard userID > 0 else {
+                throw GMLuaCanonicalEntityRegistryError.playerUserIDConflict(
+                    userID
+                )
+            }
         }
 
         lock.lock()
@@ -422,6 +437,7 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
             let projection = try prepareCanonicalProjectionLocked(target: [:])
             commitCanonicalProjectionLocked(projection)
             entityReplicationState = candidateState
+            entityReplicationPlayerUserIDs = playerUserIDs
             lock.unlock()
             state.refreshGarbageCollectionRootProviders()
             return true
@@ -456,7 +472,10 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
                 try Self.validateCanonicalSnapshot(snapshot, isRemoval: false)
                 target[snapshot.identity.entryIndex] = snapshot
             }
-            let projection = try prepareCanonicalProjectionLocked(target: target)
+            let projection = try prepareCanonicalProjectionLocked(
+                target: target,
+                preferredPlayerUserIDs: entityReplicationPlayerUserIDs
+            )
             commitCanonicalProjectionLocked(projection)
             entityReplicationState = candidateState
             lock.unlock()
@@ -483,6 +502,7 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
             let projection = try prepareCanonicalProjectionLocked(target: [:])
             commitCanonicalProjectionLocked(projection)
             entityReplicationState = candidateState
+            entityReplicationPlayerUserIDs.removeAll(keepingCapacity: true)
             lock.unlock()
             state.refreshGarbageCollectionRootProviders()
         } catch {
