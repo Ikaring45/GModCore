@@ -1707,16 +1707,18 @@ public struct GModMetalView:
                     retainedResourceIDs.contains($0.key)
                 }
 
-            let retainedTextureKeys = Set(scene.resources.flatMap { resource in
-                resource.drawRanges.compactMap { range in
-                    guard let bitmap = range.materialResolution.bitmap else {
-                        return nil
+            let retainedTextureKeys: Set<DynamicEntityTextureKey> = Set(
+                scene.resources.flatMap { resource in
+                    resource.drawRanges.compactMap { range in
+                        guard let bitmap = range.materialResolution.bitmap else {
+                            return nil
+                        }
+                        return Self.dynamicEntityTextureKey(
+                            bitmap: bitmap
+                        )
                     }
-                    return Self.dynamicEntityTextureKey(
-                        bitmap: bitmap
-                    )
                 }
-            })
+            )
             for key in Array(cachedDynamicEntityTextures.keys) where
                 !retainedTextureKeys.contains(key) {
                 removeCachedDynamicEntityTexture(for: key)
