@@ -15,26 +15,37 @@ public protocol SourceWorldWalkCollisionProvider: Sendable {
     ) throws -> SourceContents
 }
 
-/// Immutable BSP adapter shared by authoritative and predicted movement.
-/// `SourceBSP` remains asset-bundle agnostic; hosts and tests decide where the
-/// BSP data comes from.
-public struct SourceBSPWorldWalkCollisionProvider: SourceWorldWalkCollisionProvider, Sendable {
+/// Lane-confined BSP adapter for one authoritative or predicted movement
+/// stream. `SourceBSP` remains immutable; the reusable trace workspace belongs
+/// to this provider, not the BSP asset. Construct one provider per simulation
+/// lane rather than sharing a provider between SERVER and CLIENT prediction.
+public final class SourceBSPWorldWalkCollisionProvider:
+    SourceWorldWalkCollisionProvider, @unchecked Sendable
+{
     public let bsp: SourceBSP
     public let tolerance: Float
+    private let workspace: SourceBSPTraceWorkspace
 
     public init(
         bsp: SourceBSP,
-        tolerance: Float = SourceCollisionConstants.distanceEpsilon
+        tolerance: Float = SourceCollisionConstants.distanceEpsilon,
+        workspace: SourceBSPTraceWorkspace = SourceBSPTraceWorkspace()
     ) {
         self.bsp = bsp
         self.tolerance = tolerance
+        self.workspace = workspace
     }
 
     public func traceWorldWalk(
         _ ray: SourceRay,
         mask: SourceContents
     ) throws -> SourceGameTrace {
-        try bsp.traceWorld(ray, mask: mask, tolerance: tolerance)
+        try bsp.traceWorld(
+            ray,
+            mask: mask,
+            tolerance: tolerance,
+            workspace: workspace
+        )
     }
 
     public func worldWalkPointContents(

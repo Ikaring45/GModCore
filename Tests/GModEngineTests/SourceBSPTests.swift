@@ -504,6 +504,62 @@ final class SourceBSPTests: XCTestCase {
         }
     }
 
+    func testTraceWorkspacePreservesWorldTraceCorpusAndWarmsWithoutFurtherGrowth() throws {
+        let bsp = try SourceBSP(data: makeBrushWorldBSP())
+        let workspace = SourceBSPTraceWorkspace()
+        let rays = [
+            SourceRay(
+                start: SourceVector3(-10, 0, 0),
+                end: SourceVector3(10, 0, 0)
+            ),
+            SourceRay(
+                start: SourceVector3(0, 0, 0),
+                end: SourceVector3(10, 0, 0)
+            ),
+            SourceRay(
+                start: SourceVector3(-10, 0, 0),
+                end: SourceVector3(10, 0, 0),
+                mins: SourceVector3(-1, -1, -1),
+                maxs: SourceVector3(1, 1, 1)
+            ),
+        ]
+
+        for ray in rays {
+            for mask in [SourceMasks.solid, SourceMasks.water] {
+                XCTAssertEqual(
+                    try bsp.traceWorld(ray, mask: mask, workspace: workspace),
+                    try bsp.traceWorld(ray, mask: mask)
+                )
+            }
+        }
+
+        let warmed = workspace.metrics
+        XCTAssertEqual(warmed.traceCount, UInt64(rays.count * 2))
+        XCTAssertGreaterThan(warmed.nodeVisitCount, 0)
+        XCTAssertGreaterThan(warmed.leafVisitCount, 0)
+        XCTAssertGreaterThan(warmed.brushVisitCount, 0)
+        XCTAssertGreaterThanOrEqual(warmed.storageGrowthCount, 3)
+
+        for _ in 0..<256 {
+            for ray in rays {
+                XCTAssertEqual(
+                    try bsp.traceWorld(
+                        ray,
+                        mask: .solid,
+                        workspace: workspace
+                    ),
+                    try bsp.traceWorld(ray, mask: .solid)
+                )
+            }
+        }
+
+        XCTAssertEqual(workspace.metrics.storageGrowthCount, warmed.storageGrowthCount)
+        XCTAssertEqual(
+            workspace.metrics.traceCount,
+            warmed.traceCount + UInt64(rays.count * 256)
+        )
+    }
+
     func testWorldTraceCarriesExactEnteringBrushSideSurface() throws {
         let bsp = try SourceBSP(data: makeSharedPlaneDifferentSurfaceBrushWorldBSP())
         let hit = try bsp.traceWorld(
