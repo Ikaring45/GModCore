@@ -494,9 +494,6 @@ final class GModMetalSurfaceSceneTests: XCTestCase {
         let surface = try XCTUnwrap(
             resolver.resolveSurfaceTexture(named: "gui/mipped")
         )
-        let world = try XCTUnwrap(
-            resolver.resolveWorldTexture(named: "gui/mipped")
-        )
         XCTAssertEqual(surface.mipLevels.count, 1)
         XCTAssertEqual(surface.totalByteCount, base.count)
         XCTAssertEqual(surface.alphaRepresentation, .premultiplied)
@@ -508,6 +505,9 @@ final class GModMetalSurfaceSceneTests: XCTestCase {
         XCTAssertEqual(
             GModMetalSurfaceTextureUploadContract.mipmapLevelCount,
             1
+        )
+        let world = try XCTUnwrap(
+            resolver.resolveWorldTexture(named: "gui/mipped")
         )
         XCTAssertEqual(world.mipLevels.map(\.width), [4, 2, 1])
         XCTAssertEqual(world.totalByteCount, base.count + mip1.count + mip2.count)
