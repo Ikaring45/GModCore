@@ -103,6 +103,14 @@ private enum GMLuaTransportDelivery: Sendable {
     case console(GMLuaConsolePacket)
     case entity(GMLuaEntityReplicationDelivery)
 
+    var sequence: UInt64 {
+        switch self {
+        case let .net(packet): return packet.sequence
+        case let .console(packet): return packet.sequence
+        case let .entity(delivery): return delivery.sequence
+        }
+    }
+
     var sourceEndpointID: Int {
         switch self {
         case let .net(packet): return packet.sourceEndpointID
@@ -118,6 +126,18 @@ private enum GMLuaTransportDelivery: Sendable {
         case let .entity(delivery): return delivery.destinationEndpointID
         }
     }
+}
+
+enum GMLuaNetTransportDeliveryTransactionError: Error, Equatable, Sendable {
+    case nestedTransaction
+}
+
+/// Current-thread staging owned by one outer forwarded console action. A
+/// delivery receives its transport sequence at the original enqueue point but
+/// cannot enter the globally visible FIFO until the scope commits.
+private final class GMLuaTransportDeliveryTransactionContext: @unchecked Sendable {
+    var deliveries: [GMLuaTransportDelivery] = []
+    var completedMessageCount: UInt64 = 0
 }
 
 /// Typed failures specific to canonical entity replication transport. Packet
@@ -1017,6 +1037,43 @@ public final class GMLuaNetTransport: @unchecked Sendable {
         return completedMessages
     }
 
+    /// Stages deliveries enqueued by the current thread until `body` returns.
+    ///
+    /// This is the narrow transport half of a future forwarded-console action
+    /// transaction. Other threads continue to enqueue normally. Their packets
+    /// are neither hidden nor removed if this scope rolls back; a successful
+    /// scope merges its reserved sequences back into the global FIFO order.
+    /// Pending/completed public counters intentionally exclude staged work.
+    ///
+    /// Nested scopes on the same transport and thread are rejected. A nested
+    /// Lua command remains part of its outer forwarded action instead of
+    /// gaining an independently committable packet transaction.
+    func withStagedForwardedConsoleDeliveries<T>(
+        _ body: () throws -> T
+    ) throws -> T {
+        let dictionary = Thread.current.threadDictionary
+        let key = deliveryTransactionThreadKey
+        guard dictionary[key] == nil else {
+            throw GMLuaNetTransportDeliveryTransactionError.nestedTransaction
+        }
+
+        let context = GMLuaTransportDeliveryTransactionContext()
+        dictionary[key] = context
+        defer { dictionary.removeObject(forKey: key) }
+
+        let result = try body()
+        lock.lock()
+        if !context.deliveries.isEmpty {
+            deliveries = Self.mergeDeliveriesBySequence(
+                deliveries,
+                context.deliveries
+            )
+        }
+        completedMessages &+= context.completedMessageCount
+        lock.unlock()
+        return result
+    }
+
     public var connectedClientCount: Int {
         lock.lock()
         defer { lock.unlock() }
@@ -1184,7 +1241,7 @@ public final class GMLuaNetTransport: @unchecked Sendable {
         guard endpoints[source.identifier] === source else {
             throw LuaError.runtime("net.Broadcast endpoint is detached")
         }
-        completedMessages &+= 1
+        recordCompletedMessageLocked()
         let destinations = endpoints.values
             .filter {
                 $0.realm == .client && $0.state != nil &&
@@ -1194,7 +1251,7 @@ public final class GMLuaNetTransport: @unchecked Sendable {
             .sorted { $0.identifier < $1.identifier }
         for destination in destinations {
             nextSequence &+= 1
-            deliveries.append(.net(GMLuaNetPacket(
+            appendDeliveryLocked(.net(GMLuaNetPacket(
                 sequence: nextSequence,
                 sourceEndpointID: source.identifier,
                 destinationEndpointID: destination.identifier,
@@ -1235,9 +1292,9 @@ public final class GMLuaNetTransport: @unchecked Sendable {
                 "net.SendToServer cannot send: client transport disconnected during send"
             )
         }
-        completedMessages &+= 1
+        recordCompletedMessageLocked()
         nextSequence &+= 1
-        deliveries.append(.net(GMLuaNetPacket(
+        appendDeliveryLocked(.net(GMLuaNetPacket(
             sequence: nextSequence,
             sourceEndpointID: source.identifier,
             destinationEndpointID: destinationID,
@@ -1284,10 +1341,10 @@ public final class GMLuaNetTransport: @unchecked Sendable {
                 "net.Send target Player(\(missing.playerIndex)) is not connected"
             )
         }
-        completedMessages &+= 1
+        recordCompletedMessageLocked()
         for destination in destinations {
             nextSequence &+= 1
-            deliveries.append(.net(GMLuaNetPacket(
+            appendDeliveryLocked(.net(GMLuaNetPacket(
                 sequence: nextSequence,
                 sourceEndpointID: source.identifier,
                 destinationEndpointID: destination.endpointID,
@@ -1317,7 +1374,7 @@ public final class GMLuaNetTransport: @unchecked Sendable {
             )
         }
         nextSequence &+= 1
-        deliveries.append(.console(GMLuaConsolePacket(
+        appendDeliveryLocked(.console(GMLuaConsolePacket(
             sequence: nextSequence,
             sourceEndpointID: source.identifier,
             destinationEndpointID: destinationID,
@@ -1403,7 +1460,71 @@ public final class GMLuaNetTransport: @unchecked Sendable {
             )))
         }
         nextSequence += requestedSequenceCount
-        deliveries.append(contentsOf: batch)
+        appendDeliveriesLocked(batch)
+    }
+
+    /// Requires `lock`. Sequence reservation remains global even when the
+    /// resulting delivery is current-thread staged, so concurrent producers
+    /// retain one total ordering and rollback never rewinds their clock.
+    private func appendDeliveryLocked(_ delivery: GMLuaTransportDelivery) {
+        if let context = currentDeliveryTransactionContext {
+            context.deliveries.append(delivery)
+        } else {
+            deliveries.append(delivery)
+        }
+    }
+
+    /// Requires `lock`.
+    private func appendDeliveriesLocked(_ batch: [GMLuaTransportDelivery]) {
+        guard !batch.isEmpty else { return }
+        if let context = currentDeliveryTransactionContext {
+            context.deliveries.append(contentsOf: batch)
+        } else {
+            deliveries.append(contentsOf: batch)
+        }
+    }
+
+    /// Requires `lock`. A completed message becomes externally countable at
+    /// the same commit boundary as every delivery produced by that message.
+    private func recordCompletedMessageLocked() {
+        if let context = currentDeliveryTransactionContext {
+            context.completedMessageCount &+= 1
+        } else {
+            completedMessages &+= 1
+        }
+    }
+
+    private var currentDeliveryTransactionContext:
+        GMLuaTransportDeliveryTransactionContext? {
+        Thread.current.threadDictionary[deliveryTransactionThreadKey]
+            as? GMLuaTransportDeliveryTransactionContext
+    }
+
+    private static func mergeDeliveriesBySequence(
+        _ existing: [GMLuaTransportDelivery],
+        _ staged: [GMLuaTransportDelivery]
+    ) -> [GMLuaTransportDelivery] {
+        var merged: [GMLuaTransportDelivery] = []
+        merged.reserveCapacity(existing.count + staged.count)
+        var existingIndex = 0
+        var stagedIndex = 0
+
+        while existingIndex < existing.count, stagedIndex < staged.count {
+            if existing[existingIndex].sequence < staged[stagedIndex].sequence {
+                merged.append(existing[existingIndex])
+                existingIndex += 1
+            } else {
+                merged.append(staged[stagedIndex])
+                stagedIndex += 1
+            }
+        }
+        if existingIndex < existing.count {
+            merged.append(contentsOf: existing[existingIndex...])
+        }
+        if stagedIndex < staged.count {
+            merged.append(contentsOf: staged[stagedIndex...])
+        }
+        return merged
     }
 
     /// Delivers queued packets in deterministic sequence order.
@@ -1610,6 +1731,10 @@ public final class GMLuaNetTransport: @unchecked Sendable {
 
     private var pumpThreadMarkerKey: String {
         "GMLuaNetTransport.pump.\(ObjectIdentifier(self))"
+    }
+
+    private var deliveryTransactionThreadKey: String {
+        "GMLuaNetTransport.deliveryTransaction.\(ObjectIdentifier(self))"
     }
 
     private var boundaryThreadMarkerKey: String {
