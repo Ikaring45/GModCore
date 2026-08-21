@@ -134,6 +134,7 @@ public struct GModMainView: View {
     @StateObject private var inputVideoSettings: GModInputVideoSettingsStore
     @StateObject private var contentSettings: GModContentSettingsStore
     @StateObject private var diagnostics: GModAppDiagnosticsStore
+    @StateObject private var permissions: GModPermissionStore
     @State private var stats = "Starting ARM engine..."
     @State private var isRunning = false
     @State private var resultLabel = "READY"
@@ -209,6 +210,7 @@ public struct GModMainView: View {
         let audioSettingsStore = GModMenuAudioSettingsStore.shared
         let inputVideoSettingsStore = GModInputVideoSettingsStore.shared
         let diagnosticsStore = GModAppDiagnosticsStore.shared
+        let permissionStore = GModPermissionStore.shared
         let consoleModel = GModConsoleModel(runtimeFactory: factory)
         _console = StateObject(
             wrappedValue: consoleModel
@@ -247,6 +249,9 @@ public struct GModMainView: View {
         )
         _diagnostics = StateObject(
             wrappedValue: diagnosticsStore
+        )
+        _permissions = StateObject(
+            wrappedValue: permissionStore
         )
     }
 
@@ -838,6 +843,7 @@ public struct GModMainView: View {
                 developerDiagnostics: developerDiagnostics,
                 contentSettings: contentSettings,
                 content: content,
+                permissions: permissions,
                 currentMap: game.activeMap?.rawValue,
                 onClose: { activeUtilityWindow = nil },
                 onLanguageChange: selectLanguageFromOptions,
@@ -859,7 +865,8 @@ public struct GModMainView: View {
             GModProblemsWindow(
                 localization: localizationSelection.snapshot,
                 snapshot: currentProblemSnapshot,
-                onClose: { activeUtilityWindow = nil }
+                onClose: { activeUtilityWindow = nil },
+                onRevokePermission: revokePermission
             )
             .zIndex(500)
 
@@ -1005,6 +1012,9 @@ public struct GModMainView: View {
                 game.resumeInput()
 
             case let .startMap(map):
+                if game.hasActiveSession {
+                    permissions.clearTemporaryPermissions()
+                }
                 game.resumeInput()
                 game.start(
                     map: map,
@@ -1014,9 +1024,11 @@ public struct GModMainView: View {
                 )
 
             case .disconnectSession:
+                permissions.clearTemporaryPermissions()
                 game.disconnect()
 
             case .abandonFailedStart:
+                permissions.clearTemporaryPermissions()
                 game.returnToHomeAfterStartFailure()
 
             case .presentQuitUnavailable:
@@ -1039,8 +1051,27 @@ public struct GModMainView: View {
             surfaceDiagnostics: game.surfaceDiagnostics,
             contentError: content.lastError,
             rendererFailure: game.lastRendererFailure,
-            startFailure: game.startFailure
+            startFailure: game.startFailure,
+            permissionCollection: permissions.collection,
+            permissionPersistenceError: permissions.persistenceError
         )
+    }
+
+    private func revokePermission(_ record: GModAppPermissionRecord) {
+        do {
+            _ = try permissions.revoke(
+                record.permission,
+                for: record.serverIdentifier
+            )
+        } catch {
+            diagnostics.record(
+                kind: .compatibility,
+                severity: .error,
+                title: "#garryspad.problem.permissions-storage",
+                detail: error.localizedDescription,
+                source: "permissions"
+            )
+        }
     }
 
     private var currentProblemSeverity: Int {

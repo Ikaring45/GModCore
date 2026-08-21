@@ -8,9 +8,8 @@ enum GModBundledAppLocalization {
         var result: [String: [String: String]] = [:]
         for code in GModMenuLocalizationCatalog.supportedLanguageCodes {
             guard let url = Bundle.module.url(
-                forResource: "garryspad",
-                withExtension: "properties",
-                subdirectory: "Localization/\(code)"
+                forResource: "garryspad-\(code)",
+                withExtension: "properties"
             ) else {
                 diagnostic("bundled app localization is missing for \(code)")
                 continue

@@ -135,6 +135,34 @@ final class GModMenuLocalizationTests: XCTestCase {
         }
     }
 
+    func testBundledPermissionCatalogHasExactEnglishJapaneseKeyParity() throws {
+        let catalogs = GModBundledAppLocalization.load()
+        let english = try XCTUnwrap(catalogs["en"])
+        let japanese = try XCTUnwrap(catalogs["ja"])
+        XCTAssertEqual(Set(english.keys), Set(japanese.keys))
+
+        for key in [
+            "permission.connect",
+            "garryspad.permissions.server",
+            "garryspad.permissions.connect",
+            "garryspad.permissions.temporary",
+            "garryspad.permissions.permanent",
+            "garryspad.permissions.not-granted",
+            "garryspad.permissions.grant-temporary",
+            "garryspad.permissions.grant-permanent",
+            "garryspad.permissions.revoke",
+            "garryspad.permissions.none",
+            "garryspad.permissions.connect-unavailable-action",
+            "garryspad.permissions.native-boundary",
+            "garryspad.problem.permissions-limited",
+            "garryspad.problem.permissions-limited-detail",
+            "garryspad.problem.permissions-storage",
+        ] {
+            XCTAssertFalse(english[key, default: ""].isEmpty, "missing en \(key)")
+            XCTAssertFalse(japanese[key, default: ""].isEmpty, "missing ja \(key)")
+        }
+    }
+
     func testHomeLanguageCallbackPublishesPackCatalogToNativeSurfaces() {
         let suite = "GModHomeLanguagePublicationTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!

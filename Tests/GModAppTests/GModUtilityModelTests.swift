@@ -86,7 +86,7 @@ final class GModUtilityModelTests: XCTestCase {
         XCTAssertTrue(snapshot.problems.contains { $0.kind == .contentPack })
         XCTAssertTrue(snapshot.problems.contains { $0.kind == .rendererFallback })
         XCTAssertTrue(snapshot.problems.contains {
-            $0.id == "permissions-bridge-unavailable"
+            $0.id == "permissions-menu-transport-unavailable"
         })
         XCTAssertEqual(snapshot.luaErrors.count, 1)
         XCTAssertEqual(snapshot.luaErrors[0].realm, "CLIENT")
@@ -96,11 +96,7 @@ final class GModUtilityModelTests: XCTestCase {
             snapshot.luaErrors[0].traceback,
             "1. Think - addons/demo/lua/test.lua:9"
         )
-        XCTAssertEqual(snapshot.permissions.count, 1)
-        XCTAssertEqual(
-            snapshot.permissions[0].status,
-            "#garryspad.status.unavailable"
-        )
+        XCTAssertTrue(snapshot.permissions.isEmpty)
     }
 
     func testProblemSnapshotReportsOnlyCapacityExceededLightmapFallback() throws {

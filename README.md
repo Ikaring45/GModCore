@@ -31,13 +31,13 @@ No skipped or unfinished feature is reported as a pass. See
 [`LUA51_CONFORMANCE_STATUS.md`](LUA51_CONFORMANCE_STATUS.md) for the exact
 verification boundary.
 
-The post-0.1.45 integration branch now carries the paired GLua runtime into a
+The 0.1.53 release-candidate branch carries the paired GLua runtime into a
 bounded playable Sandbox slice. It owns one SERVER and one CLIENT, loads the
-original bundled Base/Sandbox/Derma/Spawnmenu Lua in measured order, creates
-the real `g_SpawnMenu`, and renders its logical Surface commands through the
-Metal overlay boundary. Pointer capture, stock DButton click ownership,
-logical point-space viewport sizing, label metrics/insets, and background input
-cancellation are modeled without replacing Spawnmenu with a separate Swift UI.
+original authorized Base/Sandbox/Derma/Spawnmenu Lua in measured order,
+creates the real `g_SpawnMenu`, and renders its Surface commands through the
+Metal overlay. The stock Weapons tab, tree categories, ContentIcons, tool
+controls, SpawnIcons, compact-layout scroll bar, and Lua callbacks are driven
+by actual pointer samples rather than a replacement Swift spawn menu.
 
 A deterministic one-SERVER/many-CLIENT session now provides canonical Player
 mirrors, `LocalPlayer`, client-to-server and targeted server-to-client net
@@ -49,11 +49,13 @@ behavior, and GC roots. `Player(number)` correctly uses UserID while
 
 The Source compatibility adapter supplies generation-safe Entity handles,
 SERVER fixed ticks, independent CLIENT frame/fixed-tick clocks, world-brush
-traces, a bounded ground-walk slice, and coarse world meshes. The authorized
-`gm_construct` and `gm_flatgrass` BSP/NAV/AIN fixtures are bundled and both run
-the same 16-tick walk regression. The installable iPadOS 16 host lives under
-`Apps/GarrysPAD` and presents `GModMainView`; the package-only host is no longer
-the sole application entry point.
+traces, and a bounded ground-walk slice. World rendering now carries BSP
+texinfo UVs, generated-cubemap fallback, worldspawn sky, HDR lightmaps,
+recursive displacement meshes, and the dedicated construct water path into
+Metal. The authorized `gm_construct` and `gm_flatgrass` BSP/NAV/AIN fixtures
+are bundled and both run deterministic startup, trace, mesh, and movement
+regressions. The iPadOS 16 host lives under `Apps/GarrysPAD` and presents
+`GModMainView`; the package-only host is no longer the sole app entry point.
 
 The repository includes a manifest-locked subset of project-authorized base
 GMod content needed by this slice: fonts, client Lua, PNGs, 72 VMTs, 46 VTFs,
@@ -62,20 +64,32 @@ does not broaden the bundle from arbitrary runtime paths. VMT/VTF and bitmap
 decoding, Surface capture, CPU caches, and per-frame GPU upload all have
 explicit allocation limits.
 
-This is not full Garry's Mod playability yet. Addon mounting, dynamic
-addon-material rendering, Steam/authentication, sockets, prediction-facing Lua
-`CUserCmd`, displacement collision, step/jump/water/ladder movement, dynamic
-entity physics, and model rendering remain explicit boundaries. Spawnmenu can
-open and paint, but clicking a stock SpawnIcon reaches the still-unimplemented
-prop/entity creation API family and must not be advertised as supported.
+The app now mounts a user-selected content ZIP transactionally, validates its
+root manifest and critical hashes before activation, and can stream CRC and
+SHA-256 verification across every authorized payload with real progress and
+cancellation. Home, Loading, Pause, Options, Problems, audio, and normal-play
+controls are connected to that mounted source. Pinch/double-tap zoom is blocked
+in Home while taps, scrolling, Angular commands, and persisted English/Japanese
+selection remain live. Normal play does not expose the old Render Preview,
+map buttons, counters, Console, or diagnostic frame unless Developer
+diagnostics is explicitly enabled.
 
-The current Windows integration gate passes 357 XCTest cases with one optional
-owned-MDL diagnostic skipped, plus 11/11 Swift Testing Source filesystem cases.
-That run reads the installed `garrysmod_dir.vpk`, `platform_misc_dir.vpk`, and
-`gm_construct.bsp`; it also verifies every declared bundled material payload.
-Engine and GameSession strict-concurrency builds pass with warnings treated as
-errors. Apple package/app/Metal build, Simulator launch, and physical-iPad
-behavior are CI/device gates and were not executed by this Windows validation.
+This is not full Garry's Mod playability. Static props and Studio-model
+rendering, arbitrary addon mounting, Steam/authentication, sockets,
+prediction, displacement collision, complete step/water/ladder movement,
+dynamic entity physics, and a complete weapon/tool runtime remain explicit
+boundaries. Spawnmenu navigation and callbacks are exercised end to end, but
+an unsupported host action is still reported rather than presented as a
+successful spawn.
+
+The 0.1.53 candidate Windows integration gate passes 469 XCTest cases plus
+11/11 Swift Testing Source-filesystem cases, with warnings treated as errors.
+The real 4.876 GB content pack validates all 2,641 authorized payload SHA-256
+values and passes Home background, both maps, six-face painted sky, water,
+materials, Sandbox startup, and movement gates. Embedded Metal source and
+pipeline contracts are checked locally, but Apple package/app/Metal build,
+Simulator launch, and physical-iPad behavior remain CI/device gates rather
+than inferred passes.
 
 The released 0.1.45 commit separately passes 170/170 Swift tests and the complete Engine
 strict-concurrency gate with warnings treated as errors. Its GC-enabled

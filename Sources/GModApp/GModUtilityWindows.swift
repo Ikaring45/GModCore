@@ -112,6 +112,7 @@ struct GModOptionsWindow: View {
     @ObservedObject var developerDiagnostics: GModDeveloperDiagnosticsSettingsStore
     @ObservedObject var contentSettings: GModContentSettingsStore
     @ObservedObject var content: GModPlaygroundContentModel
+    @ObservedObject var permissions: GModPermissionStore
     let currentMap: String?
     let onClose: () -> Void
     let onLanguageChange: (String) -> Void
@@ -122,6 +123,7 @@ struct GModOptionsWindow: View {
     let onDumpDiagnostics: () -> Void
 
     @State private var selectedTab = GModOptionsTab.game
+    @State private var permissionActionError: String?
 
     var body: some View {
         ZStack {
@@ -451,10 +453,124 @@ struct GModOptionsWindow: View {
                         set: { developerDiagnostics.setEnabled($0) }
                     )
                 )
+
+                Divider().overlay(Color.white.opacity(0.25))
+                permissionOptions
             }
             .padding(18)
         }
         .foregroundColor(.white)
+    }
+
+    private var permissionOptions: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                metadataRow(
+                    "garryspad.permissions.server",
+                    GModPermissionStore.localServerIdentifier
+                )
+                metadataRow(
+                    "garryspad.permissions.connect",
+                    connectPermissionStatus
+                )
+
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 150), spacing: 8)],
+                    spacing: 8
+                ) {
+                    utilityButton(
+                        "garryspad.permissions.grant-temporary",
+                        action: {
+                            grantConnectPermission(lifetime: .temporary)
+                        },
+                        disabled: hasConnectPermission
+                    )
+                    utilityButton(
+                        "garryspad.permissions.grant-permanent",
+                        action: {
+                            grantConnectPermission(lifetime: .permanent)
+                        },
+                        disabled: hasPermanentConnectPermission
+                    )
+                    utilityButton(
+                        "garryspad.permissions.revoke",
+                        action: revokeConnectPermission,
+                        disabled: !hasConnectPermission
+                    )
+                    utilityButton(
+                        "garryspad.permissions.connect-unavailable-action",
+                        action: {},
+                        disabled: true
+                    )
+                }
+
+                Text(text("garryspad.permissions.native-boundary"))
+                    .font(.system(size: 11))
+                    .foregroundColor(.white.opacity(0.68))
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if let error = permissionActionError {
+                    Text(error)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.red.opacity(0.9))
+                        .textSelection(.enabled)
+                }
+            }
+            .padding(.top, 4)
+        } label: {
+            Text(text("permissions.title"))
+        }
+    }
+
+    private var connectPermissionStatus: String {
+        if hasPermanentConnectPermission {
+            return text("garryspad.permissions.permanent")
+        }
+        if hasTemporaryConnectPermission {
+            return text("garryspad.permissions.temporary")
+        }
+        return text("garryspad.permissions.not-granted")
+    }
+
+    private var hasTemporaryConnectPermission: Bool {
+        permissions.collection.temporary[
+            GModPermissionStore.localServerIdentifier
+        ]?.contains("connect") == true
+    }
+
+    private var hasPermanentConnectPermission: Bool {
+        permissions.collection.permanent[
+            GModPermissionStore.localServerIdentifier
+        ]?.contains("connect") == true
+    }
+
+    private var hasConnectPermission: Bool {
+        hasTemporaryConnectPermission || hasPermanentConnectPermission
+    }
+
+    private func grantConnectPermission(lifetime: GModPermissionLifetime) {
+        do {
+            _ = try permissions.grant(
+                "connect",
+                for: GModPermissionStore.localServerIdentifier,
+                lifetime: lifetime
+            )
+            permissionActionError = nil
+        } catch {
+            permissionActionError = error.localizedDescription
+        }
+    }
+
+    private func revokeConnectPermission() {
+        do {
+            _ = try permissions.revoke(
+                "connect",
+                for: GModPermissionStore.localServerIdentifier
+            )
+            permissionActionError = nil
+        } catch {
+            permissionActionError = error.localizedDescription
+        }
     }
 
     private func slider(title: String, value: Binding<Double>) -> some View {
@@ -550,6 +666,7 @@ struct GModProblemsWindow: View {
     let localization: GModMenuLanguageSnapshot
     let snapshot: GModAppProblemSnapshot
     let onClose: () -> Void
+    let onRevokePermission: (GModAppPermissionRecord) -> Void
     @State private var selectedTab = GModProblemsTab.problems
 
     var body: some View {
@@ -669,22 +786,52 @@ struct GModProblemsWindow: View {
     private var permissionList: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 8) {
+                if snapshot.permissions.isEmpty {
+                    capabilityEmptyState("garryspad.permissions.none")
+                }
                 ForEach(snapshot.permissions) { permission in
                     VStack(alignment: .leading, spacing: 5) {
                         HStack {
-                            Text(resolve(permission.name)).font(.headline)
+                            Text(permissionTitle(permission.permission))
+                                .font(.headline)
                             Spacer()
-                            Text(resolve(permission.status))
+                            Text(text(permission.lifetime.localizationKey))
                                 .font(.caption.bold())
-                                .foregroundColor(.orange)
+                                .foregroundColor(
+                                    permission.lifetime == .temporary
+                                        ? .orange
+                                        : .green
+                                )
                         }
-                        Text(resolve(permission.detail))
-                            .font(.system(size: 12))
+                        Text(permission.serverIdentifier)
+                            .font(.system(size: 11, design: .monospaced))
                             .foregroundColor(.white.opacity(0.72))
+                            .textSelection(.enabled)
+                        Button(text("garryspad.permissions.revoke")) {
+                            onRevokePermission(permission)
+                        }
+                        .buttonStyle(GModUtilityActionButtonStyle())
+                        .accessibilityIdentifier(
+                            "garryspad.permissions.revoke.\(permission.id)"
+                        )
                     }
                     .padding(10)
                     .background(Color.white.opacity(0.055))
                 }
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Label(
+                        text("garryspad.status.unavailable"),
+                        systemImage: "network.slash"
+                    )
+                    .font(.caption.bold())
+                    .foregroundColor(.orange)
+                    Text(text("garryspad.permissions.native-boundary"))
+                        .font(.system(size: 12))
+                        .foregroundColor(.white.opacity(0.72))
+                }
+                .padding(10)
+                .background(Color.orange.opacity(0.07))
             }
             .padding(12)
         }
@@ -699,6 +846,12 @@ struct GModProblemsWindow: View {
 
     private func text(_ key: String) -> String { localization.phrase(key) }
 
+    private func permissionTitle(_ permission: String) -> String {
+        let key = "permission.\(permission)"
+        let localized = text(key)
+        return localized == key ? permission : localized
+    }
+
     private func severityIcon(_ severity: GModAppProblemSeverity) -> String {
         switch severity {
         case .information: return "info.circle.fill"
@@ -712,6 +865,17 @@ struct GModProblemsWindow: View {
         case .information: return .blue
         case .warning: return .orange
         case .error: return .red
+        }
+    }
+}
+
+private extension GModPermissionLifetime {
+    var localizationKey: String {
+        switch self {
+        case .temporary:
+            return "garryspad.permissions.temporary"
+        case .permanent:
+            return "garryspad.permissions.permanent"
         }
     }
 }

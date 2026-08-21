@@ -90,9 +90,9 @@ struct GModAppLuaErrorRecord: Identifiable, Equatable, Sendable {
 
 struct GModAppPermissionRecord: Identifiable, Equatable, Sendable {
     let id: String
-    let name: String
-    let status: String
-    let detail: String
+    let serverIdentifier: String
+    let permission: String
+    let lifetime: GModPermissionLifetime
 }
 
 /// Cross-surface diagnostics that do not naturally flow through the retained
@@ -155,7 +155,9 @@ enum GModAppProblemSnapshotBuilder {
         surfaceDiagnostics: GModMetalSurfaceDiagnostics?,
         contentError: String?,
         rendererFailure: GModMetalWorldRendererFailure? = nil,
-        startFailure: GModGameStartFailure? = nil
+        startFailure: GModGameStartFailure? = nil,
+        permissionCollection: GModPermissionCollection = .empty,
+        permissionPersistenceError: GModPermissionStoreError? = nil
     ) -> GModAppProblemSnapshot {
         var problems = retained
         var luaErrors: [GModAppLuaErrorRecord] = []
@@ -361,22 +363,37 @@ enum GModAppProblemSnapshotBuilder {
             ), to: &problems)
         }
 
-        // These are capability facts, not a false "no problems" state.
+        // The native store below is real, but it is not presented as the
+        // original MENU realm. Transport and the MENU Lua bridge remain
+        // explicit compatibility gaps until those systems exist.
         appendUnique(GModAppProblemRecord(
-            id: "permissions-bridge-unavailable",
+            id: "permissions-menu-transport-unavailable",
             kind: .compatibility,
             severity: .warning,
-            title: "#garryspad.problem.permissions-unavailable",
-            detail: "#garryspad.problem.permissions-unavailable-detail",
+            title: "#garryspad.problem.permissions-limited",
+            detail: "#garryspad.problem.permissions-limited-detail",
             source: "permissions"
         ), to: &problems)
 
-        let permissions = [GModAppPermissionRecord(
-            id: "permissions-bridge",
-            name: "#garryspad.permissions.bridge",
-            status: "#garryspad.status.unavailable",
-            detail: "#garryspad.problem.permissions-unavailable-detail"
-        )]
+        if let permissionPersistenceError {
+            appendUnique(GModAppProblemRecord(
+                id: "permissions-persistence|\(permissionPersistenceError)",
+                kind: .compatibility,
+                severity: .error,
+                title: "#garryspad.problem.permissions-storage",
+                detail: permissionPersistenceError.localizedDescription,
+                source: "UserDefaults"
+            ), to: &problems)
+        }
+
+        let permissions = permissionCollection.grants.map { grant in
+            GModAppPermissionRecord(
+                id: grant.id,
+                serverIdentifier: grant.serverIdentifier,
+                permission: grant.permission,
+                lifetime: grant.lifetime
+            )
+        }
 
         problems.sort {
             if $0.severity != $1.severity { return $0.severity > $1.severity }
