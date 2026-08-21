@@ -1,0 +1,76 @@
+# Clean VPhysics sandbox workspace (non-launch prerequisite)
+
+This tool assembles and revalidates a bounded input for a future, separately
+reviewed AppID 4020 VPhysics attestation. It does **not** download a dedicated
+server, start Windows Sandbox or GMod, load a DLL, enable the probe, or change
+firewall policy.
+
+Run the synthetic/static test with:
+
+```powershell
+.\Tools\SourceOracle\Test-SourceOracleVPhysicsSandboxWorkspace.ps1
+```
+
+The generator is:
+
+```powershell
+.\Tools\SourceOracle\New-SourceOracleVPhysicsSandboxWorkspace.ps1 `
+  -SourceRoot C:\explicit\fresh-app-4020-input `
+  -InputSpecPath C:\explicit\app-4020-allowlist.json `
+  -WorkspacePath C:\explicit\new-workspace
+```
+
+The input spec is schema 1 and has the exact object shape below. Every file is
+copied through one retained, non-share-write handle only after its byte cap and
+lowercase SHA-256 match. Paths are explicit; no glob or directory copy exists.
+
+```json
+{
+  "schema": 1,
+  "kind": "fresh-steamcmd-app-4020-x86-64-attestation-input",
+  "steam": { "app_id": 4020, "branch": "x86-64", "build_id": "12345678" },
+  "ownership_reference": "non-secret owned-install reference",
+  "server": {
+    "executable_input_path": "server/srcds.exe",
+    "engine_input_path": "server/bin/win64/engine.dll",
+    "game_server_input_path": "server/bin/win64/server.dll",
+    "vphysics_input_path": "server/bin/win64/vphysics.dll",
+    "tier0_input_path": "server/bin/win64/tier0.dll"
+  },
+  "model": {
+    "model_path": "models/owned_fixture/attested_prop.mdl",
+    "phy_path": "models/owned_fixture/attested_prop.phy"
+  },
+  "files": [
+    {
+      "role": "server_executable",
+      "source_path": "srcds.exe",
+      "input_path": "server/srcds.exe",
+      "sha256": "64 lowercase hex characters",
+      "maximum_bytes": 1048576
+    }
+  ]
+}
+```
+
+Exactly one entry is required for each of `server_executable`,
+`engine_module`, `game_server_module`, `vphysics_module`, `tier0_module`,
+`model_mdl`, and `model_phy`. Extra explicitly hashed files may use
+`server_runtime`, `shipped_content`, or `shipped_lua`. The two model entries
+must be written to `oracle_game/<logical model path>`. Any path containing an
+`addons` component is rejected.
+
+The new workspace contains only:
+
+- `input/`: copied allowlisted files, the normalized spec, an exact generated
+  manifest, and explicitly empty `oracle_game/cfg/mount.cfg` and
+  `mountdepots.txt`;
+- `output/`: an empty directory;
+- `SourceVPhysicsAttestation.wsb`: networking disabled, input mapped read-only,
+  output mapped writable, and no logon command;
+- `workspace.json`: `probe_enabled=false` plus the manifest digest and fixed
+  isolation policy.
+
+A future runner must call `Assert-SourceOracleVPhysicsSandboxWorkspace`
+immediately before it creates any probe command. This prerequisite deliberately
+contains no function that can change `probe_enabled` or start a process.
