@@ -13,7 +13,7 @@ final class GModUtilityModelTests: XCTestCase {
         let settings = GModInputVideoSettingsStore(defaults: defaults)
         XCTAssertEqual(settings.touchLookSensitivity, 0.34, accuracy: 0.0001)
         XCTAssertFalse(settings.invertTouchLookY)
-        XCTAssertEqual(settings.preferredFramesPerSecond, 120)
+        XCTAssertEqual(settings.preferredFramesPerSecond, 60)
 
         settings.setTouchLookSensitivity(-100)
         XCTAssertEqual(settings.touchLookSensitivity, 0.05, accuracy: 0.0001)

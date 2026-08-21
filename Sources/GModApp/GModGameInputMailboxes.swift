@@ -68,6 +68,42 @@ enum GModGameWorldInputPolicy {
     }
 }
 
+/// The native Surface scene currently represents the foreground Q/C panel
+/// tree. CLIENT Lua continues to tick when neither menu is visible, but there
+/// is no renderer-facing panel capture to rebuild in that state.
+enum GModGameClientSurfaceCapturePolicy {
+    static func shouldCapture(
+        activeMenu: GModGameClientMenu?,
+        transitioningMenu: GModGameClientMenu?
+    ) -> Bool {
+        activeMenu != nil && transitioningMenu == nil
+    }
+}
+
+struct GModGameSurfaceRefreshRequest: Sendable, Equatable {
+    let generation: GModGameSessionGenerationToken
+}
+
+/// One renderer refresh can be expensive while pointer callbacks must remain
+/// ordered and low-latency. Keep only the newest generation request while a
+/// prior Surface snapshot/build is in flight.
+struct GModGameSurfaceRefreshPendingQueue: Sendable, Equatable {
+    private(set) var pending: GModGameSurfaceRefreshRequest?
+
+    mutating func submit(_ request: GModGameSurfaceRefreshRequest) {
+        pending = request
+    }
+
+    mutating func takeLatest() -> GModGameSurfaceRefreshRequest? {
+        defer { pending = nil }
+        return pending
+    }
+
+    mutating func removeAll() {
+        pending = nil
+    }
+}
+
 enum GModGameWorldActionButton: Sendable, Equatable {
     case attack
     case attack2

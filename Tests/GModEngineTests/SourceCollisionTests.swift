@@ -243,6 +243,103 @@ final class SourceCollisionTests: XCTestCase {
         XCTAssertEqual(trace.contents, .solid)
     }
 
+    func testCandidatePrimitiveTraceMatchesTemporaryWorldForOrderMaskAndStartSolid() {
+        let primitives: [SourceCollisionPrimitive] = [
+            .axisAlignedBox(SourceAABBCollider(
+                mins: SourceVector3(4, -1, -1),
+                maxs: SourceVector3(6, 1, 1),
+                contents: .solid,
+                surface: SourceTraceSurface(name: "first")
+            )),
+            .axisAlignedBox(SourceAABBCollider(
+                mins: SourceVector3(4, -1, -1),
+                maxs: SourceVector3(6, 1, 1),
+                contents: .solid,
+                surface: SourceTraceSurface(name: "second")
+            )),
+            .axisAlignedBox(SourceAABBCollider(
+                mins: SourceVector3(2, -1, -1),
+                maxs: SourceVector3(3, 1, 1),
+                contents: .water,
+                surface: SourceTraceSurface(name: "water")
+            )),
+            .axisAlignedBox(SourceAABBCollider(
+                mins: SourceVector3(-1, -1, -1),
+                maxs: SourceVector3(1, 1, 1),
+                contents: .solid,
+                surface: SourceTraceSurface(name: "solid start")
+            )),
+            .axisAlignedBox(SourceAABBCollider(
+                mins: SourceVector3(-2, -2, -2),
+                maxs: SourceVector3(2, 2, 2),
+                contents: .water,
+                surface: SourceTraceSurface(name: "water start")
+            )),
+        ]
+        let world = SourceCollisionWorld(primitives: primitives)
+
+        func expectedTrace(
+            ray: SourceRay,
+            indices: [Int],
+            mask: SourceContents
+        ) -> SourceGameTrace {
+            SourceCollisionWorld(
+                primitives: indices.map { primitives[$0] }
+            ).trace(ray, mask: mask)
+        }
+
+        let sweptRay = SourceRay(start: .zero, end: SourceVector3(10, 0, 0))
+        let tieOrder = [1, 0]
+        let tieTrace = world.trace(
+            sweptRay,
+            candidatePrimitiveIndices: tieOrder,
+            mask: .solid
+        )
+        XCTAssertEqual(
+            tieTrace,
+            expectedTrace(ray: sweptRay, indices: tieOrder, mask: .solid)
+        )
+        XCTAssertEqual(tieTrace.surface.name, "second")
+
+        let maskedIndices = [2, 1]
+        XCTAssertEqual(
+            world.trace(
+                sweptRay,
+                candidatePrimitiveIndices: maskedIndices,
+                mask: .solid
+            ),
+            expectedTrace(ray: sweptRay, indices: maskedIndices, mask: .solid)
+        )
+        XCTAssertFalse(world.trace(
+            sweptRay,
+            candidatePrimitiveIndices: [2],
+            mask: .solid
+        ).didHit)
+
+        let startSolidRay = SourceRay(
+            start: .zero,
+            end: SourceVector3(4, 0, 0)
+        )
+        let startSolidOrder = [4, 3]
+        let startSolidTrace = world.trace(
+            startSolidRay,
+            candidatePrimitiveIndices: startSolidOrder,
+            mask: SourceMasks.all
+        )
+        XCTAssertEqual(
+            startSolidTrace,
+            expectedTrace(
+                ray: startSolidRay,
+                indices: startSolidOrder,
+                mask: SourceMasks.all
+            )
+        )
+        XCTAssertTrue(startSolidTrace.startSolid)
+        XCTAssertTrue(startSolidTrace.contents.contains(.solid))
+        XCTAssertTrue(startSolidTrace.contents.contains(.water))
+        XCTAssertEqual(startSolidTrace.surface.name, "water start")
+    }
+
     private static func boxPlanes(
         mins: SourceVector3,
         maxs: SourceVector3

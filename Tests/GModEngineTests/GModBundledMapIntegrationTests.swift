@@ -91,6 +91,10 @@ final class GModBundledMapIntegrationTests: XCTestCase {
             XCTAssertEqual(bsp.faces.count, expected.faceCount)
             XCTAssertEqual(bsp.leaves.count, expected.leafCount)
             XCTAssertEqual(bsp.brushes.count, expected.brushCount)
+            XCTAssertEqual(
+                bsp.prebuiltWorldCollisionPrimitiveCount,
+                expected.brushCount
+            )
 
             let entityText = try XCTUnwrap(bsp.entities.text)
             let playerStarts = try parsePlayerStarts(entityText)

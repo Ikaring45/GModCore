@@ -471,6 +471,62 @@ final class GModMetalSurfaceSceneTests: XCTestCase {
         XCTAssertEqual(resolver.cachedTextureByteCount, 8)
     }
 
+    func testSourceMaterialResolverSeparatesWorldMipChainFromSurfaceMipZero() throws {
+        let base = [UInt8](repeating: 0x40, count: 4 * 4 * 4)
+        let mip1 = [UInt8](repeating: 0x80, count: 2 * 2 * 4)
+        let mip2 = [UInt8](repeating: 0xC0, count: 1 * 1 * 4)
+        let files: [String: Data] = [
+            "materials/gui/mipped.vmt": Data(
+                "\"UnlitGeneric\" { \"$basetexture\" \"gui/mipped\" }".utf8
+            ),
+            "materials/gui/mipped.vtf": makeSurfaceRGBA8888VTF(
+                width: 4,
+                height: 4,
+                pixels: base,
+                mipPixelsByLevel: [mip1, mip2]
+            ),
+        ]
+        let resolver = GModMetalSurfaceSourceMaterialResolver(
+            maximumCachedEntryCount: 4,
+            maximumCachedByteCount: 256
+        ) { files[$0.lowercased()] }
+
+        let surface = try XCTUnwrap(
+            resolver.resolveSurfaceTexture(named: "gui/mipped")
+        )
+        let world = try XCTUnwrap(
+            resolver.resolveWorldTexture(named: "gui/mipped")
+        )
+        XCTAssertEqual(surface.mipLevels.count, 1)
+        XCTAssertEqual(surface.totalByteCount, base.count)
+        XCTAssertEqual(surface.alphaRepresentation, .premultiplied)
+        XCTAssertEqual(resolver.sourceMaterialResolver.cachedEntryCount, 1)
+        XCTAssertEqual(
+            resolver.sourceMaterialResolver.cachedImageByteCount,
+            base.count
+        )
+        XCTAssertEqual(
+            GModMetalSurfaceTextureUploadContract.mipmapLevelCount,
+            1
+        )
+        XCTAssertEqual(world.mipLevels.map(\.width), [4, 2, 1])
+        XCTAssertEqual(world.totalByteCount, base.count + mip1.count + mip2.count)
+        XCTAssertEqual(world.alphaRepresentation, .straight)
+        XCTAssertEqual(world.mipLevels[0].premultipliedRGBA8, Data(base))
+        XCTAssertNotEqual(surface.premultipliedRGBA8, world.mipLevels[0].premultipliedRGBA8)
+        XCTAssertNotEqual(surface.cacheIdentifier, world.cacheIdentifier)
+        XCTAssertEqual(resolver.sourceMaterialResolver.cachedEntryCount, 2)
+        XCTAssertEqual(
+            resolver.sourceMaterialResolver.cachedImageByteCount,
+            base.count * 2 + mip1.count + mip2.count
+        )
+        XCTAssertEqual(resolver.cachedEntryCount, 2)
+        XCTAssertEqual(
+            resolver.cachedTextureByteCount,
+            surface.totalByteCount + world.totalByteCount
+        )
+    }
+
     func testSceneBoundsUniqueBitmapRetentionWithoutReordering() throws {
         let snapshot = try makeTextureBudgetSnapshot()
         let countBoundScene = try GModMetalSurfaceScene(
@@ -560,10 +616,26 @@ final class GModMetalSurfaceSceneTests: XCTestCase {
             stride(from: 3, to: bitmap.premultipliedRGBA8.count, by: 4)
                 .contains { bitmap.premultipliedRGBA8[$0] > 0 }
         )
+        XCTAssertGreaterThanOrEqual(
+            alphaOccupiedRows(in: bitmap).count,
+            bitmap.height / 2,
+            "a full CoreText line must not collapse to a clipped alpha strip"
+        )
         XCTAssertEqual(
             try rasterizer.rasterizeSurfaceText("Sandbox", font: descriptor),
             bitmap,
             "the immutable glyph cache should return identical pixels"
+        )
+
+        let japanese = try XCTUnwrap(
+            rasterizer.rasterizeSurfaceText("武器", font: descriptor)
+        )
+        XCTAssertGreaterThan(japanese.width, 0)
+        XCTAssertEqual(japanese.height, 20)
+        XCTAssertGreaterThanOrEqual(
+            alphaOccupiedRows(in: japanese).count,
+            japanese.height / 3,
+            "CoreText fallback must rasterize CJK across meaningful rows"
         )
         _ = try XCTUnwrap(
             rasterizer.rasterizeSurfaceText("A different label", font: descriptor)
@@ -573,6 +645,19 @@ final class GModMetalSurfaceSceneTests: XCTestCase {
             rasterizer.cachedGlyphByteCount,
             1_024 * 1_024
         )
+    }
+
+    private func alphaOccupiedRows(
+        in bitmap: GModMetalSurfaceBitmap
+    ) -> Set<Int> {
+        var rows: Set<Int> = []
+        for pixelIndex in 0..<(bitmap.width * bitmap.height) {
+            let alphaIndex = pixelIndex * 4 + 3
+            if bitmap.premultipliedRGBA8[alphaIndex] > 0 {
+                rows.insert(pixelIndex / bitmap.width)
+            }
+        }
+        return rows
     }
 #endif
 
@@ -666,9 +751,16 @@ private func makePNGHeader(width: UInt32, height: UInt32) -> Data {
 private func makeSurfaceRGBA8888VTF(
     width: Int,
     height: Int,
-    pixels: [UInt8]
+    pixels: [UInt8],
+    mipPixelsByLevel: [[UInt8]] = []
 ) -> Data {
     precondition(width > 0 && height > 0 && pixels.count == width * height * 4)
+    for (offset, mip) in mipPixelsByLevel.enumerated() {
+        let level = offset + 1
+        precondition(
+            mip.count == max(1, width >> level) * max(1, height >> level) * 4
+        )
+    }
     var bytes = [UInt8](repeating: 0, count: 80)
     func write(_ value: UInt16, at offset: Int) {
         bytes[offset] = UInt8(truncatingIfNeeded: value)
@@ -689,9 +781,12 @@ private func makeSurfaceRGBA8888VTF(
     write(UInt16(1), at: 24)
     write(Float(1).bitPattern, at: 48)
     write(UInt32(bitPattern: SourceVTFImageFormat.rgba8888.rawValue), at: 52)
-    bytes[56] = 1
+    bytes[56] = UInt8(1 + mipPixelsByLevel.count)
     write(UInt32(bitPattern: SourceVTFImageFormat.unknown.rawValue), at: 57)
     write(UInt16(1), at: 63)
+    for mip in mipPixelsByLevel.reversed() {
+        bytes.append(contentsOf: mip)
+    }
     bytes.append(contentsOf: pixels)
     return Data(bytes)
 }

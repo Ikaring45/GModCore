@@ -2,6 +2,52 @@ import XCTest
 @testable import GModEngine
 
 final class SourceMovementTests: XCTestCase {
+    func testAngleVectorsRemainContinuousAndOrthonormalNearVerticalPitch() {
+        let yaws: [Float] = [-180, -90, 0, 90, 180]
+        for yaw in yaws {
+            var prior: SourceAngleBasis?
+            for pitchStep in -356...356 {
+                let pitch = Float(pitchStep) / 4
+                let basis = SourceQAngle(
+                    pitch: pitch,
+                    yaw: yaw,
+                    roll: 0
+                ).sourceBasis
+                for vector in [basis.forward, basis.right, basis.up] {
+                    XCTAssertEqual(vector.length, 1, accuracy: 0.000_01)
+                }
+                XCTAssertEqual(basis.forward.dot(basis.right), 0, accuracy: 0.000_01)
+                XCTAssertEqual(basis.forward.dot(basis.up), 0, accuracy: 0.000_01)
+                XCTAssertEqual(basis.right.dot(basis.up), 0, accuracy: 0.000_01)
+                if let prior {
+                    XCTAssertGreaterThan(prior.forward.dot(basis.forward), 0.999)
+                    XCTAssertGreaterThan(prior.right.dot(basis.right), 0.999)
+                    XCTAssertGreaterThan(prior.up.dot(basis.up), 0.999)
+                }
+                prior = basis
+            }
+        }
+
+        let belowFallbackBoundary = SourceQAngle(
+            pitch: 87.43,
+            yaw: 90,
+            roll: 0
+        ).sourceBasis
+        let aboveFallbackBoundary = SourceQAngle(
+            pitch: 87.45,
+            yaw: 90,
+            roll: 0
+        ).sourceBasis
+        XCTAssertGreaterThan(
+            belowFallbackBoundary.right.dot(aboveFallbackBoundary.right),
+            0.999_999
+        )
+        XCTAssertGreaterThan(
+            belowFallbackBoundary.up.dot(aboveFallbackBoundary.up),
+            0.999_999
+        )
+    }
+
     func testUserCommandMakeInertMatchesSourceFieldScope() {
         var command = SourceUserCommand(
             commandNumber: 12,

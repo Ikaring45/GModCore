@@ -69,11 +69,29 @@ public final class GModMetalSurfaceSourceMaterialResolver:
     public func resolveSurfaceTexture(
         named logicalName: String
     ) throws -> GModMetalSurfaceBitmap? {
-        let key = logicalName
+        try resolveTexture(named: logicalName, retainingAuthoredMipChain: false)
+    }
+
+    /// World materials retain the VTF-authored mip chain for Source minification.
+    /// VGUI Surface deliberately uses mip zero only because its sampler is
+    /// non-mipmapped and retaining the other levels would consume CPU/GPU cache
+    /// and upload budget without ever sampling them.
+    public func resolveWorldTexture(
+        named logicalName: String
+    ) throws -> GModMetalSurfaceBitmap? {
+        try resolveTexture(named: logicalName, retainingAuthoredMipChain: true)
+    }
+
+    private func resolveTexture(
+        named logicalName: String,
+        retainingAuthoredMipChain: Bool
+    ) throws -> GModMetalSurfaceBitmap? {
+        let logicalKey = logicalName
             .replacingOccurrences(of: "\\", with: "/")
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
-        guard !key.isEmpty else { return nil }
+        guard !logicalKey.isEmpty else { return nil }
+        let key = (retainingAuthoredMipChain ? "world:" : "surface:") + logicalKey
         if let cached = cachedValue(for: key) {
             switch cached {
             case .missing: return nil
@@ -81,17 +99,27 @@ public final class GModMetalSurfaceSourceMaterialResolver:
             }
         }
 
-        let resolved = try sourceMaterialResolver.resolve(named: logicalName)
+        let resolved = try sourceMaterialResolver.resolve(
+            named: logicalName,
+            mipPolicy: retainingAuthoredMipChain
+                ? .authoredChain
+                : .mipZeroOnly
+        )
         guard let dimensions = resolved.metadata.dimensions,
               let rgbaBytes = resolved.rgbaBytes else {
             store(.missing, for: key)
             return nil
         }
-        let bitmap = try makePremultipliedBitmap(
+        let bitmap = try makeBitmap(
             resourceIdentifier: resolved.metadata.materialPath.utf8String,
             width: dimensions.width,
             height: dimensions.height,
-            rgbaBytes: rgbaBytes
+            rgbaBytes: rgbaBytes,
+            mipImages: resolved.mipImages,
+            flags: resolved.sourceTextureFlags,
+            alphaRepresentation: retainingAuthoredMipChain
+                ? .straight
+                : .premultiplied
         )
         store(.bitmap(bitmap), for: key)
         return bitmap
@@ -104,7 +132,8 @@ public final class GModMetalSurfaceSourceMaterialResolver:
         named logicalName: String
     ) throws -> GModMetalWorldWaterMaterial? {
         guard let material = try sourceMaterialResolver.resolveWater(
-            named: logicalName
+            named: logicalName,
+            mipPolicy: .authoredChain
         ), let isAboveWater = material.isAboveWater,
            let rawFogColor = material.fogColor,
            rawFogColor.count == 3,
@@ -122,11 +151,14 @@ public final class GModMetalSurfaceSourceMaterialResolver:
            let width = normalTexture.width,
            let height = normalTexture.height,
            let rgbaBytes = normalTexture.rgbaBytes {
-            normalBitmap = try makePremultipliedBitmap(
+            normalBitmap = try makeBitmap(
                 resourceIdentifier: normalTexture.logicalPath,
                 width: width,
                 height: height,
-                rgbaBytes: rgbaBytes
+                rgbaBytes: rgbaBytes,
+                mipImages: normalTexture.mipImages,
+                flags: normalTexture.flags,
+                alphaRepresentation: .straight
             )
         } else {
             normalBitmap = nil
@@ -165,33 +197,67 @@ public final class GModMetalSurfaceSourceMaterialResolver:
         )
     }
 
-    private func makePremultipliedBitmap(
+    private func makeBitmap(
         resourceIdentifier: String,
         width: Int,
         height: Int,
-        rgbaBytes: Data
+        rgbaBytes: Data,
+        mipImages: [SourceVTFDecodedImage],
+        flags: SourceVTFTextureFlags?,
+        alphaRepresentation: GModMetalBitmapAlphaRepresentation
     ) throws -> GModMetalSurfaceBitmap {
-        var premultiplied = rgbaBytes
-        premultiplied.withUnsafeMutableBytes { rawBytes in
-            let bytes = rawBytes.bindMemory(to: UInt8.self)
-            var offset = 0
-            while offset + 3 < bytes.count {
-                let alpha = UInt16(bytes[offset + 3])
-                bytes[offset] = UInt8((UInt16(bytes[offset]) * alpha + 127) / 255)
-                bytes[offset + 1] = UInt8(
-                    (UInt16(bytes[offset + 1]) * alpha + 127) / 255
-                )
-                bytes[offset + 2] = UInt8(
-                    (UInt16(bytes[offset + 2]) * alpha + 127) / 255
-                )
-                offset += 4
+        func premultiply(_ straightRGBA8: Data) -> Data {
+            var premultiplied = straightRGBA8
+            premultiplied.withUnsafeMutableBytes { rawBytes in
+                let bytes = rawBytes.bindMemory(to: UInt8.self)
+                var offset = 0
+                while offset + 3 < bytes.count {
+                    let alpha = UInt16(bytes[offset + 3])
+                    bytes[offset] = UInt8(
+                        (UInt16(bytes[offset]) * alpha + 127) / 255
+                    )
+                    bytes[offset + 1] = UInt8(
+                        (UInt16(bytes[offset + 1]) * alpha + 127) / 255
+                    )
+                    bytes[offset + 2] = UInt8(
+                        (UInt16(bytes[offset + 2]) * alpha + 127) / 255
+                    )
+                    offset += 4
+                }
             }
+            return premultiplied
+        }
+        let retainedMipLevels: [GModMetalSurfaceMipLevel]
+        if mipImages.isEmpty {
+            retainedMipLevels = [GModMetalSurfaceMipLevel(
+                width: width,
+                height: height,
+                premultipliedRGBA8: alphaRepresentation == .premultiplied
+                    ? premultiply(rgbaBytes)
+                    : rgbaBytes
+            )]
+        } else {
+            retainedMipLevels = mipImages.map {
+                GModMetalSurfaceMipLevel(
+                    width: $0.width,
+                    height: $0.height,
+                    premultipliedRGBA8: alphaRepresentation == .premultiplied
+                        ? premultiply($0.rgbaBytes)
+                        : $0.rgbaBytes
+                )
+            }
+        }
+        guard let baseMip = retainedMipLevels.first else {
+            preconditionFailure("resolved Source texture must retain mip zero")
         }
         return try GModMetalSurfaceBitmap(
             resourceIdentifier: resourceIdentifier,
             width: width,
             height: height,
-            premultipliedRGBA8: premultiplied
+            premultipliedRGBA8: baseMip.premultipliedRGBA8,
+            mipLevels: retainedMipLevels,
+            sourceTextureFlags: flags,
+            alphaRepresentation: alphaRepresentation
         )
     }
 
@@ -208,7 +274,7 @@ public final class GModMetalSurfaceSourceMaterialResolver:
         let byteCount: Int
         switch value {
         case .missing: byteCount = 0
-        case let .bitmap(bitmap): byteCount = bitmap.premultipliedRGBA8.count
+        case let .bitmap(bitmap): byteCount = bitmap.totalByteCount
         }
         guard byteCount <= maximumCachedByteCount else { return }
         lock.lock()
@@ -234,7 +300,7 @@ public final class GModMetalSurfaceSourceMaterialResolver:
     private static func byteCount(of value: CachedResult) -> Int {
         switch value {
         case .missing: return 0
-        case let .bitmap(bitmap): return bitmap.premultipliedRGBA8.count
+        case let .bitmap(bitmap): return bitmap.totalByteCount
         }
     }
 }

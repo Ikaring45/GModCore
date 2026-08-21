@@ -39,6 +39,16 @@ public enum GModMetalSurfaceBitmapError: Error, Sendable, Equatable,
     case invalidDimensions(width: Int, height: Int)
     case byteCountOverflow
     case invalidByteCount(expected: Int, actual: Int)
+    case invalidMipDimensions(
+        level: Int,
+        expectedWidth: Int,
+        expectedHeight: Int,
+        actualWidth: Int,
+        actualHeight: Int
+    )
+    case invalidMipByteCount(level: Int, expected: Int, actual: Int)
+    case mipZeroDoesNotMatchBase
+    case excessiveMipCount(maximum: Int, actual: Int)
 
     public var description: String {
         switch self {
@@ -50,24 +60,70 @@ public enum GModMetalSurfaceBitmapError: Error, Sendable, Equatable,
             return "surface bitmap byte count overflows Int"
         case let .invalidByteCount(expected, actual):
             return "surface bitmap contains \(actual) bytes; expected \(expected)"
+        case let .invalidMipDimensions(
+            level, expectedWidth, expectedHeight, actualWidth, actualHeight
+        ):
+            return "surface bitmap mip \(level) is \(actualWidth)x\(actualHeight); " +
+                "expected \(expectedWidth)x\(expectedHeight)"
+        case let .invalidMipByteCount(level, expected, actual):
+            return "surface bitmap mip \(level) contains \(actual) bytes; " +
+                "expected \(expected)"
+        case .mipZeroDoesNotMatchBase:
+            return "surface bitmap mip 0 pixels do not match the base image"
+        case let .excessiveMipCount(maximum, actual):
+            return "surface bitmap has \(actual) mips; maximum is \(maximum)"
         }
     }
 }
 
-/// Immutable, top-left-origin, premultiplied RGBA8 pixels. Bitmap decoding and
-/// glyph rasterization happen while a scene is built, never in MTKView.draw.
+public struct GModMetalSurfaceMipLevel: Sendable, Equatable {
+    public let width: Int
+    public let height: Int
+    public let premultipliedRGBA8: Data
+
+    public init(width: Int, height: Int, premultipliedRGBA8: Data) {
+        self.width = width
+        self.height = height
+        self.premultipliedRGBA8 = premultipliedRGBA8
+    }
+}
+
+/// Describes how the RGB channels are encoded relative to alpha. Surface and
+/// CoreText blending require premultiplied pixels; Source world, sky, and
+/// water textures remain straight-alpha until the shader samples them.
+public enum GModMetalBitmapAlphaRepresentation: UInt8, Sendable, Equatable,
+    Hashable
+{
+    case straight
+    case premultiplied
+}
+
+enum GModMetalSurfaceTextureUploadContract {
+    static let mipmapLevelCount = 1
+}
+
+/// Immutable, top-left-origin RGBA8 pixels. `alphaRepresentation` is part of
+/// cache identity because the same Source mip bytes have different blending
+/// semantics in Surface and world render passes. Bitmap conversion and glyph
+/// rasterization happen while a scene is built, never in MTKView.draw.
 public struct GModMetalSurfaceBitmap: Sendable, Equatable {
     public let resourceIdentifier: String
     public let cacheIdentifier: String
     public let width: Int
     public let height: Int
     public let premultipliedRGBA8: Data
+    public let mipLevels: [GModMetalSurfaceMipLevel]
+    public let sourceTextureFlags: SourceVTFTextureFlags?
+    public let alphaRepresentation: GModMetalBitmapAlphaRepresentation
 
     public init(
         resourceIdentifier: String,
         width: Int,
         height: Int,
-        premultipliedRGBA8: Data
+        premultipliedRGBA8: Data,
+        mipLevels: [GModMetalSurfaceMipLevel] = [],
+        sourceTextureFlags: SourceVTFTextureFlags? = nil,
+        alphaRepresentation: GModMetalBitmapAlphaRepresentation = .premultiplied
     ) throws {
         guard !resourceIdentifier.trimmingCharacters(
             in: .whitespacesAndNewlines
@@ -95,15 +151,79 @@ public struct GModMetalSurfaceBitmap: Sendable, Equatable {
             )
         }
 
+        let retainedMipLevels = mipLevels.isEmpty
+            ? [GModMetalSurfaceMipLevel(
+                width: width,
+                height: height,
+                premultipliedRGBA8: premultipliedRGBA8
+            )]
+            : mipLevels
+        var maximumMipCount = 1
+        var maximumDimension = Swift.max(width, height)
+        while maximumDimension > 1 {
+            maximumDimension >>= 1
+            maximumMipCount += 1
+        }
+        guard retainedMipLevels.count <= maximumMipCount else {
+            throw GModMetalSurfaceBitmapError.excessiveMipCount(
+                maximum: maximumMipCount,
+                actual: retainedMipLevels.count
+            )
+        }
+        for (level, mip) in retainedMipLevels.enumerated() {
+            let expectedWidth = Swift.max(1, width >> level)
+            let expectedHeight = Swift.max(1, height >> level)
+            guard mip.width == expectedWidth,
+                  mip.height == expectedHeight else {
+                throw GModMetalSurfaceBitmapError.invalidMipDimensions(
+                    level: level,
+                    expectedWidth: expectedWidth,
+                    expectedHeight: expectedHeight,
+                    actualWidth: mip.width,
+                    actualHeight: mip.height
+                )
+            }
+            let mipPixels = expectedWidth.multipliedReportingOverflow(
+                by: expectedHeight
+            )
+            guard !mipPixels.overflow else {
+                throw GModMetalSurfaceBitmapError.byteCountOverflow
+            }
+            let mipBytes = mipPixels.partialValue.multipliedReportingOverflow(by: 4)
+            guard !mipBytes.overflow else {
+                throw GModMetalSurfaceBitmapError.byteCountOverflow
+            }
+            guard mip.premultipliedRGBA8.count == mipBytes.partialValue else {
+                throw GModMetalSurfaceBitmapError.invalidMipByteCount(
+                    level: level,
+                    expected: mipBytes.partialValue,
+                    actual: mip.premultipliedRGBA8.count
+                )
+            }
+        }
+        guard retainedMipLevels.first?.premultipliedRGBA8 == premultipliedRGBA8
+        else {
+            throw GModMetalSurfaceBitmapError.mipZeroDoesNotMatchBase
+        }
+
         self.resourceIdentifier = resourceIdentifier
         self.width = width
         self.height = height
         self.premultipliedRGBA8 = premultipliedRGBA8
+        self.mipLevels = retainedMipLevels
+        self.sourceTextureFlags = sourceTextureFlags
+        self.alphaRepresentation = alphaRepresentation
         self.cacheIdentifier = resourceIdentifier + ":" + Self.contentDigest(
             width: width,
             height: height,
-            bytes: premultipliedRGBA8
+            mipLevels: retainedMipLevels,
+            flags: sourceTextureFlags,
+            alphaRepresentation: alphaRepresentation
         )
+    }
+
+    public var totalByteCount: Int {
+        mipLevels.reduce(0) { $0 + $1.premultipliedRGBA8.count }
     }
 
     /// FNV-1a is used only as a fast cache hint. The renderer also compares the
@@ -112,7 +232,9 @@ public struct GModMetalSurfaceBitmap: Sendable, Equatable {
     private static func contentDigest(
         width: Int,
         height: Int,
-        bytes: Data
+        mipLevels: [GModMetalSurfaceMipLevel],
+        flags: SourceVTFTextureFlags?,
+        alphaRepresentation: GModMetalBitmapAlphaRepresentation
     ) -> String {
         var hash: UInt64 = 14_695_981_039_346_656_037
         func append(_ byte: UInt8) {
@@ -121,7 +243,13 @@ public struct GModMetalSurfaceBitmap: Sendable, Equatable {
         }
         for value in UInt64(width).littleEndianBytes { append(value) }
         for value in UInt64(height).littleEndianBytes { append(value) }
-        for value in bytes { append(value) }
+        for value in UInt64(flags?.rawValue ?? 0).littleEndianBytes { append(value) }
+        append(alphaRepresentation.rawValue)
+        for mip in mipLevels {
+            for value in UInt64(mip.width).littleEndianBytes { append(value) }
+            for value in UInt64(mip.height).littleEndianBytes { append(value) }
+            for value in mip.premultipliedRGBA8 { append(value) }
+        }
         return String(hash, radix: 16)
     }
 }

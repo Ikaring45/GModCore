@@ -54,17 +54,36 @@ public struct GMLuaResolvedSourceMaterial: Sendable, Equatable {
     public let rgbaBytes: Data?
     public let sourceTextureFormat: SourceVTFImageFormat?
     public let sourceTextureFlags: SourceVTFTextureFlags?
+    /// Every authored VTF mip, largest first. Imported PNGs have one level.
+    /// These are the real file levels; the renderer must not synthesize blur.
+    public let mipImages: [SourceVTFDecodedImage]
 
     public init(
         metadata: GMLuaMaterialMetadata,
         rgbaBytes: Data?,
         sourceTextureFormat: SourceVTFImageFormat? = nil,
-        sourceTextureFlags: SourceVTFTextureFlags? = nil
+        sourceTextureFlags: SourceVTFTextureFlags? = nil,
+        mipImages: [SourceVTFDecodedImage] = []
     ) {
         self.metadata = metadata
         self.rgbaBytes = rgbaBytes
         self.sourceTextureFormat = sourceTextureFormat
         self.sourceTextureFlags = sourceTextureFlags
+        if mipImages.isEmpty,
+           let dimensions = metadata.dimensions,
+           let rgbaBytes {
+            self.mipImages = [SourceVTFDecodedImage(
+                width: dimensions.width,
+                height: dimensions.height,
+                rgbaBytes: rgbaBytes
+            )]
+        } else {
+            self.mipImages = mipImages
+        }
+    }
+
+    public var decodedByteCount: Int {
+        mipImages.reduce(0) { $0 + $1.rgbaBytes.count }
     }
 
     public func pixel(x: Int, y: Int) -> GMLuaRGBA8? {
@@ -91,6 +110,15 @@ public enum GMLuaSourceTextureDecodeStatus: Sendable, Equatable {
     case unsupportedImageFormat(SourceVTFImageFormat)
 }
 
+/// Controls how much of an authored Source texture is decoded and retained.
+/// Surface/VGUI only samples mip zero; the world renderer samples the real
+/// authored chain. Keeping this in the core resolver (and its cache key)
+/// prevents a Surface-only request from paying to decode every VTF mip.
+public enum GMLuaSourceTextureMipPolicy: Sendable, Equatable, Hashable {
+    case mipZeroOnly
+    case authoredChain
+}
+
 public struct GMLuaResolvedSourceTexture: Sendable, Equatable {
     public let logicalPath: String
     public let width: Int?
@@ -98,6 +126,7 @@ public struct GMLuaResolvedSourceTexture: Sendable, Equatable {
     public let rgbaBytes: Data?
     public let imageFormat: SourceVTFImageFormat?
     public let flags: SourceVTFTextureFlags?
+    public let mipImages: [SourceVTFDecodedImage]
     public let status: GMLuaSourceTextureDecodeStatus
 }
 
@@ -145,6 +174,7 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
     private struct Key: Hashable {
         let canonicalMaterialPath: String
         let encodedParameters: LuaString?
+        let mipPolicy: GMLuaSourceTextureMipPolicy
     }
 
     private let loader: Loader
@@ -246,17 +276,20 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
 
     public func resolve(
         named materialName: String,
-        encodedParameters: LuaString? = nil
+        encodedParameters: LuaString? = nil,
+        mipPolicy: GMLuaSourceTextureMipPolicy = .mipZeroOnly
     ) throws -> GMLuaResolvedSourceMaterial {
         try resolve(
             materialPath: LuaString(materialName),
-            encodedParameters: encodedParameters
+            encodedParameters: encodedParameters,
+            mipPolicy: mipPolicy
         )
     }
 
     public func resolve(
         materialPath: LuaString,
-        encodedParameters: LuaString? = nil
+        encodedParameters: LuaString? = nil,
+        mipPolicy: GMLuaSourceTextureMipPolicy = .mipZeroOnly
     ) throws -> GMLuaResolvedSourceMaterial {
         let sourceName = materialPath.utf8String
         guard LuaString(sourceName) == materialPath,
@@ -265,7 +298,8 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
         }
         let key = Key(
             canonicalMaterialPath: logicalPath.lowercased(),
-            encodedParameters: encodedParameters
+            encodedParameters: encodedParameters,
+            mipPolicy: mipPolicy
         )
         if let cached = cachedValue(for: key) { return cached }
 
@@ -276,14 +310,18 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
                 encodedParameters: encodedParameters
             )
         } else {
-            resolved = try resolveVMT(logicalPath: logicalPath)
+            resolved = try resolveVMT(
+                logicalPath: logicalPath,
+                mipPolicy: mipPolicy
+            )
         }
         store(resolved, for: key)
         return resolved
     }
 
     public func resolveWater(
-        named materialName: String
+        named materialName: String,
+        mipPolicy: GMLuaSourceTextureMipPolicy = .mipZeroOnly
     ) throws -> GMLuaResolvedSourceWaterMaterial? {
         guard let logicalPath = try Self.normalizedMaterialPath(materialName),
               let document = try loadVMTDocument(logicalPath: logicalPath),
@@ -302,9 +340,9 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
         let fogColor = try document.vector(named: "$fogcolor", componentCount: 3...3)?
             .map { Float($0) }
         let normalTexture = try document.string(named: "$normalmap")
-            .flatMap { try resolveSourceTexture(named: $0) }
+            .flatMap { try resolveSourceTexture(named: $0, mipPolicy: mipPolicy) }
         let bumpTexture = try document.string(named: "$bumpmap")
-            .flatMap { try resolveSourceTexture(named: $0) }
+            .flatMap { try resolveSourceTexture(named: $0, mipPolicy: mipPolicy) }
 
         let textureScroll = document.proxies.first(where: {
             $0.name.caseInsensitiveCompare("TextureScroll") == .orderedSame
@@ -344,7 +382,8 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
     }
 
     private func resolveVMT(
-        logicalPath: String
+        logicalPath: String,
+        mipPolicy: GMLuaSourceTextureMipPolicy
     ) throws -> GMLuaResolvedSourceMaterial {
         guard let document = try loadVMTDocument(logicalPath: logicalPath) else {
             return missingMaterial(logicalPath)
@@ -387,7 +426,10 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
             height: vtf.height,
             logicalPath: baseTexturePath
         )
-        let image = try vtf.decodeRGBA8(mipLevel: 0, frame: 0, face: 0, slice: 0)
+        let mipImages = try Self.decodeMipImages(from: vtf, policy: mipPolicy)
+        guard let image = mipImages.first else {
+            throw SourceVTFError.invalidMipCount(0, maximum: vtf.mipCount)
+        }
         return GMLuaResolvedSourceMaterial(
             metadata: GMLuaMaterialMetadata(
                 materialPath: LuaString(logicalPath),
@@ -399,7 +441,8 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
             ),
             rgbaBytes: image.rgbaBytes,
             sourceTextureFormat: vtf.imageFormat,
-            sourceTextureFlags: vtf.flags
+            sourceTextureFlags: vtf.flags,
+            mipImages: mipImages
         )
     }
 
@@ -424,7 +467,8 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
     }
 
     private func resolveSourceTexture(
-        named textureName: String
+        named textureName: String,
+        mipPolicy: GMLuaSourceTextureMipPolicy
     ) throws -> GMLuaResolvedSourceTexture? {
         guard let logicalPath = try Self.normalizedVTFPath(textureName) else {
             throw GMLuaSourceMaterialError.unsafeLogicalPath(textureName)
@@ -437,6 +481,7 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
                 rgbaBytes: nil,
                 imageFormat: nil,
                 flags: nil,
+                mipImages: [],
                 status: .missing
             )
         }
@@ -447,12 +492,10 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
             logicalPath: logicalPath
         )
         do {
-            let image = try vtf.decodeRGBA8(
-                mipLevel: 0,
-                frame: 0,
-                face: 0,
-                slice: 0
-            )
+            let mipImages = try Self.decodeMipImages(from: vtf, policy: mipPolicy)
+            guard let image = mipImages.first else {
+                throw SourceVTFError.invalidMipCount(0, maximum: vtf.mipCount)
+            }
             return GMLuaResolvedSourceTexture(
                 logicalPath: logicalPath,
                 width: image.width,
@@ -460,6 +503,7 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
                 rgbaBytes: image.rgbaBytes,
                 imageFormat: vtf.imageFormat,
                 flags: vtf.flags,
+                mipImages: mipImages,
                 status: .decoded
             )
         } catch let SourceVTFError.unsupportedImageFormat(format) {
@@ -470,6 +514,7 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
                 rgbaBytes: nil,
                 imageFormat: vtf.imageFormat,
                 flags: vtf.flags,
+                mipImages: [],
                 status: .unsupportedImageFormat(format)
             )
         }
@@ -615,6 +660,24 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
         }
     }
 
+    private static func decodeMipImages(
+        from vtf: SourceVTFFile,
+        policy: GMLuaSourceTextureMipPolicy
+    ) throws -> [SourceVTFDecodedImage] {
+        var images: [SourceVTFDecodedImage] = []
+        let decodedMipCount = policy == .authoredChain ? vtf.mipCount : 1
+        images.reserveCapacity(decodedMipCount)
+        for mipLevel in 0..<decodedMipCount {
+            images.append(try vtf.decodeRGBA8(
+                mipLevel: mipLevel,
+                frame: 0,
+                face: 0,
+                slice: 0
+            ))
+        }
+        return images
+    }
+
     private func pngDimensions(
         _ data: Data,
         logicalPath: String
@@ -652,12 +715,12 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
     }
 
     private func store(_ value: GMLuaResolvedSourceMaterial, for key: Key) {
-        let byteCount = value.rgbaBytes?.count ?? 0
+        let byteCount = value.decodedByteCount
         guard byteCount <= maximumCachedByteCount else { return }
         lock.lock()
         defer { lock.unlock() }
         if let previous = cache.removeValue(forKey: key) {
-            cachedByteCountStorage -= previous.rgbaBytes?.count ?? 0
+            cachedByteCountStorage -= previous.decodedByteCount
             cacheOrder.removeAll { $0 == key }
         }
         while !cacheOrder.isEmpty && (
@@ -666,7 +729,7 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
         ) {
             let oldest = cacheOrder.removeFirst()
             if let evicted = cache.removeValue(forKey: oldest) {
-                cachedByteCountStorage -= evicted.rgbaBytes?.count ?? 0
+                cachedByteCountStorage -= evicted.decodedByteCount
             }
         }
         cache[key] = value

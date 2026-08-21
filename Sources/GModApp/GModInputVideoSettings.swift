@@ -39,7 +39,7 @@ final class GModInputVideoSettingsStore: ObservableObject {
             : defaults.bool(forKey: Self.invertTouchLookYKey)
         preferredFramesPerSecond = Self.resolvedFrameRate(
             defaults.object(forKey: Self.preferredFrameRateKey) == nil
-                ? 120
+                ? 60
                 : defaults.integer(forKey: Self.preferredFrameRateKey)
         )
     }
