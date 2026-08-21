@@ -10,6 +10,10 @@ public protocol SourceCanonicalEntityLuaHost: AnyObject {
         for kind: SourceCanonicalEntityKind
     ) -> SourceCanonicalModelValidation
 
+    func validateCanonicalPropPhysicsModel(
+        _ model: SourceEntityModelReference
+    ) -> SourceCanonicalModelValidation
+
     func canonicalSnapshot(
         for identity: SourceCanonicalEntityIdentity
     ) -> SourceCanonicalEntitySnapshot?
@@ -610,6 +614,22 @@ public enum SourceCanonicalEntityGLuaBridge {
                 return [.boolean(validation == .valid)]
             },
             for: .string("IsValidModel"),
+            in: util
+        )
+        try state.setRawTableValue(
+            native("util.IsValidProp") { arguments in
+                let path = try requiredString(
+                    arguments,
+                    index: 0,
+                    function: "util.IsValidProp"
+                )
+                guard let host = hostBox.value else { return [.boolean(false)] }
+                let validation = host.validateCanonicalPropPhysicsModel(
+                    SourceEntityModelReference(path)
+                )
+                return [.boolean(validation == .valid)]
+            },
+            for: .string("IsValidProp"),
             in: util
         )
         state.setGlobal("util", value: .table(util))

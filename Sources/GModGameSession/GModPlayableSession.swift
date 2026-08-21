@@ -374,6 +374,8 @@ public final class GModPlayableSession {
     public let sharedSession: GMLuaSharedSession
     public let sourceAdapter: GMLuaSourceRuntimeAdapter
     public let studioModelRepository: GModStudioModelRepository?
+    public let attestedPropPhysicsAssetResolver:
+        GModAttestedPropPhysicsAssetResolver?
     public let bsp: SourceBSP
     public let worldMesh: GModWorldRenderMesh
     public let worldIdentity: GMLuaSourceEntityIdentity
@@ -417,6 +419,7 @@ public final class GModPlayableSession {
 
     public convenience init(
         configuration: GModPlayableSessionConfiguration = .init(),
+        attestedPropPhysicsAssets: [SourceAttestedPropPhysicsAsset] = [],
         textMeasurer: (any GMLuaTextMeasurer)? = nil,
         logger: @escaping @Sendable (
             _ realm: GMLuaRealm,
@@ -429,7 +432,8 @@ public final class GModPlayableSession {
             textMeasurer: textMeasurer,
             logger: logger,
             progress: progress,
-            worldWalkCollisionProvider: nil
+            worldWalkCollisionProvider: nil,
+            attestedPropPhysicsAssets: attestedPropPhysicsAssets
         )
     }
 
@@ -446,6 +450,11 @@ public final class GModPlayableSession {
         worldWalkCollisionProvider:
             (any SourceWorldWalkCollisionProvider)?,
         canonicalModelValidator: SourceCanonicalModelValidator? = nil,
+        attestedPropPhysicsAssets: [SourceAttestedPropPhysicsAsset] = [],
+        canonicalPropPhysicsAssetResolverForTesting:
+            SourceCanonicalPropPhysicsAssetResolver? = nil,
+        attestedPropPhysicsAssetResolverForTesting:
+            GModAttestedPropPhysicsAssetResolver? = nil,
         studioModelRepositoryForTesting: GModStudioModelRepository? = nil,
         studioRenderableModelCacheForTesting:
             GModStudioRenderableModelCache? = nil
@@ -486,6 +495,20 @@ public final class GModPlayableSession {
                 kind: .bsp
             )
             loadedStudioModelRepository = studioModelRepositoryForTesting
+        }
+        let loadedAttestedPropPhysicsAssetResolver:
+            GModAttestedPropPhysicsAssetResolver?
+        if let attestedPropPhysicsAssetResolverForTesting {
+            loadedAttestedPropPhysicsAssetResolver =
+                attestedPropPhysicsAssetResolverForTesting
+        } else if let loadedStudioModelRepository {
+            loadedAttestedPropPhysicsAssetResolver = try
+                GModAttestedPropPhysicsAssetResolver(
+                    repository: loadedStudioModelRepository,
+                    attestedAssets: attestedPropPhysicsAssets
+                )
+        } else {
+            loadedAttestedPropPhysicsAssetResolver = nil
         }
         let loadedStudioRenderableModelCache: GModStudioRenderableModelCache?
         let loadedDynamicEntityRenderSceneProjector:
@@ -634,13 +657,30 @@ public final class GModPlayableSession {
             } else {
                 activeBodyGroupResolver = nil
             }
+            let activePropPhysicsAssetResolver:
+                SourceCanonicalPropPhysicsAssetResolver
+            if let canonicalPropPhysicsAssetResolverForTesting {
+                activePropPhysicsAssetResolver =
+                    canonicalPropPhysicsAssetResolverForTesting
+            } else {
+                activePropPhysicsAssetResolver = { model in
+                    guard let resolver =
+                            loadedAttestedPropPhysicsAssetResolver else {
+                        return .unavailable
+                    }
+                    return resolver.resolve(model).canonicalResolution
+                }
+            }
             let sourceAdapter = try GMLuaSourceRuntimeAdapter(
                 serverRuntime: server,
                 canonicalModelValidator: activeModelValidator,
-                canonicalBodyGroupResolver: activeBodyGroupResolver
+                canonicalBodyGroupResolver: activeBodyGroupResolver,
+                canonicalPropPhysicsAssetResolver:
+                    activePropPhysicsAssetResolver
             )
             adapter = sourceAdapter
             try sourceAdapter.installCanonicalEntityLuaBridge()
+            try sourceAdapter.installCanonicalPhysicsObjectLuaBridge()
             // This attachment owns only CLIENT Tick/Think clocking. The
             // adapter has no legacy entities in this session, and canonical
             // Entity state reaches CLIENT exclusively through SharedSession's
@@ -726,6 +766,8 @@ public final class GModPlayableSession {
             sharedSession = session
             self.sourceAdapter = sourceAdapter
             studioModelRepository = loadedStudioModelRepository
+            attestedPropPhysicsAssetResolver =
+                loadedAttestedPropPhysicsAssetResolver
             bsp = loadedBSP
             worldMesh = loadedWorldMesh
             worldIdentity = sourceWorldIdentity

@@ -191,6 +191,8 @@ public actor GModPlayableSessionLane {
         (any SourceWorldWalkCollisionProvider)?
     private let canonicalModelValidatorForTesting:
         SourceCanonicalModelValidator?
+    private let canonicalPropPhysicsAssetResolverForTesting:
+        SourceCanonicalPropPhysicsAssetResolver?
     private let studioModelRepositoryForTesting: GModStudioModelRepository?
     private let studioRenderableModelCacheForTesting:
         GModStudioRenderableModelCache?
@@ -213,6 +215,7 @@ public actor GModPlayableSessionLane {
         self.textMeasurer = textMeasurer
         worldWalkCollisionProvider = nil
         canonicalModelValidatorForTesting = nil
+        canonicalPropPhysicsAssetResolverForTesting = nil
         studioModelRepositoryForTesting = nil
         studioRenderableModelCacheForTesting = nil
         shutdownCleanupObserverForTesting = nil
@@ -226,6 +229,8 @@ public actor GModPlayableSessionLane {
             (any SourceWorldWalkCollisionProvider)?,
         canonicalModelValidatorForTesting:
             SourceCanonicalModelValidator? = nil,
+        canonicalPropPhysicsAssetResolverForTesting:
+            SourceCanonicalPropPhysicsAssetResolver? = nil,
         studioModelRepositoryForTesting:
             GModStudioModelRepository? = nil,
         studioRenderableModelCacheForTesting:
@@ -235,6 +240,8 @@ public actor GModPlayableSessionLane {
         self.worldWalkCollisionProvider = worldWalkCollisionProvider
         self.canonicalModelValidatorForTesting =
             canonicalModelValidatorForTesting
+        self.canonicalPropPhysicsAssetResolverForTesting =
+            canonicalPropPhysicsAssetResolverForTesting
         self.studioModelRepositoryForTesting = studioModelRepositoryForTesting
         self.studioRenderableModelCacheForTesting =
             studioRenderableModelCacheForTesting
@@ -252,6 +259,7 @@ public actor GModPlayableSessionLane {
         textMeasurer = nil
         worldWalkCollisionProvider = nil
         canonicalModelValidatorForTesting = nil
+        canonicalPropPhysicsAssetResolverForTesting = nil
         studioModelRepositoryForTesting = nil
         studioRenderableModelCacheForTesting = nil
         self.shutdownCleanupObserverForTesting =
@@ -285,6 +293,8 @@ public actor GModPlayableSessionLane {
             progress: progress,
             worldWalkCollisionProvider: worldWalkCollisionProvider,
             canonicalModelValidator: canonicalModelValidatorForTesting,
+            canonicalPropPhysicsAssetResolverForTesting:
+                canonicalPropPhysicsAssetResolverForTesting,
             studioModelRepositoryForTesting: studioModelRepositoryForTesting,
             studioRenderableModelCacheForTesting:
                 studioRenderableModelCacheForTesting

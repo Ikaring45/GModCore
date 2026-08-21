@@ -10,6 +10,9 @@ final class SourceCanonicalEntityGLuaBridgeTests: XCTestCase {
         let acceptedModel = SourceEntityModelReference(
             "models/props_c17/oildrum001.mdl"
         )
+        let propAsset = try makeAttestedPropPhysicsTestAsset(
+            modelPath: acceptedModel.path
+        )
         let bodyGroupMesh = makeBodyGroupMesh()
         let adapter = try GMLuaSourceRuntimeAdapter(
             serverRuntime: runtime,
@@ -25,7 +28,9 @@ final class SourceCanonicalEntityGLuaBridgeTests: XCTestCase {
                     applyingBodyGroups: subModelIDs,
                     to: currentBodyValue
                 )
-            }
+            },
+            canonicalPropPhysicsAssetResolver:
+                makeAttestedPropPhysicsTestResolver(asset: propAsset)
         )
         defer {
             try? adapter.close()
@@ -63,7 +68,9 @@ final class SourceCanonicalEntityGLuaBridgeTests: XCTestCase {
             assert(ply:GetVehicle() == NULL)
 
             assert(util.IsValidModel("models/props_c17/oildrum001.mdl") == true)
+            assert(util.IsValidProp("models/props_c17/oildrum001.mdl") == true)
             assert(util.IsValidModel("models/props_c17/not_present.mdl") == false)
+            assert(util.IsValidProp("models/props_c17/not_present.mdl") == false)
             assert(util.IsValidModel("../outside.mdl") == false)
             assert(ents.Create("unsupported_class") == NULL)
 

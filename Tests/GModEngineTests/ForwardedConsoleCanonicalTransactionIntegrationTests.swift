@@ -247,12 +247,17 @@ final class ForwardedConsoleCanonicalTransactionIntegrationTests: XCTestCase {
             logger: { _ in },
             netTransport: session.netTransport
         )
+        let propAsset = try makeAttestedPropPhysicsTestAsset(
+            modelPath: model.path
+        )
         let adapter = try GMLuaSourceRuntimeAdapter(
             serverRuntime: server,
             initialEntitySerialNumber: 9,
             canonicalModelValidator: { [model] candidate, kind in
                 candidate == model && kind == .propPhysics ? .valid : .invalid
-            }
+            },
+            canonicalPropPhysicsAssetResolver:
+                makeAttestedPropPhysicsTestResolver(asset: propAsset)
         )
 
         let world = try adapter.createCanonicalEntity(kind: .world, at: 0)

@@ -12,6 +12,9 @@ final class CanonicalMutationJournalIntegrationTests: XCTestCase {
         let acceptedModel = SourceEntityModelReference(
             "models/props_c17/oildrum001.mdl"
         )
+        let propAsset = try makeAttestedPropPhysicsTestAsset(
+            modelPath: acceptedModel.path
+        )
         let session = try GModPlayableSession(
             configuration: GModPlayableSessionConfiguration(map: .construct),
             textMeasurer: nil,
@@ -19,7 +22,9 @@ final class CanonicalMutationJournalIntegrationTests: XCTestCase {
             worldWalkCollisionProvider: nil,
             canonicalModelValidator: { model, kind in
                 model == acceptedModel && kind == .propPhysics ? .valid : .invalid
-            }
+            },
+            canonicalPropPhysicsAssetResolverForTesting:
+                makeAttestedPropPhysicsTestResolver(asset: propAsset)
         )
         defer { _ = try? session.close() }
 

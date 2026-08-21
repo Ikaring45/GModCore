@@ -8,12 +8,17 @@ final class GMLuaSourceRuntimeAdapterCanonicalEntityTests: XCTestCase {
         let server = makeRuntime(.server, transport: transport)
         let client = makeRuntime(.client, transport: transport)
         let model = SourceEntityModelReference("models/props_c17/oildrum001.mdl")
+        let propAsset = try makeAttestedPropPhysicsTestAsset(
+            modelPath: model.path
+        )
         let adapter = try GMLuaSourceRuntimeAdapter(
             serverRuntime: server,
             initialEntitySerialNumber: 9,
             canonicalModelValidator: { requestedModel, kind in
                 requestedModel == model && kind == .propPhysics ? .valid : .invalid
-            }
+            },
+            canonicalPropPhysicsAssetResolver:
+                makeAttestedPropPhysicsTestResolver(asset: propAsset)
         )
         defer {
             try? adapter.close()

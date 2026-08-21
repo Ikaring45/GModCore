@@ -428,6 +428,15 @@ public final class SourceCanonicalEntity: SourceEntity {
         revision &+= 1
     }
 
+    /// Commits the state prepared by DispatchSpawn and its lifecycle edge as
+    /// one canonical revision. Publishing happens before this method is called,
+    /// so a failed realm projection cannot expose either half of the change.
+    fileprivate func commitSpawn(_ state: SourceCanonicalEntityState) {
+        stateStorage = state
+        lifecycle = .spawned
+        revision &+= 1
+    }
+
     fileprivate func makeSnapshot(
         identity: SourceCanonicalEntityIdentity,
         state overrideState: SourceCanonicalEntityState? = nil,
@@ -633,6 +642,18 @@ public final class SourceCanonicalEntityStore {
         _ identity: SourceCanonicalEntityIdentity,
         publishing publish: (SourceCanonicalEntitySnapshot) throws -> Void
     ) throws -> SourceCanonicalEntitySnapshot {
+        try spawn(identity, mutating: { _ in }, publishing: publish)
+    }
+
+    /// DispatchSpawn transaction that may attach authoritative state recovered
+    /// from the exact validated asset. The prospective state and lifecycle are
+    /// validated and published together, then committed as one revision.
+    @discardableResult
+    func spawn(
+        _ identity: SourceCanonicalEntityIdentity,
+        mutating mutation: (inout SourceCanonicalEntityState) throws -> Void,
+        publishing publish: (SourceCanonicalEntitySnapshot) throws -> Void
+    ) throws -> SourceCanonicalEntitySnapshot {
         let entity = try requireEntity(identity)
         guard entity.lifecycle == .created else {
             throw SourceCanonicalEntityError.invalidLifecycleTransition(
@@ -640,14 +661,17 @@ public final class SourceCanonicalEntityStore {
                 to: .spawned
             )
         }
-        try validate(state: entity.state, kind: entity.kind, lifecycle: .spawned)
+        var candidate = entity.state
+        try mutation(&candidate)
+        try validate(state: candidate, kind: entity.kind, lifecycle: .spawned)
         let snapshot = entity.makeSnapshot(
             identity: identity,
+            state: candidate,
             lifecycle: .spawned,
             revision: entity.revision &+ 1
         )
         try publish(snapshot)
-        entity.transition(to: .spawned)
+        entity.commitSpawn(candidate)
         return snapshot
     }
 

@@ -9,6 +9,9 @@ final class GModPlayableDynamicEntitySceneIntegrationTests: XCTestCase {
         async throws
     {
         let model = SourceEntityModelReference("models/props/scene_test.mdl")
+        let propAsset = try makeAttestedPropPhysicsTestAsset(
+            modelPath: model.path
+        )
         let probe = PlayableSceneCompileProbe()
         let cache = try GModStudioRenderableModelCache(
             policy: GModStudioRenderableModelCachePolicy(
@@ -31,6 +34,8 @@ final class GModPlayableDynamicEntitySceneIntegrationTests: XCTestCase {
             canonicalModelValidatorForTesting: { requested, kind in
                 requested == model && kind == .propPhysics ? .valid : .invalid
             },
+            canonicalPropPhysicsAssetResolverForTesting:
+                makeAttestedPropPhysicsTestResolver(asset: propAsset),
             studioModelRepositoryForTesting: repository,
             studioRenderableModelCacheForTesting: cache
         )

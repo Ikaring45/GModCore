@@ -217,3 +217,29 @@ public struct SourceAttestedPropPhysicsAsset: Equatable, Sendable {
         self.bodyDefinition = bodyDefinition
     }
 }
+
+/// Fail-closed engine boundary used by `util.IsValidProp` and DispatchSpawn.
+///
+/// `invalid` records a stable negative content verdict while `unavailable`
+/// preserves a host I/O or allocation failure. Only `valid` carries the exact
+/// immutable collision/body contract that may be attached to an entity.
+public enum SourceCanonicalPropPhysicsAssetResolution: Equatable, Sendable {
+    case valid(SourceAttestedPropPhysicsAsset)
+    case invalid
+    case unavailable
+
+    public var modelValidation: SourceCanonicalModelValidation {
+        switch self {
+        case .valid:
+            return .valid
+        case .invalid:
+            return .invalid
+        case .unavailable:
+            return .unavailable
+        }
+    }
+}
+
+public typealias SourceCanonicalPropPhysicsAssetResolver = @Sendable (
+    _ model: SourceEntityModelReference
+) -> SourceCanonicalPropPhysicsAssetResolution

@@ -72,6 +72,19 @@ public enum GModAttestedPropPhysicsAssetResolution: Equatable, Sendable {
             return .unavailable
         }
     }
+
+    public var canonicalResolution:
+        SourceCanonicalPropPhysicsAssetResolution
+    {
+        switch self {
+        case let .valid(asset):
+            return .valid(asset)
+        case .invalid:
+            return .invalid
+        case .unavailable:
+            return .unavailable
+        }
+    }
 }
 
 struct GModObservedPropPhysicsAsset: Sendable {
