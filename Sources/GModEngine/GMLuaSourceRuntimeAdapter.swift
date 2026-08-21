@@ -45,6 +45,7 @@ public enum GMLuaSourceRuntimeAdapterError: Error, CustomStringConvertible {
     case reentrantRun(String)
     case unknownEntity(GMLuaSourceEntityIdentity)
     case canonicalRemovalProjectionMissing(SourceCanonicalEntityIdentity)
+    case canonicalMutationJournalCapacityExceeded(maximum: Int)
 
     public var description: String {
         switch self {
@@ -72,6 +73,8 @@ public enum GMLuaSourceRuntimeAdapterError: Error, CustomStringConvertible {
             return "Source entity handle \(identity.handle.rawValue) is stale or unknown"
         case let .canonicalRemovalProjectionMissing(identity):
             return "SERVER canonical removal did not match EHANDLE \(identity.handle.rawValue)"
+        case let .canonicalMutationJournalCapacityExceeded(maximum):
+            return "SERVER canonical mutation journal reached its bounded capacity of \(maximum) operations"
         }
     }
 }
@@ -80,6 +83,12 @@ public enum GMLuaSourceRuntimeAdapterError: Error, CustomStringConvertible {
 /// runtimes. The adapter, rather than GMLuaRuntime, owns simulation lifetime.
 /// It never pumps net delivery; the M4 SharedSession pump remains host-driven.
 public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
+    /// Host allocation guard for mutations produced between fixed-tick FIFO
+    /// publication boundaries. This is not presented as a Source engine
+    /// protocol value; it bounds a stalled host on iPad.
+    public static let maximumPendingCanonicalEntityOperations =
+        SourceEntityConstants.maxEdicts * 16
+
     private final class WeakClientAttachment {
         weak var runtime: GMLuaRuntime?
         let registry: GMLuaEntityRegistry
@@ -120,6 +129,12 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
     private var entityRecordsByHandle: [UInt32: EntityRecord] = [:]
     private var entityHandleOrder: [UInt32] = []
     private var canonicalEntityHandleOrder: [UInt32] = []
+    private let canonicalMutationJournalCapacity: Int
+    private var canonicalMutationJournal: [SourceEntityReplicationOperation] = []
+    /// Slots reserved for final `.remove` records at cleanup phases in the
+    /// active SERVER tick. Ordinary hook mutations cannot consume them.
+    private var canonicalCleanupJournalReservations = 0
+    private var isRunningCanonicalServerTick = false
     private var isClosedStorage = false
 
     public convenience init(serverRuntime: GMLuaRuntime) throws {
@@ -179,7 +194,9 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
     init(
         serverRuntime: GMLuaRuntime,
         initialEntitySerialNumber: Int?,
-        canonicalModelValidator: SourceCanonicalModelValidator? = nil
+        canonicalModelValidator: SourceCanonicalModelValidator? = nil,
+        canonicalMutationJournalCapacity: Int =
+            GMLuaSourceRuntimeAdapter.maximumPendingCanonicalEntityOperations
     ) throws {
         guard serverRuntime.realm == .server else {
             throw GMLuaSourceRuntimeAdapterError.invalidServerRealm(serverRuntime.realm)
@@ -207,6 +224,8 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
         }
         self.serverRuntime = serverRuntime
         netTransport = transport
+        precondition(canonicalMutationJournalCapacity > 0)
+        self.canonicalMutationJournalCapacity = canonicalMutationJournalCapacity
         let entityList = SourceEntityList(
             initialSerialNumber: initialEntitySerialNumber
         )
@@ -243,6 +262,45 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
             defer { mutationLock.unlock() }
             guard !isClosedStorage, !serverRuntime.isClosed else { return [] }
             return canonicalEntities.orderedSnapshots
+        }
+    }
+
+    /// Number of authoritative operations not yet committed to the shared
+    /// transport FIFO. Direct SERVER Lua between ticks only grows this value;
+    /// it never mutates CLIENT state synchronously.
+    public var pendingCanonicalEntityOperationCount: Int {
+        netTransport.withExclusiveLifecycleBoundary {
+            mutationLock.lock()
+            defer { mutationLock.unlock() }
+            guard !isClosedStorage, !serverRuntime.isClosed else { return 0 }
+            return canonicalMutationJournal.count
+        }
+    }
+
+    /// Publishes the exact pending prefix as one ordered delta transaction.
+    /// A throwing publisher leaves the prefix byte-for-byte intact for retry.
+    @discardableResult
+    public func publishPendingCanonicalEntityOperations(
+        using publisher: ([SourceEntityReplicationOperation]) throws -> Int
+    ) throws -> Int {
+        try withMutationBoundary {
+            guard !canonicalMutationJournal.isEmpty else { return 0 }
+            let pendingPrefix = canonicalMutationJournal
+            let result = try publisher(pendingPrefix)
+            canonicalMutationJournal.removeFirst(pendingPrefix.count)
+            return result
+        }
+    }
+
+    /// Startup uses one full canonical snapshot rather than replaying the
+    /// world/Player construction history as deltas. Callers discard only after
+    /// that snapshot has been successfully enqueued.
+    @discardableResult
+    public func discardPendingCanonicalEntityOperations() throws -> Int {
+        try withMutationBoundary {
+            let discarded = canonicalMutationJournal.count
+            canonicalMutationJournal.removeAll(keepingCapacity: true)
+            return discarded
         }
     }
 
@@ -296,6 +354,7 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
         playerUserID: Int? = nil
     ) throws -> SourceCanonicalEntitySnapshot {
         try withMutationBoundary {
+            try preflightCanonicalMutationJournalLocked(additionalOperations: 1)
             let snapshot = try canonicalEntities.create(
                 kind: kind,
                 at: entryIndex,
@@ -306,6 +365,7 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
                             snapshot,
                             userID: playerUserID
                         )
+                    self.canonicalMutationJournal.append(.create(snapshot))
                 }
             )
             canonicalEntityHandleOrder.append(snapshot.identity.handle.rawValue)
@@ -322,12 +382,14 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
     ) throws -> SourceCanonicalEntitySnapshot {
         try withMutationBoundary {
             try requireCanonicalServerProjectionLocked(identity)
+            try preflightCanonicalMutationJournalLocked(additionalOperations: 1)
             return try canonicalEntities.update(
                 identity,
                 mutation,
                 publishing: { [unowned self] snapshot in
                     _ = try self.requiredServerRegistryLocked()
                         .applyAuthoritativeSnapshot(snapshot)
+                    self.canonicalMutationJournal.append(.update(snapshot))
                 }
             )
         }
@@ -339,11 +401,13 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
     ) throws -> SourceCanonicalEntitySnapshot {
         try withMutationBoundary {
             try requireCanonicalServerProjectionLocked(identity)
+            try preflightCanonicalMutationJournalLocked(additionalOperations: 1)
             return try canonicalEntities.spawn(
                 identity,
                 publishing: { [unowned self] snapshot in
                     _ = try self.requiredServerRegistryLocked()
                         .applyAuthoritativeSnapshot(snapshot)
+                    self.canonicalMutationJournal.append(.update(snapshot))
                 }
             )
         }
@@ -355,11 +419,13 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
     ) throws -> SourceCanonicalEntitySnapshot {
         try withMutationBoundary {
             try requireCanonicalServerProjectionLocked(identity)
+            try preflightCanonicalMutationJournalLocked(additionalOperations: 1)
             return try canonicalEntities.activate(
                 identity,
                 publishing: { [unowned self] snapshot in
                     _ = try self.requiredServerRegistryLocked()
                         .applyAuthoritativeSnapshot(snapshot)
+                    self.canonicalMutationJournal.append(.update(snapshot))
                 }
             )
         }
@@ -385,6 +451,13 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
     ) throws -> SourceCanonicalEntitySnapshot {
         try withMutationBoundary {
             try requireCanonicalServerProjectionLocked(identity)
+            let hasUnpublishedCreate = canonicalMutationJournal.contains {
+                guard case let .create(snapshot) = $0 else { return false }
+                return snapshot.identity == identity
+            }
+            if !hasUnpublishedCreate {
+                try preflightCanonicalMutationJournalLocked(additionalOperations: 1)
+            }
             let snapshot = try canonicalEntities.rollbackCreated(
                 identity,
                 publishing: { [unowned self] removal in
@@ -392,6 +465,13 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
                         .applyAuthoritativeRemoval(removal) else {
                         throw GMLuaSourceRuntimeAdapterError
                             .canonicalRemovalProjectionMissing(removal.identity)
+                    }
+                    if hasUnpublishedCreate {
+                        self.canonicalMutationJournal.removeAll {
+                            Self.canonicalIdentity(of: $0) == identity
+                        }
+                    } else {
+                        self.canonicalMutationJournal.append(.remove(removal))
                     }
                 }
             )
@@ -558,6 +638,24 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
     public func runServerFixedTick() throws -> GMLuaSourceRuntimeRunReport {
         try withRunBoundary(operation: "SERVER fixed tick") {
             try validateServerLocked()
+            let removalsDueForCleanup = canonicalEntityHandleOrder.reduce(into: 0) {
+                count, rawHandle in
+                let identity = SourceCanonicalEntityIdentity(
+                    handle: SourceBaseHandle.unsafeFromIndex(rawHandle)
+                )
+                if canonicalEntities.snapshot(for: identity)?.lifecycle == .pendingRemoval {
+                    count += 1
+                }
+            }
+            try preflightCanonicalMutationJournalLocked(
+                additionalOperations: removalsDueForCleanup
+            )
+            canonicalCleanupJournalReservations = removalsDueForCleanup
+            isRunningCanonicalServerTick = true
+            defer {
+                isRunningCanonicalServerTick = false
+                canonicalCleanupJournalReservations = 0
+            }
             var hookFailures: [GMLuaSourceHookFailure] = []
             var timerFailures: [GMLuaSourceTimerFailure] = []
             var removedEntities: [GMLuaSourceEntityIdentity] = []
@@ -778,9 +876,15 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
             capturedHandle: handle,
             entity: entity
         ) else { return nil }
+        precondition(
+            canonicalCleanupJournalReservations > 0,
+            "canonical cleanup must reserve its final replication operation"
+        )
+        canonicalCleanupJournalReservations -= 1
         if let orderIndex = canonicalEntityHandleOrder.firstIndex(of: handle.rawValue) {
             canonicalEntityHandleOrder.remove(at: orderIndex)
         }
+        canonicalMutationJournal.append(.remove(snapshot))
         guard try requiredServerRegistryLocked().applyAuthoritativeRemoval(snapshot) else {
             throw GMLuaSourceRuntimeAdapterError.canonicalRemovalProjectionMissing(
                 snapshot.identity
@@ -792,13 +896,53 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
     private func markCanonicalEntityForRemovalLocked(
         _ identity: SourceCanonicalEntityIdentity
     ) throws -> SourceCanonicalEntitySnapshot {
-        try canonicalEntities.markForRemoval(
+        let prior = canonicalEntities.snapshot(for: identity)
+        let changesLifecycle = prior?.lifecycle != .pendingRemoval
+        if changesLifecycle {
+            try preflightCanonicalMutationJournalLocked(
+                additionalOperations: isRunningCanonicalServerTick ? 2 : 1
+            )
+        }
+        return try canonicalEntities.markForRemoval(
             identity,
             publishing: { [unowned self] snapshot in
                 _ = try self.requiredServerRegistryLocked()
                     .applyAuthoritativeSnapshot(snapshot)
+                if changesLifecycle {
+                    self.canonicalMutationJournal.append(.update(snapshot))
+                    if self.isRunningCanonicalServerTick {
+                        self.canonicalCleanupJournalReservations += 1
+                    }
+                }
             }
         )
+    }
+
+    private func preflightCanonicalMutationJournalLocked(
+        additionalOperations: Int
+    ) throws {
+        precondition(additionalOperations >= 0)
+        guard canonicalMutationJournal.count <= canonicalMutationJournalCapacity,
+              canonicalCleanupJournalReservations <= canonicalMutationJournalCapacity,
+              additionalOperations <= canonicalMutationJournalCapacity,
+              canonicalMutationJournal.count + canonicalCleanupJournalReservations <=
+                canonicalMutationJournalCapacity - additionalOperations else {
+            throw GMLuaSourceRuntimeAdapterError
+                .canonicalMutationJournalCapacityExceeded(
+                    maximum: canonicalMutationJournalCapacity
+                )
+        }
+    }
+
+    private static func canonicalIdentity(
+        of operation: SourceEntityReplicationOperation
+    ) -> SourceCanonicalEntityIdentity {
+        switch operation {
+        case let .create(snapshot),
+             let .update(snapshot),
+             let .remove(snapshot):
+            return snapshot.identity
+        }
     }
 
     private func requiredServerRegistryLocked() throws -> GMLuaEntityRegistry {
@@ -1112,6 +1256,9 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
         entityRecordsByHandle.removeAll(keepingCapacity: false)
         entityHandleOrder.removeAll(keepingCapacity: false)
         canonicalEntityHandleOrder.removeAll(keepingCapacity: false)
+        canonicalMutationJournal.removeAll(keepingCapacity: false)
+        canonicalCleanupJournalReservations = 0
+        isRunningCanonicalServerTick = false
         clientAttachments.removeAll(keepingCapacity: false)
         nextClientAttachmentOrder = 0
         return firstCleanupError

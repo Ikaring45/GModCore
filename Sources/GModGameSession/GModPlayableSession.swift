@@ -661,6 +661,12 @@ public final class GModPlayableSession {
                         authoritativeSnapshots:
                             sourceAdapter.canonicalEntitySnapshots
                     )
+                    // The newly enqueued full snapshot already contains the
+                    // active world and Player. Their construction journal is
+                    // discarded only after enqueue succeeds, preventing both
+                    // startup duplication and loss on connection failure.
+                    _ = try sourceAdapter
+                        .discardPendingCanonicalEntityOperations()
                     // StartupOrchestrator invokes this boundary after
                     // Initialize and before InitPostEntity. Pump the initial
                     // snapshot here so original CLIENT Lua observes the exact
@@ -761,14 +767,11 @@ public final class GModPlayableSession {
                 command: command
             )
             if tick.state != stateBeforeMovement {
-                let playerSnapshot = try sourceAdapter.updateCanonicalEntity(
+                _ = try sourceAdapter.updateCanonicalEntity(
                     playerIdentity
                 ) { state in
                     state.applyPlayerWalkState(tick.state)
                 }
-                _ = try sharedSession.publishCanonicalEntityUpdates([
-                    .update(playerSnapshot),
-                ])
             }
             movement = .advanced(tick)
         } catch let error as SourceWorldWalkError {
@@ -788,6 +791,7 @@ public final class GModPlayableSession {
         let serverReport = try sourceAdapter.runServerFixedTick()
         let delivery = try Self.drainReportingForwardedConsoleFailures(
             sharedSession,
+            sourceAdapter: sourceAdapter,
             maximumDeliveries: maximumDeliveries
         )
         let clientReport = try sourceAdapter.runClientFixedTick()
@@ -1078,6 +1082,7 @@ public final class GModPlayableSession {
     /// and net callback errors continue to escape this boundary.
     private static func drainReportingForwardedConsoleFailures(
         _ session: GMLuaSharedSession,
+        sourceAdapter: GMLuaSourceRuntimeAdapter,
         maximumDeliveries: Int
     ) throws -> ReportedDeliveryDrain {
         guard maximumDeliveries >= 0 else {
@@ -1088,7 +1093,13 @@ public final class GModPlayableSession {
         var processed = 0
         var successful = 0
         var actionFailures: [GMLuaForwardedConsoleCommandFailure] = []
-        while session.netTransport.pendingDeliveryCount > 0 {
+        while session.netTransport.pendingDeliveryCount > 0 ||
+            sourceAdapter.pendingCanonicalEntityOperationCount > 0
+        {
+            _ = try sourceAdapter.publishPendingCanonicalEntityOperations {
+                try session.publishCanonicalEntityUpdates($0)
+            }
+            if session.netTransport.pendingDeliveryCount == 0 { continue }
             guard processed < maximumDeliveries else {
                 throw GModPlayableSessionError.deliveryLimitExceeded(
                     maximumDeliveries
@@ -1096,7 +1107,7 @@ public final class GModPlayableSession {
             }
             let step = try session
                 .pumpReportingForwardedConsoleFailures(
-                    maxDeliveries: maximumDeliveries - processed
+                    maxDeliveries: 1
                 )
             guard step.processedDeliveries > 0 else {
                 if session.netTransport.pendingDeliveryCount == 0 { break }

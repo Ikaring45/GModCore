@@ -512,7 +512,13 @@ public final class GMLuaSharedSession: @unchecked Sendable {
                 .sorted { $0.playerIndex < $1.playerIndex }
             lock.unlock()
 
-            var enqueued = 0
+            var sourceEndpoint: GMLuaNetEndpoint?
+            var prepared: [(
+                record: ConnectionRecord,
+                stream: SourceEntityReplicationServerStream,
+                request: GMLuaEntityReplicationEnqueueRequest
+            )] = []
+            prepared.reserveCapacity(records.count)
             for record in records {
                 guard let server = record.server, !server.isClosed else {
                     throw GMLuaSharedSessionError.closedRuntime(.server)
@@ -523,6 +529,13 @@ public final class GMLuaSharedSession: @unchecked Sendable {
                         "net endpoint for canonical entity replication"
                     )
                 }
+                if let sourceEndpoint {
+                    guard sourceEndpoint === serverEndpoint else {
+                        throw GMLuaSharedSessionError.differentServer
+                    }
+                } else {
+                    sourceEndpoint = serverEndpoint
+                }
                 guard var stream = record.replicationStream else {
                     throw GMLuaSharedSessionError.missingRuntimeSurface(
                         .server,
@@ -530,15 +543,24 @@ public final class GMLuaSharedSession: @unchecked Sendable {
                     )
                 }
                 let packet = try stream.makeDelta(operations)
-                try netTransport.enqueueEntityReplication(
-                    packet,
-                    from: serverEndpoint,
-                    to: record.clientEndpoint
-                )
-                record.replicationStream = stream
-                enqueued += 1
+                prepared.append((
+                    record: record,
+                    stream: stream,
+                    request: GMLuaEntityReplicationEnqueueRequest(
+                        packet: packet,
+                        destination: record.clientEndpoint
+                    )
+                ))
             }
-            return enqueued
+            guard let sourceEndpoint else { return 0 }
+            try netTransport.enqueueEntityReplications(
+                prepared.map { $0.request },
+                from: sourceEndpoint
+            )
+            for item in prepared {
+                item.record.replicationStream = item.stream
+            }
+            return prepared.count
         }
     }
 

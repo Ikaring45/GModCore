@@ -91,6 +91,13 @@ private struct GMLuaEntityReplicationDelivery: Sendable {
     let packet: SourceEntityReplicationPacket
 }
 
+/// One member of an atomic SERVER entity-replication fan-out. SharedSession
+/// builds the complete batch before any destination receives a FIFO entry.
+struct GMLuaEntityReplicationEnqueueRequest: Sendable {
+    let packet: SourceEntityReplicationPacket
+    let destination: GMLuaNetEndpoint
+}
+
 private enum GMLuaTransportDelivery: Sendable {
     case net(GMLuaNetPacket)
     case console(GMLuaConsolePacket)
@@ -126,6 +133,7 @@ public enum GMLuaEntityReplicationTransportError: Error, Equatable, Sendable {
         expected: SourceEntityReplicationConnectionGeneration,
         received: SourceEntityReplicationConnectionGeneration
     )
+    case transportSequenceExhausted
     case clientHandlerUnavailable
     case packetRejected(
         transportSequence: UInt64,
@@ -1328,12 +1336,29 @@ public final class GMLuaNetTransport: @unchecked Sendable {
         from source: GMLuaNetEndpoint,
         to destination: GMLuaNetEndpoint
     ) throws {
+        try enqueueEntityReplications(
+            [GMLuaEntityReplicationEnqueueRequest(
+                packet: packet,
+                destination: destination
+            )],
+            from: source
+        )
+    }
+
+    /// Validates an entire multi-CLIENT fan-out and appends it to the global
+    /// FIFO as one lock transaction. A stale final destination cannot leave
+    /// earlier clients with a packet the SERVER stream did not commit.
+    func enqueueEntityReplications(
+        _ requests: [GMLuaEntityReplicationEnqueueRequest],
+        from source: GMLuaNetEndpoint
+    ) throws {
         guard source.realm == .server else {
             throw GMLuaEntityReplicationTransportError.serverSourceRequired
         }
-        guard destination.realm == .client else {
+        guard requests.allSatisfy({ $0.destination.realm == .client }) else {
             throw GMLuaEntityReplicationTransportError.clientDestinationRequired
         }
+        guard !requests.isEmpty else { return }
 
         lock.lock()
         defer { lock.unlock() }
@@ -1341,30 +1366,44 @@ public final class GMLuaNetTransport: @unchecked Sendable {
               endpoints[source.identifier] === source else {
             throw GMLuaEntityReplicationTransportError.sourceEndpointDetached
         }
-        guard endpoints[destination.identifier] === destination else {
-            throw GMLuaEntityReplicationTransportError.destinationEndpointDetached
-        }
-        guard let connection = clientConnectionsByEndpoint[destination.identifier] else {
-            throw GMLuaEntityReplicationTransportError.destinationNotConnected
-        }
-        let expectedGeneration = SourceEntityReplicationConnectionGeneration(
-            rawValue: connection.generation
-        )
-        guard packet.connectionGeneration == expectedGeneration else {
-            throw GMLuaEntityReplicationTransportError.connectionGenerationMismatch(
-                expected: expectedGeneration,
-                received: packet.connectionGeneration
+        for request in requests {
+            let destination = request.destination
+            guard endpoints[destination.identifier] === destination else {
+                throw GMLuaEntityReplicationTransportError.destinationEndpointDetached
+            }
+            guard let connection = clientConnectionsByEndpoint[destination.identifier] else {
+                throw GMLuaEntityReplicationTransportError.destinationNotConnected
+            }
+            let expectedGeneration = SourceEntityReplicationConnectionGeneration(
+                rawValue: connection.generation
             )
+            guard request.packet.connectionGeneration == expectedGeneration else {
+                throw GMLuaEntityReplicationTransportError.connectionGenerationMismatch(
+                    expected: expectedGeneration,
+                    received: request.packet.connectionGeneration
+                )
+            }
+        }
+        let requestedSequenceCount = UInt64(requests.count)
+        guard requestedSequenceCount <= UInt64.max - nextSequence else {
+            throw GMLuaEntityReplicationTransportError.transportSequenceExhausted
         }
 
-        nextSequence &+= 1
-        deliveries.append(.entity(GMLuaEntityReplicationDelivery(
-            sequence: nextSequence,
-            sourceEndpointID: source.identifier,
-            destinationEndpointID: destination.identifier,
-            connectionGeneration: connection.generation,
-            packet: packet
-        )))
+        var batch: [GMLuaTransportDelivery] = []
+        batch.reserveCapacity(requests.count)
+        for (offset, request) in requests.enumerated() {
+            let destination = request.destination
+            let connection = clientConnectionsByEndpoint[destination.identifier]!
+            batch.append(.entity(GMLuaEntityReplicationDelivery(
+                sequence: nextSequence + UInt64(offset) + 1,
+                sourceEndpointID: source.identifier,
+                destinationEndpointID: destination.identifier,
+                connectionGeneration: connection.generation,
+                packet: request.packet
+            )))
+        }
+        nextSequence += requestedSequenceCount
+        deliveries.append(contentsOf: batch)
     }
 
     /// Delivers queued packets in deterministic sequence order.
