@@ -220,6 +220,48 @@ public enum SourceCanonicalEntityGLuaBridge {
             let snapshot = try requiredSnapshot(arguments.first, function: "Entity:GetPos")
             return [try vector(snapshot.transform.origin)]
         }
+        try setMethod("Entity:LocalToWorld", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Entity:LocalToWorld"
+            )
+            guard arguments.indices.contains(1) else {
+                throw LuaError.runtime(
+                    "bad argument #1 to 'Entity:LocalToWorld' (Vector expected, got no value)"
+                )
+            }
+            let components = try GMLuaVectorAngle.networkVectorComponents(
+                from: arguments[1],
+                function: "Entity:LocalToWorld"
+            )
+            let local = SourceVector3(
+                Float(components.0),
+                Float(components.1),
+                Float(components.2)
+            )
+            return [try vector(snapshot.transform.transformPointFromLocal(local))]
+        }
+        try setMethod("Entity:WorldToLocal", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Entity:WorldToLocal"
+            )
+            guard arguments.indices.contains(1) else {
+                throw LuaError.runtime(
+                    "bad argument #1 to 'Entity:WorldToLocal' (Vector expected, got no value)"
+                )
+            }
+            let components = try GMLuaVectorAngle.networkVectorComponents(
+                from: arguments[1],
+                function: "Entity:WorldToLocal"
+            )
+            let world = SourceVector3(
+                Float(components.0),
+                Float(components.1),
+                Float(components.2)
+            )
+            return [try vector(snapshot.transform.inverseTransformPointToLocal(world))]
+        }
         try setMethod("Entity:GetVelocity", on: entityMetatable) { arguments in
             let snapshot = try requiredSnapshot(
                 arguments.first,
