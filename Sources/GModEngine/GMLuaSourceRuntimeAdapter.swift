@@ -464,6 +464,10 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
                 into: serverRuntime,
                 serverHost: self
             )
+            try SourceCanonicalEntitySpawnMetadataGLuaBridge.install(
+                into: serverRuntime,
+                serverHost: self
+            )
         }
     }
 
@@ -492,10 +496,12 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
     ) throws -> SourceCanonicalEntitySnapshot {
         try withMutationBoundary {
             try preflightCanonicalMutationJournalLocked(additionalOperations: 1)
+            var initialState = state ?? .defaults(for: kind)
+            initialState.creationTime = kernel.globals.currentTime
             let snapshot = try canonicalEntities.create(
                 kind: kind,
                 at: entryIndex,
-                state: state,
+                state: initialState,
                 publishing: { [unowned self] snapshot in
                     _ = try self.requiredServerRegistryLocked()
                         .applyAuthoritativeSnapshot(
@@ -587,6 +593,35 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
                 identity,
                 { candidate in
                     _ = candidate.networkVariables.setInt(value, forKey: key)
+                },
+                publishing: { [unowned self] snapshot in
+                    _ = try self.requiredServerRegistryLocked()
+                        .applyAuthoritativeSnapshot(snapshot)
+                    self.canonicalMutationJournal.append(.update(snapshot))
+                }
+            )
+        }
+    }
+
+    /// Publishes the engine spawn-effect bit in the same canonical Entity
+    /// stream as lifecycle and transform state. The bit is consumed by CLIENT
+    /// only when that EHANDLE generation first appears over replication.
+    @discardableResult
+    public func setCanonicalSpawnEffect(
+        _ enabled: Bool,
+        on identity: SourceCanonicalEntityIdentity
+    ) throws -> SourceCanonicalEntitySnapshot {
+        try withMutationBoundary {
+            try requireCanonicalServerProjectionLocked(identity)
+            guard let current = canonicalEntities.snapshot(for: identity) else {
+                throw GMLuaSourceRuntimeAdapterError.unknownEntity(identity)
+            }
+            guard current.spawnEffect != enabled else { return current }
+            try preflightCanonicalMutationJournalLocked(additionalOperations: 1)
+            return try canonicalEntities.update(
+                identity,
+                { candidate in
+                    candidate.spawnEffect = enabled
                 },
                 publishing: { [unowned self] snapshot in
                     _ = try self.requiredServerRegistryLocked()
@@ -881,6 +916,9 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
                 throw GMLuaSourceRuntimeAdapterError.missingRuntimeSurface(.client, "Entity registry")
             }
             try SourceCanonicalEntityNetworkVariableGLuaBridge.install(
+                into: client
+            )
+            try SourceCanonicalEntitySpawnMetadataGLuaBridge.install(
                 into: client
             )
 

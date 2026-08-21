@@ -290,6 +290,13 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
     /// state; neither relationship is reduced to an entry index.
     public var vehicle: SourceCanonicalEntityIdentity?
     public var creator: SourceCanonicalEntityIdentity?
+    /// Source-relative time at which the engine allocated this entity.
+    /// CLIENT receives the SERVER value in the canonical snapshot so
+    /// `GetCreationTime` remains comparable with the shared `CurTime` clock.
+    public var creationTime: Float
+    /// Networked spawn-effect bit consumed exactly once by CLIENT entity
+    /// creation handling. The renderer does not infer this flag from class.
+    public var spawnEffect: Bool
     /// Legacy `SetNW*` values are part of the engine-owned Entity, not a
     /// realm-local Lua side table. CLIENT receives this value only inside the
     /// existing full-EHANDLE snapshot FIFO.
@@ -307,6 +314,8 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
         viewOffset: SourceVector3 = .zero,
         vehicle: SourceCanonicalEntityIdentity? = nil,
         creator: SourceCanonicalEntityIdentity? = nil,
+        creationTime: Float = 0,
+        spawnEffect: Bool = false,
         networkVariables: SourceEntityNetworkVariables = .init()
     ) {
         self.transform = transform
@@ -320,6 +329,8 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
         self.viewOffset = viewOffset
         self.vehicle = vehicle
         self.creator = creator
+        self.creationTime = creationTime
+        self.spawnEffect = spawnEffect
         self.networkVariables = networkVariables
     }
 
@@ -422,6 +433,8 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
     public let viewOffset: SourceVector3
     public let vehicle: SourceCanonicalEntityIdentity?
     public let creator: SourceCanonicalEntityIdentity?
+    public let creationTime: Float
+    public let spawnEffect: Bool
     public let networkVariables: SourceEntityNetworkVariables
     public let lifecycle: SourceCanonicalEntityLifecycle
     public let isNetworkable: Bool
@@ -445,6 +458,8 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         viewOffset: SourceVector3 = .zero,
         vehicle: SourceCanonicalEntityIdentity? = nil,
         creator: SourceCanonicalEntityIdentity? = nil,
+        creationTime: Float = 0,
+        spawnEffect: Bool = false,
         networkVariables: SourceEntityNetworkVariables = .init()
     ) {
         self.identity = identity
@@ -461,6 +476,8 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         self.viewOffset = viewOffset
         self.vehicle = vehicle
         self.creator = creator
+        self.creationTime = creationTime
+        self.spawnEffect = spawnEffect
         self.networkVariables = networkVariables
         self.lifecycle = lifecycle
         self.isNetworkable = isNetworkable
@@ -499,6 +516,7 @@ public enum SourceCanonicalEntityError: Error, Equatable, CustomStringConvertibl
     case invalidMotion
     case invalidSkin(Int)
     case invalidBodyValue(Int)
+    case invalidCreationTime(Float)
     case invalidModelPath(String)
     case modelRequired(SourceCanonicalEntityKind)
     case modelValidationUnavailable(SourceEntityModelReference)
@@ -526,6 +544,8 @@ public enum SourceCanonicalEntityError: Error, Equatable, CustomStringConvertibl
             return "Source entity Studio skin index is invalid: \(skin)"
         case let .invalidBodyValue(value):
             return "Source entity Studio body value is invalid: \(value)"
+        case let .invalidCreationTime(value):
+            return "Source entity creation time is invalid: \(value)"
         case let .invalidModelPath(path):
             return "Source entity model path is structurally invalid: \(path)"
         case let .modelRequired(kind):
@@ -615,6 +635,8 @@ public final class SourceCanonicalEntity: SourceEntity {
             viewOffset: state.viewOffset,
             vehicle: state.vehicle,
             creator: state.creator,
+            creationTime: state.creationTime,
+            spawnEffect: state.spawnEffect,
             networkVariables: state.networkVariables
         )
     }
@@ -1057,6 +1079,11 @@ public final class SourceCanonicalEntityStore {
         }
         guard state.bodyValue >= 0, state.bodyValue <= Int(Int32.max) else {
             throw SourceCanonicalEntityError.invalidBodyValue(state.bodyValue)
+        }
+        guard state.creationTime.isFinite, state.creationTime >= 0 else {
+            throw SourceCanonicalEntityError.invalidCreationTime(
+                state.creationTime
+            )
         }
         guard state.viewOffset.x.isFinite,
               state.viewOffset.y.isFinite,

@@ -427,8 +427,11 @@ public final class GMLuaSharedSession: @unchecked Sendable {
                 )
             }
             try clientEndpoint.connectEntityReplicationHandler {
-                [clientRegistry] packet in
+                [weak client, clientRegistry] packet in
                 try replicationLease.withActive {
+                    let identitiesBefore = Set(
+                        clientRegistry.canonicalEntitySnapshots.map(\.identity)
+                    )
                     let result = try clientRegistry.applyEntityReplicationPacket(
                         packet
                     )
@@ -438,6 +441,22 @@ public final class GMLuaSharedSession: @unchecked Sendable {
                             index: playerIndex,
                             generation: playerIdentity.generation
                         )
+                    }
+                    if case .applied = result, let client {
+                        let newlyNetworked = clientRegistry
+                            .canonicalEntitySnapshots
+                            .filter {
+                                !identitiesBefore.contains($0.identity)
+                            }
+                        for snapshot in newlyNetworked {
+                            let entity = clientRegistry.entity(
+                                at: snapshot.identity.entryIndex
+                            )
+                            try client.dispatchHostHook(
+                                named: "NetworkEntityCreated",
+                                arguments: [entity]
+                            )
+                        }
                     }
                     return result
                 }
