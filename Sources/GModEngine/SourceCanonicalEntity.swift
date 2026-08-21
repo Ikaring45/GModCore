@@ -157,10 +157,92 @@ public struct SourceNetworkedIntValue: Equatable, Sendable {
     }
 }
 
+/// Retained-memory limits for one canonical Entity's legacy `SetNW*` state.
+///
+/// These values are an iPad host allocation guard, not Source/GMod protocol
+/// constants. They only bound bytes retained by canonical snapshots and the
+/// pending full-snapshot journal; Lua strings keep their original raw bytes.
+/// Hosts may inject a different policy when their memory envelope differs.
+public struct SourceNetworkVariableAllocationPolicy: Equatable, Sendable {
+    public static let `default` = SourceNetworkVariableAllocationPolicy()
+
+    public let maximumEntryCount: Int
+    public let maximumAggregateStoredBytes: Int
+    public let maximumKeyBytes: Int
+    public let maximumStringValueBytes: Int
+
+    public init(
+        maximumEntryCount: Int = 256,
+        maximumAggregateStoredBytes: Int = 64 * 1_024,
+        maximumKeyBytes: Int = 1_024,
+        maximumStringValueBytes: Int = 16 * 1_024
+    ) {
+        precondition(
+            maximumEntryCount >= 0,
+            "NW-variable entry limit cannot be negative"
+        )
+        precondition(
+            maximumAggregateStoredBytes >= 0,
+            "NW-variable aggregate-byte limit cannot be negative"
+        )
+        precondition(
+            maximumKeyBytes >= 0,
+            "NW-variable key-byte limit cannot be negative"
+        )
+        precondition(
+            maximumStringValueBytes >= 0,
+            "NW-variable string-byte limit cannot be negative"
+        )
+        self.maximumEntryCount = maximumEntryCount
+        self.maximumAggregateStoredBytes = maximumAggregateStoredBytes
+        self.maximumKeyBytes = maximumKeyBytes
+        self.maximumStringValueBytes = maximumStringValueBytes
+    }
+}
+
+public struct SourceNetworkVariableAllocationUsage: Equatable, Sendable {
+    public let entryCount: Int
+    public let aggregateStoredBytes: Int
+
+    public init(entryCount: Int, aggregateStoredBytes: Int) {
+        self.entryCount = entryCount
+        self.aggregateStoredBytes = aggregateStoredBytes
+    }
+}
+
+public enum SourceNetworkVariableAllocationError:
+    Error,
+    Equatable,
+    Sendable,
+    CustomStringConvertible
+{
+    case entryCountExceeded(actual: Int, maximum: Int)
+    case keyByteCountExceeded(actual: Int, maximum: Int)
+    case stringValueByteCountExceeded(actual: Int, maximum: Int)
+    case aggregateStoredByteCountExceeded(actual: Int, maximum: Int)
+
+    public var description: String {
+        switch self {
+        case let .entryCountExceeded(actual, maximum):
+            return "NW-variable entry count \(actual) exceeds host cap \(maximum)"
+        case let .keyByteCountExceeded(actual, maximum):
+            return "NW-variable key is \(actual) bytes; host cap is \(maximum)"
+        case let .stringValueByteCountExceeded(actual, maximum):
+            return "NW-variable string value is \(actual) bytes; host cap is \(maximum)"
+        case let .aggregateStoredByteCountExceeded(actual, maximum):
+            return "NW-variable state retains \(actual) bytes; host cap is \(maximum)"
+        }
+    }
+}
+
 /// Type-specific, key-sorted NW state carried by every canonical Entity
 /// snapshot. The arrays are maintained in raw Lua-byte order, so replication
 /// and equality never depend on Dictionary iteration order.
 public struct SourceEntityNetworkVariables: Equatable, Sendable {
+    /// `SetNWInt` retains the exact Source float bits represented by UInt32.
+    /// This fixed payload participates in the host aggregate-byte budget.
+    public static let numericValueByteCount = MemoryLayout<UInt32>.size
+
     public struct StringEntry: Equatable, Sendable {
         public let key: SourceNetworkVariableString
         public let value: SourceNetworkVariableString
@@ -216,6 +298,76 @@ public struct SourceEntityNetworkVariables: Equatable, Sendable {
         intEntries.first { $0.key == key }?.value
     }
 
+    /// Exact retained payload accounting for this canonical value. Container
+    /// overhead is separately bounded by `entryCount`; no UTF-8 conversion is
+    /// performed while measuring raw Lua strings.
+    public var allocationUsage: SourceNetworkVariableAllocationUsage {
+        var aggregateStoredBytes = 0
+        func addSaturating(_ byteCount: Int) {
+            let (sum, overflow) = aggregateStoredBytes.addingReportingOverflow(
+                byteCount
+            )
+            aggregateStoredBytes = overflow ? Int.max : sum
+        }
+        for entry in stringEntries {
+            addSaturating(entry.key.bytes.count)
+            addSaturating(entry.value.bytes.count)
+        }
+        for entry in intEntries {
+            addSaturating(entry.key.bytes.count)
+            addSaturating(Self.numericValueByteCount)
+        }
+        let (entryCount, overflow) = stringEntries.count.addingReportingOverflow(
+            intEntries.count
+        )
+        return SourceNetworkVariableAllocationUsage(
+            entryCount: overflow ? Int.max : entryCount,
+            aggregateStoredBytes: aggregateStoredBytes
+        )
+    }
+
+    /// Validates a complete prospective snapshot before canonical state,
+    /// revision, realm projection, or replication journal mutation.
+    public func validate(
+        allocationPolicy policy: SourceNetworkVariableAllocationPolicy
+    ) throws {
+        let usage = allocationUsage
+        guard usage.entryCount <= policy.maximumEntryCount else {
+            throw SourceNetworkVariableAllocationError.entryCountExceeded(
+                actual: usage.entryCount,
+                maximum: policy.maximumEntryCount
+            )
+        }
+
+        for entry in stringEntries {
+            try Self.validate(
+                key: entry.key,
+                policy: policy
+            )
+            guard entry.value.bytes.count <= policy.maximumStringValueBytes else {
+                throw SourceNetworkVariableAllocationError
+                    .stringValueByteCountExceeded(
+                        actual: entry.value.bytes.count,
+                        maximum: policy.maximumStringValueBytes
+                    )
+            }
+        }
+        for entry in intEntries {
+            try Self.validate(
+                key: entry.key,
+                policy: policy
+            )
+        }
+
+        guard usage.aggregateStoredBytes <= policy.maximumAggregateStoredBytes else {
+            throw SourceNetworkVariableAllocationError
+                .aggregateStoredByteCountExceeded(
+                    actual: usage.aggregateStoredBytes,
+                    maximum: policy.maximumAggregateStoredBytes
+                )
+        }
+    }
+
     /// Returns false only when the exact key/value bytes were already stored.
     @discardableResult
     public mutating func setString(
@@ -258,6 +410,18 @@ public struct SourceEntityNetworkVariables: Equatable, Sendable {
         }
         intEntries.append(replacement)
         return true
+    }
+
+    private static func validate(
+        key: SourceNetworkVariableString,
+        policy: SourceNetworkVariableAllocationPolicy
+    ) throws {
+        guard key.bytes.count <= policy.maximumKeyBytes else {
+            throw SourceNetworkVariableAllocationError.keyByteCountExceeded(
+                actual: key.bytes.count,
+                maximum: policy.maximumKeyBytes
+            )
+        }
     }
 }
 
@@ -650,6 +814,8 @@ public final class SourceCanonicalEntity: SourceEntity {
 /// console delivery without restoring direct realm mirrors.
 public final class SourceCanonicalEntityStore {
     public let entityList: SourceEntityList
+    public let networkVariableAllocationPolicy:
+        SourceNetworkVariableAllocationPolicy
 
     private let modelValidator: SourceCanonicalModelValidator
     private var entitiesByHandle: [UInt32: SourceCanonicalEntity] = [:]
@@ -657,10 +823,13 @@ public final class SourceCanonicalEntityStore {
 
     public init(
         entityList: SourceEntityList = SourceEntityList(),
-        modelValidator: SourceCanonicalModelValidator? = nil
+        modelValidator: SourceCanonicalModelValidator? = nil,
+        networkVariableAllocationPolicy:
+            SourceNetworkVariableAllocationPolicy = .default
     ) {
         self.entityList = entityList
         self.modelValidator = modelValidator ?? { _, _ in .unavailable }
+        self.networkVariableAllocationPolicy = networkVariableAllocationPolicy
     }
 
     public var count: Int { entitiesByHandle.count }
@@ -1068,6 +1237,9 @@ public final class SourceCanonicalEntityStore {
         kind: SourceCanonicalEntityKind,
         lifecycle: SourceCanonicalEntityLifecycle
     ) throws {
+        try state.networkVariables.validate(
+            allocationPolicy: networkVariableAllocationPolicy
+        )
         guard state.transform.isFinite else {
             throw SourceCanonicalEntityError.invalidTransform
         }

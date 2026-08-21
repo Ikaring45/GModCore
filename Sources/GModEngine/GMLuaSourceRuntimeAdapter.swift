@@ -197,10 +197,16 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
     private var isRunningCanonicalServerTick = false
     private var isClosedStorage = false
 
-    public convenience init(serverRuntime: GMLuaRuntime) throws {
+    public convenience init(
+        serverRuntime: GMLuaRuntime,
+        canonicalNetworkVariableAllocationPolicy:
+            SourceNetworkVariableAllocationPolicy = .default
+    ) throws {
         try self.init(
             serverRuntime: serverRuntime,
-            initialEntitySerialNumber: nil
+            initialEntitySerialNumber: nil,
+            canonicalNetworkVariableAllocationPolicy:
+                canonicalNetworkVariableAllocationPolicy
         )
     }
 
@@ -212,7 +218,9 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
         canonicalModelValidator: SourceCanonicalModelValidator?,
         canonicalBodyGroupResolver: SourceCanonicalBodyGroupResolver? = nil,
         canonicalPropPhysicsAssetResolver:
-            SourceCanonicalPropPhysicsAssetResolver? = nil
+            SourceCanonicalPropPhysicsAssetResolver? = nil,
+        canonicalNetworkVariableAllocationPolicy:
+            SourceNetworkVariableAllocationPolicy = .default
     ) throws {
         try self.init(
             serverRuntime: serverRuntime,
@@ -220,7 +228,9 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
             canonicalModelValidator: canonicalModelValidator,
             canonicalBodyGroupResolver: canonicalBodyGroupResolver,
             canonicalPropPhysicsAssetResolver:
-                canonicalPropPhysicsAssetResolver
+                canonicalPropPhysicsAssetResolver,
+            canonicalNetworkVariableAllocationPolicy:
+                canonicalNetworkVariableAllocationPolicy
         )
     }
 
@@ -264,6 +274,8 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
         canonicalBodyGroupResolver: SourceCanonicalBodyGroupResolver? = nil,
         canonicalPropPhysicsAssetResolver:
             SourceCanonicalPropPhysicsAssetResolver? = nil,
+        canonicalNetworkVariableAllocationPolicy:
+            SourceNetworkVariableAllocationPolicy = .default,
         canonicalMutationJournalCapacity: Int =
             GMLuaSourceRuntimeAdapter.maximumPendingCanonicalEntityOperations
     ) throws {
@@ -307,7 +319,9 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
         kernel = SourceRuntimeKernel(entityList: entityList)
         canonicalEntities = SourceCanonicalEntityStore(
             entityList: entityList,
-            modelValidator: canonicalModelValidator
+            modelValidator: canonicalModelValidator,
+            networkVariableAllocationPolicy:
+                canonicalNetworkVariableAllocationPolicy
         )
         self.canonicalBodyGroupResolver = canonicalBodyGroupResolver
         self.canonicalPropPhysicsAssetResolver =
