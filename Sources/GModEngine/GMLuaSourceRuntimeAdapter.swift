@@ -46,6 +46,8 @@ public enum GMLuaSourceRuntimeAdapterError: Error, CustomStringConvertible {
     case unknownEntity(GMLuaSourceEntityIdentity)
     case canonicalRemovalProjectionMissing(SourceCanonicalEntityIdentity)
     case canonicalMutationJournalCapacityExceeded(maximum: Int)
+    case canonicalBodyGroupResolverUnavailable
+    case canonicalBodyGroupModelMissing(SourceCanonicalEntityIdentity)
 
     public var description: String {
         switch self {
@@ -75,6 +77,10 @@ public enum GMLuaSourceRuntimeAdapterError: Error, CustomStringConvertible {
             return "SERVER canonical removal did not match EHANDLE \(identity.handle.rawValue)"
         case let .canonicalMutationJournalCapacityExceeded(maximum):
             return "SERVER canonical mutation journal reached its bounded capacity of \(maximum) operations"
+        case .canonicalBodyGroupResolverUnavailable:
+            return "canonical Studio body-group resolver is unavailable"
+        case let .canonicalBodyGroupModelMissing(identity):
+            return "Source entity EHANDLE \(identity.handle.rawValue) has no Studio model for body-group resolution"
         }
     }
 }
@@ -122,6 +128,7 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
 
     private let kernel: SourceRuntimeKernel
     private let canonicalEntities: SourceCanonicalEntityStore
+    private let canonicalBodyGroupResolver: SourceCanonicalBodyGroupResolver?
     private let mutationLock = NSRecursiveLock()
     let mirrorOwner = GMLuaSourceMirrorOwner()
     private var clientAttachments: [WeakClientAttachment] = []
@@ -149,12 +156,14 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
     /// replaced with a permissive fallback when omitted.
     public convenience init(
         serverRuntime: GMLuaRuntime,
-        canonicalModelValidator: SourceCanonicalModelValidator?
+        canonicalModelValidator: SourceCanonicalModelValidator?,
+        canonicalBodyGroupResolver: SourceCanonicalBodyGroupResolver? = nil
     ) throws {
         try self.init(
             serverRuntime: serverRuntime,
             initialEntitySerialNumber: nil,
-            canonicalModelValidator: canonicalModelValidator
+            canonicalModelValidator: canonicalModelValidator,
+            canonicalBodyGroupResolver: canonicalBodyGroupResolver
         )
     }
 
@@ -195,6 +204,7 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
         serverRuntime: GMLuaRuntime,
         initialEntitySerialNumber: Int?,
         canonicalModelValidator: SourceCanonicalModelValidator? = nil,
+        canonicalBodyGroupResolver: SourceCanonicalBodyGroupResolver? = nil,
         canonicalMutationJournalCapacity: Int =
             GMLuaSourceRuntimeAdapter.maximumPendingCanonicalEntityOperations
     ) throws {
@@ -234,6 +244,7 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
             entityList: entityList,
             modelValidator: canonicalModelValidator
         )
+        self.canonicalBodyGroupResolver = canonicalBodyGroupResolver
     }
 
     public var attachedClientCount: Int {
@@ -386,6 +397,44 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
             return try canonicalEntities.update(
                 identity,
                 mutation,
+                publishing: { [unowned self] snapshot in
+                    _ = try self.requiredServerRegistryLocked()
+                        .applyAuthoritativeSnapshot(snapshot)
+                    self.canonicalMutationJournal.append(.update(snapshot))
+                }
+            )
+        }
+    }
+
+    /// Resolves and commits `m_nBody` as one canonical copy/validate/publish
+    /// transaction. Any missing model/provider, malformed selection, decode
+    /// failure, or rejected publication leaves state, revision, and journal
+    /// byte-for-byte unchanged.
+    @discardableResult
+    public func setCanonicalBodyGroups(
+        _ subModelIDs: String,
+        for identity: SourceCanonicalEntityIdentity
+    ) throws -> SourceCanonicalEntitySnapshot {
+        try withMutationBoundary {
+            try requireCanonicalServerProjectionLocked(identity)
+            guard let resolver = canonicalBodyGroupResolver else {
+                throw GMLuaSourceRuntimeAdapterError
+                    .canonicalBodyGroupResolverUnavailable
+            }
+            try preflightCanonicalMutationJournalLocked(additionalOperations: 1)
+            return try canonicalEntities.update(
+                identity,
+                { candidate in
+                    guard let model = candidate.model else {
+                        throw GMLuaSourceRuntimeAdapterError
+                            .canonicalBodyGroupModelMissing(identity)
+                    }
+                    candidate.bodyValue = try resolver(
+                        model,
+                        subModelIDs,
+                        candidate.bodyValue
+                    )
+                },
                 publishing: { [unowned self] snapshot in
                     _ = try self.requiredServerRegistryLocked()
                         .applyAuthoritativeSnapshot(snapshot)

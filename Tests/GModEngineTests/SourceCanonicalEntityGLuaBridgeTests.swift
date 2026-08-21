@@ -8,11 +8,21 @@ final class SourceCanonicalEntityGLuaBridgeTests: XCTestCase {
         let acceptedModel = SourceEntityModelReference(
             "models/props_c17/oildrum001.mdl"
         )
+        let bodyGroupMesh = makeBodyGroupMesh()
         let adapter = try GMLuaSourceRuntimeAdapter(
             serverRuntime: runtime,
             initialEntitySerialNumber: 4,
             canonicalModelValidator: { model, kind in
                 model == acceptedModel && kind == .propPhysics ? .valid : .invalid
+            },
+            canonicalBodyGroupResolver: { model, subModelIDs, currentBodyValue in
+                guard model == acceptedModel else {
+                    throw SourceCanonicalEntityError.modelRejected(model)
+                }
+                return try bodyGroupMesh.bodyValue(
+                    applyingBodyGroups: subModelIDs,
+                    to: currentBodyValue
+                )
             }
         )
         defer {
@@ -60,6 +70,7 @@ final class SourceCanonicalEntityGLuaBridgeTests: XCTestCase {
             prop:SetModel("models/props_c17/oildrum001.mdl")
             prop:SetSkin(3)
             assert(prop:GetSkin() == 3)
+            prop:SetBodyGroups("12")
             prop:SetPos(Vector(100, 200, 300))
             prop:SetAngles(Angle(15, 25, 35))
             local localPoint = Vector(7, -11, 13)
@@ -83,6 +94,7 @@ final class SourceCanonicalEntityGLuaBridgeTests: XCTestCase {
         XCTAssertEqual(prop.lifecycle, .active)
         XCTAssertEqual(prop.model, acceptedModel)
         XCTAssertEqual(prop.skin, 3)
+        XCTAssertEqual(prop.bodyValue, 5)
         XCTAssertEqual(prop.transform.origin, SourceVector3(100, 200, 300))
         XCTAssertEqual(
             prop.transform.angles,
@@ -188,6 +200,116 @@ final class SourceCanonicalEntityGLuaBridgeTests: XCTestCase {
         XCTAssertEqual(snapshot.lifecycle, .created)
         XCTAssertEqual(snapshot.transform.origin, SourceVector3(1, 2, 3))
         XCTAssertEqual(snapshot.revision, 2)
+    }
+
+    func testBodyGroupFailuresLeaveCanonicalStateRevisionAndJournalExact() throws {
+        let acceptedModel = SourceEntityModelReference("models/props/test.mdl")
+        let mesh = makeBodyGroupMesh()
+        let runtime = makeRuntime()
+        let adapter = try GMLuaSourceRuntimeAdapter(
+            serverRuntime: runtime,
+            initialEntitySerialNumber: 20,
+            canonicalModelValidator: { _, _ in .valid },
+            canonicalBodyGroupResolver: { model, subModelIDs, currentBodyValue in
+                guard model == acceptedModel else {
+                    throw SourceCanonicalEntityError.modelRejected(model)
+                }
+                return try mesh.bodyValue(
+                    applyingBodyGroups: subModelIDs,
+                    to: currentBodyValue
+                )
+            }
+        )
+        defer {
+            try? adapter.close()
+            _ = runtime.close()
+        }
+        try adapter.installCanonicalEntityLuaBridge()
+
+        let values = try runtime.executeReturningValues(
+            """
+            local prop = ents.Create("prop_physics")
+            local missingModel, missingMessage = pcall(function()
+                prop:SetBodyGroups("10")
+            end)
+            assert(missingModel == false)
+            assert(string.find(missingMessage, "has no Studio model", 1, true))
+
+            prop:SetModel("models/props/test.mdl")
+            local malformed, malformedMessage = pcall(function()
+                prop:SetBodyGroups("20")
+            end)
+            assert(malformed == false)
+            assert(string.find(malformedMessage, "invalidSelection", 1, true))
+            return prop
+            """,
+            sourceName: "=(canonical body-group rejection)"
+        )
+        let propValue = try XCTUnwrap(values.first)
+        let snapshot = try XCTUnwrap(
+            runtime.entityRegistry?.canonicalSnapshot(for: propValue)
+        )
+        XCTAssertEqual(snapshot.model, acceptedModel)
+        XCTAssertEqual(snapshot.bodyValue, 0)
+        XCTAssertEqual(snapshot.revision, 1)
+        XCTAssertEqual(adapter.pendingCanonicalEntityOperationCount, 2)
+
+        let unavailableRuntime = makeRuntime()
+        let unavailableAdapter = try GMLuaSourceRuntimeAdapter(
+            serverRuntime: unavailableRuntime,
+            initialEntitySerialNumber: 30,
+            canonicalModelValidator: { _, _ in .valid }
+        )
+        defer {
+            try? unavailableAdapter.close()
+            _ = unavailableRuntime.close()
+        }
+        try unavailableAdapter.installCanonicalEntityLuaBridge()
+        let unavailableValues = try unavailableRuntime.executeReturningValues(
+            """
+            local prop = ents.Create("prop_physics")
+            prop:SetModel("models/props/test.mdl")
+            local ok, message = pcall(function() prop:SetBodyGroups("10") end)
+            assert(ok == false)
+            assert(string.find(message, "resolver is unavailable", 1, true))
+            return prop
+            """,
+            sourceName: "=(canonical body-group resolver unavailable)"
+        )
+        let unavailableValue = try XCTUnwrap(unavailableValues.first)
+        let unavailableSnapshot = try XCTUnwrap(
+            unavailableRuntime.entityRegistry?.canonicalSnapshot(
+                for: unavailableValue
+            )
+        )
+        XCTAssertEqual(unavailableSnapshot.bodyValue, 0)
+        XCTAssertEqual(unavailableSnapshot.revision, 1)
+        XCTAssertEqual(unavailableAdapter.pendingCanonicalEntityOperationCount, 2)
+    }
+
+    private func makeBodyGroupMesh() -> SourceStudioModelMeshSnapshot {
+        SourceStudioModelMeshSnapshot(
+            checksum: 17,
+            modelName: "bodygroup_test",
+            lodIndex: 0,
+            bodyParts: [2, 3].enumerated().map { bodyGroupID, modelCount in
+                SourceStudioBodyPartMeshSnapshot(
+                    index: bodyGroupID,
+                    name: "body_\(bodyGroupID)",
+                    modelSelectionBase: bodyGroupID == 0 ? 1 : 2,
+                    models: (0..<modelCount).map { modelID in
+                        SourceStudioSubmodelSnapshot(
+                            index: modelID,
+                            name: "model_\(modelID)",
+                            type: 0,
+                            boundingRadius: 1,
+                            rootLODVertexCount: 0,
+                            meshes: []
+                        )
+                    }
+                )
+            }
+        )
     }
 
     private func makeRuntime() -> GMLuaRuntime {

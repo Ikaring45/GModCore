@@ -26,6 +26,11 @@ public protocol SourceCanonicalEntityLuaHost: AnyObject {
         _ mutation: (inout SourceCanonicalEntityState) throws -> Void
     ) throws -> SourceCanonicalEntitySnapshot
 
+    func setCanonicalBodyGroups(
+        _ subModelIDs: String,
+        for identity: SourceCanonicalEntityIdentity
+    ) throws -> SourceCanonicalEntitySnapshot
+
     func spawnCanonicalEntity(
         _ identity: SourceCanonicalEntityIdentity
     ) throws -> SourceCanonicalEntitySnapshot
@@ -65,6 +70,19 @@ private final class SourceCanonicalEntityLuaWeakHost: @unchecked Sendable {
     }
 }
 
+/// Swift requires a weak reference to live in mutable storage. Keeping the
+/// mutable slot inside this retained box lets native closures avoid extending
+/// registry/type-system lifetime on Apple and Windows alike.
+private final class SourceCanonicalEntityLuaWeakObject<Value: AnyObject>:
+    @unchecked Sendable
+{
+    weak var value: Value?
+
+    init(_ value: Value) {
+        self.value = value
+    }
+}
+
 /// Installs the original GLua spellings over one injected canonical entity
 /// host. Only SERVER gets mutators/`ents.Create`; CLIENT state continues to be
 /// populated exclusively by the ordered replication stream.
@@ -93,8 +111,8 @@ public enum SourceCanonicalEntityGLuaBridge {
         let state = runtime.state
         let hostBox = SourceCanonicalEntityLuaWeakHost(host)
         let nullValue = state.getGlobal("NULL")
-        weak let weakRegistry: GMLuaEntityRegistry? = registry
-        weak let weakTypeSystem: GMLuaTypeSystem? = typeSystem
+        let registryBox = SourceCanonicalEntityLuaWeakObject(registry)
+        let typeSystemBox = SourceCanonicalEntityLuaWeakObject(typeSystem)
 
         func native(
             _ name: String,
@@ -127,7 +145,7 @@ public enum SourceCanonicalEntityGLuaBridge {
             function: String,
             kind: SourceCanonicalEntityKind? = nil
         ) throws -> SourceCanonicalEntitySnapshot {
-            guard let registry = weakRegistry,
+            guard let registry = registryBox.value,
                   let value,
                   let snapshot = registry.canonicalSnapshot(for: value) else {
                 throw LuaError.runtime(
@@ -191,7 +209,7 @@ public enum SourceCanonicalEntityGLuaBridge {
         func vector(
             _ source: SourceVector3
         ) throws -> LuaValue {
-            guard let typeSystem = weakTypeSystem else {
+            guard let typeSystem = typeSystemBox.value else {
                 throw LuaError.runtime("Vector canonical type surface is unavailable")
             }
             return try GMLuaVectorAngle.makeNetworkVector(
@@ -205,7 +223,7 @@ public enum SourceCanonicalEntityGLuaBridge {
         func angle(
             _ source: SourceQAngle
         ) throws -> LuaValue {
-            guard let typeSystem = weakTypeSystem else {
+            guard let typeSystem = typeSystemBox.value else {
                 throw LuaError.runtime("Angle canonical type surface is unavailable")
             }
             return try GMLuaVectorAngle.makeNetworkAngle(
@@ -312,7 +330,7 @@ public enum SourceCanonicalEntityGLuaBridge {
                 kind: .player
             )
             guard let vehicle = snapshot.vehicle else { return [nullValue] }
-            guard let registry = weakRegistry else { return [nullValue] }
+            guard let registry = registryBox.value else { return [nullValue] }
             let value = registry.entity(at: vehicle.entryIndex)
             guard registry.canonicalIdentity(for: value) == vehicle else {
                 return [nullValue]
@@ -339,6 +357,23 @@ public enum SourceCanonicalEntityGLuaBridge {
             _ = try host.updateCanonicalEntity(snapshot.identity) { candidate in
                 candidate.skin = skin
             }
+            return []
+        }
+        try setMethod("Entity:SetBodyGroups", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Entity:SetBodyGroups"
+            )
+            let subModelIDs = try requiredString(
+                arguments,
+                index: 1,
+                function: "Entity:SetBodyGroups"
+            )
+            let host = try requiredHost("Entity:SetBodyGroups")
+            _ = try host.setCanonicalBodyGroups(
+                subModelIDs,
+                for: snapshot.identity
+            )
             return []
         }
         try setMethod("Entity:SetPos", on: entityMetatable) { arguments in
@@ -391,7 +426,7 @@ public enum SourceCanonicalEntityGLuaBridge {
                 arguments.first,
                 function: "Entity:SetCreator"
             )
-            guard let registry = weakRegistry else {
+            guard let registry = registryBox.value else {
                 throw LuaError.runtime("Entity:SetCreator Entity registry is unavailable")
             }
             guard arguments.indices.contains(1),
@@ -463,7 +498,7 @@ public enum SourceCanonicalEntityGLuaBridge {
                     return [nullValue]
                 }
 
-                guard let registry = weakRegistry else {
+                guard let registry = registryBox.value else {
                     _ = try host.rollbackCanonicalEntityCreation(snapshot.identity)
                     throw LuaError.runtime("ents.Create Entity registry is unavailable")
                 }

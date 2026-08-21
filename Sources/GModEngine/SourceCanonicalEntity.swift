@@ -318,6 +318,16 @@ public typealias SourceCanonicalModelValidator = (
     _ kind: SourceCanonicalEntityKind
 ) -> SourceCanonicalModelValidation
 
+/// Resolves GLua body-group selections against one already validated Studio
+/// model. The Engine owns the atomic entity-state transaction while the host
+/// supplies filesystem-backed model metadata; omission never implies a
+/// permissive fallback.
+public typealias SourceCanonicalBodyGroupResolver = (
+    _ model: SourceEntityModelReference,
+    _ subModelIDs: String,
+    _ currentBodyValue: Int
+) throws -> Int
+
 public enum SourceCanonicalEntityError: Error, Equatable, CustomStringConvertible {
     case entityList(SourceEntityListError)
     case noFreeNetworkableSlot
