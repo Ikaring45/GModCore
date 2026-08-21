@@ -62,6 +62,102 @@ private final class SharedSessionAsyncResult: @unchecked Sendable {
 private final class SharedSessionHostIdentityError: Error, @unchecked Sendable {}
 
 final class GMLuaSharedSessionTests: XCTestCase {
+    func testCanonicalConnectQueuesInitialSnapshotUntilHostPumpAndDisconnectPurgesIt() throws {
+        let pair = makePair()
+        defer {
+            _ = pair.client.close()
+            _ = pair.server.close()
+        }
+        let store = SourceCanonicalEntityStore()
+        let world = try store.create(kind: .world, at: 0)
+        let player = try store.create(kind: .player, at: 7)
+        let prop = try store.create(kind: .propPhysics, at: 20)
+        let serverRegistry = try XCTUnwrap(pair.server.entityRegistry)
+        for snapshot in store.orderedSnapshots {
+            _ = try serverRegistry.applyAuthoritativeSnapshot(snapshot)
+        }
+        XCTAssertEqual(serverRegistry.canonicalIdentity(at: 7), player.identity)
+        XCTAssertNotEqual(
+            player.identity.generation,
+            1,
+            "the test requires an EHANDLE generation distinct from transport generation 1"
+        )
+
+        try pair.session.connectCanonical(
+            server: pair.server,
+            client: pair.client,
+            playerIdentity: player.identity,
+            authoritativeSnapshots: store.orderedSnapshots
+        )
+
+        let clientRegistry = try XCTUnwrap(pair.client.entityRegistry)
+        XCTAssertEqual(pair.session.connectedPlayerIndices, [7])
+        XCTAssertEqual(pair.session.connectedUserIDs, [7])
+        XCTAssertEqual(pair.session.netTransport.pendingDeliveryCount, 1)
+        XCTAssertNil(clientRegistry.canonicalSnapshot(at: world.identity.entryIndex))
+        XCTAssertNil(clientRegistry.canonicalSnapshot(at: player.identity.entryIndex))
+        XCTAssertNil(clientRegistry.canonicalSnapshot(at: prop.identity.entryIndex))
+        try pair.client.execute(
+            "assert(LocalPlayer() == NULL and Entity(7) == NULL and Player(7) == NULL)"
+        )
+
+        // This is the host boundary used after Initialize and before
+        // InitPostEntity. Only the pump publishes the canonical snapshot.
+        XCTAssertEqual(try pair.session.pump(maxDeliveries: 1), 1)
+        XCTAssertEqual(clientRegistry.canonicalSnapshot(at: 0), world)
+        XCTAssertEqual(clientRegistry.canonicalSnapshot(at: 7), player)
+        XCTAssertEqual(clientRegistry.canonicalSnapshot(at: 20), prop)
+        try pair.client.execute(
+            "assert(LocalPlayer() == Entity(7) and LocalPlayer() == Player(7))"
+        )
+        let firstClientPlayer = clientRegistry.player(at: 7)
+        XCTAssertEqual(
+            clientRegistry.canonicalIdentity(for: firstClientPlayer),
+            player.identity
+        )
+
+        let updatedProp = try store.update(prop.identity) { state in
+            state.transform.origin = SourceVector3(64, 0, 0)
+        }
+        _ = try serverRegistry.applyAuthoritativeSnapshot(updatedProp)
+        let delayedPacket = SourceEntityReplicationPacket(
+            connectionGeneration: SourceEntityReplicationConnectionGeneration(rawValue: 1),
+            sequence: 2,
+            payload: .delta([.update(updatedProp)])
+        )
+        try pair.session.netTransport.enqueueEntityReplication(
+            delayedPacket,
+            from: try XCTUnwrap(pair.server.netEndpoint),
+            to: try XCTUnwrap(pair.client.netEndpoint)
+        )
+        XCTAssertEqual(pair.session.netTransport.pendingDeliveryCount, 1)
+
+        try pair.session.disconnect(client: pair.client)
+        XCTAssertEqual(pair.session.netTransport.pendingDeliveryCount, 0)
+        XCTAssertNil(clientRegistry.canonicalSnapshot(at: 0))
+        XCTAssertNil(clientRegistry.canonicalSnapshot(at: 7))
+        XCTAssertNil(clientRegistry.canonicalSnapshot(at: 20))
+        XCTAssertFalse(try XCTUnwrap(GMLuaTypeSystem.typedObject(from: firstClientPlayer)).isValid)
+        XCTAssertEqual(serverRegistry.canonicalIdentity(at: 7), player.identity)
+        try pair.client.execute("assert(LocalPlayer() == NULL and Entity(7) == NULL)")
+
+        // A second transport generation can carry the same live Player
+        // EHANDLE. Reusing the entity identity must never reuse the connection
+        // generation or resurrect the first CLIENT userdata.
+        try pair.session.connectCanonical(
+            server: pair.server,
+            client: pair.client,
+            playerIdentity: player.identity,
+            authoritativeSnapshots: store.orderedSnapshots
+        )
+        XCTAssertEqual(pair.session.netTransport.pendingDeliveryCount, 1)
+        XCTAssertNil(clientRegistry.canonicalSnapshot(at: 7))
+        XCTAssertEqual(try pair.session.pump(), 1)
+        XCTAssertEqual(clientRegistry.canonicalIdentity(at: 7), player.identity)
+        XCTAssertEqual(clientRegistry.canonicalSnapshot(at: 20), updatedProp)
+        try pair.client.execute("assert(LocalPlayer() == Entity(7))")
+    }
+
     func testConnectionCreatesCanonicalRealmLocalPlayersAndSendToServerUsesServerMirror() throws {
         let pair = makePair()
         defer {
