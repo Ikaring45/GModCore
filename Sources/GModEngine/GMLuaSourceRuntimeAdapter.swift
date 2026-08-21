@@ -670,6 +670,12 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
     ) throws -> SourceCanonicalEntitySnapshot {
         try withMutationBoundary {
             try requireCanonicalServerProjectionLocked(identity)
+            guard !subModelIDs.isEmpty else {
+                guard let current = canonicalEntities.snapshot(for: identity) else {
+                    throw GMLuaSourceRuntimeAdapterError.unknownEntity(identity)
+                }
+                return current
+            }
             guard let resolver = canonicalBodyGroupResolver else {
                 throw GMLuaSourceRuntimeAdapterError
                     .canonicalBodyGroupResolverUnavailable
