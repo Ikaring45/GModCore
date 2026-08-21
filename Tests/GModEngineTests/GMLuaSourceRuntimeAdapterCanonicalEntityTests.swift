@@ -271,7 +271,7 @@ final class GMLuaSourceRuntimeAdapterCanonicalEntityTests: XCTestCase {
         XCTAssertEqual(list.pendingDeletionCount, 1)
     }
 
-    func testMissingServerRemovalProjectionIsReported() throws {
+    func testMissingServerRemovalProjectionIsRejectedBeforeCleanupAndCanRetry() throws {
         let transport = GMLuaNetTransport()
         let server = makeRuntime(.server, transport: transport)
         let adapter = try GMLuaSourceRuntimeAdapter(
@@ -285,7 +285,7 @@ final class GMLuaSourceRuntimeAdapterCanonicalEntityTests: XCTestCase {
         try installNoopHooks(in: server)
 
         let player = try adapter.createCanonicalEntity(kind: .player, at: 9)
-        _ = try adapter.markCanonicalEntityForRemoval(player.identity)
+        let pending = try adapter.markCanonicalEntityForRemoval(player.identity)
         server.entityRegistry?.unregister(index: player.identity.entryIndex)
 
         XCTAssertThrowsError(try adapter.runServerFixedTick()) { error in
@@ -295,6 +295,13 @@ final class GMLuaSourceRuntimeAdapterCanonicalEntityTests: XCTestCase {
             }
             XCTAssertEqual(identity, player.identity)
         }
+        XCTAssertTrue(adapter.contains(player.identity))
+        XCTAssertEqual(adapter.canonicalSnapshot(for: player.identity), pending)
+
+        _ = try XCTUnwrap(server.entityRegistry)
+            .applyAuthoritativeSnapshot(pending)
+        let retry = try adapter.runServerFixedTick()
+        XCTAssertEqual(retry.removedEntities, [player.identity])
         XCTAssertFalse(adapter.contains(player.identity))
         XCTAssertNil(adapter.canonicalSnapshot(for: player.identity))
     }

@@ -814,19 +814,21 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
     public func runServerFixedTick() throws -> GMLuaSourceRuntimeRunReport {
         try withRunBoundary(operation: "SERVER fixed tick") {
             try validateServerLocked()
-            let removalsDueForCleanup = canonicalEntityHandleOrder.reduce(into: 0) {
-                count, rawHandle in
+            let removalsDueForCleanup = canonicalEntityHandleOrder.compactMap {
+                rawHandle -> SourceCanonicalEntityIdentity? in
                 let identity = SourceCanonicalEntityIdentity(
                     handle: SourceBaseHandle.unsafeFromIndex(rawHandle)
                 )
                 if canonicalEntities.snapshot(for: identity)?.lifecycle == .pendingRemoval {
-                    count += 1
+                    return identity
                 }
+                return nil
             }
             try preflightCanonicalMutationJournalLocked(
-                additionalOperations: removalsDueForCleanup
+                additionalOperations: removalsDueForCleanup.count
             )
-            canonicalCleanupJournalReservations = removalsDueForCleanup
+            try preflightCanonicalCleanupRegistryLocked(removalsDueForCleanup)
+            canonicalCleanupJournalReservations = removalsDueForCleanup.count
             isRunningCanonicalServerTick = true
             defer {
                 isRunningCanonicalServerTick = false
@@ -835,7 +837,6 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
             var hookFailures: [GMLuaSourceHookFailure] = []
             var timerFailures: [GMLuaSourceTimerFailure] = []
             var removedEntities: [GMLuaSourceEntityIdentity] = []
-            var canonicalRemovalError: Error?
 
             kernel.runServerTick(
                 onAddonHook: { [unowned self] phase in
@@ -855,18 +856,11 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
                     )
                 },
                 onEntityRemoved: { [unowned self] handle, entity in
-                    do {
-                        if let identity = try self.didCleanupCanonicalEntityLocked(
-                            handle: handle,
-                            entity: entity
-                        ) {
-                            removedEntities.append(identity)
-                            return
-                        }
-                    } catch {
-                        if canonicalRemovalError == nil {
-                            canonicalRemovalError = error
-                        }
+                    if let identity = self.didCleanupCanonicalEntityLocked(
+                        handle: handle,
+                        entity: entity
+                    ) {
+                        removedEntities.append(identity)
                         return
                     }
                     if let identity = self.didCleanupEntityLocked(handle: handle, entity: entity) {
@@ -874,10 +868,6 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
                     }
                 }
             )
-
-            if let canonicalRemovalError {
-                throw canonicalRemovalError
-            }
 
             return GMLuaSourceRuntimeRunReport(
                 kind: .serverFixedTick,
@@ -1047,7 +1037,7 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
     private func didCleanupCanonicalEntityLocked(
         handle: SourceBaseHandle,
         entity: SourceEntity
-    ) throws -> SourceCanonicalEntityIdentity? {
+    ) -> SourceCanonicalEntityIdentity? {
         guard let snapshot = canonicalEntities.didCleanup(
             capturedHandle: handle,
             entity: entity
@@ -1061,11 +1051,16 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
             canonicalEntityHandleOrder.remove(at: orderIndex)
         }
         canonicalMutationJournal.append(.remove(snapshot))
-        guard try requiredServerRegistryLocked().applyAuthoritativeRemoval(snapshot) else {
-            throw GMLuaSourceRuntimeAdapterError.canonicalRemovalProjectionMissing(
-                snapshot.identity
+        guard let registry = serverRuntime.entityRegistry else {
+            preconditionFailure(
+                "preflighted SERVER canonical registry disappeared during cleanup"
             )
         }
+        let applied = try? registry.applyAuthoritativeRemoval(snapshot)
+        precondition(
+            applied == true,
+            "preflighted SERVER canonical removal projection changed during cleanup"
+        )
         return snapshot.identity
     }
 
@@ -1199,6 +1194,19 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
                 .canonicalMutationJournalCapacityExceeded(
                     maximum: canonicalMutationJournalCapacity
                 )
+        }
+    }
+
+    private func preflightCanonicalCleanupRegistryLocked(
+        _ identities: [SourceCanonicalEntityIdentity]
+    ) throws {
+        guard !identities.isEmpty else { return }
+        let registry = try requiredServerRegistryLocked()
+        for identity in identities where
+            registry.canonicalIdentity(at: identity.entryIndex) != identity
+        {
+            throw GMLuaSourceRuntimeAdapterError
+                .canonicalRemovalProjectionMissing(identity)
         }
     }
 
