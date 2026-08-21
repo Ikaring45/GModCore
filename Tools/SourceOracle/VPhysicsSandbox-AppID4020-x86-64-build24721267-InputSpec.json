@@ -840,6 +840,13 @@
     },
     {
       "role": "isolated_game_content",
+      "source_path": "garrysmod/resource/serverevents.res",
+      "input_path": "oracle_game/resource/serverevents.res",
+      "sha256": "d5ead67866bc49bd971acfd5dd370b9f708b942de2fdfb55dbf30aa880a612dd",
+      "maximum_bytes": 4874
+    },
+    {
+      "role": "isolated_game_content",
       "source_path": "garrysmod/maps/gm_flatgrass.bsp",
       "input_path": "oracle_game/maps/gm_flatgrass.bsp",
       "sha256": "4dfd95ecb8f77a093e3079697b04c5be5675e8595c05639aaf57ad1541024d76",

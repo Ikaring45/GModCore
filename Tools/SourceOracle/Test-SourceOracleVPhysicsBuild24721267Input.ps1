@@ -12,7 +12,7 @@ $inputs = Read-SourceOracleVPhysicsBuild24721267Inputs
 $spec = $inputs.spec
 $metadata = $inputs.metadata
 $files = @($spec.files)
-Assert-BuildInput ($files.Count -eq 127) 'Fixed build input must contain exactly 127 files'
+Assert-BuildInput ($files.Count -eq 128) 'Fixed build input must contain exactly 128 files'
 Assert-BuildInput `
     ([string]$spec.server.executable_input_path -ceq
         'server/srcds_console_win64.exe') `
@@ -86,6 +86,8 @@ Assert-BuildInput `
 
 $exactCleanInputs = [ordered]@{
     'garrysmod/steam.inf' = 'oracle_game/steam.inf'
+    'garrysmod/resource/serverevents.res' =
+        'oracle_game/resource/serverevents.res'
     'garrysmod/maps/gm_flatgrass.bsp' = 'oracle_game/maps/gm_flatgrass.bsp'
     'sourceengine/scripts/surfaceproperties.txt' =
         'server/sourceengine/scripts/surfaceproperties.txt'
@@ -113,6 +115,15 @@ foreach ($pair in $exactCleanInputs.GetEnumerator()) {
     Assert-BuildInput ($matches.Count -eq 1) `
         "Fixed clean game root is missing $($pair.Key)"
 }
+Assert-BuildInput `
+    (@($files | Where-Object {
+        [string]$_.source_path -ceq 'garrysmod/resource/serverevents.res' -and
+        [string]$_.input_path -ceq 'oracle_game/resource/serverevents.res' -and
+        [string]$_.sha256 -ceq
+            'd5ead67866bc49bd971acfd5dd370b9f708b942de2fdfb55dbf30aa880a612dd' -and
+        [int64]$_.maximum_bytes -eq 4874
+    }).Count -eq 1) `
+    'Fixed clean game root does not bind the exact GMod serverevents resource'
 Assert-BuildInput `
     (@($files | Where-Object {
         [string]$_.role -ceq 'probe_lua'

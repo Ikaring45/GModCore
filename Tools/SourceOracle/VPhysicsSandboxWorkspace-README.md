@@ -31,10 +31,11 @@ has a separate bounded staging command:
 
 Its checked-in spec selects the x64 CUI `srcds_console_win64.exe`, the statically identified
 64-bit bootstrap/interface/import closure, the exact Steam appmanifest, the
-fixed `gm_flatgrass` map and GMod startup Lua, three surface-property files,
-four controlled gamemode files, one probe, one guest bootstrap, and only four
-`button_06` VPK entries. The staging code authenticates the bounded directory
-VPK and target ranges, and does not rehash or copy the complete VPK chunk.
+fixed `gm_flatgrass` map and GMod startup Lua, the exact GMod
+`resource/serverevents.res`, three surface-property files, four controlled
+gamemode files, one probe, one guest bootstrap, and only four `button_06` VPK
+entries. The staging code authenticates the bounded directory VPK and target
+ranges, and does not rehash or copy the complete VPK chunk.
 
 The input spec is schema 1 and has the exact object shape below. Every file is
 copied through one retained, non-share-write handle only after its byte cap and
