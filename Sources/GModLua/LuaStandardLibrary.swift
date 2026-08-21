@@ -838,7 +838,9 @@ extension LuaState {
         native("find") { [unowned self] args in
             let subject = try self.requireLuaString(args, 0, "find")
             let pattern = try self.requireLuaString(args, 1, "find")
-            let initIndex = args.count > 2 ? Int(try self.numberFromValue(args[2])) : 1
+            let initIndex = args.count > 2 && !self.isNil(args[2])
+                ? Int(try self.numberFromValue(args[2]))
+                : 1
             let plain = args.count > 3 ? args[3].isTruthy : false
             let start = self.normalizeStringIndex(initIndex, count: subject.count, allowPastEnd: true)
             if plain {
@@ -851,7 +853,9 @@ extension LuaState {
         native("match") { [unowned self] args in
             let subject = try self.requireLuaString(args, 0, "match")
             let pattern = try self.requireLuaString(args, 1, "match")
-            let initIndex = args.count > 2 ? Int(try self.numberFromValue(args[2])) : 1
+            let initIndex = args.count > 2 && !self.isNil(args[2])
+                ? Int(try self.numberFromValue(args[2]))
+                : 1
             let start = self.normalizeStringIndex(initIndex, count: subject.count, allowPastEnd: true)
             guard let match = try LuaPatternMatcher(subject: subject, pattern: pattern).firstMatch(from: start) else { return [.nilValue] }
             if !match.captures.isEmpty { return match.captures }
