@@ -92,6 +92,66 @@ final class SourceEntityReplicationTests: XCTestCase {
         )
     }
 
+    func testPerKindCursorIgnoresPlayerOnlyPacketsAndTracksPropRemoval() {
+        var client = SourceEntityReplicationClientState()
+        XCTAssertTrue(client.connect(generation: generation1))
+        let emptyPropCursor = client.cursor(for: .propPhysics)
+        XCTAssertEqual(emptyPropCursor?.sequence, 0)
+
+        let player = SourceCanonicalEntitySnapshot(
+            identity: SourceCanonicalEntityIdentity(handle: SourceBaseHandle(
+                entryIndex: 1,
+                serialNumber: 1
+            )),
+            kind: .player,
+            className: SourceCanonicalEntityKind.player.className,
+            transform: .identity,
+            motion: SourceEntityMotionState(),
+            model: nil,
+            solidType: .boundingBox,
+            moveType: .walk,
+            lifecycle: .active,
+            isNetworkable: true,
+            revision: 1
+        )
+        _ = client.apply(packet(sequence: 1, payload: .snapshot([player])))
+        XCTAssertEqual(client.cursor(for: .player)?.sequence, 1)
+        XCTAssertEqual(client.cursor(for: .propPhysics), emptyPropCursor)
+
+        let prop = entity(entryIndex: 2, serialNumber: 4, revision: 0)
+        _ = client.apply(packet(sequence: 2, payload: .delta([.create(prop)])))
+        XCTAssertEqual(client.cursor(for: .propPhysics)?.sequence, 2)
+
+        let movedPlayer = SourceCanonicalEntitySnapshot(
+            identity: player.identity,
+            kind: player.kind,
+            className: player.className,
+            transform: SourceEntityTransform(origin: SourceVector3(1, 0, 0)),
+            motion: player.motion,
+            model: player.model,
+            solidType: player.solidType,
+            moveType: player.moveType,
+            lifecycle: player.lifecycle,
+            isNetworkable: player.isNetworkable,
+            revision: 2
+        )
+        _ = client.apply(packet(
+            sequence: 3,
+            payload: .delta([.update(movedPlayer)])
+        ))
+        XCTAssertEqual(client.cursor(for: .player)?.sequence, 3)
+        XCTAssertEqual(client.cursor(for: .propPhysics)?.sequence, 2)
+
+        let removed = entity(
+            entryIndex: 2,
+            serialNumber: 4,
+            revision: 1,
+            lifecycle: .removed
+        )
+        _ = client.apply(packet(sequence: 4, payload: .delta([.remove(removed)])))
+        XCTAssertEqual(client.cursor(for: .propPhysics)?.sequence, 4)
+    }
+
     func testDisconnectReconnectRejectsOldConnectionGeneration() {
         var client = SourceEntityReplicationClientState()
         XCTAssertTrue(client.connect(generation: generation1))

@@ -565,6 +565,71 @@ final class GMLuaEntityRegistryTests: XCTestCase {
         )
     }
 
+    func testClientKindProjectionIsAtomicAndSkipsUnchangedPropCursor() throws {
+        let runtime = GMLuaRuntime(realm: .client, logger: { _ in })
+        defer { _ = runtime.close() }
+        let registry = try XCTUnwrap(runtime.entityRegistry)
+        let generation = SourceEntityReplicationConnectionGeneration(rawValue: 7)
+        XCTAssertTrue(try registry.beginEntityReplication(generation: generation))
+
+        let empty = try XCTUnwrap(registry.canonicalEntityProjection(
+            for: .propPhysics,
+            ifChangedFrom: nil
+        ))
+        XCTAssertEqual(empty.cursor.sequence, 0)
+        XCTAssertEqual(empty.entities, [])
+        XCTAssertNil(registry.canonicalEntityProjection(
+            for: .propPhysics,
+            ifChangedFrom: empty.cursor
+        ))
+
+        let first = canonicalProp(
+            entryIndex: 31,
+            serialNumber: 5,
+            revision: 0,
+            lifecycle: .active,
+            originX: 10
+        )
+        _ = try registry.applyEntityReplicationPacket(
+            SourceEntityReplicationPacket(
+                connectionGeneration: generation,
+                sequence: 1,
+                payload: .snapshot([first])
+            )
+        )
+        let created = try XCTUnwrap(registry.canonicalEntityProjection(
+            for: .propPhysics,
+            ifChangedFrom: empty.cursor
+        ))
+        XCTAssertEqual(created.cursor.sequence, 1)
+        XCTAssertEqual(created.entities, [first])
+        XCTAssertNil(registry.canonicalEntityProjection(
+            for: .propPhysics,
+            ifChangedFrom: created.cursor
+        ))
+
+        let removed = canonicalProp(
+            entryIndex: 31,
+            serialNumber: 5,
+            revision: 1,
+            lifecycle: .removed,
+            originX: 10
+        )
+        _ = try registry.applyEntityReplicationPacket(
+            SourceEntityReplicationPacket(
+                connectionGeneration: generation,
+                sequence: 2,
+                payload: .delta([.remove(removed)])
+            )
+        )
+        let cleared = try XCTUnwrap(registry.canonicalEntityProjection(
+            for: .propPhysics,
+            ifChangedFrom: created.cursor
+        ))
+        XCTAssertEqual(cleared.cursor.sequence, 2)
+        XCTAssertEqual(cleared.entities, [])
+    }
+
     private func canonicalProp(
         entryIndex: Int,
         serialNumber: Int,

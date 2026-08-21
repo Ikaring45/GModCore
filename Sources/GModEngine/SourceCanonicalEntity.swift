@@ -131,6 +131,9 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
     /// Studio skin-family selection. Range validation against the loaded MDL
     /// remains the responsibility of the real Studio asset boundary.
     public var skin: Int
+    /// Source `m_nBody` value. Bodypart decomposition remains owned by the
+    /// decoded MDL; this canonical value is not guessed from a submodel index.
+    public var bodyValue: Int
     /// Local eye offset used by `CBasePlayer::EyePosition`/`GetShootPos`.
     /// Keeping this beside the authoritative origin avoids a Lua-owned eye
     /// position that can drift away from movement state.
@@ -147,6 +150,7 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
         solidType: SourceEntitySolidType = .none,
         moveType: SourceMoveType = .none,
         skin: Int = 0,
+        bodyValue: Int = 0,
         viewOffset: SourceVector3 = .zero,
         vehicle: SourceCanonicalEntityIdentity? = nil,
         creator: SourceCanonicalEntityIdentity? = nil
@@ -157,6 +161,7 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
         self.solidType = solidType
         self.moveType = moveType
         self.skin = skin
+        self.bodyValue = bodyValue
         self.viewOffset = viewOffset
         self.vehicle = vehicle
         self.creator = creator
@@ -256,6 +261,7 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
     public let solidType: SourceEntitySolidType
     public let moveType: SourceMoveType
     public let skin: Int
+    public let bodyValue: Int
     public let viewOffset: SourceVector3
     public let vehicle: SourceCanonicalEntityIdentity?
     public let creator: SourceCanonicalEntityIdentity?
@@ -276,6 +282,7 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         isNetworkable: Bool,
         revision: UInt64,
         skin: Int = 0,
+        bodyValue: Int = 0,
         viewOffset: SourceVector3 = .zero,
         vehicle: SourceCanonicalEntityIdentity? = nil,
         creator: SourceCanonicalEntityIdentity? = nil
@@ -289,6 +296,7 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         self.solidType = solidType
         self.moveType = moveType
         self.skin = skin
+        self.bodyValue = bodyValue
         self.viewOffset = viewOffset
         self.vehicle = vehicle
         self.creator = creator
@@ -318,6 +326,7 @@ public enum SourceCanonicalEntityError: Error, Equatable, CustomStringConvertibl
     case invalidTransform
     case invalidMotion
     case invalidSkin(Int)
+    case invalidBodyValue(Int)
     case invalidModelPath(String)
     case modelRequired(SourceCanonicalEntityKind)
     case modelValidationUnavailable(SourceEntityModelReference)
@@ -343,6 +352,8 @@ public enum SourceCanonicalEntityError: Error, Equatable, CustomStringConvertibl
             return "Source entity motion contains a non-finite or invalid component"
         case let .invalidSkin(skin):
             return "Source entity Studio skin index is invalid: \(skin)"
+        case let .invalidBodyValue(value):
+            return "Source entity Studio body value is invalid: \(value)"
         case let .invalidModelPath(path):
             return "Source entity model path is structurally invalid: \(path)"
         case let .modelRequired(kind):
@@ -418,6 +429,7 @@ public final class SourceCanonicalEntity: SourceEntity {
             isNetworkable: true,
             revision: overrideRevision ?? revision,
             skin: state.skin,
+            bodyValue: state.bodyValue,
             viewOffset: state.viewOffset,
             vehicle: state.vehicle,
             creator: state.creator
@@ -805,6 +817,9 @@ public final class SourceCanonicalEntityStore {
         }
         guard state.skin >= 0, state.skin <= Int(Int32.max) else {
             throw SourceCanonicalEntityError.invalidSkin(state.skin)
+        }
+        guard state.bodyValue >= 0, state.bodyValue <= Int(Int32.max) else {
+            throw SourceCanonicalEntityError.invalidBodyValue(state.bodyValue)
         }
         guard state.viewOffset.x.isFinite,
               state.viewOffset.y.isFinite,

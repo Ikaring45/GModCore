@@ -564,6 +564,28 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
         return entityReplicationState.cursor
     }
 
+    /// Atomically compares one kind's CLIENT replication cursor and builds its
+    /// ordered immutable projection only when changed. This prevents Player
+    /// movement packets from forcing a prop array copy at fixed-tick rate.
+    public func canonicalEntityProjection(
+        for kind: SourceCanonicalEntityKind,
+        ifChangedFrom priorCursor: SourceEntityReplicationCursor?
+    ) -> SourceCanonicalEntityKindProjection? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let cursor = entityReplicationState.cursor(for: kind),
+              cursor != priorCursor else { return nil }
+        let entities = canonicalSnapshotsByIndexLocked()
+            .filter { $0.value.kind == kind }
+            .sorted { $0.key < $1.key }
+            .map(\.value)
+        return SourceCanonicalEntityKindProjection(
+            kind: kind,
+            cursor: cursor,
+            entities: entities
+        )
+    }
+
     private struct CanonicalProjection {
         var values: [Int: LuaValue]
         var playerIdentityByUserID: [Int: (index: Int, generation: UInt64)]

@@ -151,12 +151,26 @@ final class SourceCanonicalEntityTests: XCTestCase {
         }
         XCTAssertEqual(store.snapshot(for: player.identity), player)
 
+        XCTAssertThrowsError(
+            try store.update(player.identity) { state in
+                state.bodyValue = -1
+            }
+        ) { error in
+            XCTAssertEqual(
+                error as? SourceCanonicalEntityError,
+                .invalidBodyValue(-1)
+            )
+        }
+        XCTAssertEqual(store.snapshot(for: player.identity), player)
+
         let updated = try store.update(player.identity) { state in
             state.transform.origin = SourceVector3(1, 2, 3)
             state.moveType = .noClip
+            state.bodyValue = 3
         }
         XCTAssertEqual(updated.transform.origin, SourceVector3(1, 2, 3))
         XCTAssertEqual(updated.moveType, .noClip)
+        XCTAssertEqual(updated.bodyValue, 3)
         XCTAssertEqual(updated.revision, 1)
     }
 

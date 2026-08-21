@@ -168,6 +168,24 @@ public struct SourceEntityReplicationCursor: Equatable, Sendable {
     }
 }
 
+/// Atomic filtered CLIENT projection. Its cursor and entity array were read
+/// under the same registry lock.
+public struct SourceCanonicalEntityKindProjection: Equatable, Sendable {
+    public let kind: SourceCanonicalEntityKind
+    public let cursor: SourceEntityReplicationCursor
+    public let entities: [SourceCanonicalEntitySnapshot]
+
+    public init(
+        kind: SourceCanonicalEntityKind,
+        cursor: SourceEntityReplicationCursor,
+        entities: [SourceCanonicalEntitySnapshot]
+    ) {
+        self.kind = kind
+        self.cursor = cursor
+        self.entities = entities
+    }
+}
+
 public enum SourceEntityReplicationRejection: Equatable, Sendable {
     case noActiveConnection
     case connectionGenerationMismatch(
@@ -216,6 +234,8 @@ public struct SourceEntityReplicationClientState: Sendable {
     public private(set) var lastAppliedSequence: UInt64 = 0
 
     private var entitiesByEntryIndex: [Int: SourceCanonicalEntitySnapshot] = [:]
+    private var lastChangedSequenceByKind:
+        [SourceCanonicalEntityKind: UInt64] = [:]
 
     public init() {}
 
@@ -234,6 +254,7 @@ public struct SourceEntityReplicationClientState: Sendable {
         highestConnectionGeneration = generation
         lastAppliedSequence = 0
         entitiesByEntryIndex.removeAll(keepingCapacity: true)
+        lastChangedSequenceByKind.removeAll(keepingCapacity: true)
         return true
     }
 
@@ -244,6 +265,7 @@ public struct SourceEntityReplicationClientState: Sendable {
         activeConnectionGeneration = nil
         lastAppliedSequence = 0
         entitiesByEntryIndex.removeAll(keepingCapacity: true)
+        lastChangedSequenceByKind.removeAll(keepingCapacity: true)
     }
 
     public var snapshot: SourceEntityReplicationClientSnapshot? {
@@ -262,6 +284,19 @@ public struct SourceEntityReplicationClientState: Sendable {
         return SourceEntityReplicationCursor(
             connectionGeneration: activeConnectionGeneration,
             sequence: lastAppliedSequence
+        )
+    }
+
+    /// Last successful packet that changed one canonical kind. A connected
+    /// kind with no entities uses sequence zero; connection generation still
+    /// distinguishes it from every earlier empty projection.
+    public func cursor(
+        for kind: SourceCanonicalEntityKind
+    ) -> SourceEntityReplicationCursor? {
+        guard let activeConnectionGeneration else { return nil }
+        return SourceEntityReplicationCursor(
+            connectionGeneration: activeConnectionGeneration,
+            sequence: lastChangedSequenceByKind[kind] ?? 0
         )
     }
 
@@ -330,6 +365,9 @@ public struct SourceEntityReplicationClientState: Sendable {
 
         entitiesByEntryIndex = transaction
         lastAppliedSequence = packet.sequence
+        for kind in Self.changedKinds(in: packet.payload) {
+            lastChangedSequenceByKind[kind] = packet.sequence
+        }
         return .applied(
             makeSnapshot(
                 generation: activeConnectionGeneration,
@@ -337,6 +375,23 @@ public struct SourceEntityReplicationClientState: Sendable {
                 entitiesByEntryIndex: transaction
             )
         )
+    }
+
+    private static func changedKinds(
+        in payload: SourceEntityReplicationPayload
+    ) -> Set<SourceCanonicalEntityKind> {
+        switch payload {
+        case let .snapshot(entities):
+            return Set(entities.map(\.kind))
+        case let .delta(operations):
+            return Set(operations.map { operation in
+                switch operation {
+                case let .create(snapshot), let .update(snapshot),
+                        let .remove(snapshot):
+                    return snapshot.kind
+                }
+            })
+        }
     }
 
     private func applySnapshot(
