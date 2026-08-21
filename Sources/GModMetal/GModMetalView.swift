@@ -1952,12 +1952,20 @@ public struct GModMetalView:
                 }
                 return
             }
+            var storedSkyColor = false
             if let scene = activeWorldScene,
                let mesh = cachedWorldMesh,
                mesh.identifier == scene.meshIdentifier,
                mesh.vertexCount == scene.metalPositions.count,
                mesh.indexCount == scene.indices.count {
                 worldTextureUploadFailureReason = nil
+                // An iPad GPU may keep this attachment in tile memory until
+                // the encoder ends. The following ordinary-world pass loads
+                // the sky color, so make that inter-pass store explicit rather
+                // than depending on the MTKView descriptor's transient
+                // default and then mutating the same descriptor in place.
+                descriptor.colorAttachments[0].storeAction = .store
+                descriptor.depthAttachment.storeAction = .dontCare
                 guard let skyEncoder = commandBuffer.makeRenderCommandEncoder(
                     descriptor: descriptor
                 ) else {
@@ -1990,13 +1998,23 @@ public struct GModMetalView:
                     encoder: skyEncoder
                 )
                 skyEncoder.endEncoding()
-                descriptor.colorAttachments[0].loadAction = .load
-                descriptor.depthAttachment.loadAction = .clear
+                storedSkyColor = true
             } else {
                 worldTextureUploadFailureReason = nil
             }
+            // Metal copies a descriptor when an encoder is created, but an
+            // independent value keeps the tile store/load boundary explicit
+            // on physical iPad hardware. Sky depth is intentionally discarded;
+            // Source starts the ordinary world with a fresh depth lifetime.
+            let worldDescriptor = descriptor.copy() as! MTLRenderPassDescriptor
+            if storedSkyColor {
+                worldDescriptor.colorAttachments[0].loadAction = .load
+            }
+            worldDescriptor.colorAttachments[0].storeAction = .store
+            worldDescriptor.depthAttachment.loadAction = .clear
+            worldDescriptor.depthAttachment.storeAction = .dontCare
             guard let encoder = commandBuffer.makeRenderCommandEncoder(
-                descriptor: descriptor
+                descriptor: worldDescriptor
             ) else {
                 if let meshIdentifier = activeWorldScene?.meshIdentifier {
                     worldFramePresentationSink.fail(
