@@ -61,6 +61,32 @@ public struct GMLuaSurfaceColor: Sendable, Equatable {
     }
 }
 
+public enum GMLuaTextureFilter: Int, Sendable, Equatable {
+    case none = 0
+    case point = 1
+    case linear = 2
+    case anisotropic = 3
+}
+
+/// Effective filter override attached to one retained textured draw command.
+/// `nil` means that stack had no override; `.none` is an explicit pushed
+/// TEXFILTER.NONE value and remains distinguishable for stack fidelity.
+public struct GMLuaSurfaceTextureFilterSnapshot: Sendable, Equatable {
+    public let commandIndex: Int
+    public let minification: GMLuaTextureFilter?
+    public let magnification: GMLuaTextureFilter?
+
+    public init(
+        commandIndex: Int,
+        minification: GMLuaTextureFilter?,
+        magnification: GMLuaTextureFilter?
+    ) {
+        self.commandIndex = commandIndex
+        self.minification = minification
+        self.magnification = magnification
+    }
+}
+
 public enum GMLuaSurfaceDrawCommand: Sendable, Equatable {
     case rectangle(
         frame: GMLuaPanelRect,
@@ -123,10 +149,53 @@ public struct GMLuaSurfacePersistentResourceDiagnostics: Sendable, Equatable {
     public var overflowed: Bool { rejectedRegistrationCount > 0 }
 }
 
+/// One renderer-neutral `surface.PlaySound` request. The App audio adapter may
+/// resolve `soundPath` against mounted Source content, but this layer neither
+/// decodes nor claims audible playback.
+public struct GMLuaSurfaceSoundRequest: Sendable, Equatable {
+    public let sequenceNumber: UInt64
+    public let frameNumber: UInt64
+    public let eventIndex: Int
+    public let soundPath: LuaString
+    public let hasAudioBacking: Bool
+
+    public init(
+        sequenceNumber: UInt64,
+        frameNumber: UInt64,
+        eventIndex: Int,
+        soundPath: LuaString,
+        hasAudioBacking: Bool = false
+    ) {
+        self.sequenceNumber = sequenceNumber
+        self.frameNumber = frameNumber
+        self.eventIndex = eventIndex
+        self.soundPath = soundPath
+        self.hasAudioBacking = hasAudioBacking
+    }
+}
+
+public struct GMLuaSurfaceSoundRequestDiagnostics: Sendable, Equatable {
+    public let attemptedRequestCount: Int
+    public let retainedRequestCount: Int
+    public let droppedRequestCount: Int
+    public let estimatedRetainedByteCount: Int
+    public let maximumRequestCount: Int
+    public let maximumEstimatedByteCount: Int
+
+    public var overflowed: Bool { droppedRequestCount > 0 }
+}
+
+/// Bounded, drainable handoff from Lua UI actions to an App-owned audio layer.
+public struct GMLuaSurfaceSoundRequestReport: Sendable, Equatable {
+    public let requests: [GMLuaSurfaceSoundRequest]
+    public let diagnostics: GMLuaSurfaceSoundRequestDiagnostics
+}
+
 public struct GMLuaSurfaceFrameSnapshot: Sendable, Equatable {
     public let viewportWidth: Int
     public let viewportHeight: Int
     public let commands: [GMLuaSurfaceDrawCommand]
+    public let textureFilters: [GMLuaSurfaceTextureFilterSnapshot]
     public let textureCount: Int
     public let captureDiagnostics: GMLuaSurfaceCommandCaptureDiagnostics
 
@@ -215,6 +284,8 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
     /// while bounding a long-running addon's unique-name churn.
     public static let defaultMaximumPersistentTextureCount = 16_384
     public static let defaultMaximumCustomFontCount = 4_096
+    public static let defaultMaximumSoundRequestCount = 1_024
+    public static let defaultMaximumEstimatedSoundRequestByteCount = 512 * 1_024
 
     private struct PaintContext {
         let originX: Double
@@ -239,24 +310,39 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
     private var textPosition = GMLuaCursorPosition(x: 0, y: 0)
     private var contexts: [PaintContext] = []
     private var commands: [GMLuaSurfaceDrawCommand] = []
+    private var textureFilterSnapshots: [GMLuaSurfaceTextureFilterSnapshot] = []
+    private var minificationFilterStack: [GMLuaTextureFilter] = []
+    private var magnificationFilterStack: [GMLuaTextureFilter] = []
     private var attemptedCommandCount = 0
     private var droppedCommandCount = 0
     private var estimatedCommandByteCount = 0
     private var viewportWidth = 0
     private var viewportHeight = 0
     private var clippingDisabled = false
+    private var scissorRect: GMLuaPanelRect?
+    private var pendingSoundRequests: [GMLuaSurfaceSoundRequest] = []
+    private var attemptedSoundRequestCount = 0
+    private var droppedSoundRequestCount = 0
+    private var estimatedSoundRequestByteCount = 0
+    private var currentSoundFrameNumber: UInt64 = 0
+    private var nextSoundEventIndex = 0
+    private var nextSoundRequestSequence: UInt64 = 0
     private let textMeasurer: any GMLuaTextMeasurer
     private let maximumDrawCommandCount: Int
     private let maximumEstimatedCommandByteCount: Int
     private let maximumPersistentTextureCount: Int
     private let maximumCustomFontCount: Int
+    private let maximumSoundRequestCount: Int
+    private let maximumEstimatedSoundRequestByteCount: Int
 
     fileprivate init(
         textMeasurer: any GMLuaTextMeasurer,
         maximumDrawCommandCount: Int,
         maximumEstimatedCommandByteCount: Int,
         maximumPersistentTextureCount: Int,
-        maximumCustomFontCount: Int
+        maximumCustomFontCount: Int,
+        maximumSoundRequestCount: Int,
+        maximumEstimatedSoundRequestByteCount: Int
     ) {
         self.textMeasurer = textMeasurer
         self.maximumDrawCommandCount = max(0, maximumDrawCommandCount)
@@ -269,6 +355,11 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
             maximumPersistentTextureCount
         )
         self.maximumCustomFontCount = max(0, maximumCustomFontCount)
+        self.maximumSoundRequestCount = max(0, maximumSoundRequestCount)
+        self.maximumEstimatedSoundRequestByteCount = max(
+            0,
+            maximumEstimatedSoundRequestByteCount
+        )
         installBuiltInFontDescriptors()
         builtInFontDescriptorCount = fontDescriptors.count
         selectedFontKey = Self.canonicalFontName("Default")
@@ -327,6 +418,25 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
         return fontDescriptors[selectedFontKey]?.name
     }
 
+    public var pendingSoundRequestReport: GMLuaSurfaceSoundRequestReport {
+        lock.lock()
+        defer { lock.unlock() }
+        return soundRequestReportLocked()
+    }
+
+    /// Transfers retained requests to the App audio adapter and resets this
+    /// bounded report window. Sequence and frame numbers remain monotonic.
+    public func drainSoundRequestReport() -> GMLuaSurfaceSoundRequestReport {
+        lock.lock()
+        let report = soundRequestReportLocked()
+        pendingSoundRequests.removeAll(keepingCapacity: true)
+        attemptedSoundRequestCount = 0
+        droppedSoundRequestCount = 0
+        estimatedSoundRequestByteCount = 0
+        lock.unlock()
+        return report
+    }
+
     public var textMeasurementFidelity: GMLuaTextMeasurementFidelity {
         textMeasurer.fidelity
     }
@@ -378,14 +488,18 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
 
     public func beginFrame(viewportWidth: Int, viewportHeight: Int) {
         lock.lock()
+        currentSoundFrameNumber &+= 1
+        nextSoundEventIndex = 0
         self.viewportWidth = max(0, viewportWidth)
         self.viewportHeight = max(0, viewportHeight)
         commands.removeAll(keepingCapacity: true)
+        textureFilterSnapshots.removeAll(keepingCapacity: true)
         attemptedCommandCount = 0
         droppedCommandCount = 0
         estimatedCommandByteCount = 0
         contexts.removeAll(keepingCapacity: true)
         clippingDisabled = false
+        scissorRect = nil
         lock.unlock()
     }
 
@@ -396,6 +510,7 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
             viewportWidth: viewportWidth,
             viewportHeight: viewportHeight,
             commands: commands,
+            textureFilters: textureFilterSnapshots,
             textureCount: textureIDs.count,
             captureDiagnostics: GMLuaSurfaceCommandCaptureDiagnostics(
                 attemptedCommandCount: attemptedCommandCount,
@@ -501,6 +616,55 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Records the glyph portion of native TextEntry painting. Selection and
+    /// caret primitives are deliberately owned by VGUI because this command
+    /// receives only text state that the registry can prove exists.
+    func appendTextEntryText(
+        value: LuaString,
+        fontName: LuaString,
+        color: GMLuaPanelColorSnapshot,
+        insetX: Int,
+        insetY: Int,
+        panelHeight: Double
+    ) throws {
+        guard !value.isEmpty else { return }
+        lock.lock()
+        guard let context = contexts.last else {
+            lock.unlock()
+            throw LuaError.runtime(
+                "Panel:DrawTextEntryText called without a panel paint context"
+            )
+        }
+        guard let descriptor = fontDescriptors[Self.canonicalFontName(fontName)]
+                ?? fontDescriptors[Self.canonicalFontName("Default")] else {
+            lock.unlock()
+            throw LuaError.runtime(
+                "Panel:DrawTextEntryText has no resolvable current font"
+            )
+        }
+        let measurement = textMeasurer.measure(value, using: descriptor)
+        let position = GMLuaCursorPosition(
+            x: context.originX + Double(insetX),
+            y: context.originY + (
+                (panelHeight - Double(measurement.height)) * 0.5
+            ).rounded(.towardZero) + Double(insetY)
+        )
+        let textColor = GMLuaSurfaceColor(
+            red: color.red,
+            green: color.green,
+            blue: color.blue,
+            alpha: color.alpha
+        )
+        appendCommandsWithinBudget([.text(
+            value: value,
+            position: position,
+            font: descriptor,
+            color: multipliedAlpha(textColor, context.alphaMultiplier),
+            clip: effectiveClip(context)
+        )])
+        lock.unlock()
+    }
+
     func appendPanelImage(_ panel: GMLuaPanelRenderSnapshot) throws {
         guard let imageName = panel.imageName else { return }
         try selectTexture(named: imageName)
@@ -579,6 +743,110 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
         return previous
     }
 
+    fileprivate func setScissorRect(
+        startX: Double,
+        startY: Double,
+        endX: Double,
+        endY: Double,
+        enabled: Bool
+    ) {
+        lock.lock()
+        if enabled {
+            scissorRect = GMLuaPanelRect(
+                x: startX,
+                y: startY,
+                width: max(0, endX - startX),
+                height: max(0, endY - startY)
+            )
+        } else {
+            scissorRect = nil
+        }
+        lock.unlock()
+    }
+
+    fileprivate func pushTextureFilter(
+        _ filter: GMLuaTextureFilter,
+        minification: Bool
+    ) {
+        lock.lock()
+        if minification {
+            minificationFilterStack.append(filter)
+        } else {
+            magnificationFilterStack.append(filter)
+        }
+        lock.unlock()
+    }
+
+    fileprivate func popTextureFilter(minification: Bool) throws {
+        lock.lock()
+        if minification {
+            guard !minificationFilterStack.isEmpty else {
+                lock.unlock()
+                throw LuaError.runtime(
+                    "render.PopFilterMin called without matching render.PushFilterMin"
+                )
+            }
+            minificationFilterStack.removeLast()
+        } else {
+            guard !magnificationFilterStack.isEmpty else {
+                lock.unlock()
+                throw LuaError.runtime(
+                    "render.PopFilterMag called without matching render.PushFilterMag"
+                )
+            }
+            magnificationFilterStack.removeLast()
+        }
+        lock.unlock()
+    }
+
+    fileprivate func appendSoundRequest(_ soundPath: LuaString) {
+        lock.lock()
+        attemptedSoundRequestCount = Self.saturatingAdd(
+            attemptedSoundRequestCount,
+            1
+        )
+        let eventIndex = nextSoundEventIndex
+        nextSoundEventIndex = Self.saturatingAdd(nextSoundEventIndex, 1)
+        let sequenceNumber = nextSoundRequestSequence
+        nextSoundRequestSequence &+= 1
+        let estimatedBytes = Self.saturatingAdd(64, soundPath.count)
+        let countFits = pendingSoundRequests.count < maximumSoundRequestCount
+        let bytesFit = estimatedBytes <= maximumEstimatedSoundRequestByteCount &&
+            estimatedSoundRequestByteCount <=
+                maximumEstimatedSoundRequestByteCount - estimatedBytes
+        guard countFits, bytesFit else {
+            droppedSoundRequestCount = Self.saturatingAdd(
+                droppedSoundRequestCount,
+                1
+            )
+            lock.unlock()
+            return
+        }
+        pendingSoundRequests.append(GMLuaSurfaceSoundRequest(
+            sequenceNumber: sequenceNumber,
+            frameNumber: currentSoundFrameNumber,
+            eventIndex: eventIndex,
+            soundPath: soundPath
+        ))
+        estimatedSoundRequestByteCount += estimatedBytes
+        lock.unlock()
+    }
+
+    /// Requires `lock` to be held.
+    private func soundRequestReportLocked() -> GMLuaSurfaceSoundRequestReport {
+        GMLuaSurfaceSoundRequestReport(
+            requests: pendingSoundRequests,
+            diagnostics: GMLuaSurfaceSoundRequestDiagnostics(
+                attemptedRequestCount: attemptedSoundRequestCount,
+                retainedRequestCount: pendingSoundRequests.count,
+                droppedRequestCount: droppedSoundRequestCount,
+                estimatedRetainedByteCount: estimatedSoundRequestByteCount,
+                maximumRequestCount: maximumSoundRequestCount,
+                maximumEstimatedByteCount: maximumEstimatedSoundRequestByteCount
+            )
+        )
+    }
+
     fileprivate func appendRectangle(x: Double, y: Double, width: Double, height: Double) {
         lock.lock()
         guard let context = contexts.last, width > 0, height > 0 else {
@@ -598,6 +866,110 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// `surface.DrawOutlinedRect` keeps every border pixel inside the supplied
+    /// outer rectangle. The command stream has no native outline primitive, so
+    /// emit four non-overlapping filled edges. When the requested border leaves
+    /// no positive inner rectangle, the mathematically equivalent result is one
+    /// filled rectangle. Each logical outline is admitted or rejected as one
+    /// atomic command-budget candidate set so a tight budget cannot retain only
+    /// part of its border.
+    fileprivate func appendOutlinedRectangle(
+        x: Double,
+        y: Double,
+        width: Double,
+        height: Double,
+        thickness: Double
+    ) {
+        lock.lock()
+        guard let context = contexts.last,
+              width > 0,
+              height > 0,
+              thickness > 0 else {
+            lock.unlock()
+            return
+        }
+
+        let color = multipliedAlpha(drawColor, context.alphaMultiplier)
+        let clip = effectiveClip(context)
+        let outerFrame = GMLuaPanelRect(
+            x: context.originX + x,
+            y: context.originY + y,
+            width: width,
+            height: height
+        )
+        let innerWidth = width - thickness * 2
+        let innerHeight = height - thickness * 2
+        let candidates: [GMLuaSurfaceDrawCommand]
+        if innerWidth <= 0 || innerHeight <= 0 {
+            candidates = [.rectangle(frame: outerFrame, color: color, clip: clip)]
+        } else {
+            candidates = [
+                .rectangle(
+                    frame: GMLuaPanelRect(
+                        x: outerFrame.x,
+                        y: outerFrame.y,
+                        width: width,
+                        height: thickness
+                    ),
+                    color: color,
+                    clip: clip
+                ),
+                .rectangle(
+                    frame: GMLuaPanelRect(
+                        x: outerFrame.x,
+                        y: outerFrame.y + height - thickness,
+                        width: width,
+                        height: thickness
+                    ),
+                    color: color,
+                    clip: clip
+                ),
+                .rectangle(
+                    frame: GMLuaPanelRect(
+                        x: outerFrame.x,
+                        y: outerFrame.y + thickness,
+                        width: thickness,
+                        height: innerHeight
+                    ),
+                    color: color,
+                    clip: clip
+                ),
+                .rectangle(
+                    frame: GMLuaPanelRect(
+                        x: outerFrame.x + width - thickness,
+                        y: outerFrame.y + thickness,
+                        width: thickness,
+                        height: innerHeight
+                    ),
+                    color: color,
+                    clip: clip
+                )
+            ]
+        }
+        appendCommandsWithinBudget(candidates)
+        lock.unlock()
+    }
+
+    /// Native `Panel:DrawFilledRect` is exactly the current panel-local
+    /// rectangle under the active Paint/PaintOver context. Routing through
+    /// `appendRectangle` preserves surface color, cumulative panel alpha,
+    /// clipping/scissor state, and the shared bounded command budget.
+    func appendPanelFilledRectangle(width: Double, height: Double) {
+        appendRectangle(x: 0, y: 0, width: width, height: height)
+    }
+
+    /// Native `Panel:DrawOutlinedRect` is the one-pixel shorthand for the
+    /// global Surface primitive under the current panel Paint/PaintOver context.
+    func appendPanelOutlinedRectangle(width: Double, height: Double) {
+        appendOutlinedRectangle(
+            x: 0,
+            y: 0,
+            width: width,
+            height: height,
+            thickness: 1
+        )
+    }
+
     fileprivate func appendTexturedRectangle(
         x: Double,
         y: Double,
@@ -611,7 +983,8 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
             lock.unlock()
             return
         }
-        appendCommandsWithinBudget([.texturedRectangle(
+        let commandIndex = commands.count
+        let retained = appendCommandsWithinBudget([.texturedRectangle(
             frame: GMLuaPanelRect(
                 x: context.originX + x,
                 y: context.originY + y,
@@ -623,6 +996,13 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
             color: multipliedAlpha(drawColor, context.alphaMultiplier),
             clip: effectiveClip(context)
         )])
+        if retained {
+            textureFilterSnapshots.append(GMLuaSurfaceTextureFilterSnapshot(
+                commandIndex: commandIndex,
+                minification: minificationFilterStack.last,
+                magnification: magnificationFilterStack.last
+            ))
+        }
         lock.unlock()
     }
 
@@ -650,15 +1030,24 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
     }
 
     private func effectiveClip(_ context: PaintContext) -> GMLuaPanelRect {
+        let panelClip: GMLuaPanelRect
         if clippingDisabled {
-            return GMLuaPanelRect(
+            panelClip = GMLuaPanelRect(
                 x: 0,
                 y: 0,
                 width: Double(viewportWidth),
                 height: Double(viewportHeight)
             )
+        } else {
+            panelClip = context.clip
         }
-        return context.clip
+        guard let scissorRect else { return panelClip }
+        return panelClip.intersection(scissorRect) ?? GMLuaPanelRect(
+            x: max(panelClip.x, scissorRect.x),
+            y: max(panelClip.y, scissorRect.y),
+            width: 0,
+            height: 0
+        )
     }
 
     private func multipliedAlpha(_ color: GMLuaSurfaceColor, _ multiplier: Double) -> GMLuaSurfaceColor {
@@ -673,10 +1062,11 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
     /// Requires `lock` to be held. A multi-command logical operation (for
     /// example Label shadow + main glyphs) is admitted atomically so overflow
     /// never leaves only the decorative half of the operation in the frame.
+    @discardableResult
     private func appendCommandsWithinBudget(
         _ candidates: [GMLuaSurfaceDrawCommand]
-    ) {
-        guard !candidates.isEmpty else { return }
+    ) -> Bool {
+        guard !candidates.isEmpty else { return true }
         attemptedCommandCount = Self.saturatingAdd(
             attemptedCommandCount,
             candidates.count
@@ -699,10 +1089,11 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
                 droppedCommandCount,
                 candidates.count
             )
-            return
+            return false
         }
         commands.append(contentsOf: candidates)
         estimatedCommandByteCount += candidateBytes
+        return true
     }
 
     private static func estimatedByteCount(
@@ -868,14 +1259,20 @@ public enum GMLuaSurface {
         maximumPersistentTextureCount: Int =
             GMLuaSurfaceCommandState.defaultMaximumPersistentTextureCount,
         maximumCustomFontCount: Int =
-            GMLuaSurfaceCommandState.defaultMaximumCustomFontCount
+            GMLuaSurfaceCommandState.defaultMaximumCustomFontCount,
+        maximumSoundRequestCount: Int =
+            GMLuaSurfaceCommandState.defaultMaximumSoundRequestCount,
+        maximumEstimatedSoundRequestByteCount: Int =
+            GMLuaSurfaceCommandState.defaultMaximumEstimatedSoundRequestByteCount
     ) throws -> GMLuaSurfaceCommandState {
         let commandState = GMLuaSurfaceCommandState(
             textMeasurer: textMeasurer,
             maximumDrawCommandCount: maximumDrawCommandCount,
             maximumEstimatedCommandByteCount: maximumEstimatedCommandByteCount,
             maximumPersistentTextureCount: maximumPersistentTextureCount,
-            maximumCustomFontCount: maximumCustomFontCount
+            maximumCustomFontCount: maximumCustomFontCount,
+            maximumSoundRequestCount: maximumSoundRequestCount,
+            maximumEstimatedSoundRequestByteCount: maximumEstimatedSoundRequestByteCount
         )
         let surfaceTable: LuaTable
         if case let .table(existing) = state.getGlobal("surface") {
@@ -883,6 +1280,21 @@ public enum GMLuaSurface {
         } else {
             surfaceTable = LuaTable()
         }
+
+        let playSound = LuaNativeFunctionBox(
+            { [commandState] arguments in
+                commandState.appendSoundRequest(
+                    try safeLogicalSoundPath(arguments, function: "PlaySound")
+                )
+                return []
+            },
+            debugName: "surface.PlaySound"
+        )
+        try state.setRawTableValue(
+            .nativeFunction(playSound),
+            for: .string("PlaySound"),
+            in: surfaceTable
+        )
 
         let getTextureID = LuaNativeFunctionBox(
             { [commandState] arguments in
@@ -1003,6 +1415,39 @@ public enum GMLuaSurface {
             },
             debugName: "surface.DrawRect"
         )
+        let drawOutlinedRect = LuaNativeFunctionBox(
+            { [commandState] arguments in
+                let values = try finiteNumbers(
+                    arguments,
+                    count: 4,
+                    function: "DrawOutlinedRect"
+                )
+                let thickness: Double
+                if arguments.indices.contains(4) {
+                    switch arguments[4] {
+                    case .nilValue:
+                        thickness = 1
+                    case let .number(value) where value.isFinite:
+                        thickness = value
+                    default:
+                        throw LuaError.runtime(
+                            "bad argument #5 to 'DrawOutlinedRect' (finite number expected)"
+                        )
+                    }
+                } else {
+                    thickness = 1
+                }
+                commandState.appendOutlinedRectangle(
+                    x: values[0],
+                    y: values[1],
+                    width: values[2],
+                    height: values[3],
+                    thickness: thickness
+                )
+                return []
+            },
+            debugName: "surface.DrawOutlinedRect"
+        )
         let setTextPos = LuaNativeFunctionBox(
             { [commandState] arguments in
                 let values = try finiteNumbers(arguments, count: 2, function: "SetTextPos")
@@ -1069,7 +1514,8 @@ public enum GMLuaSurface {
         )
         for (name, function) in [
             ("SetDrawColor", setDrawColor), ("SetTextColor", setTextColor),
-            ("DrawRect", drawRect), ("SetTextPos", setTextPos),
+            ("DrawRect", drawRect), ("DrawOutlinedRect", drawOutlinedRect),
+            ("SetTextPos", setTextPos),
             ("DrawText", drawText), ("DrawTexturedRect", drawTexturedRect),
             ("DrawTexturedRectUV", drawTexturedRectUV), ("SetMaterial", setMaterial),
             ("DisableClipping", disableClipping)
@@ -1086,7 +1532,158 @@ public enum GMLuaSurface {
         // shipped Derma Lua to call a non-existent namespaced API.
         state.setGlobal("DisableClipping", value: .nativeFunction(disableClipping))
         state.setGlobal("surface", value: .table(surfaceTable))
+
+        let textureFilters = LuaTable()
+        for (name, rawValue) in [
+            ("NONE", GMLuaTextureFilter.none.rawValue),
+            ("POINT", GMLuaTextureFilter.point.rawValue),
+            ("LINEAR", GMLuaTextureFilter.linear.rawValue),
+            ("ANISOTROPIC", GMLuaTextureFilter.anisotropic.rawValue)
+        ] {
+            try state.setRawTableValue(
+                .number(Double(rawValue)),
+                for: .string(LuaString(name)),
+                in: textureFilters
+            )
+        }
+        state.setGlobal("TEXFILTER", value: .table(textureFilters))
+
+        let renderTable: LuaTable
+        if case let .table(existing) = state.getGlobal("render") {
+            renderTable = existing
+        } else {
+            renderTable = LuaTable()
+        }
+        let pushFilterMin = LuaNativeFunctionBox(
+            { [commandState] arguments in
+                commandState.pushTextureFilter(
+                    try textureFilter(arguments, function: "PushFilterMin"),
+                    minification: true
+                )
+                return []
+            },
+            debugName: "render.PushFilterMin"
+        )
+        let pushFilterMag = LuaNativeFunctionBox(
+            { [commandState] arguments in
+                commandState.pushTextureFilter(
+                    try textureFilter(arguments, function: "PushFilterMag"),
+                    minification: false
+                )
+                return []
+            },
+            debugName: "render.PushFilterMag"
+        )
+        let popFilterMin = LuaNativeFunctionBox(
+            { [commandState] _ in
+                try commandState.popTextureFilter(minification: true)
+                return []
+            },
+            debugName: "render.PopFilterMin"
+        )
+        let popFilterMag = LuaNativeFunctionBox(
+            { [commandState] _ in
+                try commandState.popTextureFilter(minification: false)
+                return []
+            },
+            debugName: "render.PopFilterMag"
+        )
+        let setScissorRect = LuaNativeFunctionBox(
+            { [commandState] arguments in
+                let values = try finiteNumbers(
+                    arguments,
+                    count: 4,
+                    function: "SetScissorRect"
+                )
+                guard arguments.indices.contains(4),
+                      case let .boolean(enabled) = arguments[4] else {
+                    throw LuaError.runtime(
+                        "bad argument #5 to 'SetScissorRect' (boolean expected)"
+                    )
+                }
+                commandState.setScissorRect(
+                    startX: values[0],
+                    startY: values[1],
+                    endX: values[2],
+                    endY: values[3],
+                    enabled: enabled
+                )
+                return []
+            },
+            debugName: "render.SetScissorRect"
+        )
+        for (name, function) in [
+            ("PushFilterMin", pushFilterMin), ("PushFilterMag", pushFilterMag),
+            ("PopFilterMin", popFilterMin), ("PopFilterMag", popFilterMag),
+            ("SetScissorRect", setScissorRect)
+        ] {
+            try state.setRawTableValue(
+                .nativeFunction(function),
+                for: .string(LuaString(name)),
+                in: renderTable
+            )
+        }
+        state.setGlobal("render", value: .table(renderTable))
         return commandState
+    }
+
+    private static func textureFilter(
+        _ arguments: [LuaValue],
+        function: String
+    ) throws -> GMLuaTextureFilter {
+        let value = try finiteNumbers(arguments, count: 1, function: function)[0]
+        guard value.rounded(.towardZero) == value,
+              value >= Double(GMLuaTextureFilter.none.rawValue),
+              value <= Double(GMLuaTextureFilter.anisotropic.rawValue),
+              let filter = GMLuaTextureFilter(rawValue: Int(value)) else {
+            throw LuaError.runtime(
+                "bad argument #1 to '\(function)' (valid TEXFILTER expected)"
+            )
+        }
+        return filter
+    }
+
+    private static func safeLogicalSoundPath(
+        _ arguments: [LuaValue],
+        function: String
+    ) throws -> LuaString {
+        guard let first = arguments.first, case let .string(path) = first else {
+            throw LuaError.runtime(
+                "bad argument #1 to '\(function)' (string expected)"
+            )
+        }
+        let bytes = path.bytes
+        guard !bytes.isEmpty, bytes.count <= 259,
+              bytes.first != 47, bytes.first != 92,
+              !bytes.contains(0), !bytes.contains(58) else {
+            throw LuaError.runtime(
+                "bad argument #1 to '\(function)' (safe relative sound path expected)"
+            )
+        }
+
+        var component: [UInt8] = []
+        func componentIsTraversal() -> Bool {
+            component == [46] || component == [46, 46]
+        }
+        for byte in bytes {
+            if byte == 47 || byte == 92 {
+                guard !componentIsTraversal() else {
+                    throw LuaError.runtime(
+                        "bad argument #1 to '\(function)' " +
+                            "(safe relative sound path expected)"
+                    )
+                }
+                component.removeAll(keepingCapacity: true)
+            } else {
+                component.append(byte)
+            }
+        }
+        guard !componentIsTraversal() else {
+            throw LuaError.runtime(
+                "bad argument #1 to '\(function)' (safe relative sound path expected)"
+            )
+        }
+        return path
     }
 
     private static func finiteNumbers(

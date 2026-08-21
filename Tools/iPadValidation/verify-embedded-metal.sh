@@ -4,9 +4,15 @@ set -euo pipefail
 
 repo_root="${1:-$(pwd -P)}"
 source_file="$repo_root/Sources/GModMetal/GModMetalView.swift"
+color_contract_file="$repo_root/Sources/GModMetal/GModMetalWorldColorSpaceContract.swift"
 
 if [[ ! -f "$source_file" ]]; then
   echo "GModMetalView.swift was not found at: $source_file" >&2
+  exit 1
+fi
+
+if [[ ! -f "$color_contract_file" ]]; then
+  echo "GModMetalWorldColorSpaceContract.swift was not found at: $color_contract_file" >&2
   exit 1
 fi
 
@@ -29,14 +35,16 @@ metal_source="$work_dir/GModMetalViewShaders.metal"
 metal_air="$work_dir/GModMetalViewShaders.air"
 metal_library="$work_dir/GModMetalViewShaders.metallib"
 
-python3 - "$source_file" "$metal_source" <<'PY'
+python3 - "$source_file" "$color_contract_file" "$metal_source" <<'PY'
 import pathlib
 import re
 import sys
 
 source_path = pathlib.Path(sys.argv[1])
-output_path = pathlib.Path(sys.argv[2])
+contract_path = pathlib.Path(sys.argv[2])
+output_path = pathlib.Path(sys.argv[3])
 swift_source = source_path.read_text(encoding="utf-8")
+contract_source = contract_path.read_text(encoding="utf-8")
 
 marker = "private static let shaderSource"
 marker_index = swift_source.find(marker)
@@ -50,11 +58,35 @@ closing_index = swift_source.find('"""', opening_index + 3)
 if closing_index < 0:
     raise SystemExit("Embedded Metal source has no closing triple quote")
 
-metal = swift_source[opening_index + 3 : closing_index]
+contract_marker = "static let metalShaderSupport"
+contract_marker_index = contract_source.find(contract_marker)
+if contract_marker_index < 0:
+    raise SystemExit(f"Metal color support marker not found in {contract_path}")
+contract_opening = contract_source.find('"""', contract_marker_index)
+contract_closing = contract_source.find('"""', contract_opening + 3)
+if contract_opening < 0 or contract_closing < 0:
+    raise SystemExit("Metal color support has an invalid triple-quoted string")
+
+suffix_opening = swift_source.find('"""', closing_index + 3)
+suffix_closing = swift_source.find('"""', suffix_opening + 3)
+if suffix_opening < 0 or suffix_closing < 0:
+    raise SystemExit("Embedded Metal source has no concatenated shader suffix")
+
+metal = (
+    swift_source[opening_index + 3 : closing_index]
+    + contract_source[contract_opening + 3 : contract_closing]
+    + swift_source[suffix_opening + 3 : suffix_closing]
+)
 expected_functions = {
     "worldVertexMain",
     "worldFragmentMain",
     "worldTexturedFragmentMain",
+    "worldLightmappedFragmentMain",
+    "worldTexturedLightmappedFragmentMain",
+    "worldMissingMaterialFragmentMain",
+    "worldSkyboxFragmentMain",
+    "worldWaterSolidFragmentMain",
+    "worldWaterNormalFragmentMain",
     "surfaceVertexMain",
     "surfaceSolidFragmentMain",
     "surfaceTexturedFragmentMain",
@@ -71,7 +103,7 @@ if missing_functions:
 
 normalized_swift = re.sub(r"\s+", " ", swift_source)
 required_pipeline_contract = {
-    "let colorPixelFormat: MTLPixelFormat = .bgra8Unorm",
+    "let colorPixelFormat: MTLPixelFormat = GModMetalWorldColorSpaceContract.drawablePixelFormat",
     "let depthPixelFormat: MTLPixelFormat = .depth32Float",
     "view.colorPixelFormat = colorPixelFormat",
     "view.depthStencilPixelFormat = depthPixelFormat",

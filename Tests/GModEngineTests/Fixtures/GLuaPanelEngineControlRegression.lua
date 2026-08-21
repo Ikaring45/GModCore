@@ -49,9 +49,15 @@ assert(second:GetParent() == nil)
 assert(parent:ChildCount() == 1 and parent:GetChild(0) == first)
 
 parent:Remove()
-assert(not parent:IsValid() and not first:IsValid())
+assert(not parent:IsValid() and parent:IsMarkedForDeletion())
+assert(first:IsValid() and not first:IsMarkedForDeletion())
 assert(second:IsValid())
 second:Remove()
-assert(#vgui.GetAll() == 0)
+assert(not second:IsValid() and second:IsMarkedForDeletion())
+assert(#vgui.GetAll() == 1 and vgui.GetAll()[1] == first)
+
+GLUA_PANEL_ENGINE_DEFERRED_PARENT = parent
+GLUA_PANEL_ENGINE_DEFERRED_CHILD = first
+GLUA_PANEL_ENGINE_DEFERRED_SECOND = second
 
 GLUA_PANEL_ENGINE_CONTROL_REGRESSION_OK = true

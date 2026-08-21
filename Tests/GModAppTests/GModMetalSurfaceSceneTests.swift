@@ -131,6 +131,100 @@ final class GModMetalSurfaceSceneTests: XCTestCase {
         XCTAssertEqual(scene.diagnostics.resolvedCommandCount, 3)
     }
 
+    func testTextureFilterSnapshotsReachBoundedMetalSamplerConfigurations() throws {
+        let runtime = GMLuaRuntime(
+            realm: .client,
+            logger: { _ in },
+            bootstrapMode: .strict
+        )
+        try runtime.execute(
+            """
+            ROOT = vgui.Create("Panel")
+            ROOT:SetSize(64, 64)
+            function ROOT:Paint(w, h)
+                surface.SetDrawColor(255, 255, 255, 255)
+                surface.SetTexture(surface.GetTextureID("icon16/brick.png"))
+                surface.DrawTexturedRect(0, 0, 16, 16)
+
+                render.PushFilterMag(TEXFILTER.POINT)
+                render.PushFilterMin(TEXFILTER.ANISOTROPIC)
+                surface.DrawTexturedRect(16, 0, 16, 16)
+                render.PopFilterMin()
+                render.PopFilterMag()
+
+                render.PushFilterMin(TEXFILTER.NONE)
+                surface.DrawTexturedRect(32, 0, 16, 16)
+                render.PopFilterMin()
+                return true
+            end
+            """,
+            sourceName: "@GModMetalSurfaceFilterPropagationTests.lua"
+        )
+        let snapshot = try XCTUnwrap(runtime.vguiRegistry).renderFrame(
+            surface: try XCTUnwrap(runtime.surfaceCommandState),
+            viewportWidth: 64,
+            viewportHeight: 64
+        )
+        let scene = try GModMetalSurfaceScene(
+            snapshot: snapshot,
+            textureResolver: FixtureTextureResolver()
+        )
+        let rectangles = scene.commands.compactMap { command ->
+            GModMetalSurfaceTexturedRectangle? in
+            guard case let .texturedRectangle(rectangle) = command else {
+                return nil
+            }
+            return rectangle
+        }
+        XCTAssertEqual(rectangles.count, 3)
+        XCTAssertNil(rectangles[0].minificationFilter)
+        XCTAssertNil(rectangles[0].magnificationFilter)
+        XCTAssertEqual(rectangles[1].minificationFilter, .anisotropic)
+        XCTAssertEqual(rectangles[1].magnificationFilter, .point)
+        XCTAssertEqual(rectangles[2].minificationFilter, .none)
+        XCTAssertNil(rectangles[2].magnificationFilter)
+
+        XCTAssertEqual(
+            GModMetalSurfaceSamplerConfiguration.source(
+                minification: rectangles[0].minificationFilter,
+                magnification: rectangles[0].magnificationFilter
+            ),
+            GModMetalSurfaceSamplerConfiguration(
+                minification: .linear,
+                magnification: .linear,
+                maximumAnisotropy: 1
+            )
+        )
+        XCTAssertEqual(
+            GModMetalSurfaceSamplerConfiguration.source(
+                minification: rectangles[1].minificationFilter,
+                magnification: rectangles[1].magnificationFilter
+            ),
+            GModMetalSurfaceSamplerConfiguration(
+                minification: .linear,
+                magnification: .point,
+                maximumAnisotropy:
+                    GModMetalSurfaceSamplerConfiguration.defaultMaximumAnisotropy
+            )
+        )
+        XCTAssertEqual(
+            GModMetalSurfaceSamplerConfiguration.source(
+                minification: rectangles[2].minificationFilter,
+                magnification: rectangles[2].magnificationFilter
+            ),
+            GModMetalSurfaceSamplerConfiguration(
+                minification: .linear,
+                magnification: .linear,
+                maximumAnisotropy: 1
+            ),
+            "TEXFILTER.NONE disables the override rather than becoming point sampling"
+        )
+        XCTAssertLessThanOrEqual(
+            GModMetalSurfaceSamplerConfiguration.allSourceConfigurations.count,
+            6
+        )
+    }
+
     func testPNGResolverRequiresRealBytesAndPremultipliesStraightAlpha() throws {
         let encoded = try XCTUnwrap(Data(base64Encoded:
             "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAF0lEQVR42mP4z8DwHwgbGIC0g6CS8X8AOTAGIm/J6C0AAAAASUVORK5CYII="

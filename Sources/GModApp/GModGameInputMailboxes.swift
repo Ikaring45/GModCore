@@ -1,5 +1,86 @@
 import Foundation
 import GModEngine
+import GModGameSession
+
+enum GModGameClientMenu: String, Sendable, Equatable {
+    case spawn
+    case context
+
+    var statusName: String {
+        switch self {
+        case .spawn: return "Spawn Menu"
+        case .context: return "Context Menu"
+        }
+    }
+
+    var playableMenu: GModPlayableClientMenu {
+        switch self {
+        case .spawn: return .spawn
+        case .context: return .context
+        }
+    }
+
+    init(_ playableMenu: GModPlayableClientMenu) {
+        switch playableMenu {
+        case .spawn: self = .spawn
+        case .context: self = .context
+        }
+    }
+}
+
+enum GModGameWorldInputPolicy {
+    static func accepts(
+        isReady: Bool,
+        isInputSuspended: Bool,
+        activeMenu: GModGameClientMenu?,
+        transitioningMenu: GModGameClientMenu?,
+        isHostPopupPresented: Bool = false
+    ) -> Bool {
+        isReady && !isInputSuspended && activeMenu == nil &&
+            transitioningMenu == nil && !isHostPopupPresented
+    }
+
+    static func movementInput(
+        acceptsWorldInput: Bool,
+        viewAngles: SourceQAngle,
+        forwardAxis: Float,
+        sideAxis: Float,
+        jumpPressed: Bool,
+        heldActionButtons: SourceInputButtons = [],
+        speed: Float = 250
+    ) -> GModPlayableMovementInput {
+        guard acceptsWorldInput else { return .idle }
+        var buttons: SourceInputButtons = []
+        if forwardAxis > 0 { buttons.insert(.forward) }
+        if forwardAxis < 0 { buttons.insert(.back) }
+        if sideAxis > 0 { buttons.insert(.moveRight) }
+        if sideAxis < 0 { buttons.insert(.moveLeft) }
+        if jumpPressed { buttons.insert(.jump) }
+        buttons.formUnion(
+            heldActionButtons.intersection([.attack, .attack2, .use])
+        )
+        return GModPlayableMovementInput(
+            viewAngles: viewAngles,
+            forwardMove: forwardAxis * speed,
+            sideMove: sideAxis * speed,
+            buttons: buttons
+        )
+    }
+}
+
+enum GModGameWorldActionButton: Sendable, Equatable {
+    case attack
+    case attack2
+    case use
+
+    var sourceButton: SourceInputButtons {
+        switch self {
+        case .attack: return .attack
+        case .attack2: return .attack2
+        case .use: return .use
+        }
+    }
+}
 
 struct GModGameSessionGenerationToken: Sendable, Equatable {
     let application: UInt64
@@ -31,17 +112,17 @@ struct GModGameFrameToken: Sendable, Equatable {
 struct GModSurfacePublicationToken: Sendable, Equatable {
     let generation: GModGameSessionGenerationToken
     let requestRevision: UInt64
-    let spawnMenuOpen: Bool
+    let activeMenu: GModGameClientMenu?
 
     func matches(
         application: UInt64,
         lane: UInt64?,
         requestRevision: UInt64,
-        spawnMenuOpen: Bool
+        activeMenu: GModGameClientMenu?
     ) -> Bool {
         generation.matches(application: application, lane: lane)
             && self.requestRevision == requestRevision
-            && self.spawnMenuOpen == spawnMenuOpen
+            && self.activeMenu == activeMenu
     }
 }
 

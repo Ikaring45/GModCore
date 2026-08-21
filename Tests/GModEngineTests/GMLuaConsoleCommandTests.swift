@@ -1,6 +1,7 @@
 import Foundation
 import XCTest
-import GModEngine
+@testable import GModEngine
+import GModGameAssets
 
 final class GMLuaConsoleCommandTests: XCTestCase {
     private final class InvocationRecorder: @unchecked Sendable {
@@ -235,6 +236,110 @@ final class GMLuaConsoleCommandTests: XCTestCase {
             XCTAssertTrue(GMLuaRuntime.describe(error).contains(
                 "without a host-owned player context"
             ))
+        }
+    }
+
+    func testStockPlayerExtensionQueuesNativeConCommandThroughObservablePolicy() throws {
+        var logged: [String] = []
+        let runtime = GMLuaRuntime(
+            realm: .client,
+            logger: { logged.append($0) },
+            bootstrapMode: .strict
+        )
+        defer { _ = runtime.close() }
+        let entities = try XCTUnwrap(runtime.entityRegistry)
+        _ = try entities.register(index: 1, kind: .player, className: "player")
+        try entities.setLocalPlayer(index: 1, generation: 0)
+        let dispatcher = try XCTUnwrap(runtime.consoleCommandDispatcher)
+        try dispatcher.replaceBlockedCommandNames(["bind"])
+        dispatcher.connectCommandBlockPredicate { $0 == "host_forbidden" }
+
+        try runtime.execute(
+            """
+            hook = { Stored = {} }
+            function hook.Add(event, identifier, callback)
+                hook.Stored[event] = hook.Stored[event] or {}
+                hook.Stored[event][identifier] = callback
+            end
+            function hook.Run(event, ...)
+                for _, callback in pairs(hook.Stored[event] or {}) do
+                    callback(...)
+                end
+            end
+            function table.IsEmpty(value)
+                return next(value) == nil
+            end
+            """,
+            sourceName: "=(stock player extension dependencies)"
+        )
+        let sqlSourceData = try GModGameAssets.clientContentData(
+            for: "lua/includes/util/sql.lua"
+        )
+        let sqlSource = try XCTUnwrap(String(data: sqlSourceData, encoding: .utf8))
+        try runtime.execute(sqlSource, sourceName: "lua/includes/util/sql.lua")
+        let sourceData = try GModGameAssets.clientContentData(
+            for: "lua/includes/extensions/player.lua"
+        )
+        let source = try XCTUnwrap(String(data: sourceData, encoding: .utf8))
+        try runtime.execute(
+            source,
+            sourceName: "lua/includes/extensions/player.lua"
+        )
+
+        try runtime.execute(
+            """
+            local queued = CreateClientConVar("gpad_queued_model", "old")
+            assert(IsConCommandBlocked('gpad_queued_model "new value"') == false)
+            assert(IsConCommandBlocked("BiNd x y") == true)
+            assert(IsConCommandBlocked("host_forbidden argument") == true)
+
+            local ok, message = pcall(IsConCommandBlocked, 1)
+            assert(not ok and string.find(message, "string expected", 1, true))
+            ok, message = pcall(LocalPlayer().ConCommand, LocalPlayer(), 1)
+            assert(not ok and string.find(message, "string expected", 1, true))
+
+            LocalPlayer():ConCommand('gpad_queued_model "new value"\\n')
+            assert(queued:GetString() == "old")
+            hook.Run("Tick")
+            assert(queued:GetString() == "new value")
+
+            LocalPlayer():ConCommand("bind x y")
+            """,
+            sourceName: "=(stock player extension queued native ConCommand regression)"
+        )
+
+        XCTAssertEqual(dispatcher.commandBlockPolicySnapshot,
+            GMLuaConsoleCommandBlockPolicySnapshot(
+                explicitlyBlockedCommandNames: ["bind"],
+                hasAdditionalHostPredicate: true,
+                includesCompleteGModBinaryPolicy: false
+            )
+        )
+        let report = dispatcher.drainPlayerConsoleCommandRequestReport()
+        XCTAssertEqual(report.attemptedRequestCount, 2)
+        XCTAssertEqual(report.droppedRequestCount, 0)
+        XCTAssertEqual(report.requests.map(\.rawCommand), [
+            "gpad_queued_model \"new value\"\n",
+            "bind x y",
+        ])
+        XCTAssertEqual(report.requests[0].parsedCommands, [
+            GMLuaConsoleCommandInvocation(
+                realm: .client,
+                command: "gpad_queued_model",
+                arguments: ["new value"]
+            )
+        ])
+        XCTAssertEqual(report.requests[0].outcome, .dispatched(commandCount: 1))
+        XCTAssertEqual(report.requests[1].outcome, .blocked(commandName: "bind"))
+        XCTAssertTrue(logged.contains("ConCommand blocked! (bind)"))
+
+        XCTAssertThrowsError(
+            try dispatcher.replaceBlockedCommandNames(["two commands"])
+        ) { error in
+            XCTAssertEqual(
+                error as? GMLuaConsoleCommandPolicyError,
+                .invalidBlockedCommandName("two commands")
+            )
         }
     }
 }

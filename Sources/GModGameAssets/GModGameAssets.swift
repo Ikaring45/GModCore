@@ -257,8 +257,21 @@ public enum GModGameAssets {
         kind: GModBundledMapAssetKind,
         mappedIfSafe: Bool = true
     ) throws -> Data {
-        try Data(
-            contentsOf: url(for: map, kind: kind),
+        let assetURL = try url(for: map, kind: kind)
+        if kind == .bsp {
+            let values = try assetURL.resourceValues(forKeys: [.fileSizeKey])
+            guard let byteCount = values.fileSize, byteCount >= 0 else {
+                throw GModGameAssetError.invalidManifest(
+                    "bundled BSP has no finite file size: \(map.rawValue)"
+                )
+            }
+            try GModMapAllocationPolicy.iPadValidated.validate(
+                .bspEncodedBytes,
+                requestedByteCount: UInt64(byteCount)
+            )
+        }
+        return try Data(
+            contentsOf: assetURL,
             options: mappedIfSafe ? .mappedIfSafe : []
         )
     }

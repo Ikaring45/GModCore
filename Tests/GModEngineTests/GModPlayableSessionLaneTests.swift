@@ -395,6 +395,166 @@ final class GModPlayableSessionLaneTests: XCTestCase {
         _ = try await lane.close()
     }
 
+    func testContextMenuOpenAndCloseRetireInputEpochsDeterministically() async throws {
+        let lane = GModPlayableSessionLane()
+        let snapshot = try await lane.start(
+            configuration: GModPlayableSessionConfiguration(map: .construct)
+        )
+        let actions: SourceInputButtons = [.attack, .attack2, .use]
+        let actionFrame = try await lane.runHostFrame(
+            fixedTickCount: 0,
+            renderClientFrame: false,
+            movementInput: GModPlayableMovementInput(buttons: actions),
+            expectedGeneration: snapshot.generation,
+            expectedInputEpoch: snapshot.inputEpoch
+        )
+        XCTAssertEqual(actionFrame.inputButtons.buttons, actions)
+
+        let opened = try await lane.setContextMenuOpen(
+            true,
+            expectedGeneration: snapshot.generation,
+            expectedPointerEpoch: snapshot.pointerEpoch,
+            expectedInputEpoch: snapshot.inputEpoch
+        )
+        XCTAssertNil(opened.lifecycleFailure)
+        XCTAssertGreaterThan(opened.pointerEpoch, snapshot.pointerEpoch)
+        XCTAssertGreaterThan(opened.inputEpoch, snapshot.inputEpoch)
+        try await lane.execute(
+            "assert(g_ContextMenu:IsVisible() and " +
+                "not LocalPlayer():KeyDown(IN_ATTACK) and " +
+                "not LocalPlayer():KeyDown(IN_ATTACK2) and " +
+                "not LocalPlayer():KeyDown(IN_USE))",
+            realm: .client,
+            expectedGeneration: snapshot.generation
+        )
+        try await lane.execute(
+            "assert(not Player(1):KeyDown(IN_ATTACK) and " +
+                "not Player(1):KeyDown(IN_ATTACK2) and " +
+                "not Player(1):KeyDown(IN_USE))",
+            expectedGeneration: snapshot.generation
+        )
+
+        let closed = try await lane.setContextMenuOpen(
+            false,
+            cancelActivePointer: true,
+            cancellationTimestamp: 2,
+            expectedGeneration: snapshot.generation,
+            expectedPointerEpoch: opened.pointerEpoch,
+            expectedInputEpoch: opened.inputEpoch
+        )
+        XCTAssertNil(closed.lifecycleFailure)
+        XCTAssertGreaterThan(closed.pointerEpoch, opened.pointerEpoch)
+        XCTAssertGreaterThan(closed.inputEpoch, opened.inputEpoch)
+        try await lane.execute(
+            "assert(not g_ContextMenu:IsVisible())",
+            realm: .client,
+            expectedGeneration: snapshot.generation
+        )
+        _ = try await lane.close()
+    }
+
+    func testAtomicSpawnToContextTransitionClosesPriorBeforeOpeningTarget() async throws {
+        let lane = GModPlayableSessionLane()
+        let snapshot = try await lane.start(
+            configuration: GModPlayableSessionConfiguration(map: .construct)
+        )
+        let actions: SourceInputButtons = [.attack, .attack2, .use]
+        _ = try await lane.runHostFrame(
+            fixedTickCount: 0,
+            renderClientFrame: false,
+            movementInput: GModPlayableMovementInput(buttons: actions),
+            expectedGeneration: snapshot.generation,
+            expectedInputEpoch: snapshot.inputEpoch
+        )
+        let spawn = try await lane.transitionClientMenu(
+            from: nil,
+            to: .spawn,
+            expectedGeneration: snapshot.generation,
+            expectedPointerEpoch: snapshot.pointerEpoch,
+            expectedInputEpoch: snapshot.inputEpoch
+        )
+        XCTAssertEqual(spawn.committedMenu, .spawn)
+        XCTAssertNil(spawn.lifecycleFailure)
+        try await lane.execute(
+            "assert(not Player(1):KeyDown(IN_ATTACK) and " +
+                "not Player(1):KeyDown(IN_ATTACK2) and " +
+                "not Player(1):KeyDown(IN_USE))",
+            expectedGeneration: snapshot.generation
+        )
+        try await lane.execute(
+            "assert(not LocalPlayer():KeyDown(IN_ATTACK) and " +
+                "not LocalPlayer():KeyDown(IN_ATTACK2) and " +
+                "not LocalPlayer():KeyDown(IN_USE))",
+            realm: .client,
+            expectedGeneration: snapshot.generation
+        )
+
+        let context = try await lane.transitionClientMenu(
+            from: .spawn,
+            to: .context,
+            cancelActivePointer: true,
+            cancellationTimestamp: 1,
+            expectedGeneration: snapshot.generation,
+            expectedPointerEpoch: spawn.pointerEpoch,
+            expectedInputEpoch: spawn.inputEpoch
+        )
+        XCTAssertEqual(context.committedMenu, .context)
+        XCTAssertNil(context.lifecycleFailure)
+        XCTAssertNil(context.rollbackFailure)
+        XCTAssertGreaterThan(context.pointerEpoch, spawn.pointerEpoch)
+        XCTAssertGreaterThan(context.inputEpoch, spawn.inputEpoch)
+        try await lane.execute(
+            "assert(not g_SpawnMenu:IsVisible() and g_ContextMenu:IsVisible())",
+            realm: .client,
+            expectedGeneration: snapshot.generation
+        )
+        _ = try await lane.close()
+    }
+
+    func testAtomicMenuTransitionRestoresPriorWhenTargetHookThrows() async throws {
+        let lane = GModPlayableSessionLane()
+        let snapshot = try await lane.start(
+            configuration: GModPlayableSessionConfiguration(map: .construct)
+        )
+        let spawn = try await lane.transitionClientMenu(
+            from: nil,
+            to: .spawn,
+            expectedGeneration: snapshot.generation,
+            expectedPointerEpoch: snapshot.pointerEpoch,
+            expectedInputEpoch: snapshot.inputEpoch
+        )
+        try await lane.execute(
+            """
+            hook.Add("OnContextMenuOpen", "AtomicTargetFailure", function()
+                error("intentional context open failure")
+            end)
+            """,
+            realm: .client,
+            expectedGeneration: snapshot.generation
+        )
+
+        let failed = try await lane.transitionClientMenu(
+            from: .spawn,
+            to: .context,
+            expectedGeneration: snapshot.generation,
+            expectedPointerEpoch: spawn.pointerEpoch,
+            expectedInputEpoch: spawn.inputEpoch
+        )
+        XCTAssertEqual(failed.committedMenu, .spawn)
+        XCTAssertTrue(
+            failed.lifecycleFailure?.contains(
+                "intentional context open failure"
+            ) == true
+        )
+        XCTAssertNil(failed.rollbackFailure)
+        try await lane.execute(
+            "assert(g_SpawnMenu:IsVisible() and not g_ContextMenu:IsVisible())",
+            realm: .client,
+            expectedGeneration: snapshot.generation
+        )
+        _ = try await lane.close()
+    }
+
     func testPoppedHostFrameCannotCrossSuspensionInputEpoch() async throws {
         let lane = GModPlayableSessionLane()
         let snapshot = try await lane.start(
@@ -407,16 +567,26 @@ final class GModPlayableSessionLaneTests: XCTestCase {
         _ = try await lane.runHostFrame(
             fixedTickCount: 0,
             renderClientFrame: false,
-            movementInput: GModPlayableMovementInput(buttons: [.forward]),
+            movementInput: GModPlayableMovementInput(
+                buttons: [.forward, .attack, .attack2, .use]
+            ),
             expectedGeneration: snapshot.generation,
             expectedInputEpoch: poppedInputEpoch
         )
         try await lane.execute(
-            "STALE_FRAME_SERVER_TIME = CurTime(); assert(Player(1):KeyDown(IN_FORWARD))",
+            "STALE_FRAME_SERVER_TIME = CurTime(); " +
+                "assert(Player(1):KeyDown(IN_FORWARD) and " +
+                "Player(1):KeyDown(IN_ATTACK) and " +
+                "Player(1):KeyDown(IN_ATTACK2) and " +
+                "Player(1):KeyDown(IN_USE))",
             expectedGeneration: snapshot.generation
         )
         try await lane.execute(
-            "STALE_FRAME_CLIENT_TIME = CurTime(); assert(LocalPlayer():KeyDown(IN_FORWARD))",
+            "STALE_FRAME_CLIENT_TIME = CurTime(); " +
+                "assert(LocalPlayer():KeyDown(IN_FORWARD) and " +
+                "LocalPlayer():KeyDown(IN_ATTACK) and " +
+                "LocalPlayer():KeyDown(IN_ATTACK2) and " +
+                "LocalPlayer():KeyDown(IN_USE))",
             realm: .client,
             expectedGeneration: snapshot.generation
         )
@@ -435,7 +605,7 @@ final class GModPlayableSessionLaneTests: XCTestCase {
                 renderClientFrame: false,
                 movementInput: GModPlayableMovementInput(
                     forwardMove: 250,
-                    buttons: [.forward]
+                    buttons: [.forward, .attack, .attack2, .use]
                 ),
                 expectedGeneration: snapshot.generation,
                 expectedInputEpoch: poppedInputEpoch
@@ -454,11 +624,19 @@ final class GModPlayableSessionLaneTests: XCTestCase {
         // Rejection occurs before button publication, fixed ticks, CLIENT
         // Think, viewport mutation, or movement simulation.
         try await lane.execute(
-            "assert(CurTime() == STALE_FRAME_SERVER_TIME and not Player(1):KeyDown(IN_FORWARD))",
+            "assert(CurTime() == STALE_FRAME_SERVER_TIME and " +
+                "not Player(1):KeyDown(IN_FORWARD) and " +
+                "not Player(1):KeyDown(IN_ATTACK) and " +
+                "not Player(1):KeyDown(IN_ATTACK2) and " +
+                "not Player(1):KeyDown(IN_USE))",
             expectedGeneration: snapshot.generation
         )
         try await lane.execute(
-            "assert(CurTime() == STALE_FRAME_CLIENT_TIME and not LocalPlayer():KeyDown(IN_FORWARD))",
+            "assert(CurTime() == STALE_FRAME_CLIENT_TIME and " +
+                "not LocalPlayer():KeyDown(IN_FORWARD) and " +
+                "not LocalPlayer():KeyDown(IN_ATTACK) and " +
+                "not LocalPlayer():KeyDown(IN_ATTACK2) and " +
+                "not LocalPlayer():KeyDown(IN_USE))",
             realm: .client,
             expectedGeneration: snapshot.generation
         )
@@ -481,7 +659,9 @@ final class GModPlayableSessionLaneTests: XCTestCase {
         )
         XCTAssertEqual(snapshot.startup.map, .construct)
         XCTAssertEqual(snapshot.startup.spawnPoint.angles.yaw, 180)
-        XCTAssertEqual(snapshot.worldMesh.triangleCount, 20_560)
+        // This is the complete construct world mesh, including expanded
+        // displacement geometry (not the old coarse-face-only count).
+        XCTAssertEqual(snapshot.worldMesh.triangleCount, 41_344)
         XCTAssertEqual(
             snapshot.playerWalkState.origin,
             snapshot.startup.spawnPoint.origin
@@ -703,6 +883,25 @@ final class GModPlayableSessionLaneTests: XCTestCase {
             )
         }
 
+        do {
+            _ = try await lane.close(
+                expectedGeneration: snapshot.generation
+            )
+            XCTFail("a stale disconnect closed the replacement session")
+        } catch {
+            XCTAssertEqual(
+                error as? GModPlayableSessionLaneError,
+                .staleGeneration(
+                    expected: snapshot.generation,
+                    actual: replacement.generation
+                )
+            )
+        }
+        try await lane.execute(
+            "assert(true)",
+            expectedGeneration: replacement.generation
+        )
+
         _ = try await lane.close()
         _ = try await lane.close()
         do {
@@ -714,6 +913,80 @@ final class GModPlayableSessionLaneTests: XCTestCase {
                 .notStarted
             )
         }
+    }
+
+    func testClientSurfaceSoundsDrainOnceInOrderAndPauseRetiresStaleEvents()
+        async throws
+    {
+        let lane = GModPlayableSessionLane()
+        let snapshot = try await lane.start(
+            configuration: GModPlayableSessionConfiguration(map: .construct)
+        )
+
+        _ = try await lane.runHostFrame(
+            fixedTickCount: 0,
+            renderClientFrame: false,
+            expectedGeneration: snapshot.generation,
+            expectedInputEpoch: snapshot.inputEpoch
+        )
+        try await lane.execute(
+            """
+            surface.PlaySound("ui/buttonclickrelease.wav")
+            surface.PlaySound("ui/buttonclickrelease.wav")
+            surface.PlaySound("buttons/button15.wav")
+            """,
+            realm: .client,
+            sourceName: "@GModPlayableSurfaceSoundDrain.lua",
+            expectedGeneration: snapshot.generation
+        )
+
+        let report = try await lane.runHostFrame(
+            fixedTickCount: 0,
+            renderClientFrame: false,
+            expectedGeneration: snapshot.generation,
+            expectedInputEpoch: snapshot.inputEpoch
+        )
+        XCTAssertEqual(
+            report.clientSurfaceSounds.requests.map(\.soundPath),
+            [
+                "ui/buttonclickrelease.wav",
+                "ui/buttonclickrelease.wav",
+                "buttons/button15.wav",
+            ]
+        )
+        let sequences = report.clientSurfaceSounds.requests
+            .map(\.sequenceNumber)
+        XCTAssertEqual(sequences.count, 3)
+        XCTAssertEqual(sequences[1], sequences[0] + 1)
+        XCTAssertEqual(sequences[2], sequences[1] + 1)
+
+        let drainedAgain = try await lane.runHostFrame(
+            fixedTickCount: 0,
+            renderClientFrame: false,
+            expectedGeneration: snapshot.generation,
+            expectedInputEpoch: snapshot.inputEpoch
+        )
+        XCTAssertTrue(drainedAgain.clientSurfaceSounds.requests.isEmpty)
+
+        try await lane.execute(
+            "surface.PlaySound('ui/stale-on-pause.wav')",
+            realm: .client,
+            expectedGeneration: snapshot.generation
+        )
+        let suspended = try await lane.suspendInput(
+            cancellationTimestamp: 1,
+            expectedGeneration: snapshot.generation,
+            expectedPointerEpoch: snapshot.pointerEpoch,
+            expectedInputEpoch: snapshot.inputEpoch
+        )
+        let afterPause = try await lane.runHostFrame(
+            fixedTickCount: 0,
+            renderClientFrame: false,
+            expectedGeneration: snapshot.generation,
+            expectedInputEpoch: suspended.inputEpoch
+        )
+        XCTAssertTrue(afterPause.clientSurfaceSounds.requests.isEmpty)
+        _ = try await lane.close()
     }
 
     private func installDropFinalizer(

@@ -28,6 +28,92 @@ public typealias GMLuaConsoleCommandHostHandler = @Sendable (
     GMLuaConsoleCommandInvocation
 ) throws -> GMLuaConsoleCommandHostDisposition
 
+/// Additional host-owned predicate for GMod's binary console-command block
+/// policy. The input is the lowercased, argument-free command name.
+public typealias GMLuaConsoleCommandBlockPredicate = @Sendable (String) -> Bool
+
+/// The open-source Lua layer exposes `IsConCommandBlocked`, but the complete
+/// default list is owned by GMod's closed engine binaries. This snapshot makes
+/// the modeled coverage explicit instead of presenting an empty fallback as
+/// binary parity.
+public struct GMLuaConsoleCommandBlockPolicySnapshot: Sendable, Equatable {
+    public let explicitlyBlockedCommandNames: [String]
+    public let hasAdditionalHostPredicate: Bool
+    public let includesCompleteGModBinaryPolicy: Bool
+
+    public init(
+        explicitlyBlockedCommandNames: [String],
+        hasAdditionalHostPredicate: Bool,
+        includesCompleteGModBinaryPolicy: Bool
+    ) {
+        self.explicitlyBlockedCommandNames = explicitlyBlockedCommandNames
+        self.hasAdditionalHostPredicate = hasAdditionalHostPredicate
+        self.includesCompleteGModBinaryPolicy = includesCompleteGModBinaryPolicy
+    }
+}
+
+public enum GMLuaPlayerConsoleCommandOutcome: Sendable, Equatable {
+    case dispatched(commandCount: Int)
+    case blocked(commandName: String)
+    case ignoredEmptyCommand
+    case failed(message: String)
+}
+
+/// One call that reached the native method captured by the stock CLIENT
+/// `extensions/player.lua` queue. The raw string is retained alongside the
+/// parsed command invocations so a host can audit ordering and quoting.
+public struct GMLuaPlayerConsoleCommandRequest: Sendable, Equatable {
+    public let sequence: UInt64
+    public let realm: GMLuaRealm
+    public let playerIndex: Int
+    public let rawCommand: String
+    public let parsedCommands: [GMLuaConsoleCommandInvocation]
+    public let outcome: GMLuaPlayerConsoleCommandOutcome
+
+    public init(
+        sequence: UInt64,
+        realm: GMLuaRealm,
+        playerIndex: Int,
+        rawCommand: String,
+        parsedCommands: [GMLuaConsoleCommandInvocation],
+        outcome: GMLuaPlayerConsoleCommandOutcome
+    ) {
+        self.sequence = sequence
+        self.realm = realm
+        self.playerIndex = playerIndex
+        self.rawCommand = rawCommand
+        self.parsedCommands = parsedCommands
+        self.outcome = outcome
+    }
+}
+
+public struct GMLuaPlayerConsoleCommandRequestReport: Sendable, Equatable {
+    public let requests: [GMLuaPlayerConsoleCommandRequest]
+    public let attemptedRequestCount: Int
+    public let droppedRequestCount: Int
+
+    public init(
+        requests: [GMLuaPlayerConsoleCommandRequest],
+        attemptedRequestCount: Int,
+        droppedRequestCount: Int
+    ) {
+        self.requests = requests
+        self.attemptedRequestCount = attemptedRequestCount
+        self.droppedRequestCount = droppedRequestCount
+    }
+}
+
+public enum GMLuaConsoleCommandPolicyError: Error, CustomStringConvertible, Equatable {
+    case invalidBlockedCommandName(String)
+
+    public var description: String {
+        switch self {
+        case let .invalidBlockedCommandName(name):
+            return "blocked console command name must be one non-empty argument-free token: \(name)"
+        }
+    }
+}
+
 /// Internal typed boundary for an interactive remote command. Only expected
 /// user-action outcomes belong here; host-handler throws and dispatcher
 /// invariants continue to use Swift error propagation.
@@ -58,26 +144,44 @@ private final class GMLuaConsoleReportingContext: @unchecked Sendable {
 /// State-local bridge for Lua ConVars, Lua console commands, and real engine
 /// commands supplied by an embedding host.
 public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
+    public static let defaultMaximumPlayerConsoleCommandRequestCount = 1_024
+
     private let state: LuaState
     private let realm: GMLuaRealm
     private let conVars: GMLuaConVarRegistry
     private let entityRegistry: GMLuaEntityRegistry
+    private let logger: (String) -> Void
+    private let maximumPlayerConsoleCommandRequestCount: Int
     private let lock = NSLock()
     private var hostHandler: GMLuaConsoleCommandHostHandler?
     private var remoteServerHandler: GMLuaConsoleCommandHostHandler?
+    private var blockedCommandNames: Set<String> = []
+    private var blockPredicate: GMLuaConsoleCommandBlockPredicate?
     private var registeredNamesByKey: [String: String] = [:]
     private var registeredKeysInOrder: [String] = []
+    private var playerConsoleCommandRequests: [GMLuaPlayerConsoleCommandRequest] = []
+    private var attemptedPlayerConsoleCommandRequestCount = 0
+    private var droppedPlayerConsoleCommandRequestCount = 0
+    private var nextPlayerConsoleCommandRequestSequence: UInt64 = 0
 
     init(
         state: LuaState,
         realm: GMLuaRealm,
         conVars: GMLuaConVarRegistry,
-        entityRegistry: GMLuaEntityRegistry
+        entityRegistry: GMLuaEntityRegistry,
+        logger: @escaping (String) -> Void,
+        maximumPlayerConsoleCommandRequestCount: Int =
+            GMLuaConsoleCommandDispatcher.defaultMaximumPlayerConsoleCommandRequestCount
     ) {
         self.state = state
         self.realm = realm
         self.conVars = conVars
         self.entityRegistry = entityRegistry
+        self.logger = logger
+        self.maximumPlayerConsoleCommandRequestCount = max(
+            0,
+            maximumPlayerConsoleCommandRequestCount
+        )
     }
 
     /// Commands registered through the native `AddConsoleCommand` ABI, in
@@ -86,6 +190,70 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return registeredKeysInOrder.compactMap { registeredNamesByKey[$0] }
+    }
+
+    public var commandBlockPolicySnapshot: GMLuaConsoleCommandBlockPolicySnapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return GMLuaConsoleCommandBlockPolicySnapshot(
+            explicitlyBlockedCommandNames: blockedCommandNames.sorted(),
+            hasAdditionalHostPredicate: blockPredicate != nil,
+            // The complete default policy is compiled into GMod binaries and
+            // has no authoritative source table in the installed Lua tree.
+            includesCompleteGModBinaryPolicy: false
+        )
+    }
+
+    public var pendingPlayerConsoleCommandRequestReport:
+        GMLuaPlayerConsoleCommandRequestReport {
+        lock.lock()
+        defer { lock.unlock() }
+        return playerConsoleCommandRequestReportLocked()
+    }
+
+    public func drainPlayerConsoleCommandRequestReport()
+        -> GMLuaPlayerConsoleCommandRequestReport {
+        lock.lock()
+        defer { lock.unlock() }
+        let report = playerConsoleCommandRequestReportLocked()
+        playerConsoleCommandRequests.removeAll(keepingCapacity: true)
+        attemptedPlayerConsoleCommandRequestCount = 0
+        droppedPlayerConsoleCommandRequestCount = 0
+        return report
+    }
+
+    /// Replaces the explicit, case-insensitive command-name portion of the
+    /// block policy. Names are command tokens, not full command lines.
+    public func replaceBlockedCommandNames(_ names: Set<String>) throws {
+        var normalized: Set<String> = []
+        normalized.reserveCapacity(names.count)
+        for name in names {
+            let parsed = try Self.parseConsoleCommandLine(name, function: "blocked policy")
+            guard parsed.count == 1,
+                  parsed[0].arguments.isEmpty,
+                  parsed[0].command == name.trimmingCharacters(in: .whitespacesAndNewlines)
+            else {
+                throw GMLuaConsoleCommandPolicyError.invalidBlockedCommandName(name)
+            }
+            normalized.insert(normalizedName(parsed[0].command))
+        }
+        lock.lock()
+        blockedCommandNames = normalized
+        lock.unlock()
+    }
+
+    public func connectCommandBlockPredicate(
+        _ predicate: @escaping GMLuaConsoleCommandBlockPredicate
+    ) {
+        lock.lock()
+        blockPredicate = predicate
+        lock.unlock()
+    }
+
+    public func disconnectCommandBlockPredicate() {
+        lock.lock()
+        blockPredicate = nil
+        lock.unlock()
     }
 
     public func connectHost(_ handler: @escaping GMLuaConsoleCommandHostHandler) {
@@ -112,13 +280,36 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
         lock.unlock()
     }
 
-    func installBindings() {
+    func installBindings() throws {
         state.register("AddConsoleCommand") { [unowned self] arguments in
             try self.addConsoleCommand(arguments)
         }
         state.register("RunConsoleCommand") { [unowned self] arguments in
             try self.runConsoleCommand(arguments)
         }
+        state.register("IsConCommandBlocked") { [unowned self] arguments in
+            let rawCommand = try self.requiredExactConsoleString(
+                arguments,
+                index: 0,
+                function: "IsConCommandBlocked"
+            )
+            let parsed = try Self.parseConsoleCommandLine(
+                rawCommand,
+                function: "IsConCommandBlocked"
+            )
+            return [.boolean(parsed.contains { self.isCommandBlocked($0.command) })]
+        }
+        try entityRegistry.installPlayerMethod(
+            named: "ConCommand",
+            function: .nativeFunction(
+                LuaNativeFunctionBox(
+                    { [unowned self] arguments in
+                        try self.playerConCommand(arguments)
+                    },
+                    debugName: "Player:ConCommand"
+                )
+            )
+        )
     }
 
     private func addConsoleCommand(_ arguments: [LuaValue]) throws -> [LuaValue] {
@@ -144,6 +335,100 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
         }
         lock.unlock()
         return []
+    }
+
+    private func playerConCommand(_ arguments: [LuaValue]) throws -> [LuaValue] {
+        guard let receiver = arguments.first else {
+            throw LuaError.runtime(
+                "bad self to 'Player:ConCommand' (Player expected, got no value)"
+            )
+        }
+        let playerIndex = try entityRegistry.playerNetworkIndex(
+            from: receiver,
+            function: "Player:ConCommand"
+        )
+        let rawCommand = try requiredExactConsoleString(
+            arguments,
+            index: 1,
+            function: "ConCommand",
+            visibleArgumentPosition: 1
+        )
+        let parsed = try Self.parseConsoleCommandLine(
+            rawCommand,
+            function: "Player:ConCommand"
+        )
+        let invocations = parsed.map {
+            GMLuaConsoleCommandInvocation(
+                realm: realm,
+                command: $0.command,
+                arguments: $0.arguments
+            )
+        }
+
+        guard realm == .client else {
+            let message = "Player:ConCommand SERVER target-client delivery is unavailable"
+            recordPlayerConsoleCommandRequest(
+                playerIndex: playerIndex,
+                rawCommand: rawCommand,
+                parsedCommands: invocations,
+                outcome: .failed(message: message)
+            )
+            throw LuaError.runtime(message)
+        }
+        guard !parsed.isEmpty else {
+            recordPlayerConsoleCommandRequest(
+                playerIndex: playerIndex,
+                rawCommand: rawCommand,
+                parsedCommands: [],
+                outcome: .ignoredEmptyCommand
+            )
+            return []
+        }
+        if let blocked = parsed.first(where: { isCommandBlocked($0.command) }) {
+            let name = normalizedName(blocked.command)
+            recordPlayerConsoleCommandRequest(
+                playerIndex: playerIndex,
+                rawCommand: rawCommand,
+                parsedCommands: invocations,
+                outcome: .blocked(commandName: name)
+            )
+            // GMod reports a blocked Player:ConCommand to the console without
+            // turning the Lua call itself into a successful engine dispatch.
+            logger("ConCommand blocked! (\(name))")
+            return []
+        }
+
+        do {
+            let runner = state.getGlobal("RunConsoleCommand")
+            guard runner.typeName == "function" else {
+                throw LuaError.runtime(
+                    "Player:ConCommand cannot execute because RunConsoleCommand is unavailable"
+                )
+            }
+            for command in parsed {
+                _ = try state.call(
+                    runner,
+                    arguments: [
+                        .string(LuaString(command.command)),
+                    ] + command.arguments.map { .string(LuaString($0)) }
+                )
+            }
+            recordPlayerConsoleCommandRequest(
+                playerIndex: playerIndex,
+                rawCommand: rawCommand,
+                parsedCommands: invocations,
+                outcome: .dispatched(commandCount: parsed.count)
+            )
+            return []
+        } catch {
+            recordPlayerConsoleCommandRequest(
+                playerIndex: playerIndex,
+                rawCommand: rawCommand,
+                parsedCommands: invocations,
+                outcome: .failed(message: GMLuaRuntime.describe(error))
+            )
+            throw error
+        }
     }
 
     private func runConsoleCommand(_ values: [LuaValue]) throws -> [LuaValue] {
@@ -509,6 +794,157 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return registeredNamesByKey[normalizedName(name)] != nil
+    }
+
+    private func isCommandBlocked(_ name: String) -> Bool {
+        let normalized = normalizedName(name)
+        let explicit: Bool
+        let predicate: GMLuaConsoleCommandBlockPredicate?
+        lock.lock()
+        explicit = blockedCommandNames.contains(normalized)
+        predicate = blockPredicate
+        lock.unlock()
+        return explicit || predicate?(normalized) == true
+    }
+
+    private func recordPlayerConsoleCommandRequest(
+        playerIndex: Int,
+        rawCommand: String,
+        parsedCommands: [GMLuaConsoleCommandInvocation],
+        outcome: GMLuaPlayerConsoleCommandOutcome
+    ) {
+        lock.lock()
+        attemptedPlayerConsoleCommandRequestCount += 1
+        nextPlayerConsoleCommandRequestSequence &+= 1
+        if playerConsoleCommandRequests.count < maximumPlayerConsoleCommandRequestCount {
+            playerConsoleCommandRequests.append(GMLuaPlayerConsoleCommandRequest(
+                sequence: nextPlayerConsoleCommandRequestSequence,
+                realm: realm,
+                playerIndex: playerIndex,
+                rawCommand: rawCommand,
+                parsedCommands: parsedCommands,
+                outcome: outcome
+            ))
+        } else {
+            droppedPlayerConsoleCommandRequestCount += 1
+        }
+        lock.unlock()
+    }
+
+    private func playerConsoleCommandRequestReportLocked()
+        -> GMLuaPlayerConsoleCommandRequestReport {
+        GMLuaPlayerConsoleCommandRequestReport(
+            requests: playerConsoleCommandRequests,
+            attemptedRequestCount: attemptedPlayerConsoleCommandRequestCount,
+            droppedRequestCount: droppedPlayerConsoleCommandRequestCount
+        )
+    }
+
+    private struct ParsedConsoleCommand {
+        let command: String
+        let arguments: [String]
+    }
+
+    /// Tokenizes the Source-style command strings passed by native
+    /// Player:ConCommand. Quotes preserve whitespace, backslash escapes a quote
+    /// or backslash inside quotes, and newline/semicolon delimit commands.
+    private static func parseConsoleCommandLine(
+        _ source: String,
+        function: String
+    ) throws -> [ParsedConsoleCommand] {
+        var result: [ParsedConsoleCommand] = []
+        var tokens: [String] = []
+        var token = ""
+        var tokenStarted = false
+        var quote: Character?
+        var escaped = false
+
+        func finishToken() {
+            guard tokenStarted else { return }
+            tokens.append(token)
+            token.removeAll(keepingCapacity: true)
+            tokenStarted = false
+        }
+        func finishCommand() {
+            finishToken()
+            guard let command = tokens.first, !command.isEmpty else {
+                tokens.removeAll(keepingCapacity: true)
+                return
+            }
+            result.append(ParsedConsoleCommand(
+                command: command,
+                arguments: Array(tokens.dropFirst())
+            ))
+            tokens.removeAll(keepingCapacity: true)
+        }
+
+        for character in source {
+            if let activeQuote = quote {
+                tokenStarted = true
+                if escaped {
+                    if character != activeQuote, character != "\\" {
+                        token.append("\\")
+                    }
+                    token.append(character)
+                    escaped = false
+                } else if character == "\\" {
+                    escaped = true
+                } else if character == activeQuote {
+                    quote = nil
+                } else {
+                    token.append(character)
+                }
+                continue
+            }
+
+            switch character {
+            case "\"", "'":
+                quote = character
+                tokenStarted = true
+            case ";", "\n", "\r":
+                finishCommand()
+            default:
+                if character.isWhitespace {
+                    finishToken()
+                } else {
+                    tokenStarted = true
+                    token.append(character)
+                }
+            }
+        }
+        if escaped { token.append("\\") }
+        guard quote == nil else {
+            throw LuaError.runtime("\(function): unterminated quoted console argument")
+        }
+        finishCommand()
+        return result
+    }
+
+    private func requiredExactConsoleString(
+        _ arguments: [LuaValue],
+        index: Int,
+        function: String,
+        visibleArgumentPosition: Int? = nil
+    ) throws -> String {
+        let position = visibleArgumentPosition ?? index + 1
+        guard arguments.indices.contains(index),
+              case let .string(value) = arguments[index] else {
+            let actual = arguments.indices.contains(index)
+                ? arguments[index].typeName
+                : "no value"
+            throw LuaError.runtime(
+                "bad argument #\(position) to '\(function)' " +
+                "(string expected, got \(actual))"
+            )
+        }
+        let result = value.utf8String
+        guard !result.contains("\0") else {
+            throw LuaError.runtime(
+                "bad argument #\(position) to '\(function)' " +
+                "(console strings cannot contain NUL bytes)"
+            )
+        }
+        return result
     }
 
     private func consoleString(

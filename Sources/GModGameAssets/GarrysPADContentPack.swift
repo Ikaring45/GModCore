@@ -8,6 +8,10 @@ public enum GarrysPADContentPackError: Error, Sendable, Equatable, CustomStringC
     case missingRequiredEntry(String)
     case unsupportedCompression(path: String, method: UInt16)
     case entryTooLarge(path: String, byteCount: UInt64)
+    case mapAllocationExceeded(
+        path: String,
+        failure: GModMapAllocationPolicyError
+    )
     case truncatedEntry(String)
     case checksumMismatch(String)
 
@@ -27,6 +31,9 @@ public enum GarrysPADContentPackError: Error, Sendable, Equatable, CustomStringC
             return "content-pack entry \(path) uses unsupported ZIP method \(method)"
         case let .entryTooLarge(path, byteCount):
             return "content-pack entry \(path) is too large to read (\(byteCount) bytes)"
+        case let .mapAllocationExceeded(path, failure):
+            return "content-pack map \(path) exceeds the iPad allocation policy: " +
+                failure.description
         case let .truncatedEntry(path):
             return "content-pack entry is truncated: \(path)"
         case let .checksumMismatch(path):
@@ -41,11 +48,10 @@ public enum GarrysPADContentPackError: Error, Sendable, Equatable, CustomStringC
 /// bundle URL.
 ///
 /// The packer stores large maps, images, audio, and VPK payloads without ZIP
-/// compression. This reader therefore needs only the ZIP/ZIP64 index and reads
-/// selected entries directly from the bundle instead of expanding a second
-/// multi-gigabyte copy into the iPad container. Deflated metadata and text
-/// remain indexed, but are rejected explicitly until a streaming inflater is
-/// connected.
+/// compression. This reader therefore reads those entries by bounded ranges
+/// instead of expanding a second multi-gigabyte copy into the iPad container.
+/// The one legacy exception is the small root JSON manifest: method-8 DEFLATE
+/// is accepted for that exact path behind strict compressed and decoded limits.
 public final class GarrysPADContentPack: @unchecked Sendable {
     public struct Entry: Sendable, Equatable {
         public let path: String
@@ -58,6 +64,9 @@ public final class GarrysPADContentPack: @unchecked Sendable {
     }
 
     public static let preferredFileNamePrefix = "GarrysPAD_Content_"
+    public static let rootManifestPath = "garryspadcontentmanifest.json"
+    public static let maximumCompressedManifestByteCount: UInt64 = 8 * 1_024 * 1_024
+    public static let maximumDecodedManifestByteCount: UInt64 = 32 * 1_024 * 1_024
     public static let requiredPlayablePaths = [
         "garrysmod/maps/gm_construct.bsp",
         "garrysmod/maps/gm_flatgrass.bsp",
@@ -69,7 +78,11 @@ public final class GarrysPADContentPack: @unchecked Sendable {
 
     private let lock = NSLock()
 
-    public init(url: URL, requirePlayableContent: Bool = true) throws {
+    public init(
+        url: URL,
+        requirePlayableContent: Bool = true,
+        mapAllocationPolicy: GModMapAllocationPolicy = .iPadValidated
+    ) throws {
         archiveURL = url.standardizedFileURL
         guard FileManager.default.fileExists(atPath: archiveURL.path) else {
             throw GarrysPADContentPackError.fileNotFound(archiveURL.path)
@@ -78,6 +91,20 @@ public final class GarrysPADContentPack: @unchecked Sendable {
         if requirePlayableContent {
             for path in Self.requiredPlayablePaths where entries[path] == nil {
                 throw GarrysPADContentPackError.missingRequiredEntry(path)
+            }
+            for path in Self.requiredPlayablePaths where path.hasSuffix(".bsp") {
+                guard let entry = entries[path] else { continue }
+                do {
+                    try mapAllocationPolicy.validate(
+                        .bspEncodedBytes,
+                        requestedByteCount: entry.uncompressedByteCount
+                    )
+                } catch let failure as GModMapAllocationPolicyError {
+                    throw GarrysPADContentPackError.mapAllocationExceeded(
+                        path: path,
+                        failure: failure
+                    )
+                }
             }
         }
     }
@@ -146,8 +173,9 @@ public final class GarrysPADContentPack: @unchecked Sendable {
         )
     }
 
-    /// Reads a stored entry. `maximumByteCount` is an allocation boundary, not
-    /// a claim about the ZIP entry's trustworthiness.
+    /// Reads a stored entry, or the bounded method-8 root manifest.
+    /// `maximumByteCount` is an allocation boundary, not a claim about the ZIP
+    /// entry's trustworthiness.
     public func data(
         for logicalPath: String,
         maximumByteCount: UInt64 = 512 * 1_024 * 1_024
@@ -155,17 +183,6 @@ public final class GarrysPADContentPack: @unchecked Sendable {
         let path = try Self.normalizedPath(logicalPath)
         guard let entry = entries[path] else {
             throw GarrysPADContentPackError.missingRequiredEntry(path)
-        }
-        guard entry.compressionMethod == 0 else {
-            throw GarrysPADContentPackError.unsupportedCompression(
-                path: path,
-                method: entry.compressionMethod
-            )
-        }
-        guard entry.uncompressedByteCount == entry.compressedByteCount else {
-            throw GarrysPADContentPackError.invalidArchive(
-                "stored entry has unequal compressed and uncompressed sizes: \(path)"
-            )
         }
         guard entry.uncompressedByteCount <= maximumByteCount,
               entry.uncompressedByteCount <= UInt64(Int.max) else {
@@ -190,16 +207,131 @@ public final class GarrysPADContentPack: @unchecked Sendable {
             entry: entry,
             path: path
         )
-        let result = try Self.readExactly(
-            handle,
-            offset: dataOffset,
-            count: Int(entry.uncompressedByteCount),
-            context: path
-        )
+        let result: Data
+        switch entry.compressionMethod {
+        case 0:
+            guard entry.uncompressedByteCount == entry.compressedByteCount else {
+                throw GarrysPADContentPackError.invalidArchive(
+                    "stored entry has unequal compressed and uncompressed sizes: \(path)"
+                )
+            }
+            result = try Self.readExactly(
+                handle,
+                offset: dataOffset,
+                count: Int(entry.uncompressedByteCount),
+                context: path
+            )
+        case 8 where path == Self.rootManifestPath:
+            guard entry.compressedByteCount <= Self.maximumCompressedManifestByteCount,
+                  entry.compressedByteCount <= UInt64(Int.max),
+                  entry.uncompressedByteCount <= Self.maximumDecodedManifestByteCount else {
+                throw GarrysPADContentPackError.entryTooLarge(
+                    path: path,
+                    byteCount: max(
+                        entry.compressedByteCount,
+                        entry.uncompressedByteCount
+                    )
+                )
+            }
+            let compressed = try Self.readExactly(
+                handle,
+                offset: dataOffset,
+                count: Int(entry.compressedByteCount),
+                context: path
+            )
+            do {
+                result = try GModRawDeflate.decode(
+                    compressed,
+                    expectedByteCount: entry.uncompressedByteCount,
+                    maximumCompressedByteCount: Self.maximumCompressedManifestByteCount,
+                    maximumDecodedByteCount: min(
+                        maximumByteCount,
+                        Self.maximumDecodedManifestByteCount
+                    )
+                )
+            } catch {
+                throw GarrysPADContentPackError.invalidArchive(
+                    "root manifest DEFLATE is invalid: \(error)"
+                )
+            }
+        default:
+            throw GarrysPADContentPackError.unsupportedCompression(
+                path: path,
+                method: entry.compressionMethod
+            )
+        }
         guard Self.crc32(result) == entry.crc32 else {
             throw GarrysPADContentPackError.checksumMismatch(path)
         }
         return result
+    }
+
+    /// Streams one stored payload through its ZIP CRC without allocating the
+    /// complete entry. This is the integrity path used for maps and nested VPK
+    /// chunks during a manual full-pack validation.
+    public func streamVerifiedData(
+        for logicalPath: String,
+        chunkByteCount: Int = 1 * 1_024 * 1_024,
+        shouldCancel: () -> Bool = { false },
+        consume: (Data, UInt64) throws -> Void
+    ) throws {
+        let path = try Self.normalizedPath(logicalPath)
+        guard let entry = entries[path] else {
+            throw GarrysPADContentPackError.missingRequiredEntry(path)
+        }
+        guard entry.compressionMethod == 0 else {
+            throw GarrysPADContentPackError.unsupportedCompression(
+                path: path,
+                method: entry.compressionMethod
+            )
+        }
+        guard entry.uncompressedByteCount == entry.compressedByteCount else {
+            throw GarrysPADContentPackError.invalidArchive(
+                "stored entry has unequal compressed and uncompressed sizes: \(path)"
+            )
+        }
+        guard chunkByteCount > 0, chunkByteCount <= 8 * 1_024 * 1_024 else {
+            throw GarrysPADContentPackError.invalidArchive(
+                "invalid verification chunk size for \(path)"
+            )
+        }
+
+        lock.lock()
+        defer { lock.unlock() }
+        let handle: FileHandle
+        do {
+            handle = try FileHandle(forReadingFrom: archiveURL)
+        } catch {
+            throw GarrysPADContentPackError.fileNotFound(archiveURL.path)
+        }
+        defer { try? handle.close() }
+        let dataOffset = try Self.entryDataOffset(
+            handle: handle,
+            entry: entry,
+            path: path
+        )
+        var crc = UInt32.max
+        var completed: UInt64 = 0
+        while completed < entry.uncompressedByteCount {
+            if shouldCancel() { throw CancellationError() }
+            let count = Int(min(
+                UInt64(chunkByteCount),
+                entry.uncompressedByteCount - completed
+            ))
+            let chunk = try Self.readExactly(
+                handle,
+                offset: dataOffset + completed,
+                count: count,
+                context: path
+            )
+            crc = Self.crc32(chunk, updating: crc)
+            completed += UInt64(chunk.count)
+            try consume(chunk, completed)
+        }
+        if shouldCancel() { throw CancellationError() }
+        guard ~crc == entry.crc32 else {
+            throw GarrysPADContentPackError.checksumMismatch(path)
+        }
     }
 
     private static func entryDataOffset(
@@ -522,14 +654,24 @@ public final class GarrysPADContentPack: @unchecked Sendable {
     }
 
     private static func crc32(_ data: Data) -> UInt32 {
-        var crc = UInt32.max
-        for byte in data {
-            crc ^= UInt32(byte)
-            for _ in 0..<8 {
-                let mask = UInt32(bitPattern: -Int32(crc & 1))
-                crc = (crc >> 1) ^ (0xEDB8_8320 & mask)
-            }
+        ~crc32(data, updating: UInt32.max)
+    }
+
+    private static let crc32Table: [UInt32] = (0..<256).map { value in
+        var crc = UInt32(value)
+        for _ in 0..<8 {
+            let mask = UInt32(bitPattern: -Int32(crc & 1))
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask)
         }
-        return ~crc
+        return crc
+    }
+
+    private static func crc32(_ data: Data, updating initial: UInt32) -> UInt32 {
+        var crc = initial
+        for byte in data {
+            let index = Int((crc ^ UInt32(byte)) & 0xFF)
+            crc = (crc >> 8) ^ crc32Table[index]
+        }
+        return crc
     }
 }

@@ -159,6 +159,106 @@ public struct GModMetalSurfaceTexturedRectangle: Sendable, Equatable {
     public let textureName: String
     public let color: GModMetalSurfaceColor
     public let bitmap: GModMetalSurfaceBitmap
+    public let minificationFilter: GMLuaTextureFilter?
+    public let magnificationFilter: GMLuaTextureFilter?
+
+    public init(
+        frame: GModMetalSurfaceRect,
+        uv: GModMetalSurfaceRect,
+        textureName: String,
+        color: GModMetalSurfaceColor,
+        bitmap: GModMetalSurfaceBitmap,
+        minificationFilter: GMLuaTextureFilter? = nil,
+        magnificationFilter: GMLuaTextureFilter? = nil
+    ) {
+        self.frame = frame
+        self.uv = uv
+        self.textureName = textureName
+        self.color = color
+        self.bitmap = bitmap
+        self.minificationFilter = minificationFilter
+        self.magnificationFilter = magnificationFilter
+    }
+}
+
+public enum GModMetalSurfaceSamplerAxisFilter: Sendable, Equatable, Hashable {
+    case point
+    case linear
+}
+
+/// Finite Metal sampler key derived from GMod's independent min/mag override
+/// stacks. TEXFILTER.NONE disables the override and therefore resolves to the
+/// same linear default as an empty stack. Hardware anisotropy applies only to
+/// minification; an anisotropic magnification request remains linear.
+public struct GModMetalSurfaceSamplerConfiguration: Sendable, Equatable, Hashable {
+    public static let defaultMaximumAnisotropy = 8
+
+    public let minification: GModMetalSurfaceSamplerAxisFilter
+    public let magnification: GModMetalSurfaceSamplerAxisFilter
+    public let maximumAnisotropy: Int
+
+    public init(
+        minification: GModMetalSurfaceSamplerAxisFilter,
+        magnification: GModMetalSurfaceSamplerAxisFilter,
+        maximumAnisotropy: Int
+    ) {
+        self.minification = minification
+        self.magnification = magnification
+        self.maximumAnisotropy = maximumAnisotropy
+    }
+
+    public static func source(
+        minification: GMLuaTextureFilter?,
+        magnification: GMLuaTextureFilter?
+    ) -> Self {
+        Self(
+            minification: axisFilter(minification),
+            magnification: axisFilter(magnification),
+            maximumAnisotropy: minification == .anisotropic
+                ? defaultMaximumAnisotropy
+                : 1
+        )
+    }
+
+    static let allSourceConfigurations: [Self] = {
+        let values: [GMLuaTextureFilter?] = [
+            nil, .none, .point, .linear, .anisotropic,
+        ]
+        return Array(Set(values.flatMap { minification in
+            values.map { magnification in
+                source(
+                    minification: minification,
+                    magnification: magnification
+                )
+            }
+        })).sorted {
+            let lhs = ($0.minification.sortOrder, $0.magnification.sortOrder,
+                $0.maximumAnisotropy)
+            let rhs = ($1.minification.sortOrder, $1.magnification.sortOrder,
+                $1.maximumAnisotropy)
+            return lhs < rhs
+        }
+    }()
+
+    private static func axisFilter(
+        _ filter: GMLuaTextureFilter?
+    ) -> GModMetalSurfaceSamplerAxisFilter {
+        switch filter {
+        case .some(.point):
+            return .point
+        case .none, .some(.none), .some(.linear), .some(.anisotropic):
+            return .linear
+        }
+    }
+}
+
+private extension GModMetalSurfaceSamplerAxisFilter {
+    var sortOrder: Int {
+        switch self {
+        case .point: return 0
+        case .linear: return 1
+        }
+    }
 }
 
 public struct GModMetalSurfaceText: Sendable, Equatable {
@@ -298,6 +398,16 @@ public struct GModMetalSurfaceScene: Sendable, Equatable {
             maximumCount: max(0, maximumRetainedBitmapCount),
             maximumByteCount: max(0, maximumRetainedBitmapByteCount)
         )
+        let textureFiltersByCommandIndex = snapshot.textureFilters.reduce(
+            into: [Int: GMLuaSurfaceTextureFilterSnapshot]()
+        ) { result, filter in
+            // Capture emits at most one value per retained textured command.
+            // Keep the first value if a synthetic/malformed snapshot contains
+            // duplicates so scene construction remains deterministic.
+            if result[filter.commandIndex] == nil {
+                result[filter.commandIndex] = filter
+            }
+        }
 
         for (index, command) in snapshot.commands
             .prefix(processedCommandCount)
@@ -423,7 +533,11 @@ public struct GModMetalSurfaceScene: Sendable, Equatable {
                             uv: geometry.uv,
                             textureName: decodedName,
                             color: normalizedColor,
-                            bitmap: retainedBitmap
+                            bitmap: retainedBitmap,
+                            minificationFilter:
+                                textureFiltersByCommandIndex[index]?.minification,
+                            magnificationFilter:
+                                textureFiltersByCommandIndex[index]?.magnification
                         )
                     ))
                     textureCount += 1

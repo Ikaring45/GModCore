@@ -34,6 +34,40 @@ final class GarrysPADContentPackTests: XCTestCase {
         )
     }
 
+    func testCandidateRejectsOversizeMapBeforeReadingEntryData() throws {
+        let fixture = try makeTemporaryZIP(entries: [
+            ("garrysmod/maps/gm_construct.bsp", Data("construct".utf8), 0),
+            ("garrysmod/maps/gm_flatgrass.bsp", Data("flatgrass".utf8), 0),
+            ("garrysmod/html/img/bg.jpg", Data([0xFF, 0xD8, 0xFF, 0xD9]), 0),
+        ])
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        let policy = GModMapAllocationPolicy(
+            maximumBSPEncodedByteCount: 8,
+            maximumWorldVertexWorkingByteCount: .max,
+            maximumWorldIndexWorkingByteCount: .max,
+            maximumDisplacementVertexWorkingByteCount: .max,
+            maximumDisplacementIndexWorkingByteCount: .max,
+            maximumLightmapAtlasByteCount: .max
+        )
+
+        XCTAssertThrowsError(try GarrysPADContentPack(
+            url: fixture,
+            mapAllocationPolicy: policy
+        )) { error in
+            XCTAssertEqual(
+                error as? GarrysPADContentPackError,
+                .mapAllocationExceeded(
+                    path: "garrysmod/maps/gm_construct.bsp",
+                    failure: GModMapAllocationPolicyError(
+                        resource: .bspEncodedBytes,
+                        requestedByteCount: 9,
+                        maximumByteCount: 8
+                    )
+                )
+            )
+        }
+    }
+
     func testCompressedEntryIsRejectedWithoutInventingDecodedBytes() throws {
         let fixture = try makeTemporaryZIP(entries: [
             ("garrysmod/maps/gm_construct.bsp", Data("construct".utf8), 0),
@@ -157,6 +191,93 @@ final class GarrysPADContentPackTests: XCTestCase {
         XCTAssertNotEqual(tick.movement.state.origin, origin)
     }
 
+    func testConfiguredRealPackResolvesAllSixPaintedSkyboxFaces() throws {
+        guard let path = ProcessInfo.processInfo.environment[
+            "GMOD_CONTENT_PACK_DIAGNOSTIC_PATH"
+        ], !path.isEmpty else {
+            throw XCTSkip("GMOD_CONTENT_PACK_DIAGNOSTIC_PATH is not configured")
+        }
+        let pack = try GarrysPADContentPack(url: URL(fileURLWithPath: path))
+        let source = try GModContentPackAssetSource(pack: pack)
+        let resolver = GMLuaSourceMaterialResolver { logicalPath in
+            try source.data(for: logicalPath)
+        }
+        let expectedNames = [
+            "skybox/paintedrt", "skybox/paintedbk", "skybox/paintedlf",
+            "skybox/paintedft", "skybox/paintedup", "skybox/painteddn",
+        ]
+
+        for name in expectedNames {
+            let resolved = try resolver.resolve(named: name)
+            XCTAssertEqual(resolved.metadata.status, .resolved, name)
+            XCTAssertGreaterThan(resolved.metadata.dimensions?.width ?? 0, 0, name)
+            XCTAssertGreaterThan(resolved.metadata.dimensions?.height ?? 0, 0, name)
+            XCTAssertFalse(try XCTUnwrap(resolved.rgbaBytes, name).isEmpty)
+        }
+    }
+
+    func testConfiguredRealPackResolvesConstructWaterWithoutInventedTextures() throws {
+        guard let path = ProcessInfo.processInfo.environment[
+            "GMOD_CONTENT_PACK_DIAGNOSTIC_PATH"
+        ], !path.isEmpty else {
+            throw XCTSkip("GMOD_CONTENT_PACK_DIAGNOSTIC_PATH is not configured")
+        }
+        let pack = try GarrysPADContentPack(url: URL(fileURLWithPath: path))
+        let source = try GModContentPackAssetSource(pack: pack)
+        let resolver = GMLuaSourceMaterialResolver { logicalPath in
+            try source.data(for: logicalPath)
+        }
+
+        let top = try XCTUnwrap(
+            resolver.resolveWater(named: "gm_construct/water_13")
+        )
+        XCTAssertEqual(top.isAboveWater, true)
+        XCTAssertEqual(top.fogEnabled, true)
+        XCTAssertEqual(top.fogColor, [7, 58, 66])
+        XCTAssertEqual(top.fogStart, 0)
+        XCTAssertEqual(top.fogEnd, 1_024)
+        XCTAssertEqual(top.reflectionAmount, 0.4)
+        XCTAssertEqual(top.refractionAmount, 1)
+        XCTAssertEqual(top.normalTexture?.status, .decoded)
+        XCTAssertEqual(top.normalTexture?.imageFormat, .bgra8888)
+        let normalBytes = try XCTUnwrap(top.normalTexture?.rgbaBytes)
+        XCTAssertTrue(
+            stride(from: 3, to: normalBytes.count, by: 4).allSatisfy {
+                normalBytes[$0] == 255
+            },
+            "the retained surface-bitmap adapter must not alter this normal map"
+        )
+        XCTAssertEqual(
+            top.bumpTexture?.status,
+            .unsupportedImageFormat(.uv88)
+        )
+        XCTAssertNil(top.bumpTexture?.rgbaBytes)
+        XCTAssertEqual(top.textureScroll?.targetVariable.lowercased(), "$bumptransform")
+        XCTAssertEqual(top.textureScroll?.rate, 0.02)
+        XCTAssertEqual(top.textureScroll?.angleDegrees, 25)
+
+        let beneath = try XCTUnwrap(
+            resolver.resolveWater(named: "gm_construct/water_13_beneath")
+        )
+        XCTAssertEqual(beneath.isAboveWater, false)
+        XCTAssertEqual(beneath.fogColor, [24, 64, 72])
+        XCTAssertEqual(beneath.fogStart, -1_024)
+        XCTAssertEqual(beneath.fogEnd, 2_048)
+        XCTAssertNil(beneath.reflectionAmount)
+        XCTAssertEqual(beneath.refractionAmount, 1)
+        XCTAssertEqual(beneath.normalTexture?.status, .decoded)
+        XCTAssertEqual(
+            beneath.bumpTexture?.status,
+            .unsupportedImageFormat(.uv88)
+        )
+        XCTAssertEqual(
+            beneath.textureScroll?.targetVariable.lowercased(),
+            "$bumptransform"
+        )
+        XCTAssertEqual(beneath.textureScroll?.rate, 0.05)
+        XCTAssertEqual(beneath.textureScroll?.angleDegrees, 45)
+    }
+
     func testConfiguredRealPackResolvesStockWorldMaterialBudget() throws {
         guard let path = ProcessInfo.processInfo.environment[
             "GMOD_CONTENT_PACK_DIAGNOSTIC_PATH"
@@ -175,12 +296,17 @@ final class GarrysPADContentPackTests: XCTestCase {
             var resolvedCount = 0
             var decodedByteCount = 0
             var allocationFailures: [String] = []
+            var unresolvedMaterials: [String] = []
             for name in mesh.materialRanges.compactMap(\.materialName) {
                 do {
                     let material = try resolver.resolve(named: name)
                     if let pixels = material.rgbaBytes {
                         resolvedCount += 1
                         decodedByteCount += pixels.count
+                    } else {
+                        unresolvedMaterials.append(
+                            "\(name) [\(material.metadata.status.rawValue)]"
+                        )
                     }
                 } catch let error as SourceVTFError {
                     if case .allocationLimitExceeded = error {
@@ -197,11 +323,24 @@ final class GarrysPADContentPackTests: XCTestCase {
                 resolvedCount,
                 map == .construct ? 10 : 2
             )
+            XCTAssertEqual(resolvedCount, map == .construct ? 55 : 14)
+            XCTAssertEqual(
+                Set(unresolvedMaterials),
+                map == .construct
+                    ? Set([
+                        "gm_construct/water_13 [materialWithoutBaseTexture]",
+                        "gm_construct/water_13_beneath [materialWithoutBaseTexture]",
+                    ])
+                    : Set<String>()
+            )
             XCTAssertLessThanOrEqual(decodedByteCount, 128 * 1_024 * 1_024)
             print(
                 "\(map.rawValue): resolved \(resolvedCount)/" +
                     "\(mesh.materialRanges.count) world materials, " +
-                    "\(decodedByteCount) decoded bytes"
+                    "\(decodedByteCount) decoded bytes; unresolved " +
+                    (unresolvedMaterials.isEmpty
+                        ? "none"
+                        : unresolvedMaterials.joined(separator: ", "))
             )
         }
     }

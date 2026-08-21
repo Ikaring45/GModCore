@@ -58,6 +58,8 @@ public typealias GMLuaCursorWarpSink = @Sendable (GMLuaCursorPosition) -> Void
 /// the update methods. That keeps headless conformance deterministic and
 /// avoids claiming a platform event integration that does not exist yet.
 public final class GMLuaInput: @unchecked Sendable {
+    /// Garry's Mod `BUTTON_CODE` value installed as the global `MOUSE_LEFT`.
+    public static let leftMouseButton = 107
     /// Values from Garry's Mod's public KEY enum used by the modifier helpers.
     public static let leftShiftKey = 79
     public static let rightShiftKey = 80

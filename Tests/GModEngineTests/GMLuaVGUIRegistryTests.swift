@@ -5,6 +5,381 @@ import GModGameAssets
 import GModLua
 
 final class GMLuaVGUIRegistryTests: XCTestCase {
+    func testGUIMouseCoordinatesTrackHitTestPointerAndCancelToHiddenCursorSentinel() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: typeSystem)
+
+        try state.execute(
+            """
+            assert(gui.MouseX() == 0 and gui.MouseY() == 0)
+            local panel = assert(vgui.Create("Panel"))
+            panel:SetSize(100, 100)
+            """,
+            sourceName: "@GMLuaGUIMouseHiddenCursorSentinel.lua"
+        )
+
+        _ = try registry.dispatchPointerEvent(
+            x: 41,
+            y: 73,
+            phase: .moved,
+            timestamp: 1,
+            viewportWidth: 320,
+            viewportHeight: 180
+        )
+        try state.execute(
+            "assert(gui.MouseX() == 41 and gui.MouseY() == 73)",
+            sourceName: "@GMLuaGUIMouseMovedPointer.lua"
+        )
+
+        _ = try registry.dispatchPointerEvent(
+            x: 44.5,
+            y: 76.25,
+            phase: .ended,
+            timestamp: 2,
+            viewportWidth: 320,
+            viewportHeight: 180
+        )
+        try state.execute(
+            "assert(gui.MouseX() == 44.5 and gui.MouseY() == 76.25)",
+            sourceName: "@GMLuaGUIMouseReleasedPointer.lua"
+        )
+
+        _ = try registry.dispatchPointerEvent(
+            x: 999,
+            y: 999,
+            phase: .cancelled,
+            timestamp: 3,
+            viewportWidth: 320,
+            viewportHeight: 180
+        )
+        try state.execute(
+            "assert(gui.MouseX() == 0 and gui.MouseY() == 0)",
+            sourceName: "@GMLuaGUIMouseCancelledPointer.lua"
+        )
+    }
+
+    func testRemoveUsesDeferredDeletionAndStockControlPanelRecreatesForMarkedAncestor() throws {
+        let fileSystem = try GMLuaHostDirectoryFileSystem(
+            rootURL: GModGameAssets.clientContentRootURL(),
+            writable: false
+        )
+        let runtime = GMLuaRuntime(
+            realm: .client,
+            logger: { _ in },
+            virtualFileSystem: fileSystem,
+            bootstrapMode: .strict
+        )
+        defer { _ = runtime.close() }
+        try runtime.loadFile("lua/includes/init.lua")
+        let registry = try XCTUnwrap(runtime.vguiRegistry)
+
+        try runtime.execute(
+            """
+            local CONTROL = {}
+            vgui.Register("ControlPanel", CONTROL, "Panel")
+
+            local name = "__deferred_remove_regression"
+            local first = assert(controlpanel.Get(name))
+            assert(IsValid(first))
+            assert(not first:IsMarkedForDeletion())
+
+            local wrapper = assert(vgui.Create("Panel"))
+            assert(IsValid(wrapper))
+            assert(not wrapper:IsMarkedForDeletion())
+            first:SetParent(wrapper)
+            assert(first:GetParent() == wrapper)
+
+            wrapper:Remove()
+            assert(not IsValid(wrapper))
+            assert(wrapper:IsMarkedForDeletion())
+            assert(IsValid(first))
+            assert(not first:IsMarkedForDeletion())
+            assert(first:GetParent() == wrapper)
+
+            -- Panel:Remove is idempotent throughout the deferred interval.
+            wrapper:Remove()
+
+            -- This invokes the unmodified stock ShouldReCreate path, whose
+            -- parent walk must see the retained, marked wrapper userdata.
+            local replacement = assert(controlpanel.Get(name))
+            assert(replacement != first)
+            assert(IsValid(replacement))
+            assert(IsValid(first))
+
+            DEFERRED_REMOVE_WRAPPER = wrapper
+            DEFERRED_REMOVE_CHILD = first
+            DEFERRED_REMOVE_REPLACEMENT = replacement
+            """,
+            sourceName: "@GMLuaDeferredPanelRemoveBeforeFrame.lua"
+        )
+        XCTAssertEqual(registry.livePanelCount, 2)
+
+        _ = try registry.performPendingLayouts()
+        try runtime.execute(
+            """
+            assert(not IsValid(DEFERRED_REMOVE_WRAPPER))
+            assert(not DEFERRED_REMOVE_WRAPPER:IsMarkedForDeletion())
+            assert(not IsValid(DEFERRED_REMOVE_CHILD))
+            assert(IsValid(DEFERRED_REMOVE_REPLACEMENT))
+
+            -- Repeating Remove after the deletion pass is also a no-op.
+            DEFERRED_REMOVE_WRAPPER:Remove()
+            """,
+            sourceName: "@GMLuaDeferredPanelRemoveAfterFrame.lua"
+        )
+        XCTAssertEqual(registry.livePanelCount, 1)
+    }
+
+    func testNativePanelStartsAtSourceDefaultDimensionsBeforeScriptedSizing() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: typeSystem)
+
+        try state.execute(
+            """
+            local panel = assert(vgui.Create("Panel"))
+            local width, height = panel:GetSize()
+            assert(width == 64 and height == 24)
+
+            local explicitlySized = assert(vgui.Create("Panel"))
+            explicitlySized:SetSize(11, 22)
+            local explicitWidth, explicitHeight = explicitlySized:GetSize()
+            assert(explicitWidth == 11 and explicitHeight == 22)
+
+            local PROBE = {}
+            vgui.Register("ViewportFillProbe", PROBE, "Panel")
+            VIEWPORT_FILL_PROBE = assert(vgui.Create("ViewportFillProbe"))
+            VIEWPORT_FILL_PROBE:Dock(FILL)
+            """,
+            sourceName: "@GMLuaNativePanelDefaultDimensionsRegression.lua"
+        )
+
+        let tree = registry.renderTree(viewportWidth: 320, viewportHeight: 180)
+        let fillProbe = try XCTUnwrap(tree.first(where: {
+            $0.requestedClassName == "ViewportFillProbe"
+        }))
+        XCTAssertEqual(
+            fillProbe.frame,
+            GMLuaPanelRect(x: 0, y: 0, width: 320, height: 180)
+        )
+    }
+
+    func testHTMLLoadingLifecycleRequiresAnExplicitRendererResolution() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: typeSystem)
+
+        try state.execute(
+            """
+            HTML_LIFECYCLE_LOG = {}
+            HTML_LIFECYCLE = assert(vgui.Create("HTML"))
+            function HTML_LIFECYCLE:OnBeginLoadingDocument(url)
+                HTML_LIFECYCLE_LOG[#HTML_LIFECYCLE_LOG + 1] = "begin:" .. url
+            end
+            function HTML_LIFECYCLE:OnDocumentReady(url)
+                assert(not self:IsLoading())
+                HTML_LIFECYCLE_LOG[#HTML_LIFECYCLE_LOG + 1] = "ready:" .. url
+            end
+            function HTML_LIFECYCLE:OnFinishLoadingDocument(url)
+                assert(not self:IsLoading())
+                HTML_LIFECYCLE_LOG[#HTML_LIFECYCLE_LOG + 1] = "finish:" .. url
+            end
+
+            assert(not HTML_LIFECYCLE:IsLoading())
+            HTML_LIFECYCLE:OpenURL("https://example.invalid/stock-panel")
+            assert(HTML_LIFECYCLE:IsLoading())
+            assert(table.concat(HTML_LIFECYCLE_LOG, "|") ==
+                "begin:https://example.invalid/stock-panel")
+
+            local ordinary = vgui.Create("Panel")
+            assert(pcall(ordinary.IsLoading, ordinary) == false)
+            """,
+            sourceName: "@GMLuaHTMLLogicalLoadRequestRegression.lua"
+        )
+
+        var snapshot = try XCTUnwrap(registry.htmlPanelStateSnapshots.first)
+        XCTAssertEqual(snapshot.state, .loading)
+        XCTAssertEqual(snapshot.url, LuaString("https://example.invalid/stock-panel"))
+        XCTAssertNil(snapshot.html)
+        let firstRequest = snapshot.requestIdentifier
+        XCTAssertTrue(try registry.resolveHTMLDocumentLoad(
+            panelIdentifier: snapshot.panelIdentifier,
+            requestIdentifier: firstRequest,
+            result: .succeeded
+        ))
+        try state.execute(
+            """
+            assert(not HTML_LIFECYCLE:IsLoading())
+            assert(table.concat(HTML_LIFECYCLE_LOG, "|") ==
+                "begin:https://example.invalid/stock-panel|" ..
+                "ready:https://example.invalid/stock-panel|" ..
+                "finish:https://example.invalid/stock-panel")
+
+            HTML_LIFECYCLE:SetHTML("<p>stock default.lua shape</p>")
+            assert(HTML_LIFECYCLE:IsLoading())
+            """,
+            sourceName: "@GMLuaHTMLLogicalLoadCompletionRegression.lua"
+        )
+
+        snapshot = try XCTUnwrap(registry.htmlPanelStateSnapshots.first)
+        XCTAssertEqual(snapshot.state, .loading)
+        XCTAssertNil(snapshot.url)
+        XCTAssertEqual(snapshot.html, LuaString("<p>stock default.lua shape</p>"))
+        XCTAssertFalse(try registry.resolveHTMLDocumentLoad(
+            panelIdentifier: snapshot.panelIdentifier,
+            requestIdentifier: firstRequest,
+            result: .succeeded
+        ))
+        XCTAssertTrue(try registry.resolveHTMLDocumentLoad(
+            panelIdentifier: snapshot.panelIdentifier,
+            requestIdentifier: snapshot.requestIdentifier,
+            result: .failed(message: "platform renderer unavailable")
+        ))
+
+        snapshot = try XCTUnwrap(registry.htmlPanelStateSnapshots.first)
+        XCTAssertEqual(snapshot.state, .failed)
+        XCTAssertEqual(snapshot.failureMessage, "platform renderer unavailable")
+        try state.execute(
+            """
+            assert(not HTML_LIFECYCLE:IsLoading())
+            assert(HTML_LIFECYCLE_LOG[#HTML_LIFECYCLE_LOG] == "begin:about:blank")
+            """,
+            sourceName: "@GMLuaHTMLLogicalLoadFailureRegression.lua"
+        )
+    }
+
+    func testBundledSpawnIconRetainsModelImageRequestWithoutFabricatingPreview() throws {
+        let fileSystem = try GMLuaHostDirectoryFileSystem(
+            rootURL: GModGameAssets.clientContentRootURL(),
+            writable: false
+        )
+        let runtime = GMLuaRuntime(
+            realm: .client,
+            logger: { _ in },
+            virtualFileSystem: fileSystem,
+            bootstrapMode: .strict
+        )
+        defer { _ = runtime.close() }
+        runtime.resourceRegistry?.setMaterialPixelResolver(
+            GMLuaVPKMaterialPixelResolver(
+                looseFileSystem: fileSystem,
+                archivesInPriorityOrder: []
+            )
+        )
+        try runtime.loadFile("lua/includes/init.lua")
+        try runtime.loadFile("lua/derma/init.lua")
+        try runtime.loadFile("lua/vgui/dlabel.lua")
+        try runtime.loadFile("lua/vgui/dbutton.lua")
+        try runtime.loadFile("lua/vgui/spawnicon.lua")
+
+        try runtime.execute(
+            """
+            -- Scheme rendering is outside this state test; the full playable
+            -- session supplies the stock skin before these controls are built.
+            DLabel.ApplySchemeSettings = function() end
+            MODEL_ICON = assert(vgui.Create("SpawnIcon"))
+            MODEL_ICON:SetModel(
+                "models/props_c17/oildrum001.mdl",
+                2,
+                "012345678"
+            )
+            assert(MODEL_ICON:GetModelName() ==
+                "models/props_c17/oildrum001.mdl")
+            assert(MODEL_ICON:GetSkinID() == 2)
+            assert(MODEL_ICON:GetBodyGroup() == "012345678")
+
+            MODEL_ICON:SetSpawnIcon("spawnicons/oildrum.png")
+            assert(MODEL_ICON:GetIconName() == "spawnicons/oildrum.png")
+
+            local ok = pcall(MODEL_ICON.Icon.SetModel, MODEL_ICON.Icon, {}, 0)
+            assert(not ok)
+            ok = pcall(MODEL_ICON.Icon.SetModel, MODEL_ICON.Icon, "model.mdl", 1.5)
+            assert(not ok)
+            local ordinary = assert(vgui.Create("Panel"))
+            ok = pcall(ordinary.SetModel, ordinary, "model.mdl")
+            assert(not ok)
+            """,
+            sourceName: "@GMLuaBundledSpawnIconModelImageStateRegression.lua"
+        )
+
+        let registry = try XCTUnwrap(runtime.vguiRegistry)
+        let snapshot = try XCTUnwrap(registry.modelImageStateSnapshots.first(where: {
+            $0.modelPath == LuaString("models/props_c17/oildrum001.mdl")
+        }))
+        XCTAssertEqual(snapshot.requestedClassName, "ModelImage")
+        XCTAssertEqual(snapshot.skin, 2)
+        XCTAssertEqual(snapshot.bodyGroups, LuaString("012345678"))
+        XCTAssertEqual(snapshot.spawnIconName, LuaString("spawnicons/oildrum.png"))
+        XCTAssertEqual(snapshot.previewState, .unavailable)
+    }
+
+    func testBundledHorizontalDividerPlacesRightPanelAfterLeftAndDivider() throws {
+        let fileSystem = try GMLuaHostDirectoryFileSystem(
+            rootURL: GModGameAssets.clientContentRootURL(),
+            writable: false
+        )
+        let runtime = GMLuaRuntime(
+            realm: .client,
+            logger: { _ in },
+            virtualFileSystem: fileSystem,
+            bootstrapMode: .strict,
+            initialViewport: GMLuaViewportSize(width: 1_280, height: 720)
+        )
+        defer { _ = runtime.close() }
+        try runtime.loadFile("lua/includes/init.lua")
+        try runtime.loadFile("lua/derma/init.lua")
+        try runtime.loadFile("lua/vgui/dpanel.lua")
+        try runtime.loadFile("lua/vgui/dhorizontaldivider.lua")
+
+        try runtime.execute(
+            """
+            DIVIDER = assert(vgui.Create("DHorizontalDivider"))
+            DIVIDER:SetPos(8, 58)
+            DIVIDER:SetSize(798, 654)
+            DIVIDER:SetLeftWidth(192)
+            DIVIDER:SetDividerWidth(6)
+            DIVIDER:SetLeftMin(192)
+            DIVIDER:SetRightMin(100)
+
+            DIVIDER_LEFT = assert(vgui.Create("Panel"))
+            DIVIDER_RIGHT = assert(vgui.Create("Panel"))
+            DIVIDER:SetLeft(DIVIDER_LEFT)
+            DIVIDER:SetRight(DIVIDER_RIGHT)
+            DIVIDER:InvalidateLayout(true)
+
+            local lx, ly = DIVIDER_LEFT:GetPos()
+            local rx, ry = DIVIDER_RIGHT:GetPos()
+            assert(lx == 0 and ly == 0)
+            assert(rx == 198 and ry == 0)
+            assert(DIVIDER_LEFT.x == 0 and DIVIDER_LEFT.y == 0)
+            assert(DIVIDER_RIGHT.x == 198 and DIVIDER_RIGHT.y == 0)
+            assert(DIVIDER_LEFT:GetWide() == 192 and DIVIDER_LEFT:GetTall() == 654)
+            assert(DIVIDER_RIGHT:GetWide() == 600 and DIVIDER_RIGHT:GetTall() == 654)
+            """,
+            sourceName: "@GMLuaBundledHorizontalDividerGeometryRegression.lua"
+        )
+
+        let registry = try XCTUnwrap(runtime.vguiRegistry)
+        let tree = registry.renderTree(viewportWidth: 1_280, viewportHeight: 720)
+        let right = try XCTUnwrap(tree.first(where: {
+            $0.requestedClassName == "Panel" && $0.frame.x == 206 && $0.frame.y == 58
+        }))
+        XCTAssertEqual(
+            right.frame,
+            GMLuaPanelRect(x: 206, y: 58, width: 600, height: 654)
+        )
+    }
+
     func testDockConstantsMatchGModABI() throws {
         XCTAssertEqual(GMLuaPanelDock.none.rawValue, 0)
         XCTAssertEqual(GMLuaPanelDock.fill.rawValue, 1)
@@ -141,6 +516,203 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
         XCTAssertFalse(registry.hasPlatformViewBacking)
     }
 
+    func testSetSizeDispatchesOnSizeChangedOnlyForActualIntegerDimensionChanges() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: typeSystem)
+
+        try state.execute(
+            """
+            local panelMeta = FindMetaTable("Panel")
+            assert(type(panelMeta.OnSizeChanged) == "function")
+
+            local PROBE = {}
+            function PROBE:OnSizeChanged(width, height)
+                SIZE_CHANGE_CALLS = (SIZE_CHANGE_CALLS or 0) + 1
+                SIZE_CHANGE_WIDTH = width
+                SIZE_CHANGE_HEIGHT = height
+                panelMeta.OnSizeChanged(self, width, height)
+            end
+            vgui.Register("SizeChangeProbe", PROBE, "Panel")
+
+            SIZE_CHANGE_PANEL = assert(vgui.Create("SizeChangeProbe"))
+            SIZE_CHANGE_PANEL:SetSize(100.9, 20.9)
+            assert(SIZE_CHANGE_CALLS == 1)
+            assert(SIZE_CHANGE_WIDTH == 100 and SIZE_CHANGE_HEIGHT == 20)
+            assert(SIZE_CHANGE_PANEL:GetWide() == 100 and SIZE_CHANGE_PANEL:GetTall() == 20)
+
+            -- Each value floors to the already-observable integer dimension.
+            SIZE_CHANGE_PANEL:SetSize(100.1, 20.1)
+            SIZE_CHANGE_PANEL:SetWide(100.9)
+            SIZE_CHANGE_PANEL:SetTall(20.9)
+            assert(SIZE_CHANGE_CALLS == 1)
+
+            SIZE_CHANGE_PANEL:SetWide(101)
+            assert(SIZE_CHANGE_CALLS == 2)
+            assert(SIZE_CHANGE_WIDTH == 101 and SIZE_CHANGE_HEIGHT == 20)
+            SIZE_CHANGE_PANEL:SetTall(21)
+            assert(SIZE_CHANGE_CALLS == 3)
+            assert(SIZE_CHANGE_WIDTH == 101 and SIZE_CHANGE_HEIGHT == 21)
+            """,
+            sourceName: "@GMLuaPanelSizeChangedRegression.lua"
+        )
+        XCTAssertEqual(registry.pendingLayoutCount, 1)
+        XCTAssertEqual(try registry.performPendingLayouts(), 1)
+        XCTAssertEqual(registry.pendingLayoutCount, 0)
+    }
+
+    func testDockResizeDispatchesFinalSizeBeforeDockedChildLayout() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let surface = try GMLuaSurface.install(into: state)
+        let registry = try GMLuaVGUI.install(
+            into: state,
+            typeSystem: typeSystem,
+            surfaceCommandState: surface
+        )
+
+        try state.execute(
+            """
+            local panelMeta = FindMetaTable("Panel")
+            local PROBE = {}
+            function PROBE:OnSizeChanged(width, height)
+                DOCK_SIZE_CHANGE_CALLS = (DOCK_SIZE_CHANGE_CALLS or 0) + 1
+                DOCK_CALLBACK_WIDTH = width
+                DOCK_CALLBACK_HEIGHT = height
+                DOCK_CALLBACK_OBSERVED_WIDTH = self:GetWide()
+                DOCK_CALLBACK_OBSERVED_HEIGHT = self:GetTall()
+                panelMeta.OnSizeChanged(self, width, height)
+            end
+            function PROBE:PerformLayout(width, height)
+                DOCK_LAYOUT_CALLS = (DOCK_LAYOUT_CALLS or 0) + 1
+                DOCK_LAYOUT_WIDTH = width
+                DOCK_LAYOUT_HEIGHT = height
+                DOCK_LAYOUT_OBSERVED_WIDTH = self:GetWide()
+                DOCK_LAYOUT_OBSERVED_HEIGHT = self:GetTall()
+            end
+            vgui.Register("DockSizeChangeProbe", PROBE, "Panel")
+
+            DOCK_ROOT = assert(vgui.Create("Panel"))
+            DOCK_ROOT:SetSize(320, 180)
+            DOCK_CHILD = assert(vgui.Create("DockSizeChangeProbe", DOCK_ROOT))
+            DOCK_CHILD:Dock(FILL)
+            """,
+            sourceName: "@GMLuaDockSizeChangedRegression.lua"
+        )
+
+        _ = try registry.renderFrame(
+            surface: surface,
+            viewportWidth: 320,
+            viewportHeight: 180
+        )
+        try state.execute(
+            """
+            assert(DOCK_SIZE_CHANGE_CALLS == 1)
+            assert(DOCK_CALLBACK_WIDTH == 320 and DOCK_CALLBACK_HEIGHT == 180)
+            assert(DOCK_CALLBACK_OBSERVED_WIDTH == 320)
+            assert(DOCK_CALLBACK_OBSERVED_HEIGHT == 180)
+            assert(DOCK_LAYOUT_CALLS == 1)
+            assert(DOCK_LAYOUT_WIDTH == 320 and DOCK_LAYOUT_HEIGHT == 180)
+            assert(DOCK_LAYOUT_OBSERVED_WIDTH == 320)
+            assert(DOCK_LAYOUT_OBSERVED_HEIGHT == 180)
+            """,
+            sourceName: "@GMLuaDockFinalSizeObservedByLayout.lua"
+        )
+
+        _ = try registry.renderFrame(
+            surface: surface,
+            viewportWidth: 320,
+            viewportHeight: 180
+        )
+        try state.execute(
+            """
+            assert(DOCK_SIZE_CHANGE_CALLS == 1)
+            assert(DOCK_LAYOUT_CALLS == 1)
+            """,
+            sourceName: "@GMLuaDockSameSizeNoOp.lua"
+        )
+    }
+
+    func testLateChildLayoutRevisitsSizeToChildrenCanvasToStableFrame() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let surface = try GMLuaSurface.install(into: state)
+        let registry = try GMLuaVGUI.install(
+            into: state,
+            typeSystem: typeSystem,
+            surfaceCommandState: surface
+        )
+
+        try state.execute(
+            """
+            LATE_CANVAS = assert(vgui.Create("Panel"))
+            LATE_CANVAS:SetSize(308, 18)
+            LATE_CANVAS.LayoutCalls = 0
+            function LATE_CANVAS:PerformLayout()
+                self.LayoutCalls = self.LayoutCalls + 1
+                self:SizeToChildren(false, true)
+            end
+
+            LATE_CONTROL_PANEL = assert(vgui.Create("Panel", LATE_CANVAS))
+            LATE_CONTROL_PANEL:SetPos(2, 2)
+            LATE_CONTROL_PANEL:SetSize(304, 16)
+            LATE_CONTROL_PANEL.LayoutCalls = 0
+            function LATE_CONTROL_PANEL:PerformLayout()
+                self.LayoutCalls = self.LayoutCalls + 1
+                self:SetTall(385)
+            end
+
+            LATE_CANVAS:InvalidateLayout()
+            LATE_CONTROL_PANEL:InvalidateLayout()
+            """,
+            sourceName: "@GMLuaLateSizeToChildrenFixedPointSetup.lua"
+        )
+
+        _ = try registry.renderFrame(
+            surface: surface,
+            viewportWidth: 1280,
+            viewportHeight: 720
+        )
+        let fixedPointProbe = try state.executeReturningValues(
+            """
+            return LATE_CONTROL_PANEL:GetTall(), LATE_CANVAS:GetTall(),
+                LATE_CONTROL_PANEL.LayoutCalls, LATE_CANVAS.LayoutCalls
+            """,
+            sourceName: "@GMLuaLateSizeToChildrenFixedPointStable.lua"
+        )
+        guard fixedPointProbe.count == 4,
+              case .number(385) = fixedPointProbe[0],
+              case .number(387) = fixedPointProbe[1],
+              case .number(1) = fixedPointProbe[2],
+              case .number(2) = fixedPointProbe[3] else {
+            return XCTFail("unexpected fixed-point geometry: \(fixedPointProbe)")
+        }
+        let stableLayoutPassCount = registry.completedLayoutPassCount
+
+        _ = try registry.renderFrame(
+            surface: surface,
+            viewportWidth: 1280,
+            viewportHeight: 720
+        )
+        XCTAssertEqual(registry.completedLayoutPassCount, stableLayoutPassCount)
+        try state.execute(
+            """
+            assert(LATE_CONTROL_PANEL.LayoutCalls == 1)
+            assert(LATE_CANVAS.LayoutCalls == 2)
+            """,
+            sourceName: "@GMLuaLateSizeToChildrenFixedPointNoOp.lua"
+        )
+    }
+
     func testLogicalEnginePanelStateSupportsScriptedDPanelBase() throws {
         let state = LuaState(output: { _ in })
         let typeSystem = try GMLuaTypeSystem.install(
@@ -160,17 +732,34 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
             )
         )
 
-        try state.execute(
-            String(contentsOf: fixtureURL, encoding: .utf8),
-            sourceName: "@GLuaPanelEngineControlRegression.lua"
-        )
+        do {
+            try state.execute(
+                String(contentsOf: fixtureURL, encoding: .utf8),
+                sourceName: "@GLuaPanelEngineControlRegression.lua"
+            )
+        } catch {
+            return XCTFail(GMLuaRuntime.describe(error))
+        }
 
         XCTAssertEqual(registry.registeredControlCount, 1)
-        XCTAssertEqual(registry.livePanelCount, 0)
+        XCTAssertEqual(registry.livePanelCount, 1)
         XCTAssertFalse(registry.hasPlatformViewBacking)
         guard case .boolean(true) = state.getGlobal("GLUA_PANEL_ENGINE_CONTROL_REGRESSION_OK") else {
             return XCTFail("logical engine Panel fixture did not reach its success sentinel")
         }
+        _ = try registry.performPendingLayouts()
+        try state.execute(
+            """
+            assert(not IsValid(GLUA_PANEL_ENGINE_DEFERRED_PARENT))
+            assert(not GLUA_PANEL_ENGINE_DEFERRED_PARENT:IsMarkedForDeletion())
+            assert(not IsValid(GLUA_PANEL_ENGINE_DEFERRED_CHILD))
+            assert(not IsValid(GLUA_PANEL_ENGINE_DEFERRED_SECOND))
+            assert(not GLUA_PANEL_ENGINE_DEFERRED_SECOND:IsMarkedForDeletion())
+            assert(#vgui.GetAll() == 0)
+            """,
+            sourceName: "@GLuaPanelEngineControlDeferredRemovalPass.lua"
+        )
+        XCTAssertEqual(registry.livePanelCount, 0)
     }
 
     func testNativePanelIdentityRegistryAndScriptedControlInheritance() throws {
@@ -718,7 +1307,7 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
 
             local panel = assert(vgui.Create("Panel"))
             assert(pcall(panel.GetContentSize, panel) == false)
-            assert(type(LABEL.SetWrap) == "nil")
+            assert(type(LABEL.SetWrap) == "function")
 
             LABEL:SetFontInternal("FontThatDoesNotExist")
             LABEL:SetText("fallback")
@@ -730,6 +1319,249 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
 
         XCTAssertEqual(surface.selectedFontName, LuaString("Trebuchet24"))
         XCTAssertEqual(surface.textMeasurementFidelity, .platformGlyphMetrics)
+    }
+
+    func testLabelSizingWrapAndNativePerformLayoutUseMeasuredContent() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let surface = try GMLuaSurface.install(into: state)
+        let registry = try GMLuaVGUI.install(
+            into: state,
+            typeSystem: typeSystem,
+            surfaceCommandState: surface
+        )
+
+        let values = try state.executeReturningValues(
+            """
+            local label = assert(vgui.Create("Label"))
+            label:SetFont("Default")
+            label:SetText("AAAA BBBB")
+
+            local tw, th = label:GetTextSize()
+
+            label:SetSize(20, 100)
+            label:SetWrap(true)
+            local wrappedW, wrappedH = label:GetContentSize()
+
+            label:SizeToContentsY(5)
+            local afterYW, afterYH = label:GetSize()
+            label:SizeToContentsX("2")
+            local afterXW, afterXH = label:GetSize()
+
+            label:SetWrap(false)
+            label:SizeToContents()
+            local sizedW, sizedH = label:GetSize()
+
+            label:SetText("AAAA")
+            label:SetTextInset(0, 3)
+            label:SetSize(100, 20)
+            label:PerformLayout()
+            local laidOutW, laidOutH = label:GetContentSize()
+
+            return label:GetFont(), tw, th, wrappedW, wrappedH,
+                   afterYW, afterYH, afterXW, afterXH,
+                   sizedW, sizedH, laidOutW, laidOutH
+            """,
+            sourceName: "@GMLuaLabelMeasuredSizingRegression.lua"
+        )
+        guard values.count == 13,
+              case let .string(font) = values[0],
+              case let .number(textWidth) = values[1],
+              case let .number(textHeight) = values[2],
+              case let .number(wrappedWidth) = values[3],
+              case let .number(wrappedHeight) = values[4],
+              case let .number(afterYWidth) = values[5],
+              case let .number(afterYHeight) = values[6],
+              case let .number(afterXWidth) = values[7],
+              case let .number(afterXHeight) = values[8],
+              case let .number(sizedWidth) = values[9],
+              case let .number(sizedHeight) = values[10],
+              case let .number(laidOutWidth) = values[11],
+              case let .number(laidOutHeight) = values[12] else {
+            return XCTFail("Label sizing probe did not return its numeric contract")
+        }
+        XCTAssertEqual(font, LuaString("Default"))
+        XCTAssertEqual(textWidth, 59)
+        XCTAssertEqual(textHeight, 13)
+        XCTAssertEqual(wrappedWidth, 20)
+        XCTAssertEqual(wrappedHeight, 39)
+        XCTAssertEqual(afterYWidth, 20)
+        XCTAssertEqual(afterYHeight, 44)
+        XCTAssertEqual(afterXWidth, 22)
+        XCTAssertEqual(afterXHeight, 44)
+        XCTAssertEqual(sizedWidth, 59)
+        XCTAssertEqual(sizedHeight, 13)
+        XCTAssertEqual(laidOutWidth, 26)
+        XCTAssertEqual(laidOutHeight, 16)
+
+        let snapshot = try XCTUnwrap(registry.textPanelStateSnapshots.first)
+        XCTAssertFalse(snapshot.wrapsText)
+    }
+
+    func testGenericPanelSizeToContentsUsesDirectChildBoundsAndStableSizeIsNoOp() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        _ = try GMLuaVGUI.install(into: state, typeSystem: typeSystem)
+
+        try state.execute(
+            """
+            local panelMeta = FindMetaTable("Panel")
+            local PROBE = {}
+            function PROBE:OnSizeChanged(width, height)
+                GENERIC_SIZE_CALLS = (GENERIC_SIZE_CALLS or 0) + 1
+                GENERIC_SIZE_WIDTH = self:GetWide()
+                GENERIC_SIZE_HEIGHT = self:GetTall()
+                GENERIC_SIZE_ARGUMENT_WIDTH = width
+                GENERIC_SIZE_ARGUMENT_HEIGHT = height
+                panelMeta.OnSizeChanged(self, width, height)
+            end
+            vgui.Register("GenericSizeToContentsProbe", PROBE, "Panel")
+
+            local parent = vgui.Create("GenericSizeToContentsProbe")
+            parent:SetSize(320, 240)
+            GENERIC_SIZE_CALLS = 0
+
+            local first = vgui.Create("Panel", parent)
+            first:SetPos(10, 20)
+            first:SetSize(30, 40)
+
+            local farthest = vgui.Create("Panel", parent)
+            farthest:SetPos(70, 15)
+            farthest:SetSize(50, 100)
+
+            -- Descendants do not enlarge the direct child extent.
+            local grandchild = vgui.Create("Panel", first)
+            grandchild:SetPos(500, 600)
+            grandchild:SetSize(20, 30)
+
+            parent:SizeToContents()
+            assert(parent:GetWide() == 120 and parent:GetTall() == 115)
+            assert(GENERIC_SIZE_CALLS == 1)
+            assert(GENERIC_SIZE_WIDTH == 120 and GENERIC_SIZE_HEIGHT == 115)
+            assert(GENERIC_SIZE_ARGUMENT_WIDTH == 120 and GENERIC_SIZE_ARGUMENT_HEIGHT == 115)
+
+            parent:SizeToContents()
+            assert(GENERIC_SIZE_CALLS == 1)
+            """,
+            sourceName: "@GMLuaGenericPanelSizeToContentsRegression.lua"
+        )
+    }
+
+    func testBundledStockDCheckBoxLabelCallsEngineSizeToContentsAtLine129() throws {
+        let fileSystem = try GMLuaHostDirectoryFileSystem(
+            rootURL: GModGameAssets.clientContentRootURL(),
+            writable: false
+        )
+        let runtime = GMLuaRuntime(
+            realm: .client,
+            logger: { _ in },
+            virtualFileSystem: fileSystem,
+            bootstrapMode: .strict,
+            initialViewport: GMLuaViewportSize(width: 810, height: 1_080)
+        )
+        defer { _ = runtime.close() }
+        runtime.resourceRegistry?.setMaterialPixelResolver(
+            GMLuaVPKMaterialPixelResolver(
+                looseFileSystem: fileSystem,
+                archivesInPriorityOrder: []
+            )
+        )
+
+        try runtime.loadFile("lua/includes/init.lua")
+        try runtime.loadFile("lua/derma/init.lua")
+        try runtime.loadFile("lua/vgui/dpanel.lua")
+        try runtime.loadFile("lua/vgui/dlabel.lua")
+        try runtime.loadFile("lua/vgui/dbutton.lua")
+        try runtime.loadFile("lua/vgui/dcheckbox.lua")
+        try runtime.loadFile("lua/skins/default.lua")
+
+        try runtime.execute(
+            """
+            local panelMeta = FindMetaTable("Panel")
+            assert(type(panelMeta.SizeToContents) == "function")
+            assert(type(panelMeta.GetTextSize) == "function")
+            assert(type(panelMeta.SetWrap) == "function")
+
+            CHECK = assert(vgui.Create("DCheckBoxLabel"))
+            CHECK:SetText("Sandbox")
+            assert(CHECK:GetText() == "Sandbox")
+            local contentW, contentH = CHECK.Label:GetContentSize()
+            assert(CHECK.Label:GetWide() == contentW)
+            assert(CHECK.Label:GetTall() == contentH)
+            assert(contentW > 0 and contentH > 0)
+
+            CHECK:SetFont("DermaDefaultBold")
+            local textW, textH = CHECK.Label:GetTextSize()
+            assert(textW > 0 and textH > 0)
+
+            WRAPPED = assert(vgui.Create("DLabel"))
+            WRAPPED:SetWide(30)
+            WRAPPED:SetText("AAAA BBBB")
+            WRAPPED:SetWrap(true)
+            assert(type(WRAPPED.SetAutoStretchVertical) == "function")
+            WRAPPED:SetAutoStretchVertical(true)
+            WRAPPED:Think()
+            assert(WRAPPED:GetTall() > 13)
+            """,
+            sourceName: "@GMLuaBundledDCheckBoxSizeToContentsRegression.lua"
+        )
+
+        let registry = try XCTUnwrap(runtime.vguiRegistry)
+        XCTAssertTrue(registry.missingMethodDiagnostics.isEmpty)
+    }
+
+    func testMissingMethodDiagnosticsPreserveNilLookupAndClassifyLifecycleCall() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: typeSystem)
+
+        try state.execute(
+            """
+            local PANEL = {}
+            function PANEL:KnownMethod()
+                return true
+            end
+            function PANEL:PerformLayout()
+                assert(self:KnownMethod())
+                assert(type(self.MissingThing) == "nil")
+                self:MissingThing()
+            end
+            vgui.Register("MissingDiagnosticPanel", PANEL, "Panel")
+
+            MISSING_DIAGNOSTIC_PANEL = assert(vgui.Create("MissingDiagnosticPanel"))
+            assert(type(MISSING_DIAGNOSTIC_PANEL.MissingThing) == "nil")
+            MISSING_DIAGNOSTIC_PANEL:InvalidateLayout()
+            """,
+            sourceName: "@GMLuaVGUIMissingMethodLifecycle.lua"
+        )
+        XCTAssertTrue(registry.missingMethodDiagnostics.isEmpty)
+
+        XCTAssertThrowsError(try registry.performPendingLayouts()) { error in
+            XCTAssertTrue(String(describing: error).contains(
+                "[VGUI][MISSING] class=MissingDiagnosticPanel method=MissingThing " +
+                    "source=GMLuaVGUIMissingMethodLifecycle.lua:8"
+            ))
+        }
+        let diagnostic = try XCTUnwrap(registry.missingMethodDiagnostics.last)
+        XCTAssertEqual(diagnostic.requestedClassName, "MissingDiagnosticPanel")
+        XCTAssertEqual(diagnostic.engineClassName, "Panel")
+        XCTAssertEqual(diagnostic.methodName, "MissingThing")
+        XCTAssertEqual(diagnostic.source, "GMLuaVGUIMissingMethodLifecycle.lua")
+        XCTAssertEqual(diagnostic.line, 8)
+        XCTAssertEqual(
+            diagnostic.logLine,
+            "[VGUI][MISSING] class=MissingDiagnosticPanel method=MissingThing " +
+                "source=GMLuaVGUIMissingMethodLifecycle.lua:8"
+        )
     }
 
     func testSyntheticDButtonSizeToContentsXUsesLabelContentWidthFormula() throws {
@@ -830,6 +1662,328 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
         registry.connectPlatformBridge(textBacking: true)
         XCTAssertTrue(registry.hasPlatformViewBacking)
         XCTAssertTrue(registry.hasPlatformTextBacking)
+    }
+
+    func testNoClippingWidensOnlyLuaPaintAndPaintOverNotNativeTextOrHitTesting() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let surface = try GMLuaSurface.install(into: state)
+        let registry = try GMLuaVGUI.install(
+            into: state,
+            typeSystem: typeSystem,
+            surfaceCommandState: surface
+        )
+        try state.execute(
+            """
+            local PROBE = {}
+            function PROBE:Paint()
+                surface.SetDrawColor(10, 20, 30, 255)
+                surface.DrawRect(-15, 0, 40, 10)
+            end
+            function PROBE:PaintOver()
+                surface.SetDrawColor(40, 50, 60, 255)
+                surface.DrawRect(0, 12, 20, 5)
+            end
+            vgui.Register("NoClippingPaintProbe", PROBE, "Label")
+
+            NOCLIP_ROOT = assert(vgui.Create("Panel"))
+            NOCLIP_ROOT:SetPos(20, 20)
+            NOCLIP_ROOT:SetSize(40, 40)
+            NOCLIP_PROBE = assert(vgui.Create("NoClippingPaintProbe", NOCLIP_ROOT))
+            NOCLIP_PROBE:SetPos(30, 5)
+            NOCLIP_PROBE:SetSize(20, 20)
+            NOCLIP_PROBE:SetText("native")
+
+            assert(select("#", NOCLIP_PROBE:NoClipping(true)) == 0)
+            assert(pcall(NOCLIP_PROBE.NoClipping, NOCLIP_PROBE, 1) == false)
+            """,
+            sourceName: "@GMLuaPanelNoClippingPaintSetup.lua"
+        )
+
+        let tree = registry.renderTree(viewportWidth: 100, viewportHeight: 100)
+        let probe = try XCTUnwrap(tree.first(where: {
+            $0.requestedClassName == "NoClippingPaintProbe"
+        }))
+        XCTAssertEqual(probe.frame, GMLuaPanelRect(x: 50, y: 25, width: 20, height: 20))
+        XCTAssertEqual(probe.clipRect, GMLuaPanelRect(x: 50, y: 25, width: 10, height: 20))
+        XCTAssertTrue(probe.paintClippingDisabled)
+        XCTAssertEqual(probe.paintClipRect, GMLuaPanelRect(x: 0, y: 0, width: 100, height: 100))
+
+        let frame = try registry.renderFrame(
+            surface: surface,
+            viewportWidth: 100,
+            viewportHeight: 100
+        )
+        XCTAssertEqual(frame.commands.count, 3)
+        guard case let .rectangle(paintFrame, _, paintClip) = frame.commands[0],
+              case let .text(text, _, _, _, textClip) = frame.commands[1],
+              case let .rectangle(paintOverFrame, _, paintOverClip) = frame.commands[2] else {
+            return XCTFail("NoClipping probe emitted an unexpected draw-command sequence")
+        }
+        XCTAssertEqual(paintFrame, GMLuaPanelRect(x: 35, y: 25, width: 40, height: 10))
+        XCTAssertEqual(paintClip, GMLuaPanelRect(x: 0, y: 0, width: 100, height: 100))
+        XCTAssertEqual(text, LuaString("native"))
+        XCTAssertEqual(textClip, probe.clipRect)
+        XCTAssertEqual(paintOverFrame, GMLuaPanelRect(x: 50, y: 37, width: 20, height: 5))
+        XCTAssertEqual(paintOverClip, paintClip)
+
+        let outsideParent = try registry.dispatchPointerEvent(
+            x: 65,
+            y: 30,
+            phase: .moved,
+            timestamp: 1,
+            viewportWidth: 100,
+            viewportHeight: 100
+        )
+        XCTAssertNotEqual(outsideParent.hitPanelIdentifier, probe.identifier)
+        let insideParent = try registry.dispatchPointerEvent(
+            x: 55,
+            y: 30,
+            phase: .moved,
+            timestamp: 1.1,
+            viewportWidth: 100,
+            viewportHeight: 100
+        )
+        XCTAssertEqual(insideParent.hitPanelIdentifier, probe.identifier)
+
+        try state.execute(
+            "NOCLIP_PROBE:NoClipping(false)",
+            sourceName: "@GMLuaPanelNoClippingRestore.lua"
+        )
+        let restoredTree = registry.renderTree(viewportWidth: 100, viewportHeight: 100)
+        let restoredProbe = try XCTUnwrap(restoredTree.first(where: {
+            $0.identifier == probe.identifier
+        }))
+        XCTAssertFalse(restoredProbe.paintClippingDisabled)
+        XCTAssertEqual(restoredProbe.paintClipRect, restoredProbe.clipRect)
+        let restoredFrame = try registry.renderFrame(
+            surface: surface,
+            viewportWidth: 100,
+            viewportHeight: 100
+        )
+        guard case let .rectangle(_, _, restoredPaintClip) = restoredFrame.commands[0],
+              case let .rectangle(_, _, restoredPaintOverClip) = restoredFrame.commands[2] else {
+            return XCTFail("restored clipping probe emitted unexpected commands")
+        }
+        XCTAssertEqual(restoredPaintClip, restoredProbe.clipRect)
+        XCTAssertEqual(restoredPaintOverClip, restoredProbe.clipRect)
+    }
+
+    func testStockDColorButtonDrawFilledRectUsesPanelRectColorAlphaClipAndBudget() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let surface = try GMLuaSurface.install(
+            into: state,
+            maximumDrawCommandCount: 2
+        )
+        let registry = try GMLuaVGUI.install(
+            into: state,
+            typeSystem: typeSystem,
+            surfaceCommandState: surface
+        )
+        try state.execute(
+            """
+            function Color(r, g, b, a)
+                return { r = r, g = g, b = b, a = a }
+            end
+
+            local BUTTON = {}
+            function BUTTON:Paint()
+                local panelColor = self.PaintColor
+                -- Exact rendering shape used by stock DColorButton:Paint.
+                surface.SetDrawColor(
+                    panelColor.r, panelColor.g, panelColor.b, panelColor.a
+                )
+                self:DrawFilledRect()
+                return true
+            end
+            vgui.Register("DColorButtonShape", BUTTON, "Label")
+
+            FILLED_ROOT = assert(vgui.Create("Panel"))
+            FILLED_ROOT:SetPos(10, 10)
+            FILLED_ROOT:SetSize(30, 40)
+            FILLED_ROOT:SetAlpha(128)
+
+            FILLED_CLIPPED = assert(vgui.Create("DColorButtonShape", FILLED_ROOT))
+            FILLED_CLIPPED:SetPos(20, 5)
+            FILLED_CLIPPED:SetSize(20, 10)
+            FILLED_CLIPPED:SetAlpha(128)
+            FILLED_CLIPPED.PaintColor = Color(10, 20, 30, 200)
+
+            FILLED_NOCLIP = assert(vgui.Create("DColorButtonShape", FILLED_ROOT))
+            FILLED_NOCLIP:SetPos(20, 18)
+            FILLED_NOCLIP:SetSize(20, 10)
+            FILLED_NOCLIP:SetAlpha(128)
+            FILLED_NOCLIP.PaintColor = Color(40, 50, 60, 160)
+            FILLED_NOCLIP:NoClipping(true)
+
+            -- This third valid draw proves Panel:DrawFilledRect participates
+            -- in the same bounded Surface command budget.
+            FILLED_BUDGET = assert(vgui.Create("DColorButtonShape", FILLED_ROOT))
+            FILLED_BUDGET:SetPos(0, 30)
+            FILLED_BUDGET:SetSize(5, 5)
+            FILLED_BUDGET.PaintColor = Color(70, 80, 90, 255)
+
+            assert(select("#", FILLED_CLIPPED:DrawFilledRect()) == 0)
+            assert(pcall(FILLED_CLIPPED.DrawFilledRect, {}) == false)
+            """,
+            sourceName: "@GMLuaStockDColorButtonDrawFilledRectSetup.lua"
+        )
+
+        let frame = try registry.renderFrame(
+            surface: surface,
+            viewportWidth: 100,
+            viewportHeight: 100
+        )
+        XCTAssertEqual(frame.captureDiagnostics.attemptedCommandCount, 3)
+        XCTAssertEqual(frame.captureDiagnostics.retainedCommandCount, 2)
+        XCTAssertEqual(frame.captureDiagnostics.droppedCommandCount, 1)
+        XCTAssertEqual(frame.commands.count, 2)
+        guard case let .rectangle(clippedFrame, clippedColor, clippedClip) = frame.commands[0],
+              case let .rectangle(noClipFrame, noClipColor, noClipClip) = frame.commands[1] else {
+            return XCTFail("DrawFilledRect emitted an unexpected command sequence")
+        }
+        XCTAssertEqual(clippedFrame, GMLuaPanelRect(x: 30, y: 15, width: 20, height: 10))
+        XCTAssertEqual(clippedClip, GMLuaPanelRect(x: 30, y: 15, width: 10, height: 10))
+        XCTAssertEqual(clippedColor.red, 10)
+        XCTAssertEqual(clippedColor.green, 20)
+        XCTAssertEqual(clippedColor.blue, 30)
+        let cumulativeAlpha = 128.0 * 128.0 / 255.0
+        XCTAssertEqual(clippedColor.alpha, 200.0 * cumulativeAlpha / 255.0, accuracy: 0.000_001)
+
+        XCTAssertEqual(noClipFrame, GMLuaPanelRect(x: 30, y: 28, width: 20, height: 10))
+        XCTAssertEqual(noClipClip, GMLuaPanelRect(x: 0, y: 0, width: 100, height: 100))
+        XCTAssertEqual(noClipColor.red, 40)
+        XCTAssertEqual(noClipColor.green, 50)
+        XCTAssertEqual(noClipColor.blue, 60)
+        XCTAssertEqual(noClipColor.alpha, 160.0 * cumulativeAlpha / 255.0, accuracy: 0.000_001)
+    }
+
+    func testOutlinedRectUsesInnerEdgesTinyFillClipAlphaAndAtomicBudget() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let surface = try GMLuaSurface.install(
+            into: state,
+            maximumDrawCommandCount: 5
+        )
+        let registry = try GMLuaVGUI.install(
+            into: state,
+            typeSystem: typeSystem,
+            surfaceCommandState: surface
+        )
+        try state.execute(
+            """
+            assert(type(surface.DrawOutlinedRect) == "function")
+            assert(pcall(surface.DrawOutlinedRect, 0, 0, 1) == false)
+            assert(pcall(surface.DrawOutlinedRect, {}, 0, 1, 1) == false)
+            assert(pcall(surface.DrawOutlinedRect, 0, 0, 1, 1, 0 / 0) == false)
+            assert(pcall(surface.DrawOutlinedRect, 0, 0, 1, 1, "wide") == false)
+            assert(select("#", surface.DrawOutlinedRect(0, 0, 1, 1, 0)) == 0)
+
+            local OUTLINE = {}
+            function OUTLINE:Paint()
+                local color = self.PaintColor
+                surface.SetDrawColor(color[1], color[2], color[3], color[4])
+                if self.PanelShorthand then
+                    -- Stock DAlphaBar/DColorCube/DRGBPicker shape.
+                    self:DrawOutlinedRect()
+                else
+                    surface.DrawOutlinedRect(
+                        self.OutlineX or 0,
+                        self.OutlineY or 0,
+                        self.OutlineW or self:GetWide(),
+                        self.OutlineH or self:GetTall(),
+                        self.Thickness
+                    )
+                end
+                return true
+            end
+            vgui.Register("DOutlinedRectShape", OUTLINE, "Panel")
+
+            OUTLINE_ROOT = assert(vgui.Create("Panel"))
+            OUTLINE_ROOT:SetPos(10, 10)
+            OUTLINE_ROOT:SetSize(30, 40)
+            OUTLINE_ROOT:SetAlpha(128)
+
+            OUTLINE_CLIPPED = assert(vgui.Create("DOutlinedRectShape", OUTLINE_ROOT))
+            OUTLINE_CLIPPED:SetPos(20, 5)
+            OUTLINE_CLIPPED:SetSize(20, 10)
+            OUTLINE_CLIPPED:SetAlpha(128)
+            OUTLINE_CLIPPED.PaintColor = { 10, 20, 30, 200 }
+            OUTLINE_CLIPPED.OutlineX = -2
+            OUTLINE_CLIPPED.OutlineY = -1
+            OUTLINE_CLIPPED.OutlineW = 8
+            OUTLINE_CLIPPED.OutlineH = 6
+            OUTLINE_CLIPPED.Thickness = 2
+
+            OUTLINE_TINY = assert(vgui.Create("DOutlinedRectShape", OUTLINE_ROOT))
+            OUTLINE_TINY:SetPos(20, 18)
+            OUTLINE_TINY:SetSize(2, 1)
+            OUTLINE_TINY:SetAlpha(128)
+            OUTLINE_TINY.PaintColor = { 40, 50, 60, 160 }
+            OUTLINE_TINY.PanelShorthand = true
+            OUTLINE_TINY:NoClipping(true)
+
+            -- The remaining budget cannot retain a partial four-edge outline.
+            OUTLINE_BUDGET = assert(vgui.Create("DOutlinedRectShape", OUTLINE_ROOT))
+            OUTLINE_BUDGET:SetPos(0, 30)
+            OUTLINE_BUDGET:SetSize(5, 5)
+            OUTLINE_BUDGET.PaintColor = { 70, 80, 90, 255 }
+
+            assert(select("#", OUTLINE_TINY:DrawOutlinedRect()) == 0)
+            assert(pcall(OUTLINE_TINY.DrawOutlinedRect, {}) == false)
+            """,
+            sourceName: "@GMLuaOutlinedRectSetup.lua"
+        )
+
+        let frame = try registry.renderFrame(
+            surface: surface,
+            viewportWidth: 100,
+            viewportHeight: 100
+        )
+        XCTAssertEqual(frame.captureDiagnostics.attemptedCommandCount, 9)
+        XCTAssertEqual(frame.captureDiagnostics.retainedCommandCount, 5)
+        XCTAssertEqual(frame.captureDiagnostics.droppedCommandCount, 4)
+        XCTAssertEqual(frame.commands.count, 5)
+
+        let expectedFrames = [
+            GMLuaPanelRect(x: 28, y: 14, width: 8, height: 2),
+            GMLuaPanelRect(x: 28, y: 18, width: 8, height: 2),
+            GMLuaPanelRect(x: 28, y: 16, width: 2, height: 2),
+            GMLuaPanelRect(x: 34, y: 16, width: 2, height: 2),
+            GMLuaPanelRect(x: 30, y: 28, width: 2, height: 1)
+        ]
+        let clippedClip = GMLuaPanelRect(x: 30, y: 15, width: 10, height: 10)
+        let viewportClip = GMLuaPanelRect(x: 0, y: 0, width: 100, height: 100)
+        let cumulativeAlpha = 128.0 * 128.0 / 255.0
+        for (index, command) in frame.commands.enumerated() {
+            guard case let .rectangle(actualFrame, color, clip) = command else {
+                return XCTFail("outlined rectangle emitted a non-rectangle command")
+            }
+            XCTAssertEqual(actualFrame, expectedFrames[index])
+            if index < 4 {
+                XCTAssertEqual(clip, clippedClip)
+                XCTAssertEqual(color.red, 10)
+                XCTAssertEqual(color.green, 20)
+                XCTAssertEqual(color.blue, 30)
+                XCTAssertEqual(color.alpha, 200.0 * cumulativeAlpha / 255.0, accuracy: 0.000_001)
+            } else {
+                XCTAssertEqual(clip, viewportClip)
+                XCTAssertEqual(color.red, 40)
+                XCTAssertEqual(color.green, 50)
+                XCTAssertEqual(color.blue, 60)
+                XCTAssertEqual(color.alpha, 160.0 * cumulativeAlpha / 255.0, accuracy: 0.000_001)
+            }
+        }
     }
 
     func testDockingUsesZPositionAndTransparentPanelsStillConsumeSpace() throws {
@@ -1060,6 +2214,46 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
         )
     }
 
+    func testSizeToChildrenDispatchesChangedFinalSizeAndSameSizeIsNoOp() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        _ = try GMLuaVGUI.install(into: state, typeSystem: typeSystem)
+
+        try state.execute(
+            """
+            local panelMeta = FindMetaTable("Panel")
+            local PROBE = {}
+            function PROBE:OnSizeChanged(width, height)
+                SIZE_TO_CHILDREN_CALLS = (SIZE_TO_CHILDREN_CALLS or 0) + 1
+                SIZE_TO_CHILDREN_WIDTH = width
+                SIZE_TO_CHILDREN_HEIGHT = height
+                panelMeta.OnSizeChanged(self, width, height)
+            end
+            vgui.Register("SizeToChildrenProbe", PROBE, "Panel")
+
+            local parent = vgui.Create("SizeToChildrenProbe")
+            parent:SetSize(320, 240)
+            SIZE_TO_CHILDREN_CALLS = 0
+
+            local child = vgui.Create("Panel", parent)
+            child:SetPos(10, 20)
+            child:SetSize(50, 70)
+
+            parent:SizeToChildren(false, true)
+            assert(SIZE_TO_CHILDREN_CALLS == 1)
+            assert(SIZE_TO_CHILDREN_WIDTH == 320 and SIZE_TO_CHILDREN_HEIGHT == 90)
+            assert(parent:GetWide() == 320 and parent:GetTall() == 90)
+
+            parent:SizeToChildren(false, true)
+            assert(SIZE_TO_CHILDREN_CALLS == 1)
+            """,
+            sourceName: "@GMLuaPanelSizeToChildrenCallbackRegression.lua"
+        )
+    }
+
     func testStockShapedContextMenuExposesWorldClickerWithoutSynthesizingWorldInput() throws {
         let state = LuaState(output: { _ in })
         let typeSystem = try GMLuaTypeSystem.install(
@@ -1166,6 +2360,8 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
             ENTRY:SetAllowNonAsciiCharacters(true)
             function ENTRY:OnTextChanged() TEXT_CHANGED = (TEXT_CHANGED or 0) + 1 end
             function ENTRY:OnValueChange(value) VALUE_CHANGED = (VALUE_CHANGED or 0) + 1 end
+            assert(vgui.GetHoveredPanel() == nil)
+            assert(vgui.GetKeyboardFocus() == nil)
             """,
             sourceName: "@GMLuaPanelInputRegression.lua"
         )
@@ -1175,6 +2371,13 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
             viewportWidth: 810, viewportHeight: 1080
         )
         XCTAssertEqual(began.callbackNames, ["OnCursorEntered", "OnMousePressed"])
+        try state.execute(
+            """
+            assert(vgui.GetHoveredPanel() == BUTTON_PANEL)
+            assert(vgui.GetKeyboardFocus() == BUTTON_PANEL)
+            """,
+            sourceName: "@GMLuaPanelHoveredAndFocusButtonCheckpoint.lua"
+        )
         let ended = try registry.dispatchPointerEvent(
             x: 120, y: 220, phase: .ended, timestamp: 1.1,
             viewportWidth: 810, viewportHeight: 1080
@@ -1195,6 +2398,11 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
             assert(CLICKED == 1 and DOUBLE_CLICKED == nil)
             assert(TEXT_CHANGED == 1 and VALUE_CHANGED == nil)
             assert(ENTRY:GetValue() == "テスト")
+            assert(vgui.GetHoveredPanel() == ENTRY)
+            assert(vgui.GetKeyboardFocus() == ENTRY)
+            ENTRY:Remove()
+            assert(vgui.GetHoveredPanel() == nil)
+            assert(vgui.GetKeyboardFocus() == nil)
             """,
             sourceName: "@GMLuaPanelInputCheckpoint.lua"
         )
@@ -1455,6 +2663,171 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
         )
     }
 
+    func testTextEntryCaretTracksSetTextSetCaretAndHostInsertion() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: typeSystem)
+        try state.execute(
+            """
+            local STOCK_SHAPED = {}
+            function STOCK_SHAPED:SetValue(strValue)
+                -- Exact caret-preservation sequence from bundled dtextentry.lua.
+                local caretPos = self:GetCaretPos()
+                self:SetText(strValue)
+                self:SetCaretPos(caretPos)
+            end
+            vgui.Register("CaretPreservingTextEntry", STOCK_SHAPED, "TextEntry")
+
+            CARET_ENTRY = assert(vgui.Create("CaretPreservingTextEntry"))
+            assert(CARET_ENTRY:GetCaretPos() == 0)
+            CARET_ENTRY:SetText("A日本B")
+            assert(CARET_ENTRY:GetCaretPos() == 0)
+            assert(select("#", CARET_ENTRY:SetCaretPos(2)) == 0)
+            assert(CARET_ENTRY:GetCaretPos() == 2)
+
+            CARET_ENTRY:SetValue("A日本B")
+            assert(CARET_ENTRY:GetCaretPos() == 2)
+            CARET_ENTRY:SetCaretPos(-100)
+            assert(CARET_ENTRY:GetCaretPos() == 0)
+            CARET_ENTRY:SetCaretPos(100)
+            assert(CARET_ENTRY:GetCaretPos() == 4)
+            CARET_ENTRY:SetCaretPos(1.9)
+            assert(CARET_ENTRY:GetCaretPos() == 1)
+            CARET_ENTRY:SetCaretPos(2)
+            CARET_ENTRY:SetAllowNonAsciiCharacters(true)
+
+            local panel = assert(vgui.Create("Panel"))
+            assert(pcall(panel.GetCaretPos, panel) == false)
+            assert(pcall(CARET_ENTRY.SetCaretPos, CARET_ENTRY, "2") == false)
+            """,
+            sourceName: "@GMLuaTextEntryCaretMutationSetup.lua"
+        )
+        try state.execute(
+            "CARET_ENTRY:RequestFocus()",
+            sourceName: "@GMLuaTextEntryCaretMutationFocus.lua"
+        )
+        XCTAssertNotNil(try registry.insertText("語"))
+        try state.execute(
+            """
+            assert(CARET_ENTRY:GetText() == "A日語本B")
+            assert(CARET_ENTRY:GetCaretPos() == 3)
+            CARET_ENTRY:SetAllowNonAsciiCharacters(false)
+            CARET_ENTRY:SetCaretPos(1)
+            """,
+            sourceName: "@GMLuaTextEntryCaretUnicodeInsertion.lua"
+        )
+        XCTAssertNotNil(try registry.insertText("XテY"))
+        try state.execute(
+            """
+            assert(CARET_ENTRY:GetText() == "AXY日語本B")
+            assert(CARET_ENTRY:GetCaretPos() == 3)
+            """,
+            sourceName: "@GMLuaTextEntryCaretRestrictedInsertion.lua"
+        )
+        let snapshot = try XCTUnwrap(registry.textPanelStateSnapshots.first(where: {
+            $0.requestedClassName == "CaretPreservingTextEntry"
+        }))
+        XCTAssertEqual(snapshot.caretPosition, 3)
+    }
+
+    func testStockTextEntryPaintUsesCurrentValueInsetColorsAndPanelClip() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let surface = try GMLuaSurface.install(
+            into: state,
+            maximumDrawCommandCount: 1
+        )
+        let registry = try GMLuaVGUI.install(
+            into: state,
+            typeSystem: typeSystem,
+            surfaceCommandState: surface
+        )
+        try state.execute(
+            """
+            function Color(r, g, b, a)
+                return { r = r, g = g, b = b, a = a }
+            end
+
+            local ENABLED = Color(11, 22, 33, 201)
+            local DISABLED = Color(44, 55, 66, 151)
+            local HIGHLIGHT = Color(77, 88, 99, 101)
+            local CURSOR = Color(111, 122, 133, 51)
+            local ENTRY = {}
+            function ENTRY:Paint()
+                local textColor = self:IsEnabled() and ENABLED or DISABLED
+                -- Exact call shape used by default.lua:PaintTextEntry.
+                self:DrawTextEntryText(textColor, HIGHLIGHT, CURSOR)
+                return true
+            end
+            vgui.Register("StockPaintTextEntryProbe", ENTRY, "TextEntry")
+
+            TEXT_ROOT = assert(vgui.Create("Panel"))
+            TEXT_ROOT:SetSize(200, 100)
+            TEXT_ENTRY = assert(vgui.Create("StockPaintTextEntryProbe", TEXT_ROOT))
+            TEXT_ENTRY:SetPos(10, 20)
+            TEXT_ENTRY:SetSize(120, 24)
+            TEXT_ENTRY:SetFont("DermaDefault")
+            TEXT_ENTRY:SetTextInset(4, 2)
+            TEXT_ENTRY:SetText("Search")
+            """,
+            sourceName: "@GMLuaDefaultSkinTextEntryPaintRegression.lua"
+        )
+
+        let enabledFrame = try registry.renderFrame(
+            surface: surface,
+            viewportWidth: 200,
+            viewportHeight: 100
+        )
+        XCTAssertEqual(enabledFrame.captureDiagnostics.attemptedCommandCount, 1)
+        XCTAssertEqual(enabledFrame.captureDiagnostics.droppedCommandCount, 0)
+        guard case let .text(value, position, font, color, clip) =
+                try XCTUnwrap(enabledFrame.commands.first) else {
+            return XCTFail("DrawTextEntryText did not retain one text command")
+        }
+        XCTAssertEqual(value, LuaString("Search"))
+        XCTAssertEqual(font.name, LuaString("DermaDefault"))
+        XCTAssertEqual(position.x, 14)
+        XCTAssertEqual(position.y, 27)
+        XCTAssertEqual(color, GMLuaSurfaceColor(red: 11, green: 22, blue: 33, alpha: 201))
+        XCTAssertEqual(clip, GMLuaPanelRect(x: 10, y: 20, width: 120, height: 24))
+
+        try state.execute(
+            "TEXT_ENTRY:SetEnabled(false)",
+            sourceName: "@GMLuaDisabledTextEntryPaintColor.lua"
+        )
+        let disabledFrame = try registry.renderFrame(
+            surface: surface,
+            viewportWidth: 200,
+            viewportHeight: 100
+        )
+        guard case let .text(_, _, _, disabledColor, _) =
+                try XCTUnwrap(disabledFrame.commands.first) else {
+            return XCTFail("disabled DrawTextEntryText did not retain text")
+        }
+        XCTAssertEqual(
+            disabledColor,
+            GMLuaSurfaceColor(red: 44, green: 55, blue: 66, alpha: 151)
+        )
+
+        try state.execute(
+            "TEXT_ENTRY:SetEnabled(true); TEXT_ENTRY:RequestFocus()",
+            sourceName: "@GMLuaFocusedTextEntryMissingCaretState.lua"
+        )
+        XCTAssertThrowsError(try registry.renderFrame(
+            surface: surface,
+            viewportWidth: 200,
+            viewportHeight: 100
+        )) { error in
+            XCTAssertTrue(String(describing: error).contains("caret and selection state"))
+        }
+    }
+
     func testExpensiveShadowStoresLabelStateAndEmitsShadowBeforeMainText() throws {
         let state = LuaState(output: { _ in })
         let typeSystem = try GMLuaTypeSystem.install(
@@ -1591,6 +2964,101 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
             assert(string.find(message, "attached live viewport", 1, true))
             """,
             sourceName: "@GMLuaRootCenterMissingViewport.lua"
+        )
+    }
+
+    func testLocalAndScreenCoordinatesRoundTripThroughNestedPanelHierarchy() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        _ = try GMLuaVGUI.install(into: state, typeSystem: typeSystem)
+
+        try state.execute(
+            """
+            local root = vgui.Create("Panel")
+            root:SetPos(10, 20)
+
+            local child = vgui.Create("Panel", root)
+            child:SetPos(30, 40)
+
+            local grandchild = vgui.Create("Panel", child)
+            grandchild:SetPos(5, 6)
+
+            local screenX, screenY = grandchild:LocalToScreen(2, 3)
+            assert(screenX == 47 and screenY == 69)
+
+            local localX, localY = grandchild:ScreenToLocal(screenX, screenY)
+            assert(localX == 2 and localY == 3)
+
+            local childScreenX, childScreenY = child:LocalToScreen(-4, 8)
+            assert(childScreenX == 36 and childScreenY == 68)
+            local childLocalX, childLocalY = child:ScreenToLocal(36, 68)
+            assert(childLocalX == -4 and childLocalY == 8)
+
+            assert(pcall(grandchild.LocalToScreen, grandchild, 0 / 0, 0) == false)
+            assert(pcall(grandchild.ScreenToLocal, grandchild, 0, math.huge) == false)
+
+            grandchild:Remove()
+            assert(pcall(grandchild.LocalToScreen, grandchild, 0, 0) == false)
+            """,
+            sourceName: "@GMLuaPanelCoordinateTransformRegression.lua"
+        )
+    }
+
+    func testReparentDispatchesChildCallbacksAfterNewRelationshipIsObservable() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        _ = try GMLuaVGUI.install(into: state, typeSystem: typeSystem)
+
+        try state.execute(
+            """
+            local PROBE = {}
+            function PROBE:OnChildAdded(child)
+                local parent = child:GetParent()
+                PARENT_CHANGE_LOG[#PARENT_CHANGE_LOG + 1] =
+                    self:GetName() .. ":added:" .. parent:GetName()
+                -- DListLayout uses this exact callback to dock every child.
+                child:Dock(TOP)
+            end
+            function PROBE:OnChildRemoved(child)
+                local parent = child:GetParent()
+                PARENT_CHANGE_LOG[#PARENT_CHANGE_LOG + 1] =
+                    self:GetName() .. ":removed:" ..
+                    (IsValid(parent) and parent:GetName() or "nil")
+            end
+            vgui.Register("ParentChangeProbe", PROBE, "Panel")
+
+            local oldParent = vgui.Create("ParentChangeProbe")
+            oldParent:SetName("old")
+            local newParent = vgui.Create("ParentChangeProbe")
+            newParent:SetName("new")
+            local child = vgui.Create("Panel")
+
+            PARENT_CHANGE_LOG = {}
+            child:SetParent(oldParent)
+            assert(table.concat(PARENT_CHANGE_LOG, "|") == "old:added:old")
+            assert(child:GetDock() == TOP)
+
+            PARENT_CHANGE_LOG = {}
+            child:SetParent(newParent)
+            assert(table.concat(PARENT_CHANGE_LOG, "|") ==
+                "old:removed:new|new:added:new")
+
+            -- Reapplying the same parent is a native no-op.
+            child:SetParent(newParent)
+            assert(#PARENT_CHANGE_LOG == 2)
+
+            PARENT_CHANGE_LOG = {}
+            child:SetParent(nil)
+            assert(table.concat(PARENT_CHANGE_LOG, "|") == "new:removed:nil")
+            assert(child:GetParent() == nil)
+            """,
+            sourceName: "@GMLuaPanelParentChangeCallbackRegression.lua"
         )
     }
 }

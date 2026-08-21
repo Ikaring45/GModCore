@@ -52,23 +52,69 @@ public struct GModPlayableInputBoundaryReport: Sendable, Equatable {
     }
 }
 
+public enum GModPlayableClientMenu: String, Sendable, Equatable {
+    case spawn
+    case context
+}
+
+/// One actor-serialized Q/C ownership transaction. The prior lifecycle is
+/// closed before the target opens. If either callback fails, the lane attempts
+/// to restore the prior menu and reports any rollback failure explicitly.
+public struct GModPlayableClientMenuTransitionReport: Sendable, Equatable {
+    public let boundary: GModPlayableInputBoundaryReport
+    public let requestedPriorMenu: GModPlayableClientMenu?
+    public let requestedTargetMenu: GModPlayableClientMenu?
+    public let committedMenu: GModPlayableClientMenu?
+    public let rollbackFailure: String?
+
+    public init(
+        boundary: GModPlayableInputBoundaryReport,
+        requestedPriorMenu: GModPlayableClientMenu?,
+        requestedTargetMenu: GModPlayableClientMenu?,
+        committedMenu: GModPlayableClientMenu?,
+        rollbackFailure: String?
+    ) {
+        self.boundary = boundary
+        self.requestedPriorMenu = requestedPriorMenu
+        self.requestedTargetMenu = requestedTargetMenu
+        self.committedMenu = committedMenu
+        self.rollbackFailure = rollbackFailure
+    }
+
+    public var pointerEpoch: UInt64 { boundary.pointerEpoch }
+    public var inputEpoch: UInt64 { boundary.inputEpoch }
+    public var cancelledActivePointer: Bool {
+        boundary.cancelledActivePointer
+    }
+    public var cancellationFailure: String? { boundary.cancellationFailure }
+    public var lifecycleFailure: String? { boundary.lifecycleFailure }
+}
+
 public struct GModPlayableHostFrameReport: Sendable, Equatable {
     public let fixedTicks: [GModPlayableFixedTickReport]
+    public let inputButtons: GModPlayableInputButtonReport
     public let clientFrame: GMLuaSourceRuntimeRunReport?
     public let clientVGUIFrame: GMLuaSurfaceFrameSnapshot?
+    /// Ordered, exactly-once handoff of CLIENT `surface.PlaySound` calls made
+    /// since the preceding host-frame drain. Repeated paths remain repeated.
+    public let clientSurfaceSounds: GMLuaSurfaceSoundRequestReport
     public let viewportChanged: Bool
     public let playerWalkState: SourceWorldWalkState
 
     public init(
         fixedTicks: [GModPlayableFixedTickReport],
+        inputButtons: GModPlayableInputButtonReport,
         clientFrame: GMLuaSourceRuntimeRunReport?,
         clientVGUIFrame: GMLuaSurfaceFrameSnapshot?,
+        clientSurfaceSounds: GMLuaSurfaceSoundRequestReport,
         viewportChanged: Bool,
         playerWalkState: SourceWorldWalkState
     ) {
         self.fixedTicks = fixedTicks
+        self.inputButtons = inputButtons
         self.clientFrame = clientFrame
         self.clientVGUIFrame = clientVGUIFrame
+        self.clientSurfaceSounds = clientSurfaceSounds
         self.viewportChanged = viewportChanged
         self.playerWalkState = playerWalkState
     }
@@ -188,7 +234,8 @@ public actor GModPlayableSessionLane {
         logger: @escaping @Sendable (
             _ realm: GMLuaRealm,
             _ message: String
-        ) -> Void = { _, _ in }
+        ) -> Void = { _, _ in },
+        progress: @escaping GModPlayableSessionLoadingProgressHandler = { _ in }
     ) throws -> GModPlayableSessionSnapshot {
         dedicatedExecutor.preconditionIsCurrentWorker()
         generation &+= 1
@@ -205,6 +252,7 @@ public actor GModPlayableSessionLane {
             configuration: configuration,
             textMeasurer: textMeasurer,
             logger: logger,
+            progress: progress,
             worldWalkCollisionProvider: worldWalkCollisionProvider
         )
         session = replacement
@@ -254,7 +302,9 @@ public actor GModPlayableSessionLane {
         // Host-frame input can change on a gesture-only frame with no fixed
         // tick. Publish the exact supplied digital word before CLIENT Think or
         // pointer work; do not derive button bits from the analog axes.
-        try session.updateCurrentPlayerInputButtons(movementInput.buttons)
+        let inputButtons = try session.updateCurrentPlayerInputButtons(
+            movementInput.buttons
+        )
 
         var fixedTicks: [GModPlayableFixedTickReport] = []
         fixedTicks.reserveCapacity(fixedTickCount)
@@ -272,10 +322,15 @@ public actor GModPlayableSessionLane {
         let clientVGUIFrame = renderClientVGUIFrame
             ? try session.renderClientVGUIFrame()
             : nil
+        // Drain only after every requested CLIENT boundary has completed. The
+        // command-state queue owns total order and does not collapse repeats.
+        let clientSurfaceSounds = try session.drainClientSurfaceSoundRequests()
         return GModPlayableHostFrameReport(
             fixedTicks: fixedTicks,
+            inputButtons: inputButtons,
             clientFrame: clientFrame,
             clientVGUIFrame: clientVGUIFrame,
+            clientSurfaceSounds: clientSurfaceSounds,
             viewportChanged: viewportChanged,
             playerWalkState: session.playerWalkState
         )
@@ -290,6 +345,102 @@ public actor GModPlayableSessionLane {
         }
         try validate(expectedGeneration: expectedGeneration)
         return try session.renderClientVGUIFrame()
+    }
+
+    @discardableResult
+    public func transitionClientMenu(
+        from priorMenu: GModPlayableClientMenu?,
+        to targetMenu: GModPlayableClientMenu?,
+        cancelActivePointer: Bool = false,
+        cancellationTimestamp: TimeInterval = 0,
+        expectedGeneration: UInt64? = nil,
+        expectedPointerEpoch: UInt64? = nil,
+        expectedInputEpoch: UInt64? = nil
+    ) throws -> GModPlayableClientMenuTransitionReport {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        try validate(expectedPointerEpoch: expectedPointerEpoch)
+        try validate(expectedInputEpoch: expectedInputEpoch)
+        try session.updateCurrentPlayerInputButtons([])
+        let cancellation = cancelActivePointer
+            ? cancelPointerIfNeeded(
+                in: session,
+                timestamp: cancellationTimestamp
+            )
+            : (cancelled: false, failure: nil)
+
+        pointerGestureActive = false
+        lastPointerLocation = nil
+        pointerEpoch &+= 1
+        inputEpoch &+= 1
+
+        var phase = "begin transition"
+        var targetOpenAttempted = false
+        do {
+            if let priorMenu, priorMenu != targetMenu {
+                phase = "close \(priorMenu.rawValue)"
+                try setClientMenu(priorMenu, isOpen: false, in: session)
+            }
+            if let targetMenu, targetMenu != priorMenu {
+                phase = "open \(targetMenu.rawValue)"
+                targetOpenAttempted = true
+                try setClientMenu(targetMenu, isOpen: true, in: session)
+            }
+            return GModPlayableClientMenuTransitionReport(
+                boundary: GModPlayableInputBoundaryReport(
+                    pointerEpoch: pointerEpoch,
+                    inputEpoch: inputEpoch,
+                    cancelledActivePointer: cancellation.cancelled,
+                    cancellationFailure: cancellation.failure
+                ),
+                requestedPriorMenu: priorMenu,
+                requestedTargetMenu: targetMenu,
+                committedMenu: targetMenu,
+                rollbackFailure: nil
+            )
+        } catch {
+            let lifecycleFailure = "\(phase): \(GMLuaRuntime.describe(error))"
+            var rollbackFailures: [String] = []
+            if targetOpenAttempted, let targetMenu, targetMenu != priorMenu {
+                do {
+                    try setClientMenu(targetMenu, isOpen: false, in: session)
+                } catch {
+                    rollbackFailures.append(
+                        "close \(targetMenu.rawValue): " +
+                            GMLuaRuntime.describe(error)
+                    )
+                }
+            }
+            if let priorMenu, priorMenu != targetMenu {
+                do {
+                    try setClientMenu(priorMenu, isOpen: true, in: session)
+                } catch {
+                    rollbackFailures.append(
+                        "reopen \(priorMenu.rawValue): " +
+                            GMLuaRuntime.describe(error)
+                    )
+                }
+            }
+            let rollbackFailure = rollbackFailures.isEmpty
+                ? nil
+                : rollbackFailures.joined(separator: "; ")
+            return GModPlayableClientMenuTransitionReport(
+                boundary: GModPlayableInputBoundaryReport(
+                    pointerEpoch: pointerEpoch,
+                    inputEpoch: inputEpoch,
+                    cancelledActivePointer: cancellation.cancelled,
+                    cancellationFailure: cancellation.failure,
+                    lifecycleFailure: lifecycleFailure
+                ),
+                requestedPriorMenu: priorMenu,
+                requestedTargetMenu: targetMenu,
+                committedMenu: rollbackFailure == nil ? priorMenu : nil,
+                rollbackFailure: rollbackFailure
+            )
+        }
     }
 
     @discardableResult
@@ -327,6 +478,53 @@ public actor GModPlayableSessionLane {
         let lifecycleFailure: String?
         do {
             try session.setSpawnMenuOpen(isOpen)
+            lifecycleFailure = nil
+        } catch {
+            lifecycleFailure = GMLuaRuntime.describe(error)
+        }
+        return GModPlayableInputBoundaryReport(
+            pointerEpoch: pointerEpoch,
+            inputEpoch: inputEpoch,
+            cancelledActivePointer: cancellation.cancelled,
+            cancellationFailure: cancellation.failure,
+            lifecycleFailure: lifecycleFailure
+        )
+    }
+
+    /// Context-menu equivalent of `setSpawnMenuOpen`. The boundary is kept
+    /// separate from the Lua callback so a throwing Addon hook cannot retain a
+    /// host pointer capture or admit a pre-transition movement frame.
+    @discardableResult
+    public func setContextMenuOpen(
+        _ isOpen: Bool,
+        cancelActivePointer: Bool = false,
+        cancellationTimestamp: TimeInterval = 0,
+        expectedGeneration: UInt64? = nil,
+        expectedPointerEpoch: UInt64? = nil,
+        expectedInputEpoch: UInt64? = nil
+    ) throws -> GModPlayableInputBoundaryReport {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        try validate(expectedPointerEpoch: expectedPointerEpoch)
+        try validate(expectedInputEpoch: expectedInputEpoch)
+        try session.updateCurrentPlayerInputButtons([])
+        let cancellation = cancelActivePointer
+            ? cancelPointerIfNeeded(
+                in: session,
+                timestamp: cancellationTimestamp
+            )
+            : (cancelled: false, failure: nil)
+
+        pointerGestureActive = false
+        lastPointerLocation = nil
+        pointerEpoch &+= 1
+        inputEpoch &+= 1
+        let lifecycleFailure: String?
+        do {
+            try session.setContextMenuOpen(isOpen)
             lifecycleFailure = nil
         } catch {
             lifecycleFailure = GMLuaRuntime.describe(error)
@@ -380,6 +578,7 @@ public actor GModPlayableSessionLane {
     @discardableResult
     public func suspendInput(
         cancellationTimestamp: TimeInterval,
+        notifyPauseMenuWillShow: Bool = false,
         expectedGeneration: UInt64? = nil,
         expectedPointerEpoch: UInt64? = nil,
         expectedInputEpoch: UInt64? = nil
@@ -400,11 +599,26 @@ public actor GModPlayableSessionLane {
         lastPointerLocation = nil
         pointerEpoch &+= 1
         inputEpoch &+= 1
+        let lifecycleFailure: String?
+        if notifyPauseMenuWillShow {
+            do {
+                try session.notifyPauseMenuWillShow()
+                lifecycleFailure = nil
+            } catch {
+                lifecycleFailure = GMLuaRuntime.describe(error)
+            }
+        } else {
+            lifecycleFailure = nil
+        }
+        // A paused host has no frame drain. Retire any pre-pause UI sounds so
+        // Resume never replays stale taps from the prior input epoch.
+        _ = try session.drainClientSurfaceSoundRequests()
         return GModPlayableInputBoundaryReport(
             pointerEpoch: pointerEpoch,
             inputEpoch: inputEpoch,
             cancelledActivePointer: cancellation.cancelled,
-            cancellationFailure: cancellation.failure
+            cancellationFailure: cancellation.failure,
+            lifecycleFailure: lifecycleFailure
         )
     }
 
@@ -442,7 +656,9 @@ public actor GModPlayableSessionLane {
     }
 
     @discardableResult
-    public func close() throws -> GModPlayableSessionCloseReport {
+    public func close(
+        expectedGeneration: UInt64? = nil
+    ) throws -> GModPlayableSessionCloseReport {
         dedicatedExecutor.preconditionIsCurrentWorker()
         guard let prior = session else {
             return GModPlayableSessionCloseReport(
@@ -450,6 +666,7 @@ public actor GModPlayableSessionLane {
                 serverFinalizerErrors: []
             )
         }
+        try validate(expectedGeneration: expectedGeneration)
         let report = try prior.close()
         dedicatedExecutor.clearShutdownCleanup()
         session = nil
@@ -488,6 +705,19 @@ public actor GModPlayableSessionLane {
                     closeFailure: closeFailure
                 )
             )
+        }
+    }
+
+    private func setClientMenu(
+        _ menu: GModPlayableClientMenu,
+        isOpen: Bool,
+        in session: GModPlayableSession
+    ) throws {
+        switch menu {
+        case .spawn:
+            try session.setSpawnMenuOpen(isOpen)
+        case .context:
+            try session.setContextMenuOpen(isOpen)
         }
     }
 
