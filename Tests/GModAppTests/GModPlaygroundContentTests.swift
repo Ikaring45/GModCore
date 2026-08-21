@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import XCTest
+import GModGameAssets
 @testable import GModApp
 
 final class GModPlaygroundContentTests: XCTestCase {
