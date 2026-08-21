@@ -3362,6 +3362,18 @@ public enum GMLuaVGUI {
                 )
                 return []
             }),
+            ("GetDockMargin", { arguments in
+                let margin = try requiredPanel(
+                    arguments,
+                    "GetDockMargin"
+                ).dockMargin
+                return [
+                    .number(margin.left),
+                    .number(margin.top),
+                    .number(margin.right),
+                    .number(margin.bottom),
+                ]
+            }),
             ("DockPadding", { arguments in
                 let panel = try requiredPanel(arguments, "DockPadding")
                 panel.dockPadding = (
@@ -3790,6 +3802,18 @@ public enum GMLuaVGUI {
                     "SetFocusTopLevel"
                 )
                 return []
+            }),
+            ("GetDockPadding", { arguments in
+                let padding = try requiredPanel(
+                    arguments,
+                    "GetDockPadding"
+                ).dockPadding
+                return [
+                    .number(padding.left),
+                    .number(padding.top),
+                    .number(padding.right),
+                    .number(padding.bottom),
+                ]
             }),
             ("SetKeyboardInputEnabled", { arguments in
                 let panel = try requiredPanel(arguments, "SetKeyboardInputEnabled")
