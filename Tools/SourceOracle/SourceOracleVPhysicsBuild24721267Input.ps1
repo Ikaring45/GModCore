@@ -48,7 +48,9 @@ function Copy-SourceOracleVPhysicsBuild24721267File {
     )
 
     $sourcePath = [string]$Entry.source_path
-    $source = if ([string]$Entry.role -in @('controlled_game_file', 'probe_lua')) {
+    $source = if ([string]$Entry.role -in @(
+        'controlled_game_file', 'probe_lua', 'sandbox_bootstrap'
+    )) {
         if (-not $sourcePath.StartsWith('tool/', [StringComparison]::Ordinal)) {
             throw "Controlled input does not originate from tool/: $sourcePath"
         }

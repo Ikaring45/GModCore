@@ -898,8 +898,15 @@
       "role": "probe_lua",
       "source_path": "tool/VPhysicsAttestationAddon/lua/autorun/server/garryspad_source_vphysics_attestation.lua",
       "input_path": "oracle_game/lua/autorun/server/garryspad_source_vphysics_attestation.lua",
-      "sha256": "90bfa3748d7465938837ea9a9d3ba2e75f92bd47bbd085a39ea20bc4e3de6493",
-      "maximum_bytes": 19094
+      "sha256": "31dbdcecc551896cd5f9192db4c90708cf8a7aa086ad379aa7aed1407f715f5f",
+      "maximum_bytes": 19530
+    },
+    {
+      "role": "sandbox_bootstrap",
+      "source_path": "tool/Run-SourceOracleVPhysicsSandboxGuest.ps1",
+      "input_path": "sandbox/Run-SourceOracleVPhysicsSandboxGuest.ps1",
+      "sha256": "7cf7431eea66d9faf7dfc1bcd4a210af29c11a5f42e9dee7119078ef1ee6d1d0",
+      "maximum_bytes": 14100
     }
   ]
 }

@@ -28,7 +28,8 @@ $script:VPhysicsSandboxAllowedRoles = @(
         'isolated_game_lua',
         'isolated_game_content',
         'controlled_game_file',
-        'probe_lua'
+        'probe_lua',
+        'sandbox_bootstrap'
     )
 )
 $script:VPhysicsSandboxEmptyMount = '"mountcfg"' + "`r`n{`r`n}`r`n"
@@ -405,9 +406,13 @@ function Assert-SourceOracleVPhysicsSandboxInputSpec {
              -not $inputPath.StartsWith('oracle_game/lua/', [StringComparison]::Ordinal))) {
             throw 'isolated_game_lua must map shipped GMod Lua below oracle_game/lua'
         }
-        if ($role -in @('controlled_game_file', 'probe_lua') -and
+        if ($role -in @('controlled_game_file', 'probe_lua', 'sandbox_bootstrap') -and
             -not $sourcePath.StartsWith('tool/', [StringComparison]::Ordinal)) {
             throw "$role must originate from the checked-in tool tree"
+        }
+        if ($role -ceq 'sandbox_bootstrap' -and
+            -not $inputPath.StartsWith('sandbox/', [StringComparison]::Ordinal)) {
+            throw 'sandbox_bootstrap must remain below the isolated sandbox input'
         }
         if ($role -in @('server_runtime', 'shipped_content', 'shipped_lua') -and
             -not $inputPath.StartsWith('server/', [StringComparison]::Ordinal)) {

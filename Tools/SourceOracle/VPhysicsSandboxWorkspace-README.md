@@ -1,9 +1,9 @@
-# Clean VPhysics sandbox workspace (non-launch prerequisite)
+# Clean VPhysics sandbox workspace
 
-This tool assembles and revalidates a bounded input for a future, separately
-reviewed AppID 4020 VPhysics attestation. It does **not** download a dedicated
-server, start Windows Sandbox or GMod, load a DLL, enable the probe, or change
-firewall policy.
+This tool assembles and revalidates the bounded input used by the separately
+reviewed AppID 4020 VPhysics Windows Sandbox single-run path. The workspace
+generator itself does **not** download, launch, load a DLL, or change firewall
+policy.
 
 Run the synthetic/static test with:
 
@@ -30,10 +30,11 @@ has a separate bounded staging command:
 ```
 
 Its checked-in spec selects `srcds_win64.exe`, the statically identified
-64-bit bootstrap/interface/import closure, the exact Steam appmanifest, and
-only four `button_06` VPK entries. The staging code authenticates the bounded
-directory VPK and target ranges, and does not rehash or copy the complete VPK
-chunk. It still cannot launch a process or enable the probe.
+64-bit bootstrap/interface/import closure, the exact Steam appmanifest, the
+fixed `gm_flatgrass` map and GMod startup Lua, three surface-property files,
+four controlled gamemode files, one probe, one guest bootstrap, and only four
+`button_06` VPK entries. The staging code authenticates the bounded directory
+VPK and target ranges, and does not rehash or copy the complete VPK chunk.
 
 The input spec is schema 1 and has the exact object shape below. Every file is
 copied through one retained, non-share-write handle only after its byte cap and
@@ -86,6 +87,7 @@ The new workspace contains only:
 - `workspace.json`: `probe_enabled=false` plus the manifest digest and fixed
   isolation policy.
 
-A future runner must call `Assert-SourceOracleVPhysicsSandboxWorkspace`
-immediately before it creates any probe command. This prerequisite deliberately
-contains no function that can change `probe_enabled` or start a process.
+The single-run runner calls `Assert-SourceOracleVPhysicsSandboxWorkspace`
+before it creates the read-only token/request mapping. The prerequisite WSB
+remains nonlaunch; the separately generated launch WSB has exactly three
+mappings, networking disabled, and one fixed guest bootstrap command.

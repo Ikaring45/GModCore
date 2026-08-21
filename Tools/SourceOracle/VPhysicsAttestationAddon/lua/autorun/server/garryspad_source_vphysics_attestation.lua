@@ -458,7 +458,18 @@ end
 timer.Simple(request.limits.timeout_seconds, function()
     finishFailure("probe timeout")
 end)
-hook.Add("InitPostEntity", "GarrysPAD.SourceVPhysicsAttestation.Start", function()
+local started = false
+local function startProbeOnce()
+    if started then return end
+    started = true
     hook.Remove("InitPostEntity", "GarrysPAD.SourceVPhysicsAttestation.Start")
     timer.Simple(0, runProbe)
-end)
+end
+hook.Add("InitPostEntity", "GarrysPAD.SourceVPhysicsAttestation.Start", startProbeOnce)
+
+-- A +command placed after +map can be delivered after InitPostEntity has
+-- already fired. Keep the event path as the primary route, but allow the same
+-- token-authenticated command to start against an already-created world.
+if IsValid(game.GetWorld()) and game.GetMap() ~= "" then
+    timer.Simple(0.25, startProbeOnce)
+end

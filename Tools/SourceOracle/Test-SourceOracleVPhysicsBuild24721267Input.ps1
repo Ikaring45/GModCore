@@ -12,7 +12,7 @@ $inputs = Read-SourceOracleVPhysicsBuild24721267Inputs
 $spec = $inputs.spec
 $metadata = $inputs.metadata
 $files = @($spec.files)
-Assert-BuildInput ($files.Count -eq 126) 'Fixed build input must contain exactly 126 files'
+Assert-BuildInput ($files.Count -eq 127) 'Fixed build input must contain exactly 127 files'
 Assert-BuildInput `
     ([string]$spec.server.executable_input_path -ceq 'server/srcds_win64.exe') `
     'Fixed build input does not select the x64 srcds executable'
@@ -99,6 +99,8 @@ $exactCleanInputs = [ordered]@{
         'oracle_game/gamemodes/garryspad_attestation/gamemode/shared.lua'
     'tool/VPhysicsAttestationAddon/lua/autorun/server/garryspad_source_vphysics_attestation.lua' =
         'oracle_game/lua/autorun/server/garryspad_source_vphysics_attestation.lua'
+    'tool/Run-SourceOracleVPhysicsSandboxGuest.ps1' =
+        'sandbox/Run-SourceOracleVPhysicsSandboxGuest.ps1'
 }
 foreach ($pair in $exactCleanInputs.GetEnumerator()) {
     $matches = @($files | Where-Object {
