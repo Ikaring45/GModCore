@@ -81,14 +81,26 @@ private struct GMLuaConsolePacket: Sendable {
     let arguments: [String]
 }
 
+private struct GMLuaEntityReplicationDelivery: Sendable {
+    /// Sequence in the transport-wide net/console/entity FIFO. The nested
+    /// packet retains its independent per-connection replication sequence.
+    let sequence: UInt64
+    let sourceEndpointID: Int
+    let destinationEndpointID: Int
+    let connectionGeneration: UInt64
+    let packet: SourceEntityReplicationPacket
+}
+
 private enum GMLuaTransportDelivery: Sendable {
     case net(GMLuaNetPacket)
     case console(GMLuaConsolePacket)
+    case entity(GMLuaEntityReplicationDelivery)
 
     var sourceEndpointID: Int {
         switch self {
         case let .net(packet): return packet.sourceEndpointID
         case let .console(packet): return packet.sourceEndpointID
+        case let .entity(delivery): return delivery.sourceEndpointID
         }
     }
 
@@ -96,9 +108,35 @@ private enum GMLuaTransportDelivery: Sendable {
         switch self {
         case let .net(packet): return packet.destinationEndpointID
         case let .console(packet): return packet.destinationEndpointID
+        case let .entity(delivery): return delivery.destinationEndpointID
         }
     }
 }
+
+/// Typed failures specific to canonical entity replication transport. Packet
+/// validation failures remain values until the CLIENT handler has completed
+/// its transactional apply, then cross the pump boundary as this error.
+public enum GMLuaEntityReplicationTransportError: Error, Equatable, Sendable {
+    case serverSourceRequired
+    case clientDestinationRequired
+    case sourceEndpointDetached
+    case destinationEndpointDetached
+    case destinationNotConnected
+    case connectionGenerationMismatch(
+        expected: SourceEntityReplicationConnectionGeneration,
+        received: SourceEntityReplicationConnectionGeneration
+    )
+    case clientHandlerUnavailable
+    case packetRejected(
+        transportSequence: UInt64,
+        packetSequence: UInt64,
+        rejection: SourceEntityReplicationRejection
+    )
+}
+
+public typealias GMLuaEntityReplicationHandler = @Sendable (
+    SourceEntityReplicationPacket
+) -> SourceEntityReplicationApplyResult
 
 /// One CLIENT-originated console command that reached the SERVER command
 /// surface but had an expected user-action failure: a Lua concommand body
@@ -159,6 +197,7 @@ public final class GMLuaNetEndpoint: @unchecked Sendable {
     private let lock = NSLock()
     private var writer: GMLuaNetWriter?
     private var reader: GMLuaNetBitReader?
+    private var entityReplicationHandler: GMLuaEntityReplicationHandler?
 
     fileprivate init(
         identifier: Int,
@@ -587,6 +626,19 @@ public final class GMLuaNetEndpoint: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Installs the canonical replication sink on the destination endpoint,
+    /// keeping CLIENT state ownership out of the shareable transport queue.
+    func connectEntityReplicationHandler(
+        _ handler: @escaping GMLuaEntityReplicationHandler
+    ) throws {
+        guard realm == .client else {
+            throw GMLuaEntityReplicationTransportError.clientDestinationRequired
+        }
+        lock.lock()
+        entityReplicationHandler = handler
+        lock.unlock()
+    }
+
     fileprivate func detachFromSession() {
         lock.lock()
         writer = nil
@@ -595,6 +647,7 @@ public final class GMLuaNetEndpoint: @unchecked Sendable {
         transport = nil
         entityRegistry = nil
         consoleCommandDispatcher = nil
+        entityReplicationHandler = nil
         lock.unlock()
     }
 
@@ -651,6 +704,27 @@ public final class GMLuaNetEndpoint: @unchecked Sendable {
             arguments: arguments,
             caller: destination.sender
         )
+    }
+
+    fileprivate func invokeEntityReplication(
+        _ delivery: GMLuaEntityReplicationDelivery
+    ) throws {
+        lock.lock()
+        let handler = entityReplicationHandler
+        lock.unlock()
+        guard let handler else {
+            throw GMLuaEntityReplicationTransportError.clientHandlerUnavailable
+        }
+        switch handler(delivery.packet) {
+        case .applied:
+            return
+        case let .rejected(rejection):
+            throw GMLuaEntityReplicationTransportError.packetRejected(
+                transportSequence: delivery.sequence,
+                packetSequence: delivery.packet.sequence,
+                rejection: rejection
+            )
+        }
     }
 
     /// Returns only a typed expected user-action failure from the SERVER
@@ -1246,6 +1320,53 @@ public final class GMLuaNetTransport: @unchecked Sendable {
         )))
     }
 
+    /// Adds an immutable SERVER snapshot/delta to the same outer FIFO used by
+    /// net packets and forwarded console commands. The packet is not visible
+    /// to its CLIENT-owned handler until the host pumps this transport.
+    func enqueueEntityReplication(
+        _ packet: SourceEntityReplicationPacket,
+        from source: GMLuaNetEndpoint,
+        to destination: GMLuaNetEndpoint
+    ) throws {
+        guard source.realm == .server else {
+            throw GMLuaEntityReplicationTransportError.serverSourceRequired
+        }
+        guard destination.realm == .client else {
+            throw GMLuaEntityReplicationTransportError.clientDestinationRequired
+        }
+
+        lock.lock()
+        defer { lock.unlock() }
+        guard serverEndpointID == source.identifier,
+              endpoints[source.identifier] === source else {
+            throw GMLuaEntityReplicationTransportError.sourceEndpointDetached
+        }
+        guard endpoints[destination.identifier] === destination else {
+            throw GMLuaEntityReplicationTransportError.destinationEndpointDetached
+        }
+        guard let connection = clientConnectionsByEndpoint[destination.identifier] else {
+            throw GMLuaEntityReplicationTransportError.destinationNotConnected
+        }
+        let expectedGeneration = SourceEntityReplicationConnectionGeneration(
+            rawValue: connection.generation
+        )
+        guard packet.connectionGeneration == expectedGeneration else {
+            throw GMLuaEntityReplicationTransportError.connectionGenerationMismatch(
+                expected: expectedGeneration,
+                received: packet.connectionGeneration
+            )
+        }
+
+        nextSequence &+= 1
+        deliveries.append(.entity(GMLuaEntityReplicationDelivery(
+            sequence: nextSequence,
+            sourceEndpointID: source.identifier,
+            destinationEndpointID: destination.identifier,
+            connectionGeneration: connection.generation,
+            packet: packet
+        )))
+    }
+
     /// Delivers queued packets in deterministic sequence order.
     ///
     /// A receiver error is propagated after its reader is cleared. Any later
@@ -1363,6 +1484,13 @@ public final class GMLuaNetTransport: @unchecked Sendable {
                     )
                     successful += 1
                 }
+            case let .entity(entityDelivery):
+                try validateEntityReplicationConnection(
+                    endpoint: endpoint,
+                    delivery: entityDelivery
+                )
+                try endpoint.invokeEntityReplication(entityDelivery)
+                successful += 1
             }
             if case .net = delivery { successful += 1 }
             processed += 1
@@ -1406,6 +1534,37 @@ public final class GMLuaNetTransport: @unchecked Sendable {
            connection.playerIndex != senderPlayerIndex {
             throw LuaError.runtime(
                 "queued delivery sender does not match its connected Player"
+            )
+        }
+    }
+
+    private func validateEntityReplicationConnection(
+        endpoint: GMLuaNetEndpoint,
+        delivery: GMLuaEntityReplicationDelivery
+    ) throws {
+        lock.lock()
+        let sourceIsCurrentServer = serverEndpointID == delivery.sourceEndpointID &&
+            endpoints[delivery.sourceEndpointID]?.state != nil
+        let connection = clientConnectionsByEndpoint[endpoint.identifier]
+        lock.unlock()
+
+        guard sourceIsCurrentServer else {
+            throw GMLuaEntityReplicationTransportError.sourceEndpointDetached
+        }
+        guard let connection else {
+            throw GMLuaEntityReplicationTransportError.destinationNotConnected
+        }
+        let expectedGeneration = SourceEntityReplicationConnectionGeneration(
+            rawValue: connection.generation
+        )
+        let receivedGeneration = SourceEntityReplicationConnectionGeneration(
+            rawValue: delivery.connectionGeneration
+        )
+        guard delivery.packet.connectionGeneration == receivedGeneration,
+              receivedGeneration == expectedGeneration else {
+            throw GMLuaEntityReplicationTransportError.connectionGenerationMismatch(
+                expected: expectedGeneration,
+                received: delivery.packet.connectionGeneration
             )
         }
     }
