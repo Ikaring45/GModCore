@@ -1,21 +1,6 @@
 import Foundation
 import GModLua
 
-/// Source handle identity shared by the simulation list and each realm-local
-/// Entity userdata mirror. The complete packed handle is the generation; it is
-/// intentionally unrelated to SharedSession's connection generation.
-public struct GMLuaSourceEntityIdentity: Equatable, Hashable, Sendable {
-    public let handle: SourceBaseHandle
-
-    public init(handle: SourceBaseHandle) {
-        precondition(handle.isValid, "a Source mirror requires a valid handle")
-        self.handle = handle
-    }
-
-    public var index: Int { handle.entryIndex }
-    public var generation: UInt64 { UInt64(handle.rawValue) }
-}
-
 public enum GMLuaSourceRuntimeRunKind: String, Equatable, Sendable {
     case serverFixedTick
     case clientFrame

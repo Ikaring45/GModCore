@@ -207,9 +207,15 @@ public struct SourceCanonicalEntityIdentity: Equatable, Hashable, Sendable {
     }
 
     public var entryIndex: Int { handle.entryIndex }
+    /// Compatibility spelling used by the existing GLua Entity registry.
+    public var index: Int { entryIndex }
     public var serialNumber: Int { handle.serialNumber }
     public var generation: UInt64 { UInt64(handle.rawValue) }
 }
+
+/// Legacy API spelling retained while Runtime/Registry call sites migrate.
+/// Both names now denote the same full Source EHANDLE identity.
+public typealias GMLuaSourceEntityIdentity = SourceCanonicalEntityIdentity
 
 /// Immutable handoff shared by Lua replication and Metal model rendering.
 ///
