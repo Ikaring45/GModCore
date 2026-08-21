@@ -69,7 +69,7 @@ public enum SourceCanonicalEntityGLuaBridgeError: Error, CustomStringConvertible
 private final class SourceCanonicalEntityLuaWeakHost: @unchecked Sendable {
     weak var value: (any SourceCanonicalEntityLuaHost)?
 
-    init(_ value: any SourceCanonicalEntityLuaHost) {
+    init(_ value: (any SourceCanonicalEntityLuaHost)?) {
         self.value = value
     }
 }
@@ -87,16 +87,22 @@ private final class SourceCanonicalEntityLuaWeakObject<Value: AnyObject>:
     }
 }
 
-/// Installs the original GLua spellings over one injected canonical entity
-/// host. Only SERVER gets mutators/`ents.Create`; CLIENT state continues to be
+/// Installs the original GLua spellings over canonical Entity snapshots.
+/// SERVER additionally receives mutators/`ents.Create` through its injected
+/// authoritative host. CLIENT receives getters only and continues to be
 /// populated exclusively by the ordered replication stream.
 public enum SourceCanonicalEntityGLuaBridge {
     public static func install(
         into runtime: GMLuaRuntime,
-        host: any SourceCanonicalEntityLuaHost
+        host: (any SourceCanonicalEntityLuaHost)? = nil
     ) throws {
-        guard runtime.realm == .server else {
+        guard runtime.realm != .menu else {
             throw SourceCanonicalEntityGLuaBridgeError.serverRealmRequired(runtime.realm)
+        }
+        if runtime.realm == .server, host == nil {
+            throw SourceCanonicalEntityGLuaBridgeError.missingRuntimeSurface(
+                "an authoritative SERVER host"
+            )
         }
         guard !runtime.isClosed else {
             throw SourceCanonicalEntityGLuaBridgeError.missingRuntimeSurface("an open runtime")
@@ -414,6 +420,10 @@ public enum SourceCanonicalEntityGLuaBridge {
             }
             return [value]
         }
+
+        // CLIENT owns immutable replicated snapshots only. Returning here
+        // keeps every mutation surface and ents.Create SERVER-exclusive.
+        guard runtime.realm == .server else { return }
 
         try setMethod("Entity:SetModel", on: entityMetatable) { arguments in
             let snapshot = try requiredSnapshot(

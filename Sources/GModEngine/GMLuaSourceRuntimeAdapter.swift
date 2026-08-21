@@ -921,6 +921,7 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
             guard let registry = client.entityRegistry else {
                 throw GMLuaSourceRuntimeAdapterError.missingRuntimeSurface(.client, "Entity registry")
             }
+            try SourceCanonicalEntityGLuaBridge.install(into: client)
             try SourceCanonicalEntityNetworkVariableGLuaBridge.install(
                 into: client
             )
