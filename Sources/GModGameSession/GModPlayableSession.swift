@@ -185,7 +185,7 @@ public struct GModPlayableSessionConfiguration: Sendable, Equatable {
     public init(
         map: GModBundledMap = .construct,
         gamemodeName: String = "sandbox",
-        maxPlayers: Int = 32,
+        maxPlayers: Int = 1,
         playerEntityIndex: Int = 1,
         playerUserID: Int = 1,
         initialViewport: GMLuaViewportSize = .logicalDesktopDefault,
@@ -328,6 +328,7 @@ public struct GModPlayableSessionCloseReport: Equatable, Sendable {
 public enum GModPlayableSessionError: Error, CustomStringConvertible, Equatable {
     case invalidGamemodeName(String)
     case invalidLanguageCode(String)
+    case invalidSinglePlayerMaxPlayers(Int)
     case missingEntityText(String)
     case missingPlayerStart(String)
     case malformedPlayerStart(String)
@@ -342,6 +343,8 @@ public enum GModPlayableSessionError: Error, CustomStringConvertible, Equatable 
             return "invalid gamemode name: \(value)"
         case let .invalidLanguageCode(value):
             return "invalid language code: \(value)"
+        case let .invalidSinglePlayerMaxPlayers(value):
+            return "playable single-player sessions require maxPlayers 1, got \(value)"
         case let .missingEntityText(map):
             return "bundled map \(map) has no UTF-8 entity lump"
         case let .missingPlayerStart(map):
@@ -461,6 +464,11 @@ public final class GModPlayableSession {
         studioRenderableModelCacheForTesting:
             GModStudioRenderableModelCache? = nil
     ) throws {
+        guard configuration.maxPlayers == 1 else {
+            throw GModPlayableSessionError.invalidSinglePlayerMaxPlayers(
+                configuration.maxPlayers
+            )
+        }
         let trimmedGamemode = configuration.gamemodeName
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedGamemode.isEmpty,

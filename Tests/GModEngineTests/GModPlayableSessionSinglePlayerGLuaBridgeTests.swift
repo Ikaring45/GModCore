@@ -15,6 +15,8 @@ final class GModPlayableSessionSinglePlayerGLuaBridgeTests: XCTestCase {
             """
             local ply = Player(70)
             assert(ply == Entity(7))
+            assert(game.SinglePlayer())
+            assert(game.MaxPlayers() == 1)
             assert(ply:UniqueID() == 1)
             assert(ply:IsMarkedForDeletion() == false)
             """,
@@ -28,5 +30,18 @@ final class GModPlayableSessionSinglePlayerGLuaBridgeTests: XCTestCase {
             """,
             sourceName: "=(playable CLIENT has no SERVER single-player ABI)"
         )
+    }
+
+    func testPlayableSessionRejectsContradictorySinglePlayerCapacity() {
+        XCTAssertThrowsError(
+            try GModPlayableSession(
+                configuration: .init(map: .construct, maxPlayers: 2)
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? GModPlayableSessionError,
+                .invalidSinglePlayerMaxPlayers(2)
+            )
+        }
     }
 }
