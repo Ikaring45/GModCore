@@ -511,6 +511,36 @@ final class GModPlayableSessionLaneTests: XCTestCase {
         _ = try await lane.close()
     }
 
+    func testSpawnMenuTransitionImmediatelyExposesSurfaceInSameGeneration() async throws {
+        let lane = GModPlayableSessionLane()
+        let snapshot = try await lane.start(
+            configuration: GModPlayableSessionConfiguration(map: .construct)
+        )
+
+        let opened = try await lane.transitionClientMenu(
+            from: nil,
+            to: .spawn,
+            expectedGeneration: snapshot.generation,
+            expectedPointerEpoch: snapshot.pointerEpoch,
+            expectedInputEpoch: snapshot.inputEpoch
+        )
+        XCTAssertEqual(opened.committedMenu, .spawn)
+        XCTAssertNil(opened.lifecycleFailure)
+        try await lane.execute(
+            "assert(type(g_SpawnMenu) == 'Panel' and " +
+                "IsValid(g_SpawnMenu) and g_SpawnMenu:IsVisible())",
+            realm: .client,
+            expectedGeneration: snapshot.generation
+        )
+
+        let surface = try await lane.renderClientVGUIFrame(
+            expectedGeneration: snapshot.generation
+        )
+        XCTAssertGreaterThan(surface.drawCallCount, 0)
+        XCTAssertFalse(surface.commands.isEmpty)
+        _ = try await lane.close()
+    }
+
     func testAtomicMenuTransitionRestoresPriorWhenTargetHookThrows() async throws {
         let lane = GModPlayableSessionLane()
         let snapshot = try await lane.start(
