@@ -180,6 +180,7 @@ public struct GModPlayableSessionConfiguration: Sendable, Equatable {
     public let contentPackURL: URL?
     public let languageCode: String
     public let languagePhrases: [String: String]
+    public let hostName: String
 
     public init(
         map: GModBundledMap = .construct,
@@ -190,7 +191,8 @@ public struct GModPlayableSessionConfiguration: Sendable, Equatable {
         initialViewport: GMLuaViewportSize = .logicalDesktopDefault,
         contentPackURL: URL? = nil,
         languageCode: String = "en",
-        languagePhrases: [String: String] = [:]
+        languagePhrases: [String: String] = [:],
+        hostName: String = "Garry's PAD"
     ) {
         self.map = map
         self.gamemodeName = gamemodeName
@@ -201,6 +203,7 @@ public struct GModPlayableSessionConfiguration: Sendable, Equatable {
         self.contentPackURL = contentPackURL
         self.languageCode = languageCode
         self.languagePhrases = languagePhrases
+        self.hostName = hostName
     }
 }
 
@@ -475,7 +478,8 @@ public final class GModPlayableSession {
         let environment = try GMLuaGameEnvironmentConfiguration(
             maxPlayers: configuration.maxPlayers,
             mapName: configuration.map.rawValue,
-            sessionKind: .listenServer
+            sessionKind: .listenServer,
+            hostName: configuration.hostName
         )
         let engine = GMLuaEngineConfiguration(
             games: [],

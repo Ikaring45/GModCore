@@ -540,8 +540,11 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
         lock.unlock()
     }
 
-    func appendPanelText(_ panel: GMLuaPanelRenderSnapshot) {
-        guard !panel.text.isEmpty else { return }
+    func appendPanelText(
+        _ panel: GMLuaPanelRenderSnapshot,
+        displayedText: LuaString
+    ) {
+        guard !displayedText.isEmpty else { return }
         lock.lock()
         let descriptor = fontDescriptors[Self.canonicalFontName(panel.fontName)]
             ?? fontDescriptors[Self.canonicalFontName("Default")]
@@ -552,7 +555,7 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
         let color = panel.foregroundColor.map {
             GMLuaSurfaceColor(red: $0.red, green: $0.green, blue: $0.blue, alpha: $0.alpha)
         } ?? GMLuaSurfaceColor(red: 230, green: 230, blue: 230, alpha: 255)
-        let measurement = textMeasurer.measure(panel.text, using: descriptor)
+        let measurement = textMeasurer.measure(displayedText, using: descriptor)
         // Valve Label::Paint applies the horizontal inset from the aligned
         // edge (add for west, subtract for east, ignore for centered text),
         // and always adds the vertical inset after vertical alignment.
@@ -595,7 +598,7 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
                 alpha: shadow.color.alpha
             )
             pendingCommands.append(.text(
-                value: panel.text,
+                value: displayedText,
                 position: GMLuaCursorPosition(
                     x: position.x + shadow.distance,
                     y: position.y + shadow.distance
@@ -606,7 +609,7 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
             ))
         }
         pendingCommands.append(.text(
-            value: panel.text,
+            value: displayedText,
             position: position,
             font: descriptor,
             color: multipliedAlpha(color, panel.alpha / 255),

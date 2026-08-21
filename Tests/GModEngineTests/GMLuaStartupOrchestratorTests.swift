@@ -73,6 +73,7 @@ final class GMLuaStartupOrchestratorTests: XCTestCase {
         ])
         XCTAssertEqual(result.report.stages.map(\.stage), [
             .clientDermaBootstrap,
+            .clientNotificationBootstrap,
             .baseGamemode,
             .sharedAutorun,
             .realmAutorun,
@@ -106,6 +107,12 @@ final class GMLuaStartupOrchestratorTests: XCTestCase {
         XCTAssertEqual(dermaStage.directPaths, ["lua/derma/init.lua"])
         XCTAssertEqual(dermaStage.transitiveIncludePaths, [
             "lua/derma/parts/core.lua"
+        ])
+        let notificationStage = try XCTUnwrap(
+            result.report.stages.first { $0.stage == .clientNotificationBootstrap }
+        )
+        XCTAssertEqual(notificationStage.directPaths, [
+            "lua/includes/modules/notification.lua"
         ])
         let postProcessStage = try XCTUnwrap(
             result.report.stages.first { $0.stage == .clientPostProcessBootstrap }
@@ -280,6 +287,10 @@ final class GMLuaStartupOrchestratorTests: XCTestCase {
     func testClientRequiresDermaAndExactDefaultSkinBootstraps() throws {
         for (missingPath, expectedStage) in [
             ("lua/derma/init.lua", GMLuaStartupStage.clientDermaBootstrap),
+            (
+                "lua/includes/modules/notification.lua",
+                GMLuaStartupStage.clientNotificationBootstrap
+            ),
             ("lua/skins/default.lua", GMLuaStartupStage.clientDefaultSkinBootstrap)
         ] {
             var files = fixtureFiles()
@@ -441,6 +452,11 @@ final class GMLuaStartupOrchestratorTests: XCTestCase {
             ),
             "lua/derma/parts/core.lua": data(
                 "assert(DERMA_BOOTSTRAPPED); table.insert(STARTUP_ORDER, 'derma-core')"
+            ),
+            "lua/includes/modules/notification.lua": data(
+                "assert(DERMA_BOOTSTRAPPED); " +
+                    "notification = { AddLegacy = function() end, " +
+                    "AddProgress = function() end, Kill = function() end }"
             ),
             "lua/includes/vgui_base.lua": data(
                 "MENU_VGUI_BASE_EXECUTED = true; error('menu-only vgui_base executed in CLIENT')"

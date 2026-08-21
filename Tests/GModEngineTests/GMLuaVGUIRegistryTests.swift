@@ -5,6 +5,371 @@ import GModGameAssets
 import GModLua
 
 final class GMLuaVGUIRegistryTests: XCTestCase {
+    func testStockDFrameBottomRightTouchResizeIsImmediateClampedAndReleasesCapture() throws {
+        let fileSystem = try GMLuaHostDirectoryFileSystem(
+            rootURL: GModGameAssets.clientContentRootURL(),
+            writable: false
+        )
+        let runtime = GMLuaRuntime(
+            realm: .client,
+            logger: { _ in },
+            virtualFileSystem: fileSystem,
+            bootstrapMode: .strict,
+            initialViewport: GMLuaViewportSize(width: 810, height: 1_080)
+        )
+        defer { _ = runtime.close() }
+        try runtime.loadFile("lua/includes/init.lua")
+        try runtime.loadFile("lua/derma/init.lua")
+        try runtime.loadFile("lua/vgui/dlabel.lua")
+        try runtime.loadFile("lua/vgui/dbutton.lua")
+        try runtime.loadFile("lua/vgui/dframe.lua")
+
+        let registry = try XCTUnwrap(runtime.vguiRegistry)
+        let surface = try XCTUnwrap(runtime.surfaceCommandState)
+        do {
+            try runtime.execute(
+                """
+                DLabel.ApplySchemeSettings = function() end
+                local DerivedTouchFrame = {}
+                vgui.Register("DerivedTouchFrame", DerivedTouchFrame, "DFrame")
+                FRAME = assert(vgui.Create("DerivedTouchFrame"))
+                FRAME:SetPos(100, 100)
+                FRAME:SetSize(200, 160)
+                FRAME:SetSizable(true)
+                assert(FRAME.m_bSizable == true)
+                assert(vgui.GetControlTable("DerivedTouchFrame").Base == "DFrame")
+                FRAME:SetMinWidth(150)
+                FRAME:SetMinHeight(120)
+                FRAME.Paint = function() return true end
+                FRAME.btnClose.Paint = function() return true end
+                FRAME.btnMaxim.Paint = function() return true end
+                FRAME.btnMinim.Paint = function() return true end
+                ORIGINAL_FRAME_RELEASE = FRAME.OnMouseReleased
+
+                AFTER_BUTTON = assert(vgui.Create("DButton"))
+                AFTER_BUTTON:SetPos(400, 100)
+                AFTER_BUTTON:SetSize(100, 50)
+                AFTER_BUTTON.Paint = function() return true end
+                AFTER_BUTTON.DoClick = function()
+                    AFTER_BUTTON_CLICKS = (AFTER_BUTTON_CLICKS or 0) + 1
+                end
+                """,
+                sourceName: "@GMLuaStockDFrameTouchResizeSetup.lua"
+            )
+        } catch {
+            return XCTFail(GMLuaRuntime.describe(error))
+        }
+
+        func dispatch(
+            _ x: Double,
+            _ y: Double,
+            _ phase: GMLuaPointerPhase,
+            _ timestamp: TimeInterval
+        ) throws -> GMLuaPointerDispatchResult {
+            try registry.dispatchPointerEvent(
+                x: x,
+                y: y,
+                phase: phase,
+                timestamp: timestamp,
+                viewportWidth: 810,
+                viewportHeight: 1_080
+            )
+        }
+
+        // Thirty points from each edge is outside stock's visible 20px grip,
+        // but inside the iPad-only transparent 44-point target. Moving only X
+        // must change width in this same dispatch cycle without changing height.
+        let extendedGrip = try dispatch(270, 230, .began, 1)
+        XCTAssertEqual(
+            registry.renderTree(viewportWidth: 810, viewportHeight: 1_080)
+                .first(where: {
+                    $0.requestedClassName == "DerivedTouchFrame"
+                })?.identifier,
+            extendedGrip.hitPanelIdentifier
+        )
+        _ = try dispatch(310, 230, .moved, 1.1)
+        try runtime.execute(
+            "assert(FRAME:GetWide() == 240 and FRAME:GetTall() == 160)",
+            sourceName: "@GMLuaStockDFrameWidthResizeCheckpoint.lua"
+        )
+        _ = try dispatch(310, 230, .ended, 1.2)
+
+        // The stock bottom-right corner changes both dimensions.
+        _ = try dispatch(330, 250, .began, 2)
+        _ = try dispatch(350, 280, .moved, 2.1)
+        try runtime.execute(
+            "assert(FRAME:GetWide() == 260 and FRAME:GetTall() == 190)",
+            sourceName: "@GMLuaStockDFrameCornerResizeCheckpoint.lua"
+        )
+        _ = try dispatch(350, 280, .ended, 2.2)
+
+        // The next renderer-neutral surface capture sees the new frame.
+        _ = try registry.renderFrame(
+            surface: surface,
+            viewportWidth: 810,
+            viewportHeight: 1_080
+        )
+        XCTAssertEqual(
+            registry.renderTree(viewportWidth: 810, viewportHeight: 1_080)
+                .first(where: {
+                    $0.requestedClassName == "DerivedTouchFrame"
+                })?.frame,
+            GMLuaPanelRect(x: 100, y: 100, width: 260, height: 190)
+        )
+
+        // Stock min width/height clamp remains authoritative.
+        _ = try dispatch(350, 280, .began, 3)
+        _ = try dispatch(100, 100, .moved, 3.1)
+        try runtime.execute(
+            "assert(FRAME:GetWide() == 150 and FRAME:GetTall() == 120)",
+            sourceName: "@GMLuaStockDFrameMinimumResizeCheckpoint.lua"
+        )
+        _ = try dispatch(100, 100, .ended, 3.2)
+
+        // Screen lock caps the stock size at the live logical viewport.
+        try runtime.execute("FRAME:SetScreenLock(true)")
+        _ = try dispatch(240, 210, .began, 4)
+        _ = try dispatch(2_000, 2_000, .moved, 4.1)
+        try runtime.execute(
+            "assert(FRAME:GetWide() == 710 and FRAME:GetTall() == 980)",
+            sourceName: "@GMLuaStockDFrameScreenLockCheckpoint.lua"
+        )
+        _ = try dispatch(2_000, 2_000, .ended, 4.2)
+
+        // Cancellation clears both Lua Sizing and native pointer capture.
+        try runtime.execute(
+            "FRAME:SetScreenLock(false); FRAME:SetSize(200, 160)"
+        )
+        _ = try dispatch(290, 250, .began, 5)
+        _ = try dispatch(290, 250, .cancelled, 5.1)
+        _ = try dispatch(500, 500, .moved, 5.2)
+        try runtime.execute(
+            "assert(FRAME.Sizing == nil); " +
+                "assert(FRAME:GetWide() == 200 and FRAME:GetTall() == 160)",
+            sourceName: "@GMLuaStockDFrameCancelledResizeCheckpoint.lua"
+        )
+
+        // Native capture and the stock Sizing field are lifecycle state, so a
+        // throwing scripted release callback must not strand either one.
+        try runtime.execute(
+            """
+            FRAME:SetSizable(true)
+            FRAME.OnMouseReleased = function() error("release boom") end
+            """
+        )
+        _ = try dispatch(290, 250, .began, 5.3)
+        XCTAssertThrowsError(try dispatch(290, 250, .ended, 5.4))
+        try runtime.execute(
+            """
+            assert(FRAME.Sizing == nil)
+            FRAME.OnMouseReleased = ORIGINAL_FRAME_RELEASE
+            """,
+            sourceName: "@GMLuaStockDFrameThrowingReleaseCheckpoint.lua"
+        )
+
+        // A non-sizable frame is not intercepted by the widened touch zone.
+        try runtime.execute("FRAME:SetSizable(false)")
+        _ = try dispatch(270, 230, .began, 6)
+        _ = try dispatch(320, 280, .moved, 6.1)
+        _ = try dispatch(320, 280, .ended, 6.2)
+        try runtime.execute(
+            "assert(FRAME:GetWide() == 200 and FRAME:GetTall() == 160)",
+            sourceName: "@GMLuaStockDFrameNonSizableCheckpoint.lua"
+        )
+
+        // Neither cancellation nor the no-op path may steal the next button tap.
+        _ = try dispatch(420, 120, .began, 7)
+        _ = try dispatch(420, 120, .ended, 7.1)
+        try runtime.execute("assert(AFTER_BUTTON_CLICKS == 1)")
+    }
+
+    func testPointerCallbacksMutateLuaAndNextSurfaceCaptureInSameHostInputCycle() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let surface = try GMLuaSurface.install(into: state)
+        let registry = try GMLuaVGUI.install(
+            into: state,
+            typeSystem: typeSystem,
+            surfaceCommandState: surface
+        )
+        try state.execute(
+            """
+            EVENT_PANEL = assert(vgui.Create("Label"))
+            EVENT_PANEL:SetSize(200, 80)
+            EVENT_PANEL:SetText("idle")
+            function EVENT_PANEL:OnMousePressed(code)
+                assert(code == MOUSE_LEFT)
+                EVENT_BEGAN = (EVENT_BEGAN or 0) + 1
+                self:SetText("began")
+                self:MouseCapture(true)
+            end
+            function EVENT_PANEL:OnCursorMoved(x, y)
+                EVENT_MOVED = (EVENT_MOVED or 0) + 1
+                EVENT_MOVE_X, EVENT_MOVE_Y = x, y
+                self:SetText("moved")
+            end
+            function EVENT_PANEL:OnMouseReleased(code)
+                assert(code == MOUSE_LEFT)
+                EVENT_ENDED = (EVENT_ENDED or 0) + 1
+                self:SetText("ended")
+                self:MouseCapture(false)
+            end
+            function EVENT_PANEL:OnMouseWheeled(delta)
+                EVENT_SCROLLED = (EVENT_SCROLLED or 0) + 1
+                EVENT_SCROLL_DELTA = delta
+                self:SetText("scrolled")
+            end
+            """,
+            sourceName: "@GMLuaImmediatePointerCallbackSetup.lua"
+        )
+
+        func capturedText() throws -> LuaString {
+            let frame = try registry.renderFrame(
+                surface: surface,
+                viewportWidth: 320,
+                viewportHeight: 180
+            )
+            return try XCTUnwrap(frame.commands.compactMap { command in
+                guard case let .text(value, _, _, _, _) = command else { return nil }
+                return value
+            }.first)
+        }
+
+        let began = try registry.dispatchPointerEvent(
+            x: 10, y: 10, phase: .began, timestamp: 1,
+            viewportWidth: 320, viewportHeight: 180
+        )
+        XCTAssertTrue(began.callbackNames.contains("OnMousePressed"))
+        try state.execute("assert(EVENT_BEGAN == 1 and EVENT_PANEL:GetText() == 'began')")
+        XCTAssertEqual(try capturedText(), LuaString("began"))
+
+        let moved = try registry.dispatchPointerEvent(
+            x: 25, y: 30, phase: .moved, timestamp: 1.1,
+            viewportWidth: 320, viewportHeight: 180
+        )
+        XCTAssertTrue(moved.callbackNames.contains("OnCursorMoved"))
+        try state.execute(
+            "assert(EVENT_MOVED == 1 and EVENT_MOVE_X == 25 and EVENT_MOVE_Y == 30 " +
+                "and EVENT_PANEL:GetText() == 'moved')"
+        )
+        XCTAssertEqual(try capturedText(), LuaString("moved"))
+
+        let ended = try registry.dispatchPointerEvent(
+            x: 25, y: 30, phase: .ended, timestamp: 1.2,
+            viewportWidth: 320, viewportHeight: 180
+        )
+        XCTAssertTrue(ended.callbackNames.contains("OnMouseReleased"))
+        try state.execute("assert(EVENT_ENDED == 1 and EVENT_PANEL:GetText() == 'ended')")
+        XCTAssertEqual(try capturedText(), LuaString("ended"))
+
+        let scrolled = try registry.dispatchPointerEvent(
+            x: 25, y: 30, phase: .scroll(delta: -2), timestamp: 1.3,
+            viewportWidth: 320, viewportHeight: 180
+        )
+        XCTAssertTrue(scrolled.callbackNames.contains("OnMouseWheeled"))
+        try state.execute(
+            "assert(EVENT_SCROLLED == 1 and EVENT_SCROLL_DELTA == -2 " +
+                "and EVENT_PANEL:GetText() == 'scrolled')"
+        )
+        XCTAssertEqual(try capturedText(), LuaString("scrolled"))
+    }
+
+    func testSetFocusTopLevelRaisesOwningWindowWhenDescendantRequestsFocus() throws {
+        let state = LuaState(output: { _ in })
+        let typeSystem = try GMLuaTypeSystem.install(
+            into: state,
+            utilityLayer: .bundledFallback
+        )
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: typeSystem)
+        try state.execute(
+            """
+            BACK_WINDOW = assert(vgui.Create("Panel"))
+            BACK_WINDOW:SetSize(200, 100)
+            BACK_WINDOW:SetFocusTopLevel(true)
+            BACK_CHILD = assert(vgui.Create("Panel", BACK_WINDOW))
+            BACK_CHILD:SetSize(200, 100)
+
+            FRONT_WINDOW = assert(vgui.Create("Panel"))
+            FRONT_WINDOW:SetSize(200, 100)
+            """,
+            sourceName: "@GMLuaFocusTopLevelSetup.lua"
+        )
+
+        let initiallyCovered = try registry.dispatchPointerEvent(
+            x: 20, y: 20, phase: .moved, timestamp: 1,
+            viewportWidth: 320, viewportHeight: 180
+        )
+        let frontIdentifier = try XCTUnwrap(
+            registry.renderTree(viewportWidth: 320, viewportHeight: 180)
+                .first(where: { $0.parentIdentifier == nil && $0.identifier == initiallyCovered.hitPanelIdentifier })?
+                .identifier
+        )
+
+        try state.execute(
+            "BACK_CHILD:RequestFocus(); assert(vgui.GetKeyboardFocus() == BACK_CHILD)",
+            sourceName: "@GMLuaFocusTopLevelRaise.lua"
+        )
+        let raisedHit = try registry.dispatchPointerEvent(
+            x: 20, y: 20, phase: .moved, timestamp: 1.1,
+            viewportWidth: 320, viewportHeight: 180
+        )
+        XCTAssertNotEqual(raisedHit.hitPanelIdentifier, frontIdentifier)
+        let raisedSnapshot = try XCTUnwrap(
+            registry.renderTree(viewportWidth: 320, viewportHeight: 180)
+                .first(where: { $0.identifier == raisedHit.hitPanelIdentifier })
+        )
+        XCTAssertNotNil(raisedSnapshot.parentIdentifier)
+    }
+
+    func testPanelHasChildrenTracksLiveNativeChildIdentity() throws {
+        let runtime = GMLuaRuntime(realm: .client, logger: { _ in })
+        try runtime.execute(
+            """
+            local parent = assert(vgui.Create("Panel"))
+            assert(parent:ChildCount() == 0 and not parent:HasChildren())
+            local child = assert(vgui.Create("Panel", parent))
+            assert(parent:ChildCount() == 1 and parent:HasChildren())
+            child:Remove()
+            assert(parent:ChildCount() == 0 and not parent:HasChildren())
+            """,
+            sourceName: "@GMLuaPanelHasChildrenRegression.lua"
+        )
+    }
+
+    func testHTMLJavaScriptObjectAndCallbackRegistrationIsRetainedLogically() throws {
+        let runtime = GMLuaRuntime(realm: .client, logger: { _ in })
+        let registry = try XCTUnwrap(runtime.vguiRegistry)
+
+        try runtime.execute(
+            """
+            local html = assert(vgui.Create("HTML"))
+            html:NewObject("console")
+            html:NewObject("console")
+            html:NewObjectCallback("console", "log")
+            html:NewObjectCallback("console", "log")
+
+            local ordinary = assert(vgui.Create("Panel"))
+            assert(not pcall(ordinary.NewObject, ordinary, "console"))
+            assert(not pcall(html.NewObject, html, 12))
+            assert(not pcall(html.NewObjectCallback, html, "console"))
+            """,
+            sourceName: "@GMLuaHTMLJavaScriptBridgeRegistrationRegression.lua"
+        )
+
+        let snapshot = try XCTUnwrap(registry.htmlPanelStateSnapshots.first)
+        XCTAssertEqual(snapshot.javascriptObjects, [LuaString("console")])
+        XCTAssertEqual(
+            snapshot.javascriptCallbacks,
+            [GMLuaHTMLJavaScriptCallbackSnapshot(
+                objectName: LuaString("console"),
+                callbackName: LuaString("log")
+            )]
+        )
+    }
+
     func testGUIMouseCoordinatesTrackHitTestPointerAndCancelToHiddenCursorSentinel() throws {
         let state = LuaState(output: { _ in })
         let typeSystem = try GMLuaTypeSystem.install(

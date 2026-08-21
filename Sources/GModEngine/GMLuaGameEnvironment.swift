@@ -10,6 +10,7 @@ public enum GMLuaHostSessionKind: String, Sendable, Equatable {
 public enum GMLuaGameEnvironmentConfigurationError: Error, CustomStringConvertible, Equatable {
     case invalidMaxPlayers(Int)
     case invalidMapName(String)
+    case invalidHostName(String)
 
     public var description: String {
         switch self {
@@ -17,6 +18,8 @@ public enum GMLuaGameEnvironmentConfigurationError: Error, CustomStringConvertib
             return "maxPlayers must be a positive integer exactly representable by Lua: \(value)"
         case let .invalidMapName(value):
             return "mapName must be a non-empty logical map name without a path or .bsp suffix: \(value)"
+        case let .invalidHostName(value):
+            return "hostName must be a non-empty host-supplied string without NUL bytes: \(value)"
         }
     }
 }
@@ -31,11 +34,13 @@ public struct GMLuaGameEnvironmentConfiguration: Sendable, Equatable {
     public let maxPlayers: Int
     public let mapName: String
     public let sessionKind: GMLuaHostSessionKind
+    public let hostName: String
 
     public init(
         maxPlayers: Int,
         mapName: String,
-        sessionKind: GMLuaHostSessionKind
+        sessionKind: GMLuaHostSessionKind,
+        hostName: String
     ) throws {
         // Lua 5.1 numbers are IEEE-754 doubles. Reject values that would be
         // rounded at the native boundary even though real server limits are
@@ -52,9 +57,15 @@ public struct GMLuaGameEnvironmentConfiguration: Sendable, Equatable {
               !mapName.lowercased().hasSuffix(".bsp") else {
             throw GMLuaGameEnvironmentConfigurationError.invalidMapName(mapName)
         }
+        let trimmedHostName = hostName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedHostName.isEmpty,
+              !hostName.contains("\0") else {
+            throw GMLuaGameEnvironmentConfigurationError.invalidHostName(hostName)
+        }
         self.maxPlayers = maxPlayers
         self.mapName = mapName
         self.sessionKind = sessionKind
+        self.hostName = hostName
     }
 
     public var isSinglePlayer: Bool { sessionKind == .singlePlayer }
@@ -157,6 +168,13 @@ public final class GMLuaGameEnvironment: @unchecked Sendable {
                 for: "game.IsDedicated"
             )
             return [.boolean(configuration.isDedicatedServer)]
+        }
+
+        state.register("GetHostName") { [environment] _ in
+            let configuration = try environment.requiredConfiguration(
+                for: "GetHostName"
+            )
+            return [.string(LuaString(configuration.hostName))]
         }
 
         state.setGlobal("game", value: .table(gameTable))

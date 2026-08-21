@@ -1012,7 +1012,8 @@ enum GModLuaConformanceMain {
         let gameEnvironmentConfiguration = try GMLuaGameEnvironmentConfiguration(
             maxPlayers: 32,
             mapName: "gm_construct",
-            sessionKind: .dedicatedServer
+            sessionKind: .dedicatedServer,
+            hostName: "GMod Lua Conformance Fixture"
         )
         logger(
             "[GLUA][HOST] gameEnvironment=headless-conformance-fixture " +

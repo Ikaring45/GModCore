@@ -2,6 +2,40 @@ import XCTest
 import GModLua
 
 final class LuaAutomaticGarbageCollectionTests: XCTestCase {
+    func testGenericForRootsEphemeralIteratorStateAcrossBodyCollections() throws {
+        let state = LuaState(output: { _ in })
+
+        try state.execute(
+            """
+            local weak = setmetatable({}, { __mode = "v" })
+
+            local function iteratorTriple()
+                local iteratorState = {
+                    index = 0,
+                    values = { "first", "second", "third" }
+                }
+                weak.state = iteratorState
+
+                return function(currentState)
+                    currentState.index = currentState.index + 1
+                    return currentState.values[currentState.index]
+                end, iteratorState, nil
+            end
+
+            local seen = {}
+            for value in iteratorTriple() do
+                seen[#seen + 1] = value
+                collectgarbage("collect")
+            end
+
+            assert(table.concat(seen, "|") == "first|second|third")
+            collectgarbage("collect")
+            assert(weak.state == nil, "generic-for state escaped the loop")
+            """,
+            sourceName: "@generic-for-hidden-state-gc-root.lua"
+        )
+    }
+
     func testStringAllocationPressureClearsWeakValueWithoutExplicitCollection() throws {
         let state = LuaState(output: { _ in })
 

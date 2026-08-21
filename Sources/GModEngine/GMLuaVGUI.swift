@@ -103,6 +103,19 @@ public enum GMLuaHTMLDocumentLoadResult: Equatable, Sendable {
     case failed(message: String)
 }
 
+/// One native JavaScript callback endpoint registered by stock `DHTML`.
+/// Invocation and DOM execution remain owned by the platform HTML renderer;
+/// this value preserves the stock registration boundary without fabricating it.
+public struct GMLuaHTMLJavaScriptCallbackSnapshot: Equatable, Sendable {
+    public let objectName: LuaString
+    public let callbackName: LuaString
+
+    public init(objectName: LuaString, callbackName: LuaString) {
+        self.objectName = objectName
+        self.callbackName = callbackName
+    }
+}
+
 public struct GMLuaHTMLPanelStateSnapshot: Equatable, Sendable {
     public let panelIdentifier: Int
     public let requestedClassName: String
@@ -111,6 +124,8 @@ public struct GMLuaHTMLPanelStateSnapshot: Equatable, Sendable {
     public let url: LuaString?
     public let html: LuaString?
     public let failureMessage: String?
+    public let javascriptObjects: [LuaString]
+    public let javascriptCallbacks: [GMLuaHTMLJavaScriptCallbackSnapshot]
 
     public init(
         panelIdentifier: Int,
@@ -119,7 +134,9 @@ public struct GMLuaHTMLPanelStateSnapshot: Equatable, Sendable {
         requestIdentifier: UInt64,
         url: LuaString?,
         html: LuaString?,
-        failureMessage: String?
+        failureMessage: String?,
+        javascriptObjects: [LuaString],
+        javascriptCallbacks: [GMLuaHTMLJavaScriptCallbackSnapshot]
     ) {
         self.panelIdentifier = panelIdentifier
         self.requestedClassName = requestedClassName
@@ -128,6 +145,8 @@ public struct GMLuaHTMLPanelStateSnapshot: Equatable, Sendable {
         self.url = url
         self.html = html
         self.failureMessage = failureMessage
+        self.javascriptObjects = javascriptObjects
+        self.javascriptCallbacks = javascriptCallbacks
     }
 }
 
@@ -316,6 +335,7 @@ private final class GMLuaPanelValue: @unchecked Sendable {
     var keyboardInputEnabled = true
     var isPopup = false
     var isWorldClicker = false
+    var isFocusTopLevel = false
     // Panel:Remove invalidates the typed object immediately, but native VGUI
     // retains the panel until the following frame. This flag represents that
     // observable interval without pretending the panel is still valid.
@@ -359,6 +379,8 @@ private final class GMLuaPanelValue: @unchecked Sendable {
     var htmlDocumentURL: LuaString?
     var htmlDocumentSource: LuaString?
     var htmlDocumentFailureMessage: String?
+    var htmlJavaScriptObjects: [LuaString] = []
+    var htmlJavaScriptCallbacks: [GMLuaHTMLJavaScriptCallbackSnapshot] = []
 
     init(
         identifier: Int,
@@ -423,6 +445,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     private let panelMetatable: LuaTable
     fileprivate let screenMetrics: GMLuaScreenMetrics?
     private let surfaceCommandState: GMLuaSurfaceCommandState?
+    private let languageRegistry: GMLuaLanguageRegistry?
     private let lock = NSLock()
     private var controls: [String: LuaTable] = [:]
     private var panels: [Int: LuaValue] = [:]
@@ -434,6 +457,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     private var hoveredPanelIdentifier: Int?
     private var pressedPanelIdentifier: Int?
     private var mouseCapturePanelIdentifier: Int?
+    private var touchSizingFrameIdentifier: Int?
     private var focusedPanelIdentifier: Int?
     private var logicalPointerPosition: (x: Double, y: Double)?
     private var latestDrawOnTopOrder: UInt64 = 0
@@ -447,13 +471,27 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         typeSystem: GMLuaTypeSystem,
         panelMetatable: LuaTable,
         screenMetrics: GMLuaScreenMetrics?,
-        surfaceCommandState: GMLuaSurfaceCommandState?
+        surfaceCommandState: GMLuaSurfaceCommandState?,
+        languageRegistry: GMLuaLanguageRegistry?
     ) {
         self.state = state
         self.typeSystem = typeSystem
         self.panelMetatable = panelMetatable
         self.screenMetrics = screenMetrics
         self.surfaceCommandState = surfaceCommandState
+        self.languageRegistry = languageRegistry
+    }
+
+    /// Native Label keeps the supplied token as its logical value and only
+    /// resolves marked language phrases for layout and paint. This preserves
+    /// `GetText()` identity while making `SizeToContents` and the renderer use
+    /// the same localized glyph string.
+    private func displayedLabelText(_ rawText: LuaString) -> LuaString {
+        guard rawText.bytes.first == Character("#").asciiValue,
+              let languageRegistry else {
+            return rawText
+        }
+        return languageRegistry.phrase(for: rawText)
     }
 
     fileprivate func labelTextSize(
@@ -465,7 +503,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
             )
         }
         return try surfaceCommandState.measureText(
-            panel.text,
+            displayedLabelText(panel.text),
             usingFontNamed: panel.fontName,
             fallbackFontNamed: LuaString("Default")
         )
@@ -571,7 +609,10 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         guard panel.wrapsText else { return try labelTextSize(panel) }
         let maximumWidth = availableLabelTextWidth(panel)
         guard maximumWidth > 0 else {
-            let characters = String(decoding: panel.text.bytes, as: UTF8.self)
+            let characters = String(
+                decoding: displayedLabelText(panel.text).bytes,
+                as: UTF8.self
+            )
             let lineCount = max(1, characters.reduce(into: 1) { count, character in
                 if character == "\n" { count += 1 }
             })
@@ -582,7 +623,10 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
             )
         }
 
-        let decoded = String(decoding: panel.text.bytes, as: UTF8.self)
+        let decoded = String(
+            decoding: displayedLabelText(panel.text).bytes,
+            as: UTF8.self
+        )
         var lines: [String] = []
         var current = ""
         var token = ""
@@ -785,7 +829,9 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
                 requestIdentifier: descriptor.htmlDocumentRequestIdentifier,
                 url: descriptor.htmlDocumentURL,
                 html: descriptor.htmlDocumentSource,
-                failureMessage: descriptor.htmlDocumentFailureMessage
+                failureMessage: descriptor.htmlDocumentFailureMessage,
+                javascriptObjects: descriptor.htmlJavaScriptObjects,
+                javascriptCallbacks: descriptor.htmlJavaScriptCallbacks
             )
         }
     }
@@ -1301,6 +1347,16 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         }
         lock.unlock()
 
+        // A captured DFrame resize already has an unambiguous target. Avoid
+        // rebuilding the complete Q-menu hit-test tree for every high-rate
+        // UIKit move sample; the host's one immediate surface refresh builds
+        // the authoritative post-callback tree once. Began/ended/cancelled and
+        // ordinary captured controls still take the full hit/hover path below.
+        if phase == .moved,
+           let resizeMove = try dispatchCapturedTouchFrameResizeMove(x: x, y: y) {
+            return resizeMove
+        }
+
         // SetDrawOnTop changes paint order only. Native VGUI keeps ordinary
         // input stacking, so a visually raised panel can still be covered for
         // hit-testing by a panel that would otherwise be in front of it.
@@ -1312,10 +1368,25 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         let hit = tree.reversed().first {
             $0.mouseInputEnabled && $0.clipRect.contains(x: x, y: y)
         }
-        let hitIdentifier = hit?.identifier
         let treeByIdentifier = Dictionary(
             uniqueKeysWithValues: tree.map { ($0.identifier, $0) }
         )
+        let ordinaryHitIdentifier = hit?.identifier
+        let touchResizeIdentifier: Int?
+        if phase == .began {
+            touchResizeIdentifier = try touchSizableFrameAncestor(
+                from: ordinaryHitIdentifier,
+                x: x,
+                y: y,
+                treeByIdentifier: treeByIdentifier
+            )
+        } else {
+            touchResizeIdentifier = nil
+        }
+        // Stock DFrame owns its bottom-right sizing grip. On iPad the visible
+        // 20px grip receives a transparent 44-point touch target, and it must
+        // win over content children inside that same frame corner.
+        let hitIdentifier = touchResizeIdentifier ?? ordinaryHitIdentifier
         var effectiveWorldClicker = false
         var worldClickerCandidate = hitIdentifier
         var visitedWorldClickerPanels: Set<Int> = []
@@ -1374,11 +1445,18 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
                ]) {
                 callbacks.append("OnCursorMoved")
             }
+            if let targetIdentifier,
+               targetIdentifier == touchSizingFrameIdentifier {
+                // DFrame performs the Source resize math in Think. UIKit move
+                // samples are already a complete host input cycle, so run that
+                // exact stock callback now instead of waiting for a fixed tick.
+                _ = try callPanelMethod(identifier: targetIdentifier, name: "Think")
+            }
         case .began:
             lock.lock()
             pressedPanelIdentifier = hitIdentifier
-            if let hitIdentifier { focusedPanelIdentifier = hitIdentifier }
             lock.unlock()
+            if let hitIdentifier { focus(identifier: hitIdentifier) }
             if let hitIdentifier,
                try callPanelMethod(
                     identifier: hitIdentifier,
@@ -1387,39 +1465,64 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
                ) {
                 callbacks.append("OnMousePressed")
             }
+            if let touchResizeIdentifier {
+                try beginTouchFrameResize(
+                    identifier: touchResizeIdentifier,
+                    pointerX: x,
+                    pointerY: y
+                )
+            }
         case .ended:
             let releaseTarget: Int?
+            let endingTouchResize: Bool
             lock.lock()
             releaseTarget = mouseCapturePanelIdentifier ?? pressedPanelIdentifier
+            endingTouchResize = releaseTarget == touchSizingFrameIdentifier
             pressedPanelIdentifier = nil
             lock.unlock()
-            if let releaseTarget,
-               try callPanelMethod(
-                    identifier: releaseTarget,
-                    name: "OnMouseReleased",
-                    arguments: [.number(107)]
-               ) {
-                callbacks.append("OnMouseReleased")
+            do {
+                defer {
+                    if endingTouchResize {
+                        endTouchFrameResize(identifier: releaseTarget)
+                    }
+                }
+                if let releaseTarget,
+                   try callPanelMethod(
+                        identifier: releaseTarget,
+                        name: "OnMouseReleased",
+                        arguments: [.number(107)]
+                   ) {
+                    callbacks.append("OnMouseReleased")
+                }
             }
         case .cancelled:
             let releaseTarget: Int?
+            let endingTouchResize: Bool
             lock.lock()
             releaseTarget = mouseCapturePanelIdentifier ?? pressedPanelIdentifier
+            endingTouchResize = releaseTarget == touchSizingFrameIdentifier
             pressedPanelIdentifier = nil
             mouseCapturePanelIdentifier = nil
             lock.unlock()
-            if let releaseTarget {
-                // Lua may transfer capture to a panel other than the last hit.
-                // Keep cancellation non-clicking for that sidecar as well.
-                try setPanelHovered(identifier: releaseTarget, hovered: false)
-            }
-            if let releaseTarget,
-               try callPanelMethod(
-                    identifier: releaseTarget,
-                    name: "OnMouseReleased",
-                    arguments: [.number(107)]
-               ) {
-                callbacks.append("OnMouseReleased")
+            do {
+                defer {
+                    if endingTouchResize {
+                        endTouchFrameResize(identifier: releaseTarget)
+                    }
+                }
+                if let releaseTarget {
+                    // Lua may transfer capture to a panel other than the last hit.
+                    // Keep cancellation non-clicking for that sidecar as well.
+                    try setPanelHovered(identifier: releaseTarget, hovered: false)
+                }
+                if let releaseTarget,
+                   try callPanelMethod(
+                        identifier: releaseTarget,
+                        name: "OnMouseReleased",
+                        arguments: [.number(107)]
+                   ) {
+                    callbacks.append("OnMouseReleased")
+                }
             }
         case let .scroll(delta):
             if let hitIdentifier,
@@ -1441,6 +1544,136 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
             clicked: false,
             doubleClicked: false
         )
+    }
+
+    private func dispatchCapturedTouchFrameResizeMove(
+        x: Double,
+        y: Double
+    ) throws -> GMLuaPointerDispatchResult? {
+        let identifier: Int?
+        lock.lock()
+        identifier = touchSizingFrameIdentifier
+        lock.unlock()
+        guard let identifier else { return nil }
+
+        let origin = try screenOrigin(identifier: identifier)
+        var callbacks: [String] = []
+        if try callPanelMethod(
+            identifier: identifier,
+            name: "OnCursorMoved",
+            arguments: [.number(x - origin.x), .number(y - origin.y)]
+        ) {
+            callbacks.append("OnCursorMoved")
+        }
+        // Keep the exact shipped DFrame sizing algorithm authoritative while
+        // applying it in the same host input cycle as this UIKit move.
+        _ = try callPanelMethod(identifier: identifier, name: "Think")
+        return GMLuaPointerDispatchResult(
+            hitPanelIdentifier: identifier,
+            worldClicker: isWorldClickerInAncestry(identifier: identifier),
+            callbackNames: callbacks,
+            clicked: false,
+            doubleClicked: false
+        )
+    }
+
+    private func isWorldClickerInAncestry(identifier: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        var candidate: Int? = identifier
+        var visited: Set<Int> = []
+        while let current = candidate,
+              visited.insert(current).inserted,
+              let value = panels[current],
+              let descriptor = panelDescriptor(from: value),
+              GMLuaTypeSystem.typedObject(from: value)?.isValid == true {
+            if descriptor.isWorldClicker { return true }
+            candidate = descriptor.parentIdentifier
+        }
+        return false
+    }
+
+    /// Returns only a live, sizable DFrame ancestor whose stock bottom-right
+    /// grip contains the touch. The expanded target remains inside the frame;
+    /// it does not invent left/top/all-edge resizing.
+    private func touchSizableFrameAncestor(
+        from hitIdentifier: Int?,
+        x: Double,
+        y: Double,
+        treeByIdentifier: [Int: GMLuaPanelRenderSnapshot]
+    ) throws -> Int? {
+        var candidate = hitIdentifier
+        var visited: Set<Int> = []
+        while let identifier = candidate,
+              visited.insert(identifier).inserted,
+              let snapshot = treeByIdentifier[identifier] {
+            let derives = try className(
+                snapshot.requestedClassName,
+                derivesFrom: "DFrame"
+            )
+            if derives,
+               x > snapshot.frame.x + max(0, snapshot.frame.width - 44),
+               y > snapshot.frame.y + max(0, snapshot.frame.height - 44),
+               let value = panel(identifier: identifier),
+               let descriptor = panelDescriptor(from: value),
+               case .boolean(true) = try state.rawTableValue(
+                    for: .string("m_bSizable"),
+                    in: descriptor.instanceTable
+               ) {
+                return identifier
+            }
+            candidate = snapshot.parentIdentifier
+        }
+        return nil
+    }
+
+    private func beginTouchFrameResize(
+        identifier: Int,
+        pointerX: Double,
+        pointerY: Double
+    ) throws {
+        guard let value = panel(identifier: identifier),
+              let descriptor = panelDescriptor(from: value) else { return }
+        let sizing = LuaTable()
+        try state.setRawTableValue(
+            .number(pointerX - descriptor.width),
+            for: .number(1),
+            in: sizing
+        )
+        try state.setRawTableValue(
+            .number(pointerY - descriptor.height),
+            for: .number(2),
+            in: sizing
+        )
+        try state.setRawTableValue(
+            .table(sizing),
+            for: .string("Sizing"),
+            in: descriptor.instanceTable
+        )
+        lock.lock()
+        touchSizingFrameIdentifier = identifier
+        mouseCapturePanelIdentifier = identifier
+        lock.unlock()
+    }
+
+    private func endTouchFrameResize(identifier: Int?) {
+        guard let identifier else { return }
+        if let value = panel(identifier: identifier),
+           let descriptor = panelDescriptor(from: value) {
+            try? state.setRawTableValue(
+                .nilValue,
+                for: .string("Sizing"),
+                in: descriptor.instanceTable
+            )
+        }
+        lock.lock()
+        if touchSizingFrameIdentifier == identifier {
+            touchSizingFrameIdentifier = nil
+        }
+        if mouseCapturePanelIdentifier == identifier {
+            mouseCapturePanelIdentifier = nil
+        }
+        lock.unlock()
     }
 
     private func setPanelHovered(identifier: Int, hovered: Bool) throws {
@@ -1517,7 +1750,12 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
             if !suppressesDefaultPaint {
                 try withinPanelContext(panel, clip: panel.clipRect) {
                     try surface.appendPanelImage(panel)
-                    if panel.engineClassName == "Label" { surface.appendPanelText(panel) }
+                    if panel.engineClassName == "Label" {
+                        surface.appendPanelText(
+                            panel,
+                            displayedText: displayedLabelText(panel.text)
+                        )
+                    }
                 }
             }
             for child in byParent[panel.identifier] ?? [] { try paint(child) }
@@ -2000,6 +2238,10 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
            affectedIdentifiers.contains(mouseCapturePanelIdentifier) {
             self.mouseCapturePanelIdentifier = nil
         }
+        if let touchSizingFrameIdentifier,
+           affectedIdentifiers.contains(touchSizingFrameIdentifier) {
+            self.touchSizingFrameIdentifier = nil
+        }
         if let focusedPanelIdentifier,
            affectedIdentifiers.contains(focusedPanelIdentifier) {
             self.focusedPanelIdentifier = nil
@@ -2031,6 +2273,10 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         if let mouseCapturePanelIdentifier,
            removedIdentifiers.contains(mouseCapturePanelIdentifier) {
             self.mouseCapturePanelIdentifier = nil
+        }
+        if let touchSizingFrameIdentifier,
+           removedIdentifiers.contains(touchSizingFrameIdentifier) {
+            self.touchSizingFrameIdentifier = nil
         }
         if let focusedPanelIdentifier,
            removedIdentifiers.contains(focusedPanelIdentifier) {
@@ -2316,9 +2562,25 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     }
 
     fileprivate func focus(identifier: Int) {
+        var focusTopLevelIdentifier: Int?
         lock.lock()
         focusedPanelIdentifier = identifier
+        var candidate: Int? = identifier
+        var visited: Set<Int> = []
+        while let current = candidate,
+              visited.insert(current).inserted,
+              let value = panels[current],
+              let descriptor = panelDescriptor(from: value) {
+            if descriptor.isFocusTopLevel {
+                focusTopLevelIdentifier = current
+                break
+            }
+            candidate = descriptor.parentIdentifier
+        }
         lock.unlock()
+        if let focusTopLevelIdentifier {
+            moveToStackEdge(identifier: focusTopLevelIdentifier, front: true)
+        }
     }
 
     fileprivate func isFocused(identifier: Int) -> Bool {
@@ -2537,26 +2799,32 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
             descriptor.requestedClassName = className.utf8String
         }
 
-        var table = control(named: descriptor.requestedClassName)
-        if table == nil,
-           case let .table(vgui) = state.getGlobal("vgui") {
-            let getter = try state.rawTableValue(for: .string("GetControlTable"), in: vgui)
-            if case .luaFunction = getter {
-                if case let .table(found) = try state.call(
-                    getter,
-                    arguments: [.string(LuaString(descriptor.requestedClassName))]
-                ).first ?? .nilValue {
-                    table = found
-                }
-            } else if case .nativeFunction = getter,
-                      case let .table(found) = try state.call(
-                        getter,
-                        arguments: [.string(LuaString(descriptor.requestedClassName))]
-                      ).first ?? .nilValue {
-                table = found
-            }
-        }
+        let table = try registeredControl(named: descriptor.requestedClassName)
         if let table { try prepare(descriptor, using: table) }
+    }
+
+    /// The shipped scripted-panels extension replaces native `vgui.Register`
+    /// with a Lua `PanelFactory`. Resolve both stores so engine behaviors can
+    /// inspect addon-defined ancestry without assuming which factory owns it.
+    private func registeredControl(named name: String) throws -> LuaTable? {
+        if let control = control(named: name) { return control }
+        guard case let .table(vgui) = state.getGlobal("vgui") else { return nil }
+        let getter = try state.rawTableValue(
+            for: .string("GetControlTable"),
+            in: vgui
+        )
+        switch getter {
+        case .luaFunction, .nativeFunction:
+            if case let .table(found) = try state.call(
+                getter,
+                arguments: [.string(LuaString(name))]
+            ).first ?? .nilValue {
+                return found
+            }
+            return nil
+        default:
+            return nil
+        }
     }
 
     private func prepare(_ descriptor: GMLuaPanelValue, using control: LuaTable) throws {
@@ -2592,6 +2860,35 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         return (current, Array(derivedFirst.reversed()))
     }
 
+    /// Tests the registered class-name chain without relying on the final
+    /// native engine class. Lua controls derived from `DFrame` all resolve to
+    /// the native `Panel` engine class, but must retain DFrame sizing behavior.
+    private func className(
+        _ requestedClassName: String,
+        derivesFrom expectedBaseName: String
+    ) throws -> Bool {
+        var current = requestedClassName
+        var visited: Set<String> = []
+        while true {
+            if current == expectedBaseName { return true }
+            guard visited.insert(current).inserted else {
+                throw LuaError.runtime(
+                    "loop in VGUI base classes for '\(requestedClassName)'"
+                )
+            }
+            guard !Self.engineClassNames.contains(current),
+                  let control = try registeredControl(named: current) else {
+                return false
+            }
+            let base = try state.rawTableValue(
+                for: .string("Base"),
+                in: control
+            )
+            guard case let .string(baseName) = base else { return false }
+            current = baseName.utf8String
+        }
+    }
+
     private func descendantIdentifiers(of root: Int) -> [Int] {
         var result: [Int] = []
         var pending = [root]
@@ -2619,7 +2916,8 @@ public enum GMLuaVGUI {
         into state: LuaState,
         typeSystem: GMLuaTypeSystem,
         screenMetrics: GMLuaScreenMetrics? = nil,
-        surfaceCommandState: GMLuaSurfaceCommandState? = nil
+        surfaceCommandState: GMLuaSurfaceCommandState? = nil,
+        languageRegistry: GMLuaLanguageRegistry? = nil
     ) throws -> GMLuaVGUIRegistry {
         guard let panelMetatable = typeSystem.metatable(named: "Panel") else {
             throw LuaError.runtime("GLua Panel metatable was not installed")
@@ -2629,7 +2927,8 @@ public enum GMLuaVGUI {
             typeSystem: typeSystem,
             panelMetatable: panelMetatable,
             screenMetrics: screenMetrics,
-            surfaceCommandState: surfaceCommandState
+            surfaceCommandState: surfaceCommandState,
+            languageRegistry: languageRegistry
         )
         let semanticIndex = try state.executeReturningValues(
             "return function(container, key) return container[key] end",
@@ -2828,6 +3127,33 @@ public enum GMLuaVGUI {
                 let panel = try requiredHTMLPanel(arguments, "IsLoading")
                 return [.boolean(panel.htmlDocumentLoadState == .loading)]
             }),
+            ("NewObject", { arguments in
+                let panel = try requiredHTMLPanel(arguments, "NewObject")
+                let objectName = try requiredLuaString(arguments, 1, "NewObject")
+                if !panel.htmlJavaScriptObjects.contains(objectName) {
+                    panel.htmlJavaScriptObjects.append(objectName)
+                }
+                return []
+            }),
+            ("NewObjectCallback", { arguments in
+                let panel = try requiredHTMLPanel(arguments, "NewObjectCallback")
+                let registration = GMLuaHTMLJavaScriptCallbackSnapshot(
+                    objectName: try requiredLuaString(
+                        arguments,
+                        1,
+                        "NewObjectCallback"
+                    ),
+                    callbackName: try requiredLuaString(
+                        arguments,
+                        2,
+                        "NewObjectCallback"
+                    )
+                )
+                if !panel.htmlJavaScriptCallbacks.contains(registration) {
+                    panel.htmlJavaScriptCallbacks.append(registration)
+                }
+                return []
+            }),
             ("OpenURL", { arguments in
                 let panel = try requiredHTMLPanel(arguments, "OpenURL")
                 try registry.beginHTMLDocumentLoad(
@@ -2886,6 +3212,10 @@ public enum GMLuaVGUI {
             ("ChildCount", { arguments in
                 let panel = try requiredPanel(arguments, "ChildCount")
                 return [.number(Double(registry.children(of: panel.identifier).count))]
+            }),
+            ("HasChildren", { arguments in
+                let panel = try requiredPanel(arguments, "HasChildren")
+                return [.boolean(!registry.children(of: panel.identifier).isEmpty)]
             }),
             ("GetChild", { arguments in
                 let panel = try requiredPanel(arguments, "GetChild")
@@ -3449,6 +3779,15 @@ public enum GMLuaVGUI {
                 registry.setMouseCapture(
                     identifier: panel.identifier,
                     captured: try requiredBoolean(arguments, 1, "MouseCapture")
+                )
+                return []
+            }),
+            ("SetFocusTopLevel", { arguments in
+                let panel = try requiredPanel(arguments, "SetFocusTopLevel")
+                panel.isFocusTopLevel = try requiredBoolean(
+                    arguments,
+                    1,
+                    "SetFocusTopLevel"
                 )
                 return []
             }),
