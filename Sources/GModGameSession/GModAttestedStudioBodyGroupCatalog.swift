@@ -18,6 +18,36 @@ public enum GModAttestedStudioBodyGroupCatalogError: Error, Equatable,
     }
 }
 
+public enum GModAttestedStudioBodyGroupResolutionError: Error, Equatable,
+    Sendable, CustomStringConvertible
+{
+    case propAssetInvalid(String)
+    case propAssetUnavailable(String)
+    case propAssetModelMismatch(requested: String, resolved: String)
+    case exactMetadataMissing(
+        modelPath: String,
+        mdlSHA256: String,
+        studioChecksum: Int32
+    )
+    case selection(SourceStudioBodyGroupSelectionError)
+
+    public var description: String {
+        switch self {
+        case let .propAssetInvalid(modelPath):
+            return "attested Studio body groups rejected invalid prop asset \(modelPath)"
+        case let .propAssetUnavailable(modelPath):
+            return "attested Studio body groups cannot access prop asset \(modelPath)"
+        case let .propAssetModelMismatch(requested, resolved):
+            return "attested prop asset \(resolved) does not match requested \(requested)"
+        case let .exactMetadataMissing(modelPath, mdlSHA256, studioChecksum):
+            return "no exact Studio body-group metadata for \(modelPath) " +
+                "\(mdlSHA256) checksum \(studioChecksum)"
+        case let .selection(error):
+            return "attested Studio body-group selection failed: \(error)"
+        }
+    }
+}
+
 /// Immutable session catalog keyed by the complete attested MDL identity.
 /// Multiple exact revisions of one logical model may coexist, but duplicate
 /// entries for one path/hash/checksum triple are rejected.
@@ -61,6 +91,48 @@ public struct GModAttestedStudioBodyGroupCatalog: Sendable {
             mdlSHA256: asset.mdlSHA256,
             studioChecksum: asset.studioChecksum
         )]
+    }
+
+    public func bodyValue(
+        for model: SourceEntityModelReference,
+        resolvedPropAsset: SourceCanonicalPropPhysicsAssetResolution,
+        applyingBodyGroups subModelIDs: String,
+        to currentBodyValue: Int
+    ) throws -> Int {
+        let asset: SourceAttestedPropPhysicsAsset
+        switch resolvedPropAsset {
+        case let .valid(value):
+            asset = value
+        case .invalid:
+            throw GModAttestedStudioBodyGroupResolutionError
+                .propAssetInvalid(model.path)
+        case .unavailable:
+            throw GModAttestedStudioBodyGroupResolutionError
+                .propAssetUnavailable(model.path)
+        }
+        guard asset.normalizedModelPath == model.path else {
+            throw GModAttestedStudioBodyGroupResolutionError
+                .propAssetModelMismatch(
+                    requested: model.path,
+                    resolved: asset.normalizedModelPath
+                )
+        }
+        guard let metadata = metadata(exactlyMatching: asset) else {
+            throw GModAttestedStudioBodyGroupResolutionError
+                .exactMetadataMissing(
+                    modelPath: asset.normalizedModelPath,
+                    mdlSHA256: asset.mdlSHA256,
+                    studioChecksum: asset.studioChecksum
+                )
+        }
+        do {
+            return try metadata.bodyValue(
+                applyingBodyGroups: subModelIDs,
+                to: currentBodyValue
+            )
+        } catch let error as SourceStudioBodyGroupSelectionError {
+            throw GModAttestedStudioBodyGroupResolutionError.selection(error)
+        }
     }
 }
 

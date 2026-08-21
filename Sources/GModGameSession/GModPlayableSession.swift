@@ -455,6 +455,8 @@ public final class GModPlayableSession {
             SourceCanonicalPropPhysicsAssetResolver? = nil,
         attestedPropPhysicsAssetResolverForTesting:
             GModAttestedPropPhysicsAssetResolver? = nil,
+        attestedStudioBodyGroupMetadataForTesting:
+            [SourceAttestedStudioBodyGroupMetadata]? = nil,
         studioModelRepositoryForTesting: GModStudioModelRepository? = nil,
         studioRenderableModelCacheForTesting:
             GModStudioRenderableModelCache? = nil
@@ -510,14 +512,28 @@ public final class GModPlayableSession {
         } else {
             loadedAttestedPropPhysicsAssetResolver = nil
         }
+        let loadedAttestedStudioBodyGroupCatalog:
+            GModAttestedStudioBodyGroupCatalog
+        if let attestedStudioBodyGroupMetadataForTesting {
+            loadedAttestedStudioBodyGroupCatalog = try
+                GModAttestedStudioBodyGroupCatalog(
+                    metadata: attestedStudioBodyGroupMetadataForTesting
+                )
+        } else {
+            loadedAttestedStudioBodyGroupCatalog = try
+                GModOwnedAttestedStudioBodyGroupMetadata.initialCatalog()
+        }
         let loadedStudioRenderableModelCache: GModStudioRenderableModelCache?
         let loadedDynamicEntityRenderSceneProjector:
             GModDynamicEntityRenderSceneProjector?
-        if let loadedStudioModelRepository {
-            let cache = try studioRenderableModelCacheForTesting ??
-                GModStudioRenderableModelCache(
-                    repository: loadedStudioModelRepository
-                )
+        if let cache = studioRenderableModelCacheForTesting {
+            loadedStudioRenderableModelCache = cache
+            loadedDynamicEntityRenderSceneProjector = try
+                GModDynamicEntityRenderSceneProjector(resolver: cache)
+        } else if let loadedStudioModelRepository {
+            let cache = try GModStudioRenderableModelCache(
+                repository: loadedStudioModelRepository
+            )
             loadedStudioRenderableModelCache = cache
             loadedDynamicEntityRenderSceneProjector = try
                 GModDynamicEntityRenderSceneProjector(resolver: cache)
@@ -642,6 +658,20 @@ public final class GModPlayableSession {
             } else {
                 activeModelValidator = nil
             }
+            let activePropPhysicsAssetResolver:
+                SourceCanonicalPropPhysicsAssetResolver
+            if let canonicalPropPhysicsAssetResolverForTesting {
+                activePropPhysicsAssetResolver =
+                    canonicalPropPhysicsAssetResolverForTesting
+            } else {
+                activePropPhysicsAssetResolver = { model in
+                    guard let resolver =
+                            loadedAttestedPropPhysicsAssetResolver else {
+                        return .unavailable
+                    }
+                    return resolver.resolve(model).canonicalResolution
+                }
+            }
             let activeBodyGroupResolver: SourceCanonicalBodyGroupResolver?
             if let loadedStudioModelRepository {
                 activeBodyGroupResolver = {
@@ -655,20 +685,17 @@ public final class GModPlayableSession {
                     )
                 }
             } else {
-                activeBodyGroupResolver = nil
-            }
-            let activePropPhysicsAssetResolver:
-                SourceCanonicalPropPhysicsAssetResolver
-            if let canonicalPropPhysicsAssetResolverForTesting {
-                activePropPhysicsAssetResolver =
-                    canonicalPropPhysicsAssetResolverForTesting
-            } else {
-                activePropPhysicsAssetResolver = { model in
-                    guard let resolver =
-                            loadedAttestedPropPhysicsAssetResolver else {
-                        return .unavailable
-                    }
-                    return resolver.resolve(model).canonicalResolution
+                activeBodyGroupResolver = {
+                    model,
+                    subModelIDs,
+                    currentBodyValue in
+                    try loadedAttestedStudioBodyGroupCatalog.bodyValue(
+                        for: model,
+                        resolvedPropAsset:
+                            activePropPhysicsAssetResolver(model),
+                        applyingBodyGroups: subModelIDs,
+                        to: currentBodyValue
+                    )
                 }
             }
             let sourceAdapter = try GMLuaSourceRuntimeAdapter(

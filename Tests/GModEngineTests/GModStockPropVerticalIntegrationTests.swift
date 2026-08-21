@@ -9,7 +9,7 @@ final class GModStockPropVerticalIntegrationTests: XCTestCase {
         "models/maxofs2d/button_06.mdl"
     )
 
-    func testOriginalSpawnIconCommandCreatesReplicatesAndRemovesButtonProp()
+    func testOriginalSpawnIconCreatesReplicatesAndRemovesButtonProp()
         throws
     {
         let mdlData = Data("exact button_06 mdl fixture".utf8)
@@ -31,6 +31,15 @@ final class GModStockPropVerticalIntegrationTests: XCTestCase {
                     studioChecksum: studioChecksum
                 ))
             }
+        )
+        let bodyGroupMetadata = try SourceAttestedStudioBodyGroupMetadata(
+            normalizedModelPath: model.path,
+            mdlSHA256: asset.mdlSHA256,
+            studioChecksum: studioChecksum,
+            bodyParts: [
+                .init(modelSelectionBase: 1, modelCount: 1),
+            ],
+            attestationReference: "synthetic-stock-route-mechanics"
         )
         let renderCache = try GModStudioRenderableModelCache(
             policy: GModStudioRenderableModelCachePolicy(
@@ -74,9 +83,7 @@ final class GModStockPropVerticalIntegrationTests: XCTestCase {
                 candidate == model && kind == .propPhysics ? .valid : .invalid
             },
             attestedPropPhysicsAssetResolverForTesting: resolver,
-            studioModelRepositoryForTesting: GModStudioModelRepository(
-                reader: MissingStockPropStudioReader()
-            ),
+            attestedStudioBodyGroupMetadataForTesting: [bodyGroupMetadata],
             studioRenderableModelCacheForTesting: renderCache
         )
         defer { _ = try? session.close() }
@@ -112,9 +119,16 @@ final class GModStockPropVerticalIntegrationTests: XCTestCase {
             sourceName: "=(stock prop dock geometry ABI)"
         )
         try session.clientRuntime.execute(
-            "RunConsoleCommand('gm_spawn', " +
-                "'models/maxofs2d/button_06.mdl', '0', '')",
-            sourceName: "=(stock button_06 SpawnIcon command)"
+            """
+            STOCK_BUTTON_ICON = assert(spawnmenu.CreateContentIcon(
+                "model",
+                nil,
+                { model = "models/maxofs2d/button_06.mdl", skin = 0 }
+            ))
+            assert(STOCK_BUTTON_ICON:GetBodyGroup() == "000000000")
+            STOCK_BUTTON_ICON:DoClick()
+            """,
+            sourceName: "=(original stock button_06 SpawnIcon click)"
         )
 
         let spawned = try session.runFixedTick()
@@ -134,6 +148,7 @@ final class GModStockPropVerticalIntegrationTests: XCTestCase {
         )
         XCTAssertEqual(clientProp.identity, serverProp.identity)
         XCTAssertEqual(clientProp.model, model)
+        XCTAssertEqual(serverProp.bodyValue, 0)
         XCTAssertEqual(clientProp.lifecycle, .active)
         XCTAssertTrue(serverProp.spawnEffect)
         XCTAssertEqual(clientProp.spawnEffect, serverProp.spawnEffect)
@@ -194,15 +209,5 @@ final class GModStockPropVerticalIntegrationTests: XCTestCase {
         var hasher = GModContentSHA256()
         hasher.update(data)
         return hasher.hexadecimalDigest()
-    }
-}
-
-private struct MissingStockPropStudioReader: SourceStudioBoundedAssetReading {
-    func read(
-        path: String,
-        pathID: String?,
-        maximumBytes: Int
-    ) -> SourceStudioBoundedAssetReadOutcome {
-        .missing
     }
 }
