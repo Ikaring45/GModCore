@@ -21,9 +21,11 @@ probe opens only the two allowlisted paths through `GAME`, validates their
 hashes and the public MDL/PHY headers, checks `util.IsValidModel` and
 `util.IsValidProp`, and then records physics object 0 through
 `GetMeshConvexes`, `GetAABB`, `GetMassCenter`, `GetInertia`, `GetMass`, and
-`GetMaterial`. Convex positions remain grouped and ordered; each three entries
-are one triangle. No model, PHY, material, or other game asset bytes are
-written to the result.
+`GetMaterial`. At the fixed zero origin/angle it also records the spawned
+entity's engine-owned `OBBMins`, `OBBMaxs`, and exact `GetCollisionBounds`
+values. Convex positions remain grouped and ordered; each three entries are
+one triangle. The entity is removed before the result is handed off. No model,
+PHY, material, or other game asset bytes are written to the result.
 
 ## Launch blockers
 

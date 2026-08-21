@@ -236,6 +236,12 @@ local function vectorRecord(value, field)
     return { x = value.x, y = value.y, z = value.z }
 end
 
+local function angleRecord(value, field)
+    if not value or not isFinite(value.p) or not isFinite(value.y) or
+        not isFinite(value.r) then error(field .. " is not a finite Angle") end
+    return { pitch = value.p, yaw = value.y, roll = value.r }
+end
+
 local function readBoundedGAME(path, maximumBytes)
     local handle = file.Open(path, "rb", "GAME")
     if not handle then error("missing GAME file " .. path) end
@@ -323,6 +329,31 @@ local function runProbe()
         physics:SetPos(Vector(0, 0, 0), true)
         physics:SetAngles(Angle(0, 0, 0))
 
+        local entityOrigin = vectorRecord(entity:GetPos(), "Entity:GetPos")
+        local entityAngles = angleRecord(entity:GetAngles(), "Entity:GetAngles")
+        local obbMinimum = vectorRecord(entity:OBBMins(), "Entity:OBBMins")
+        local obbMaximum = vectorRecord(entity:OBBMaxs(), "Entity:OBBMaxs")
+        local collisionMinimum, collisionMaximum = entity:GetCollisionBounds()
+        local collisionMinimumRecord = vectorRecord(
+            collisionMinimum,
+            "Entity:GetCollisionBounds minimum"
+        )
+        local collisionMaximumRecord = vectorRecord(
+            collisionMaximum,
+            "Entity:GetCollisionBounds maximum"
+        )
+        if entityOrigin.x ~= 0 or entityOrigin.y ~= 0 or entityOrigin.z ~= 0 or
+            entityAngles.pitch ~= 0 or entityAngles.yaw ~= 0 or entityAngles.roll ~= 0 then
+            error("spawned entity transform differs from the fixed probe transform")
+        end
+        if obbMinimum.x > obbMaximum.x or obbMinimum.y > obbMaximum.y or
+            obbMinimum.z > obbMaximum.z then error("reversed Entity OBB") end
+        if collisionMinimumRecord.x > collisionMaximumRecord.x or
+            collisionMinimumRecord.y > collisionMaximumRecord.y or
+            collisionMinimumRecord.z > collisionMaximumRecord.z then
+            error("reversed Entity collision bounds")
+        end
+
         local meshConvexes = physics:GetMeshConvexes()
         if type(meshConvexes) ~= "table" or #meshConvexes < 1 or
             #meshConvexes > request.limits.maximum_convexes then
@@ -397,6 +428,15 @@ local function runProbe()
         result.validity = {
             util_is_valid_model = validModel,
             util_is_valid_prop = validProp
+        }
+        result.entity_collision = {
+            origin = entityOrigin,
+            angles = entityAngles,
+            obb = { minimum = obbMinimum, maximum = obbMaximum },
+            collision_bounds = {
+                minimum = collisionMinimumRecord,
+                maximum = collisionMaximumRecord
+            }
         }
         result.physics = {
             object_index = 0,

@@ -141,6 +141,20 @@ $result = [pscustomobject]@{
         util_is_valid_model = $true
         util_is_valid_prop = $true
     }
+    entity_collision = [pscustomobject]@{
+        origin = [pscustomobject]@{ x = [double]0; y = [double]0; z = [double]0 }
+        angles = [pscustomobject]@{
+            pitch = [double]0; yaw = [double]0; roll = [double]0
+        }
+        obb = [pscustomobject]@{
+            minimum = [pscustomobject]@{ x = [double]-1; y = [double]-2; z = [double]0 }
+            maximum = [pscustomobject]@{ x = [double]1; y = [double]2; z = [double]3 }
+        }
+        collision_bounds = [pscustomobject]@{
+            minimum = [pscustomobject]@{ x = [double]-1; y = [double]-2; z = [double]0 }
+            maximum = [pscustomobject]@{ x = [double]1; y = [double]2; z = [double]3 }
+        }
+    }
     physics = [pscustomobject]@{
         object_index = [int64]0
         convex_count = [int64]1
@@ -176,6 +190,20 @@ Assert-Throws {
     Assert-SourceOracleVPhysicsResultObject `
         -Result $reversedAABB -RunID $runID -Request $request | Out-Null
 } 'Reversed physics AABB was accepted'
+
+$reversedEntityBounds = Copy-JSONValue $result
+$reversedEntityBounds.entity_collision.collision_bounds.minimum.x = [double]2
+Assert-Throws {
+    Assert-SourceOracleVPhysicsResultObject `
+        -Result $reversedEntityBounds -RunID $runID -Request $request | Out-Null
+} 'Reversed engine collision bounds were accepted'
+
+$movedEntity = Copy-JSONValue $result
+$movedEntity.entity_collision.origin.z = [double]1
+Assert-Throws {
+    Assert-SourceOracleVPhysicsResultObject `
+        -Result $movedEntity -RunID $runID -Request $request | Out-Null
+} 'A result from outside the fixed probe transform was accepted'
 
 $wrongTopology = Copy-JSONValue $result
 $wrongTopology.physics.total_vertex_count = [int64]4
@@ -253,6 +281,9 @@ foreach ($required in @(
     'file.Open(path, "rb", "GAME")',
     'util.IsValidProp(request.model_path)',
     'physics:GetMeshConvexes()',
+    'entity:OBBMins()',
+    'entity:OBBMaxs()',
+    'entity:GetCollisionBounds()',
     'physics:GetAABB()',
     'physics:GetMassCenter()',
     'physics:GetInertia()',

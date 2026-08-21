@@ -355,7 +355,8 @@ function Assert-SourceOracleVPhysicsResultObject {
     Assert-SourceOracleVPhysicsObjectShape -InputObject $Result -Field 'result' -Names @(
         'schema', 'kind', 'enabled', 'command_line_enabled', 'run_id',
         'command_line_run_id', 'request_id', 'realm', 'finish_reason',
-        'model_path', 'phy_path', 'policy', 'runtime', 'files', 'validity', 'physics'
+        'model_path', 'phy_path', 'policy', 'runtime', 'files', 'validity',
+        'entity_collision', 'physics'
     )
     [void](Get-SourceOracleVPhysicsInteger -InputObject $Result -Name 'schema' -Minimum 1 -Maximum 1)
     if ((Get-SourceOracleVPhysicsString -InputObject $Result -Name 'kind' -MaximumLength 64) `
@@ -456,6 +457,37 @@ function Assert-SourceOracleVPhysicsResultObject {
     foreach ($name in @('util_is_valid_model', 'util_is_valid_prop')) {
         if (-not (Get-SourceOracleVPhysicsBoolean -InputObject $Result.validity -Name $name)) {
             throw "validity.$name must be true for a successful fingerprint"
+        }
+    }
+
+    Assert-SourceOracleVPhysicsObjectShape -InputObject $Result.entity_collision `
+        -Field 'entity_collision' -Names @('origin', 'angles', 'obb', 'collision_bounds')
+    $entityOrigin = Assert-SourceOracleVPhysicsVector `
+        -Vector $Result.entity_collision.origin -Field 'entity_collision.origin'
+    if ($entityOrigin.x -ne 0 -or $entityOrigin.y -ne 0 -or $entityOrigin.z -ne 0) {
+        throw 'entity_collision.origin differs from the fixed probe origin'
+    }
+    Assert-SourceOracleVPhysicsObjectShape -InputObject $Result.entity_collision.angles `
+        -Field 'entity_collision.angles' -Names @('pitch', 'yaw', 'roll')
+    foreach ($name in @('pitch', 'yaw', 'roll')) {
+        $value = Get-SourceOracleVPhysicsFiniteNumber `
+            -InputObject $Result.entity_collision.angles -Name $name
+        if ($value -ne 0) {
+            throw 'entity_collision.angles differs from the fixed probe angle'
+        }
+    }
+    foreach ($boundsName in @('obb', 'collision_bounds')) {
+        $bounds = $Result.entity_collision.PSObject.Properties[$boundsName].Value
+        Assert-SourceOracleVPhysicsObjectShape -InputObject $bounds `
+            -Field "entity_collision.$boundsName" -Names @('minimum', 'maximum')
+        $boundsMinimum = Assert-SourceOracleVPhysicsVector `
+            -Vector $bounds.minimum -Field "entity_collision.$boundsName.minimum"
+        $boundsMaximum = Assert-SourceOracleVPhysicsVector `
+            -Vector $bounds.maximum -Field "entity_collision.$boundsName.maximum"
+        if ($boundsMinimum.x -gt $boundsMaximum.x -or
+            $boundsMinimum.y -gt $boundsMaximum.y -or
+            $boundsMinimum.z -gt $boundsMaximum.z) {
+            throw "entity_collision.$boundsName minimum exceeds maximum"
         }
     }
 
