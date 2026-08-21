@@ -854,6 +854,20 @@
     },
     {
       "role": "shipped_content",
+      "source_path": "sourceengine/resource/hltvevents.res",
+      "input_path": "server/sourceengine/resource/hltvevents.res",
+      "sha256": "42009260aabd3d139ca170057a8cdf901c9263e855e0f37f2addb54806aabf52",
+      "maximum_bytes": 2923
+    },
+    {
+      "role": "shipped_content",
+      "source_path": "sourceengine/scripts/game_sounds_manifest.txt",
+      "input_path": "server/sourceengine/scripts/game_sounds_manifest.txt",
+      "sha256": "77851cb187d6de1f53a9d83a820bdbf2015af7341c4ed21491031efb5487a6e2",
+      "maximum_bytes": 3469
+    },
+    {
+      "role": "shipped_content",
       "source_path": "sourceengine/scripts/surfaceproperties.txt",
       "input_path": "server/sourceengine/scripts/surfaceproperties.txt",
       "sha256": "b75f463e4a5b351c0f9a155c100659ae0384003ae910d092a07398e611056e32",

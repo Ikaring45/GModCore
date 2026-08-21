@@ -8,11 +8,275 @@ $script:VPhysicsBuild24721267SpecName =
     'VPhysicsSandbox-AppID4020-x86-64-build24721267-InputSpec.json'
 $script:VPhysicsBuild24721267MetadataName =
     'VPhysicsAttestation-Button06-AllowlistMetadata.json'
+$script:VPhysicsBuild24721267StartupClosureName =
+    'VPhysicsSandbox-AppID4020-x86-64-build24721267-StartupClosure.json'
 $script:VPhysicsBuild24721267ToolRoot = $PSScriptRoot
 $script:VPhysicsBuild24721267DirectoryVPK = 'garrysmod/garrysmod_dir.vpk'
 $script:VPhysicsBuild24721267MaximumDirectoryVPKBytes = [int64]1048576
 $script:VPhysicsBuild24721267MaximumVPKEntries = 65536
 $script:VPhysicsBuild24721267MaximumCStringBytes = 512
+
+function Read-SourceOracleVPhysicsBuild24721267StartupClosure {
+    [CmdletBinding()]
+    param()
+
+    $closure = Read-SourceOracleSandboxBoundedJSON `
+        -Path (Join-Path $script:VPhysicsBuild24721267ToolRoot `
+            $script:VPhysicsBuild24721267StartupClosureName) `
+        -MaximumBytes 131072 `
+        -Field 'build 24721267 startup closure'
+    Assert-SourceOracleSandboxObjectShape `
+        -InputObject $closure `
+        -Field 'startup closure' `
+        -Names @(
+            'schema', 'kind', 'steam', 'scope', 'fixed_binaries',
+            'required_files', 'audited_nonfatal', 'official_source'
+        )
+    if ([int64]$closure.schema -ne 1 -or
+        [string]$closure.kind -cne
+            'source-oracle-vphysics-pre-lua-fatal-file-closure') {
+        throw 'Startup closure schema or kind is unsupported'
+    }
+    Assert-SourceOracleSandboxObjectShape `
+        -InputObject $closure.steam `
+        -Field 'startup closure steam' `
+        -Names @('app_id', 'branch', 'build_id')
+    if ([int64]$closure.steam.app_id -ne 4020 -or
+        [string]$closure.steam.branch -cne 'x86-64' -or
+        [string]$closure.steam.build_id -cne '24721267') {
+        throw 'Startup closure is not bound to AppID 4020 x86-64 build 24721267'
+    }
+    Assert-SourceOracleSandboxObjectShape `
+        -InputObject $closure.scope `
+        -Field 'startup closure scope' `
+        -Names @(
+            'boundary', 'source_roots', 'path_classes',
+            'required_file_count', 'finding'
+        )
+    if ([int64]$closure.scope.required_file_count -ne 6 -or
+        (@($closure.scope.source_roots) -join '|') -cne
+            'sourceengine|garrysmod' -or
+        (@($closure.scope.path_classes) -join '|') -cne
+            'resource|scripts|cfg|platform') {
+        throw 'Startup closure scope does not declare the exact bounded audit'
+    }
+
+    $fixedBinaries = @($closure.fixed_binaries)
+    if ($fixedBinaries.Count -ne 3) {
+        throw 'Startup closure must bind exactly three evidence binaries'
+    }
+    $fixedBinarySources = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal
+    )
+    foreach ($binary in $fixedBinaries) {
+        Assert-SourceOracleSandboxObjectShape `
+            -InputObject $binary `
+            -Field 'startup closure fixed binary' `
+            -Names @('source_path', 'byte_count', 'sha256')
+        Assert-SourceOracleSandboxRelativePath `
+            -Value ([string]$binary.source_path) `
+            -Field 'startup closure fixed binary source_path'
+        Assert-SourceOracleSandboxSHA256 `
+            -Value ([string]$binary.sha256) `
+            -Field 'startup closure fixed binary SHA-256'
+        if ([int64]$binary.byte_count -le 0) {
+            throw 'Startup closure fixed binary byte_count must be positive'
+        }
+        if (-not $fixedBinarySources.Add([string]$binary.source_path)) {
+            throw "Startup closure duplicates evidence binary $($binary.source_path)"
+        }
+    }
+    foreach ($path in @(
+        'bin/win64/engine.dll',
+        'bin/win64/server.dll',
+        'bin/win64/soundemittersystem.dll'
+    )) {
+        if (-not $fixedBinarySources.Contains($path)) {
+            throw "Startup closure is missing evidence binary $path"
+        }
+    }
+
+    $requiredFiles = @($closure.required_files)
+    if ($requiredFiles.Count -ne 6) {
+        throw 'Startup closure must contain exactly six fatal file inputs'
+    }
+    $requiredSources = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal
+    )
+    foreach ($entry in $requiredFiles) {
+        Assert-SourceOracleSandboxObjectShape `
+            -InputObject $entry `
+            -Field 'startup closure required file' `
+            -Names @(
+                'source_root', 'source_path', 'input_path', 'byte_count',
+                'sha256', 'fatal_stage', 'evidence'
+            )
+        $sourceRoot = [string]$entry.source_root
+        $sourcePath = [string]$entry.source_path
+        if ($sourceRoot -cnotin @('sourceengine', 'garrysmod') -or
+            -not $sourcePath.StartsWith(
+                $sourceRoot + '/',
+                [StringComparison]::Ordinal
+            )) {
+            throw "Startup closure source root differs for $sourcePath"
+        }
+        Assert-SourceOracleSandboxRelativePath `
+            -Value $sourcePath `
+            -Field 'startup closure required source_path'
+        Assert-SourceOracleSandboxRelativePath `
+            -Value ([string]$entry.input_path) `
+            -Field 'startup closure required input_path'
+        Assert-SourceOracleSandboxSHA256 `
+            -Value ([string]$entry.sha256) `
+            -Field 'startup closure required SHA-256'
+        if ([int64]$entry.byte_count -le 0 -or
+            [string]::IsNullOrWhiteSpace([string]$entry.fatal_stage) -or
+            [string]::IsNullOrWhiteSpace([string]$entry.evidence)) {
+            throw "Startup closure evidence is incomplete for $sourcePath"
+        }
+        if (-not $requiredSources.Add($sourcePath)) {
+            throw "Startup closure duplicates required file $sourcePath"
+        }
+    }
+    foreach ($path in @(
+        'garrysmod/resource/serverevents.res',
+        'sourceengine/resource/hltvevents.res',
+        'sourceengine/scripts/game_sounds_manifest.txt',
+        'sourceengine/scripts/surfaceproperties_manifest.txt',
+        'sourceengine/scripts/surfaceproperties.txt',
+        'sourceengine/scripts/surfaceproperties_hl2.txt'
+    )) {
+        if (-not $requiredSources.Contains($path)) {
+            throw "Startup closure is missing fatal file $path"
+        }
+    }
+
+    $nonfatal = @($closure.audited_nonfatal)
+    if ($nonfatal.Count -ne 4) {
+        throw 'Startup closure must record four audited nonfatal path classes'
+    }
+    $nonfatalClasses = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal
+    )
+    foreach ($entry in $nonfatal) {
+        Assert-SourceOracleSandboxObjectShape `
+            -InputObject $entry `
+            -Field 'startup closure audited nonfatal entry' `
+            -Names @('path_class', 'paths', 'evidence')
+        if (-not $nonfatalClasses.Add([string]$entry.path_class) -or
+            @($entry.paths).Count -eq 0 -or
+            [string]::IsNullOrWhiteSpace([string]$entry.evidence)) {
+            throw 'Startup closure audited nonfatal entry is incomplete'
+        }
+    }
+    foreach ($pathClass in @('resource', 'scripts', 'cfg', 'platform')) {
+        if (-not $nonfatalClasses.Contains($pathClass)) {
+            throw "Startup closure did not audit nonfatal $pathClass paths"
+        }
+    }
+    Assert-SourceOracleSandboxObjectShape `
+        -InputObject $closure.official_source `
+        -Field 'startup closure official source' `
+        -Names @(
+            'commit', 'gameinterface', 'hltvdirector', 'sound_emitter',
+            'prop_data', 'cached_file_data'
+        )
+    if ([string]$closure.official_source.commit -cne
+        'c8f4c6351162fbff83bfa5a428d45d1e6eed3824') {
+        throw 'Startup closure official Source reference is not pinned'
+    }
+    return $closure
+}
+
+function Assert-SourceOracleVPhysicsBuild24721267StartupClosure {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [object]$Spec,
+        [Parameter(Mandatory)] [object]$Closure
+    )
+
+    $issues = [Collections.Generic.List[string]]::new()
+    foreach ($binary in @($Closure.fixed_binaries)) {
+        $matches = @($Spec.files | Where-Object {
+            [string]$_.source_path -ceq [string]$binary.source_path
+        })
+        if ($matches.Count -ne 1) {
+            $issues.Add(
+                "missing exact evidence binary: $($binary.source_path)"
+            )
+            continue
+        }
+        $match = $matches[0]
+        if ([string]$match.sha256 -cne [string]$binary.sha256 -or
+            [int64]$match.maximum_bytes -ne [int64]$binary.byte_count) {
+            $issues.Add(
+                "evidence binary differs from closure: $($binary.source_path)"
+            )
+        }
+    }
+    foreach ($entry in @($Closure.required_files)) {
+        $matches = @($Spec.files | Where-Object {
+            [string]$_.source_path -ceq [string]$entry.source_path
+        })
+        if ($matches.Count -ne 1) {
+            $issues.Add(
+                "missing exact fatal startup file: $($entry.source_path)"
+            )
+            continue
+        }
+        $match = $matches[0]
+        if ([string]$match.input_path -cne [string]$entry.input_path -or
+            [string]$match.sha256 -cne [string]$entry.sha256 -or
+            [int64]$match.maximum_bytes -ne [int64]$entry.byte_count) {
+            $issues.Add(
+                "fatal startup file differs from closure: $($entry.source_path)"
+            )
+        }
+    }
+    if ($issues.Count -ne 0) {
+        throw (
+            "Startup closure rejected $($issues.Count) issue(s):`n- " +
+            ($issues -join "`n- ")
+        )
+    }
+    return $Closure
+}
+
+function Assert-SourceOracleVPhysicsBuild24721267StartupClosurePresence {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$InstalledRoot,
+        [Parameter(Mandatory)] [object]$Closure
+    )
+
+    $issues = [Collections.Generic.List[string]]::new()
+    foreach ($entry in @($Closure.required_files)) {
+        $path = $null
+        try {
+            $path = Assert-SourceOracleSandboxNoReparsePath `
+                -Root $InstalledRoot `
+                -RelativePath ([string]$entry.source_path) `
+                -RequireFile
+        } catch {
+            $issues.Add("missing or unsafe: $($entry.source_path)")
+            continue
+        }
+        $actualBytes = [int64][IO.FileInfo]::new($path).Length
+        if ($actualBytes -ne [int64]$entry.byte_count) {
+            $issues.Add(
+                "byte count differs: $($entry.source_path) " +
+                "($actualBytes != $($entry.byte_count))"
+            )
+        }
+    }
+    if ($issues.Count -ne 0) {
+        throw (
+            "Startup source closure rejected $($issues.Count) issue(s):`n- " +
+            ($issues -join "`n- ")
+        )
+    }
+    return $Closure
+}
 
 function Read-SourceOracleVPhysicsBuild24721267Inputs {
     [CmdletBinding()]
@@ -36,7 +300,15 @@ function Read-SourceOracleVPhysicsBuild24721267Inputs {
     if (@($metadata.model_files).Count -ne 4) {
         throw 'button_06 metadata must contain exactly four model files'
     }
-    return [pscustomobject]@{ spec = $spec; metadata = $metadata }
+    $closure = Read-SourceOracleVPhysicsBuild24721267StartupClosure
+    [void](Assert-SourceOracleVPhysicsBuild24721267StartupClosure `
+        -Spec $spec `
+        -Closure $closure)
+    return [pscustomobject]@{
+        spec = $spec
+        metadata = $metadata
+        startup_closure = $closure
+    }
 }
 
 function Copy-SourceOracleVPhysicsBuild24721267File {
@@ -363,6 +635,9 @@ function New-SourceOracleVPhysicsBuild24721267Stage {
         -Root $InstalledServerRoot `
         -RequireDirectory
     $inputs = Read-SourceOracleVPhysicsBuild24721267Inputs
+    [void](Assert-SourceOracleVPhysicsBuild24721267StartupClosurePresence `
+        -InstalledRoot $installed `
+        -Closure $inputs.startup_closure)
     $stage = [IO.Path]::GetFullPath($StagePath).TrimEnd('\')
     if ([IO.Directory]::Exists($stage) -or [IO.File]::Exists($stage)) {
         throw "Stage already exists: $stage"

@@ -11,8 +11,9 @@ function Assert-BuildInput([bool]$Condition, [string]$Message) {
 $inputs = Read-SourceOracleVPhysicsBuild24721267Inputs
 $spec = $inputs.spec
 $metadata = $inputs.metadata
+$startupClosure = $inputs.startup_closure
 $files = @($spec.files)
-Assert-BuildInput ($files.Count -eq 128) 'Fixed build input must contain exactly 128 files'
+Assert-BuildInput ($files.Count -eq 130) 'Fixed build input must contain exactly 130 files'
 Assert-BuildInput `
     ([string]$spec.server.executable_input_path -ceq
         'server/srcds_console_win64.exe') `
@@ -89,6 +90,10 @@ $exactCleanInputs = [ordered]@{
     'garrysmod/resource/serverevents.res' =
         'oracle_game/resource/serverevents.res'
     'garrysmod/maps/gm_flatgrass.bsp' = 'oracle_game/maps/gm_flatgrass.bsp'
+    'sourceengine/resource/hltvevents.res' =
+        'server/sourceengine/resource/hltvevents.res'
+    'sourceengine/scripts/game_sounds_manifest.txt' =
+        'server/sourceengine/scripts/game_sounds_manifest.txt'
     'sourceengine/scripts/surfaceproperties.txt' =
         'server/sourceengine/scripts/surfaceproperties.txt'
     'sourceengine/scripts/surfaceproperties_hl2.txt' =
@@ -129,6 +134,89 @@ Assert-BuildInput `
         [string]$_.role -ceq 'probe_lua'
     }).Count -eq 1) `
     'Fixed clean game root must contain exactly one probe Lua file'
+
+$closureRequired = @($startupClosure.required_files)
+Assert-BuildInput ($closureRequired.Count -eq 6) `
+    'Fixed startup closure must contain exactly six fatal file inputs'
+Assert-BuildInput `
+    (@($startupClosure.audited_nonfatal | Where-Object {
+        [string]$_.path_class -in @('cfg', 'platform')
+    }).Count -eq 2) `
+    'Fixed startup closure must explicitly audit cfg and platform as nonfatal'
+[void](Assert-SourceOracleVPhysicsBuild24721267StartupClosure `
+    -Spec $spec `
+    -Closure $startupClosure)
+
+# The closure gate reports its complete exact-file delta in one rejection. This
+# prevents another one-file-at-a-time launch loop when several bootstrap files
+# are absent or differ.
+$brokenSpec = (
+    $spec | ConvertTo-Json -Depth 16 | ConvertFrom-Json
+)
+$brokenSpec.files = @($brokenSpec.files | Where-Object {
+    [string]$_.source_path -cnotin @(
+        'sourceengine/resource/hltvevents.res',
+        'sourceengine/scripts/game_sounds_manifest.txt'
+    )
+})
+$changedSurface = @($brokenSpec.files | Where-Object {
+    [string]$_.source_path -ceq
+        'sourceengine/scripts/surfaceproperties_hl2.txt'
+})
+Assert-BuildInput ($changedSurface.Count -eq 1) `
+    'Synthetic closure fixture lost the fixed surface file'
+$changedSurface[0].maximum_bytes = [int64]2799
+$closureFailure = $null
+try {
+    [void](Assert-SourceOracleVPhysicsBuild24721267StartupClosure `
+        -Spec $brokenSpec `
+        -Closure $startupClosure)
+} catch {
+    $closureFailure = $_.Exception.Message
+}
+Assert-BuildInput `
+    (-not [string]::IsNullOrEmpty($closureFailure)) `
+    'Synthetic multi-file closure rejection did not fail'
+Assert-BuildInput `
+    ($closureFailure -match 'Startup closure rejected 3 issue\(s\)') `
+    'Synthetic closure rejection did not aggregate every issue'
+foreach ($path in @(
+    'sourceengine/resource/hltvevents.res',
+    'sourceengine/scripts/game_sounds_manifest.txt',
+    'sourceengine/scripts/surfaceproperties_hl2.txt'
+)) {
+    Assert-BuildInput ($closureFailure.Contains($path)) `
+        "Synthetic closure rejection omitted $path"
+}
+
+$emptyInstalledRoot = [IO.Path]::Combine(
+    [IO.Path]::GetTempPath(),
+    'source-oracle-startup-closure-' + [Guid]::NewGuid().ToString('N')
+)
+[void][IO.Directory]::CreateDirectory($emptyInstalledRoot)
+try {
+    $presenceFailure = $null
+    try {
+        [void](Assert-SourceOracleVPhysicsBuild24721267StartupClosurePresence `
+            -InstalledRoot $emptyInstalledRoot `
+            -Closure $startupClosure)
+    } catch {
+        $presenceFailure = $_.Exception.Message
+    }
+    Assert-BuildInput `
+        ($presenceFailure -match
+            'Startup source closure rejected 6 issue\(s\)') `
+        'Synthetic source-root gate did not aggregate all six missing files'
+    foreach ($entry in $closureRequired) {
+        Assert-BuildInput `
+            ($presenceFailure.Contains([string]$entry.source_path)) `
+            "Synthetic source-root gate omitted $($entry.source_path)"
+    }
+} finally {
+    if ([IO.Directory]::Exists($emptyInstalledRoot)) {
+        [IO.Directory]::Delete($emptyInstalledRoot, $true)
+    }
+}
 
 $modelEntries = @($files | Where-Object {
     [string]$_.role -in @('model_mdl', 'model_phy', 'model_render_asset')

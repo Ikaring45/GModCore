@@ -32,10 +32,20 @@ has a separate bounded staging command:
 Its checked-in spec selects the x64 CUI `srcds_console_win64.exe`, the statically identified
 64-bit bootstrap/interface/import closure, the exact Steam appmanifest, the
 fixed `gm_flatgrass` map and GMod startup Lua, the exact GMod
-`resource/serverevents.res`, three surface-property files, four controlled
-gamemode files, one probe, one guest bootstrap, and only four `button_06` VPK
-entries. The staging code authenticates the bounded directory VPK and target
-ranges, and does not rehash or copy the complete VPK chunk.
+`resource/serverevents.res`, Source `resource/hltvevents.res`, the sound-script
+manifest, three surface-property files, four controlled gamemode files, one
+probe, one guest bootstrap, and only four `button_06` VPK entries. The staging
+code authenticates the bounded directory VPK and target ranges, and does not
+rehash or copy the complete VPK chunk.
+
+`VPhysicsSandbox-AppID4020-x86-64-build24721267-StartupClosure.json` fixes the
+complete six-file fatal bootstrap closure before map/Lua/probe entry, including
+each exact source root, byte count, SHA-256, and its fixed-PE or pinned Valve
+source evidence. The assembler rejects all missing or differing closure members
+in one error. The same audit records `cfg` and `platform` as having no fatal
+file edge in this bounded headless route; optional config, sound children,
+propdata, caches, and event files are not copied just because their names occur
+in a binary.
 
 The input spec is schema 1 and has the exact object shape below. Every file is
 copied through one retained, non-share-write handle only after its byte cap and
