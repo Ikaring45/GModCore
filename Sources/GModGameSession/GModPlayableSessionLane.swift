@@ -8,6 +8,7 @@ public struct GModPlayableSessionSnapshot: Sendable, Equatable {
     public let startup: GModPlayableSessionStartupReport
     public let worldMesh: GModWorldRenderMesh
     public let playerWalkState: SourceWorldWalkState
+    public let canonicalEntities: [SourceCanonicalEntitySnapshot]
 
     public init(
         generation: UInt64,
@@ -15,7 +16,8 @@ public struct GModPlayableSessionSnapshot: Sendable, Equatable {
         inputEpoch: UInt64,
         startup: GModPlayableSessionStartupReport,
         worldMesh: GModWorldRenderMesh,
-        playerWalkState: SourceWorldWalkState
+        playerWalkState: SourceWorldWalkState,
+        canonicalEntities: [SourceCanonicalEntitySnapshot]
     ) {
         self.generation = generation
         self.pointerEpoch = pointerEpoch
@@ -23,6 +25,7 @@ public struct GModPlayableSessionSnapshot: Sendable, Equatable {
         self.startup = startup
         self.worldMesh = worldMesh
         self.playerWalkState = playerWalkState
+        self.canonicalEntities = canonicalEntities
     }
 }
 
@@ -100,6 +103,9 @@ public struct GModPlayableHostFrameReport: Sendable, Equatable {
     public let clientSurfaceSounds: GMLuaSurfaceSoundRequestReport
     public let viewportChanged: Bool
     public let playerWalkState: SourceWorldWalkState
+    /// Cheap change token. The entity array is fetched from the lane only when
+    /// this value changes, rather than sorted and copied every display frame.
+    public let canonicalEntityCursor: SourceEntityReplicationCursor?
 
     public init(
         fixedTicks: [GModPlayableFixedTickReport],
@@ -108,7 +114,8 @@ public struct GModPlayableHostFrameReport: Sendable, Equatable {
         clientVGUIFrame: GMLuaSurfaceFrameSnapshot?,
         clientSurfaceSounds: GMLuaSurfaceSoundRequestReport,
         viewportChanged: Bool,
-        playerWalkState: SourceWorldWalkState
+        playerWalkState: SourceWorldWalkState,
+        canonicalEntityCursor: SourceEntityReplicationCursor?
     ) {
         self.fixedTicks = fixedTicks
         self.inputButtons = inputButtons
@@ -117,6 +124,7 @@ public struct GModPlayableHostFrameReport: Sendable, Equatable {
         self.clientSurfaceSounds = clientSurfaceSounds
         self.viewportChanged = viewportChanged
         self.playerWalkState = playerWalkState
+        self.canonicalEntityCursor = canonicalEntityCursor
     }
 
     public var deliveredMessages: Int {
@@ -263,7 +271,8 @@ public actor GModPlayableSessionLane {
             inputEpoch: inputEpoch,
             startup: replacement.startupReport,
             worldMesh: replacement.worldMesh,
-            playerWalkState: replacement.playerWalkState
+            playerWalkState: replacement.playerWalkState,
+            canonicalEntities: replacement.clientCanonicalEntitySnapshots
         )
     }
 
@@ -332,8 +341,23 @@ public actor GModPlayableSessionLane {
             clientVGUIFrame: clientVGUIFrame,
             clientSurfaceSounds: clientSurfaceSounds,
             viewportChanged: viewportChanged,
-            playerWalkState: session.playerWalkState
+            playerWalkState: session.playerWalkState,
+            canonicalEntityCursor: session.clientCanonicalEntityReplicationCursor
         )
+    }
+
+    /// Returns the immutable CLIENT projection only on explicit demand. The
+    /// caller compares the host-frame cursor first and can therefore avoid an
+    /// O(entity count) allocation on unchanged frames.
+    public func clientCanonicalEntitySnapshots(
+        expectedGeneration: UInt64? = nil
+    ) throws -> [SourceCanonicalEntitySnapshot] {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        return session.clientCanonicalEntitySnapshots
     }
 
     public func renderClientVGUIFrame(

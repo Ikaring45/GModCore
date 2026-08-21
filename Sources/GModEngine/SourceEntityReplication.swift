@@ -152,6 +152,22 @@ public struct SourceEntityReplicationClientSnapshot: Equatable, Sendable {
     }
 }
 
+/// Allocation-free identity of the latest CLIENT-applied canonical entity
+/// projection. High-frequency host frames carry this cursor and request the
+/// immutable entity array only when either component changes.
+public struct SourceEntityReplicationCursor: Equatable, Sendable {
+    public let connectionGeneration: SourceEntityReplicationConnectionGeneration
+    public let sequence: UInt64
+
+    public init(
+        connectionGeneration: SourceEntityReplicationConnectionGeneration,
+        sequence: UInt64
+    ) {
+        self.connectionGeneration = connectionGeneration
+        self.sequence = sequence
+    }
+}
+
 public enum SourceEntityReplicationRejection: Equatable, Sendable {
     case noActiveConnection
     case connectionGenerationMismatch(
@@ -236,6 +252,16 @@ public struct SourceEntityReplicationClientState: Sendable {
             generation: activeConnectionGeneration,
             sequence: lastAppliedSequence,
             entitiesByEntryIndex: entitiesByEntryIndex
+        )
+    }
+
+    /// Cheap change token for frame lanes. Unlike `snapshot`, this does not
+    /// allocate or sort an entity array.
+    public var cursor: SourceEntityReplicationCursor? {
+        guard let activeConnectionGeneration else { return nil }
+        return SourceEntityReplicationCursor(
+            connectionGeneration: activeConnectionGeneration,
+            sequence: lastAppliedSequence
         )
     }
 

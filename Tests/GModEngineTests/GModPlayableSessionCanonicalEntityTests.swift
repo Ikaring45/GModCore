@@ -44,6 +44,14 @@ final class GModPlayableSessionCanonicalEntityTests: XCTestCase {
         XCTAssertEqual(serverWorld.identity, session.worldIdentity)
         XCTAssertEqual(clientWorld, serverWorld)
         XCTAssertEqual(clientPlayer, serverPlayer)
+        XCTAssertEqual(
+            session.clientCanonicalEntitySnapshots,
+            [clientWorld, clientPlayer]
+        )
+        let startupCursor = try XCTUnwrap(
+            session.clientCanonicalEntityReplicationCursor
+        )
+        XCTAssertGreaterThan(startupCursor.sequence, 0)
         XCTAssertEqual(serverPlayer.kind, .player)
         XCTAssertEqual(serverWorld.lifecycle, .active)
         XCTAssertEqual(serverPlayer.lifecycle, .active)
@@ -81,6 +89,18 @@ final class GModPlayableSessionCanonicalEntityTests: XCTestCase {
         XCTAssertEqual(movedServerPlayer.identity, serverPlayer.identity)
         XCTAssertGreaterThan(movedServerPlayer.revision, serverPlayer.revision)
         XCTAssertEqual(movedClientPlayer, movedServerPlayer)
+        XCTAssertEqual(
+            session.clientCanonicalEntitySnapshots,
+            [clientWorld, movedClientPlayer]
+        )
+        let movedCursor = try XCTUnwrap(
+            session.clientCanonicalEntityReplicationCursor
+        )
+        XCTAssertEqual(
+            movedCursor.connectionGeneration,
+            startupCursor.connectionGeneration
+        )
+        XCTAssertGreaterThan(movedCursor.sequence, startupCursor.sequence)
         XCTAssertEqual(movedServerPlayer.transform.origin, advanced.state.origin)
         XCTAssertEqual(movedServerPlayer.transform.angles, advanced.state.viewAngles)
         XCTAssertEqual(session.playerWalkState, advanced.state)

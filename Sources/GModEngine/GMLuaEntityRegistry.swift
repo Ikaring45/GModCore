@@ -556,6 +556,14 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
             .map(\.value)
     }
 
+    /// Allocation-free version of the CLIENT projection. Callers use this to
+    /// avoid rebuilding the ordered snapshot array on unchanged host frames.
+    public var canonicalEntityReplicationCursor: SourceEntityReplicationCursor? {
+        lock.lock()
+        defer { lock.unlock() }
+        return entityReplicationState.cursor
+    }
+
     private struct CanonicalProjection {
         var values: [Int: LuaValue]
         var playerIdentityByUserID: [Int: (index: Int, generation: UInt64)]

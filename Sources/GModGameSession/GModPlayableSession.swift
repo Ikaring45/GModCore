@@ -398,6 +398,20 @@ public final class GModPlayableSession {
         return Self.playerWalkState(from: snapshot)
     }
 
+    /// CLIENT-applied canonical state in Source entity-list order. Dynamic
+    /// rendering consumes this replicated projection, never SERVER storage or
+    /// Lua userdata directly.
+    public var clientCanonicalEntitySnapshots: [SourceCanonicalEntitySnapshot] {
+        clientRuntime.entityRegistry?.canonicalEntitySnapshots ?? []
+    }
+
+    /// Allocation-free change token for the CLIENT canonical projection.
+    public var clientCanonicalEntityReplicationCursor:
+        SourceEntityReplicationCursor?
+    {
+        clientRuntime.entityRegistry?.canonicalEntityReplicationCursor
+    }
+
     public convenience init(
         configuration: GModPlayableSessionConfiguration = .init(),
         textMeasurer: (any GMLuaTextMeasurer)? = nil,
