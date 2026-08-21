@@ -279,6 +279,7 @@ public struct GModMainView: View {
                     GModMetalView(
                         stats: $stats,
                         worldScene: game.worldScene,
+                        dynamicEntityScene: game.dynamicEntityScene,
                         surfaceScene: game.surfaceScene,
                         preferredFramesPerSecond:
                             inputVideoSettings.preferredFramesPerSecond,

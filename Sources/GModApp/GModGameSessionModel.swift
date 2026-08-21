@@ -17,6 +17,19 @@ private struct GModSurfaceBuildResult: Sendable {
     let failure: String?
 }
 
+private struct GModDynamicEntitySceneBuildRequest: Sendable {
+    let snapshot: GModDynamicEntityRenderSceneSnapshot
+    let applicationGeneration: UInt64
+    let laneGeneration: UInt64
+    let buildEpoch: UInt64
+    let requestRevision: UInt64
+}
+
+private struct GModDynamicEntitySceneBuildResult: Sendable {
+    let scene: GModMetalDynamicEntityScene?
+    let failure: String?
+}
+
 struct GModGameFirstWorldFrameGate: Equatable, Sendable {
     private(set) var expectedMeshIdentifier: String?
 
@@ -232,6 +245,8 @@ final class GModGameSessionModel: ObservableObject {
     @Published private(set) var worldScene: GModMetalWorldScene?
     @Published private(set) var lastRendererFailure:
         GModMetalWorldRendererFailure?
+    @Published private(set) var dynamicEntityScene:
+        GModMetalDynamicEntityScene?
     @Published private(set) var surfaceScene: GModMetalSurfaceScene?
     @Published private(set) var surfaceDiagnostics: GModMetalSurfaceDiagnostics?
     @Published private(set) var surfaceStatus = "VGUI surface idle"
@@ -257,6 +272,8 @@ final class GModGameSessionModel: ObservableObject {
         GModMetalSurfaceSourceMaterialResolver
     private nonisolated let surfaceTextRasterizer:
         GModMetalCoreTextRasterizer
+    private nonisolated let dynamicEntitySceneBuilder:
+        GModDynamicEntityMetalSceneBuilder
     private var forwardAxis: Float = 0
     private var sideAxis: Float = 0
     private var jumpPressed = false
@@ -269,6 +286,12 @@ final class GModGameSessionModel: ObservableObject {
     private var surfaceRequestRevision: UInt64 = 0
     private var surfaceRefreshQueue = GModGameSurfaceRefreshPendingQueue()
     private var surfaceRefreshTask: Task<Void, Never>?
+    private var lastDynamicEntitySourceRevision: UInt64?
+    private var pendingDynamicEntitySceneBuild:
+        GModDynamicEntitySceneBuildRequest?
+    private var dynamicEntitySceneBuildTask: Task<Void, Never>?
+    private var dynamicEntitySceneBuildEpoch: UInt64 = 0
+    private var dynamicEntitySceneBuildRevision: UInt64 = 0
     private var inputSuspensionInFlight = false
     private var pauseMenuNotificationPending = false
     private var lastSurfaceFailure: String?
@@ -326,8 +349,18 @@ final class GModGameSessionModel: ObservableObject {
         lane = runtimeFactory.makePlayableSessionLane()
         self.diagnosticsStore = diagnosticsStore
         self.inputVideoSettings = inputVideoSettings
-        surfaceTextureResolver = runtimeFactory.surfaceTextureResolver
+        let textureResolver = runtimeFactory.surfaceTextureResolver
+        surfaceTextureResolver = textureResolver
         surfaceTextRasterizer = runtimeFactory.surfaceTextRasterizer
+        do {
+            dynamicEntitySceneBuilder = try GModDynamicEntityMetalSceneBuilder(
+                textureResolver: textureResolver
+            )
+        } catch {
+            preconditionFailure(
+                "invalid built-in dynamic prop scene policy: \(error)"
+            )
+        }
         audioController = GModMenuAudioController(
             resolver: { logicalPath, maximumByteCount in
                 try runtimeFactory.mountedContentData(
@@ -365,6 +398,7 @@ final class GModGameSessionModel: ObservableObject {
         guard !isStarting, !isDisconnecting else { return }
         audioController.stop(bus: .gameplay)
         invalidateSurfaceRequests()
+        invalidateDynamicEntityScene()
         isStarting = true
         loadingState = GModPlayableSessionLoadingState()
         startFailure = nil
@@ -373,6 +407,7 @@ final class GModGameSessionModel: ObservableObject {
         loadingMap = map
         worldScene = nil
         worldSkyVisibility = nil
+        dynamicEntityScene = nil
         lastRendererFailure = nil
         surfaceScene = nil
         surfaceDiagnostics = nil
@@ -681,6 +716,7 @@ final class GModGameSessionModel: ObservableObject {
         clearHeldWorldInput()
         publishMovementInput()
         invalidateSurfaceRequests()
+        invalidateDynamicEntityScene()
         frameMailbox.disable()
         pointerMailbox.setEnabled(false)
         firstWorldFrameGate.reset()
@@ -751,6 +787,7 @@ final class GModGameSessionModel: ObservableObject {
         clearHeldWorldInput()
         publishMovementInput()
         invalidateSurfaceRequests()
+        invalidateDynamicEntityScene()
         frameMailbox.disable()
         pointerMailbox.setEnabled(false)
         firstWorldFrameGate.reset()
@@ -1026,6 +1063,10 @@ final class GModGameSessionModel: ObservableObject {
                 reportFailures(clientFrame)
             }
             playClientSurfaceSounds(report.clientSurfaceSounds)
+            await refreshDynamicEntitySceneIfNeeded(
+                applicationGeneration: activeToken.generation.application,
+                laneGeneration: activeToken.generation.lane
+            )
             scheduleClientSurfaceRefresh(
                 applicationGeneration: activeToken.generation.application,
                 laneGeneration: activeToken.generation.lane
@@ -1121,6 +1162,110 @@ final class GModGameSessionModel: ObservableObject {
     private func invalidateSurfaceRequests() {
         surfaceRequestRevision &+= 1
         surfaceRefreshQueue.removeAll()
+    }
+
+    /// Fetches the CLIENT prop projection only after the shared host FIFO has
+    /// advanced. Model/material conversion is then coalesced outside the game
+    /// lane so a new prop cannot stall subsequent fixed ticks or touch input.
+    private func refreshDynamicEntitySceneIfNeeded(
+        applicationGeneration: UInt64,
+        laneGeneration: UInt64
+    ) async {
+        do {
+            let snapshot = try await lane.clientDynamicEntityRenderScene(
+                ifChangedFrom: lastDynamicEntitySourceRevision,
+                expectedGeneration: laneGeneration
+            )
+            guard sessionGeneration == applicationGeneration,
+                  self.laneGeneration == laneGeneration,
+                  isReady,
+                  let snapshot else { return }
+            lastDynamicEntitySourceRevision = snapshot.revision
+            for issue in snapshot.issues.prefix(16) {
+                appendLog(
+                    "[CLIENT][PROP][EHANDLE " +
+                        "\(issue.identity.handle.rawValue)] " +
+                        "\(issue.failure)"
+                )
+            }
+            scheduleDynamicEntitySceneBuild(
+                snapshot: snapshot,
+                applicationGeneration: applicationGeneration,
+                laneGeneration: laneGeneration
+            )
+        } catch {
+            guard sessionGeneration == applicationGeneration,
+                  self.laneGeneration == laneGeneration,
+                  isReady else { return }
+            appendLog(
+                "[CLIENT][PROP] render projection unavailable: " +
+                    GMLuaRuntime.describe(error)
+            )
+        }
+    }
+
+    private func scheduleDynamicEntitySceneBuild(
+        snapshot: GModDynamicEntityRenderSceneSnapshot,
+        applicationGeneration: UInt64,
+        laneGeneration: UInt64
+    ) {
+        dynamicEntitySceneBuildRevision &+= 1
+        pendingDynamicEntitySceneBuild = GModDynamicEntitySceneBuildRequest(
+            snapshot: snapshot,
+            applicationGeneration: applicationGeneration,
+            laneGeneration: laneGeneration,
+            buildEpoch: dynamicEntitySceneBuildEpoch,
+            requestRevision: dynamicEntitySceneBuildRevision
+        )
+        guard dynamicEntitySceneBuildTask == nil else { return }
+        dynamicEntitySceneBuildTask = Task { @MainActor [weak self] in
+            await self?.drainDynamicEntitySceneBuilds()
+        }
+    }
+
+    private func drainDynamicEntitySceneBuilds() async {
+        while let request = pendingDynamicEntitySceneBuild {
+            pendingDynamicEntitySceneBuild = nil
+            let builder = dynamicEntitySceneBuilder
+            let build = await Task.detached(priority: .userInitiated) {
+                do {
+                    return GModDynamicEntitySceneBuildResult(
+                        scene: try builder.build(
+                            from: request.snapshot,
+                            applicationGeneration:
+                                request.applicationGeneration,
+                            laneGeneration: request.laneGeneration
+                        ),
+                        failure: nil
+                    )
+                } catch {
+                    return GModDynamicEntitySceneBuildResult(
+                        scene: nil,
+                        failure: GMLuaRuntime.describe(error)
+                    )
+                }
+            }.value
+            guard request.buildEpoch == dynamicEntitySceneBuildEpoch,
+                  request.requestRevision == dynamicEntitySceneBuildRevision,
+                  request.applicationGeneration == sessionGeneration,
+                  request.laneGeneration == laneGeneration,
+                  isReady else { continue }
+            if let failure = build.failure {
+                appendLog("[CLIENT][PROP] Metal scene rejected: \(failure)")
+            } else if let scene = build.scene {
+                dynamicEntityScene = scene
+            }
+        }
+        dynamicEntitySceneBuildTask = nil
+    }
+
+    private func invalidateDynamicEntityScene() {
+        dynamicEntitySceneBuildEpoch &+= 1
+        dynamicEntitySceneBuildRevision &+= 1
+        pendingDynamicEntitySceneBuild = nil
+        lastDynamicEntitySourceRevision = nil
+        dynamicEntitySceneBuilder.reset()
+        dynamicEntityScene = nil
     }
 
     private func scheduleClientSurfaceRefresh(
@@ -1392,6 +1537,7 @@ final class GModGameSessionModel: ObservableObject {
         }
         isReady = false
         invalidateSurfaceRequests()
+        invalidateDynamicEntityScene()
         frameMailbox.disable()
         pointerMailbox.setEnabled(false)
         pointerEpoch = nil
