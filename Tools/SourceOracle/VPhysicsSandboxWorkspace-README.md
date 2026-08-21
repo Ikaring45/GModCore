@@ -20,6 +20,21 @@ The generator is:
   -WorkspacePath C:\explicit\new-workspace
 ```
 
+The exact non-launch x86-64 input selected for AppID 4020 build `24721267`
+has a separate bounded staging command:
+
+```powershell
+.\Tools\SourceOracle\New-SourceOracleVPhysicsBuild24721267Stage.ps1 `
+  -InstalledServerRoot H:\explicit\fresh-app-4020-x86-64 `
+  -StagePath H:\explicit\new-empty-stage
+```
+
+Its checked-in spec selects `srcds_win64.exe`, the statically identified
+64-bit bootstrap/interface/import closure, the exact Steam appmanifest, and
+only four `button_06` VPK entries. The staging code authenticates the bounded
+directory VPK and target ranges, and does not rehash or copy the complete VPK
+chunk. It still cannot launch a process or enable the probe.
+
 The input spec is schema 1 and has the exact object shape below. Every file is
 copied through one retained, non-share-write handle only after its byte cap and
 lowercase SHA-256 match. Paths are explicit; no glob or directory copy exists.

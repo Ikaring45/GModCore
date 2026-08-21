@@ -1,0 +1,219 @@
+{
+  "schema": 1,
+  "kind": "fresh-steamcmd-app-4020-x86-64-attestation-input",
+  "steam": {
+    "app_id": 4020,
+    "branch": "x86-64",
+    "build_id": "24721267"
+  },
+  "ownership_reference": "user-owned-playable-manifest-sha256:2755c232b55cfe6f466555c4e63d2c5b1c3a4c300910aaffdee5701a7e492045",
+  "server": {
+    "executable_input_path": "server/srcds_win64.exe",
+    "engine_input_path": "server/bin/win64/engine.dll",
+    "game_server_input_path": "server/bin/win64/server.dll",
+    "vphysics_input_path": "server/bin/win64/vphysics.dll",
+    "tier0_input_path": "server/bin/win64/tier0.dll"
+  },
+  "model": {
+    "model_path": "models/maxofs2d/button_06.mdl",
+    "phy_path": "models/maxofs2d/button_06.phy"
+  },
+  "files": [
+    {
+      "role": "server_executable",
+      "source_path": "srcds_win64.exe",
+      "input_path": "server/srcds_win64.exe",
+      "sha256": "b2412bd62ed6e44a6ce7af454fffb52bdd14e404e3916826d44fe63650197f64",
+      "maximum_bytes": 334672
+    },
+    {
+      "role": "server_runtime",
+      "source_path": "steamclient64.dll",
+      "input_path": "server/steamclient64.dll",
+      "sha256": "611cabaa369cdda6f3d024f9de82cd151a9d476563dc9128fe8e6f2b5ec03aa9",
+      "maximum_bytes": 24368432
+    },
+    {
+      "role": "server_runtime",
+      "source_path": "tier0_s64.dll",
+      "input_path": "server/tier0_s64.dll",
+      "sha256": "681c23710fd26784584a40ff5994ffced11b0a621670291b9e589d5efba84c21",
+      "maximum_bytes": 428184
+    },
+    {
+      "role": "server_runtime",
+      "source_path": "vstdlib_s64.dll",
+      "input_path": "server/vstdlib_s64.dll",
+      "sha256": "a503a42f168d4f50db6a11b942d0da907c7c83e0541cec01499a469e4351b2d5",
+      "maximum_bytes": 486040
+    },
+    {
+      "role": "server_runtime",
+      "source_path": "bin/win64/dedicated.dll",
+      "input_path": "server/bin/win64/dedicated.dll",
+      "sha256": "4ffc3f169ffab688dfcb4700104b15e51ab7bfc7741111a2095af74cfc082818",
+      "maximum_bytes": 1852240
+    },
+    {
+      "role": "server_runtime",
+      "source_path": "bin/win64/filesystem_stdio.dll",
+      "input_path": "server/bin/win64/filesystem_stdio.dll",
+      "sha256": "f6e60255969b65415bac2eba8a23f93e1fcb46c78ee27d0f37c5022670b354f4",
+      "maximum_bytes": 925008
+    },
+    {
+      "role": "engine_module",
+      "source_path": "bin/win64/engine.dll",
+      "input_path": "server/bin/win64/engine.dll",
+      "sha256": "1b430e0823b830f9dd7b82590323c92407fbe7dc79cbfbaa09a5e0d8b31275b1",
+      "maximum_bytes": 5647696
+    },
+    {
+      "role": "server_runtime",
+      "source_path": "bin/win64/inputsystem.dll",
+      "input_path": "server/bin/win64/inputsystem.dll",
+      "sha256": "ea4c7186a230916b2f13a3edfb69b0dc78e5eb1c78de1bb086fc15854908fce7",
+      "maximum_bytes": 300368
+    },
+    {
+      "role": "server_runtime",
+      "source_path": "bin/win64/materialsystem.dll",
+      "input_path": "server/bin/win64/materialsystem.dll",
+      "sha256": "e61933a037c9d829bf14c10ccc8282259758fe28671227783d424857c5de9242",
+      "maximum_bytes": 1109840
+    },
+    {
+      "role": "server_runtime",
+      "source_path": "bin/win64/datacache.dll",
+      "input_path": "server/bin/win64/datacache.dll",
+      "sha256": "c42b68e154b2f141c05b4631ad465b0163f2b1934d18ffc9d39afbb60622f533",
+      "maximum_bytes": 457552
+    },
+    {
+      "role": "server_runtime",
+      "source_path": "bin/win64/studiorender.dll",
+      "input_path": "server/bin/win64/studiorender.dll",
+      "sha256": "361e100750d91f4f94ae52a02e55c2f3f22e9c16633d75b13aec2ca56c0442da",
+      "maximum_bytes": 834896
+    },
+    {
+      "role": "vphysics_module",
+      "source_path": "bin/win64/vphysics.dll",
+      "input_path": "server/bin/win64/vphysics.dll",
+      "sha256": "4ebd6149f885dfc518a44dd32dda64cbd6ebb3f938d43bdead70e80771b7e414",
+      "maximum_bytes": 1314816
+    },
+    {
+      "role": "server_runtime",
+      "source_path": "bin/win64/vgui2.dll",
+      "input_path": "server/bin/win64/vgui2.dll",
+      "sha256": "904a9f8fa37f21e88b1254da4a5200c8e2bea20c72d1f5ac339bad6a24768eac",
+      "maximum_bytes": 590672
+    },
+    {
+      "role": "server_runtime",
+      "source_path": "bin/win64/shaderapiempty.dll",
+      "input_path": "server/bin/win64/shaderapiempty.dll",
+      "sha256": "7455028234d98492eec5205f1b7edbdb0e641a69b8f3d8c66b9cac3f251e6824",
+      "maximum_bytes": 163656
+    },
+    {
+      "role": "game_server_module",
+      "source_path": "bin/win64/server.dll",
+      "input_path": "server/bin/win64/server.dll",
+      "sha256": "1e3b4f13c1035f536802b6277303179dab1405a1facd166bf2748d6c90f0b7fe",
+      "maximum_bytes": 15502672
+    },
+    {
+      "role": "server_runtime",
+      "source_path": "bin/win64/lua_shared.dll",
+      "input_path": "server/bin/win64/lua_shared.dll",
+      "sha256": "e9801d9b52cbea63cb7c66dfa2b005b2993e58e614cfc7f5b9deedf9d6f46930",
+      "maximum_bytes": 831824
+    },
+    {
+      "role": "server_runtime",
+      "source_path": "bin/win64/soundemittersystem.dll",
+      "input_path": "server/bin/win64/soundemittersystem.dll",
+      "sha256": "374e8690b850469d500cba18b63ea7604737c8b256463828772a72f82fb15e27",
+      "maximum_bytes": 308048
+    },
+    {
+      "role": "server_runtime",
+      "source_path": "bin/win64/scenefilecache.dll",
+      "input_path": "server/bin/win64/scenefilecache.dll",
+      "sha256": "1527aa0fa1f435c2f72d6cf5a304db9399ae5ad16941e8898fdaed950f472893",
+      "maximum_bytes": 162128
+    },
+    {
+      "role": "tier0_module",
+      "source_path": "bin/win64/tier0.dll",
+      "input_path": "server/bin/win64/tier0.dll",
+      "sha256": "44859a7924487e8acaf657c8231948fd4e2bae01f0e36074b5773703edbaf095",
+      "maximum_bytes": 442192
+    },
+    {
+      "role": "server_runtime",
+      "source_path": "bin/win64/vstdlib.dll",
+      "input_path": "server/bin/win64/vstdlib.dll",
+      "sha256": "9b81127d385a53e4c380881475ea3284a7fd4ee1f5f8c37b8975e3efd6d74558",
+      "maximum_bytes": 382288
+    },
+    {
+      "role": "server_runtime",
+      "source_path": "bin/win64/steam_api64.dll",
+      "input_path": "server/bin/win64/steam_api64.dll",
+      "sha256": "eb17909a76668cf9ae0b92a618a34a50f6c73d3a6787cb4dd8ce36a8b10bfb75",
+      "maximum_bytes": 317080
+    },
+    {
+      "role": "server_runtime",
+      "source_path": "bin/win64/unicode.dll",
+      "input_path": "server/bin/win64/unicode.dll",
+      "sha256": "517e070da2c23334726e818937f4617ad71ddf0c83d87bfb357c99eab5507d11",
+      "maximum_bytes": 149840
+    },
+    {
+      "role": "server_runtime",
+      "source_path": "bin/win64/resources.dll",
+      "input_path": "server/bin/win64/resources.dll",
+      "sha256": "1f767074af767e921d23c9242a0d6cf445fcbe103ac83d8c14dc67e8fcbd2f38",
+      "maximum_bytes": 977232
+    },
+    {
+      "role": "shipped_content",
+      "source_path": "steamapps/appmanifest_4020.acf",
+      "input_path": "server/steamapps/appmanifest_4020.acf",
+      "sha256": "b054854668f6906ad0d83f87fc6c396c25b39af9233f28013041e87d30ea4771",
+      "maximum_bytes": 978
+    },
+    {
+      "role": "model_render_asset",
+      "source_path": "extracted/models/maxofs2d/button_06.dx90.vtx",
+      "input_path": "oracle_game/models/maxofs2d/button_06.dx90.vtx",
+      "sha256": "ab46b68a919be34561c6c22b78d0300e4b4cca10d68eccb0fbee199cf1af1a75",
+      "maximum_bytes": 3257
+    },
+    {
+      "role": "model_mdl",
+      "source_path": "extracted/models/maxofs2d/button_06.mdl",
+      "input_path": "oracle_game/models/maxofs2d/button_06.mdl",
+      "sha256": "85dca39870932c39dd1bcd51afbb0fc09aaf8d90fadfeb222e7b49cd784e0f07",
+      "maximum_bytes": 2540
+    },
+    {
+      "role": "model_phy",
+      "source_path": "extracted/models/maxofs2d/button_06.phy",
+      "input_path": "oracle_game/models/maxofs2d/button_06.phy",
+      "sha256": "8901ecd8be29b5a3e5b688843bdbea13f34c7b76c5a63cb435f9ef1174527ef3",
+      "maximum_bytes": 880
+    },
+    {
+      "role": "model_render_asset",
+      "source_path": "extracted/models/maxofs2d/button_06.vvd",
+      "input_path": "oracle_game/models/maxofs2d/button_06.vvd",
+      "sha256": "ad2ff21e37e87ac824684ccc789ccf34e6909dcd3b8b8eefec77a4ba46053c01",
+      "maximum_bytes": 14656
+    }
+  ]
+}

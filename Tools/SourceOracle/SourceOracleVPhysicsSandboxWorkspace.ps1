@@ -23,7 +23,8 @@ $script:VPhysicsSandboxAllowedRoles = @(
     $script:VPhysicsSandboxRequiredRoles + @(
         'server_runtime',
         'shipped_content',
-        'shipped_lua'
+        'shipped_lua',
+        'model_render_asset'
     )
 )
 $script:VPhysicsSandboxEmptyMount = '"mountcfg"' + "`r`n{`r`n}`r`n"
@@ -381,6 +382,13 @@ function Assert-SourceOracleVPhysicsSandboxInputSpec {
         if ($role -ceq 'model_phy' -and
             $inputPath -cne ('oracle_game/' + $phyPath)) {
             throw 'model_phy does not match the exact logical PHY path'
+        }
+        if ($role -ceq 'model_render_asset') {
+            $modelStem = $modelPath.Substring(0, $modelPath.Length - 4)
+            if ($inputPath -cne ('oracle_game/' + $modelStem + '.vvd') -and
+                $inputPath -cne ('oracle_game/' + $modelStem + '.dx90.vtx')) {
+                throw 'model_render_asset is not the exact VVD or DX90 VTX companion'
+            }
         }
         if ($role -in @('server_runtime', 'shipped_content', 'shipped_lua') -and
             -not $inputPath.StartsWith('server/', [StringComparison]::Ordinal)) {
