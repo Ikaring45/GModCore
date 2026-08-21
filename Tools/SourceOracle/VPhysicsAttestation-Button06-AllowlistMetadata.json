@@ -1,0 +1,114 @@
+{
+  "schema": 1,
+  "kind": "owned-model-vphysics-attestation-allowlist-metadata",
+  "allowlist": {
+    "schema": 1,
+    "models": [
+      {
+        "model_path": "models/maxofs2d/button_06.mdl",
+        "phy_path": "models/maxofs2d/button_06.phy",
+        "mdl_sha256": "85dca39870932c39dd1bcd51afbb0fc09aaf8d90fadfeb222e7b49cd784e0f07",
+        "phy_sha256": "8901ecd8be29b5a3e5b688843bdbea13f34c7b76c5a63cb435f9ef1174527ef3",
+        "ownership_reference": "user-owned-playable-manifest-sha256:2755c232b55cfe6f466555c4e63d2c5b1c3a4c300910aaffdee5701a7e492045"
+      }
+    ]
+  },
+  "model_files": [
+    {
+      "kind": "mdl",
+      "logical_path": "models/maxofs2d/button_06.mdl",
+      "byte_count": 2540,
+      "sha256": "85dca39870932c39dd1bcd51afbb0fc09aaf8d90fadfeb222e7b49cd784e0f07",
+      "studio_checksum": -1817891700,
+      "vpk_crc32": "2fd818b2",
+      "vpk_offset": 184532170,
+      "vpk_preload_bytes": 0
+    },
+    {
+      "kind": "vvd",
+      "logical_path": "models/maxofs2d/button_06.vvd",
+      "byte_count": 14656,
+      "sha256": "ad2ff21e37e87ac824684ccc789ccf34e6909dcd3b8b8eefec77a4ba46053c01",
+      "studio_checksum": -1817891700,
+      "vpk_crc32": "8325ea27",
+      "vpk_offset": 184535590,
+      "vpk_preload_bytes": 0
+    },
+    {
+      "kind": "vtx_dx90",
+      "logical_path": "models/maxofs2d/button_06.dx90.vtx",
+      "byte_count": 3257,
+      "sha256": "ab46b68a919be34561c6c22b78d0300e4b4cca10d68eccb0fbee199cf1af1a75",
+      "studio_checksum": -1817891700,
+      "vpk_crc32": "5a5682b1",
+      "vpk_offset": 184528913,
+      "vpk_preload_bytes": 0
+    },
+    {
+      "kind": "phy",
+      "logical_path": "models/maxofs2d/button_06.phy",
+      "byte_count": 880,
+      "sha256": "8901ecd8be29b5a3e5b688843bdbea13f34c7b76c5a63cb435f9ef1174527ef3",
+      "studio_checksum": -1817891700,
+      "vpk_crc32": "a3f1f516",
+      "vpk_offset": 184534710,
+      "vpk_preload_bytes": 0
+    }
+  ],
+  "provenance": {
+    "content_pack": {
+      "file_name": "GarrysPAD_Content_Playable.zip",
+      "profile": "Playable",
+      "source": "User-owned Steam Garry's Mod installation",
+      "created_at_utc": "2026-08-20T03:16:05.0714585Z",
+      "root_manifest_path": "GarrysPADContentManifest.json",
+      "root_manifest_byte_count": 517993,
+      "root_manifest_sha256": "2755c232b55cfe6f466555c4e63d2c5b1c3a4c300910aaffdee5701a7e492045"
+    },
+    "directory_vpk": {
+      "logical_path": "garrysmod/garrysmod_dir.vpk",
+      "byte_count": 531669,
+      "sha256": "2ed3b5b04bdd08e0c63a8df6e7f1764e4c316e7927ec03431c35310a02990a5a",
+      "verification": "selected-pack-entry-and-installed-owned-file-match"
+    },
+    "chunk_vpk": {
+      "logical_path": "garrysmod/garrysmod_001.vpk",
+      "archive_index": 1,
+      "byte_count": 269683853,
+      "manifest_sha256": "dd20e110daf32f1c46c54afc20ba8c398b1a5fa46d410ce45563778e91f89d9a",
+      "whole_chunk_rehashed": false
+    },
+    "stock_sandbox_reference": {
+      "logical_path": "gamemodes/sandbox/entities/weapons/gmod_tool/stools/button.lua",
+      "line": 193,
+      "registry": "ButtonModels"
+    },
+    "bounded_read": {
+      "method": "stored Zip64 entry plus VPK directory offset ranges",
+      "directory_index_bytes": 531669,
+      "model_file_bytes": 21333,
+      "total_selected_bytes": 553002,
+      "whole_content_pack_revalidated": false
+    }
+  },
+  "structural_expectations": {
+    "status": "unattested",
+    "evidence": "bounded independent structural decode; no original VPhysics result",
+    "mdl_version": 48,
+    "phy_header_bytes": 16,
+    "phy_identifier": 0,
+    "phy_solid_count": 1,
+    "solid_zero_serialized_byte_count": 632,
+    "serialization_identifier": "VPHY",
+    "serialization_version": 256,
+    "model_type": 0,
+    "tree_node_count": 1,
+    "terminal_node_count": 1,
+    "compact_ledge_count": 1,
+    "triangle_count": 20,
+    "unique_point_count": 12,
+    "util_is_valid_model": null,
+    "util_is_valid_prop": null,
+    "runtime_physics_eligible": false
+  }
+}
