@@ -1,0 +1,6 @@
+"garryspad_attestation"
+{
+	"title"	"Garry's PAD VPhysics Attestation"
+	"base"	""
+	"menusystem"	"0"
+}

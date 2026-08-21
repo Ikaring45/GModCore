@@ -214,6 +214,692 @@
       "input_path": "oracle_game/models/maxofs2d/button_06.vvd",
       "sha256": "ad2ff21e37e87ac824684ccc789ccf34e6909dcd3b8b8eefec77a4ba46053c01",
       "maximum_bytes": 14656
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/extensions/angle.lua",
+      "input_path": "oracle_game/lua/includes/extensions/angle.lua",
+      "sha256": "54cab71d3ed8c036357b94cbbb1f73f4eb8c39dda72c8ef098da625c07dd1e94",
+      "maximum_bytes": 861
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/extensions/client/entity.lua",
+      "input_path": "oracle_game/lua/includes/extensions/client/entity.lua",
+      "sha256": "b2adde2a6498862d04a324524b9d6093ab06be272c6a14b1a38681f362deb4b4",
+      "maximum_bytes": 436
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/extensions/client/globals.lua",
+      "input_path": "oracle_game/lua/includes/extensions/client/globals.lua",
+      "sha256": "a953f8f46858badf019f2286b0f64d84349d42d20a33752ed69920e0791bfa5d",
+      "maximum_bytes": 212
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/extensions/client/panel.lua",
+      "input_path": "oracle_game/lua/includes/extensions/client/panel.lua",
+      "sha256": "9325c1160893d200f96ad86f1e21d2d70fe4145763da7ab34ceff0c3ab0e14a8",
+      "maximum_bytes": 16089
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/extensions/client/panel/animation.lua",
+      "input_path": "oracle_game/lua/includes/extensions/client/panel/animation.lua",
+      "sha256": "5a10fa0e0772109ecdb35d7433fa38adbd13ae3fa45094e3632f63283d3e6478",
+      "maximum_bytes": 8735
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/extensions/client/panel/dragdrop.lua",
+      "input_path": "oracle_game/lua/includes/extensions/client/panel/dragdrop.lua",
+      "sha256": "044f54234756ed0d1490444e10602f685280a5358a590f463638a228912b791b",
+      "maximum_bytes": 12363
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/extensions/client/panel/scriptedpanels.lua",
+      "input_path": "oracle_game/lua/includes/extensions/client/panel/scriptedpanels.lua",
+      "sha256": "992f01c96c88a711755e35ef6724afea345f0cecf0dcd480af4e8f18792f0eb5",
+      "maximum_bytes": 2649
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/extensions/client/panel/selections.lua",
+      "input_path": "oracle_game/lua/includes/extensions/client/panel/selections.lua",
+      "sha256": "4795ca98616fc24503f84746e36e74b88c30fce91484ae336e439ad30cac3c88",
+      "maximum_bytes": 4299
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/extensions/client/player.lua",
+      "input_path": "oracle_game/lua/includes/extensions/client/player.lua",
+      "sha256": "971c4c7217a07e6504907fa40918c226625a87f797bf5e507d467f3bcc28570a",
+      "maximum_bytes": 1713
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/extensions/client/render.lua",
+      "input_path": "oracle_game/lua/includes/extensions/client/render.lua",
+      "sha256": "96ef9cf3f9593366e0d8af463599810b4d9cef644db8f1a0aa07ed67102d69e1",
+      "maximum_bytes": 4842
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/extensions/coroutine.lua",
+      "input_path": "oracle_game/lua/includes/extensions/coroutine.lua",
+      "sha256": "3d10aec087eabe91f22053817a1d4d9fdb6e173e9e11fb7654dd4ae7020a10d6",
+      "maximum_bytes": 543
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/extensions/debug.lua",
+      "input_path": "oracle_game/lua/includes/extensions/debug.lua",
+      "sha256": "3e78fdf8a5f144c7d287655299f39a8d13fd192c7bf5259bb0ea4abfb96e4c99",
+      "maximum_bytes": 1486
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/extensions/entity_iter.lua",
+      "input_path": "oracle_game/lua/includes/extensions/entity_iter.lua",
+      "sha256": "0d93f84ab4b2a77f35e89b63549a3ed376683f9be59393bd82bfa13df05aa8d7",
+      "maximum_bytes": 534
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/extensions/entity.lua",
+      "input_path": "oracle_game/lua/includes/extensions/entity.lua",
+      "sha256": "49a4a9fd60aac72c432b7088fe898fab701952f4dad63cd2a6e8fef95f3097bc",
+      "maximum_bytes": 16588
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/extensions/ents.lua",
+      "input_path": "oracle_game/lua/includes/extensions/ents.lua",
+      "sha256": "26cf731c52ba4ace18998f10044f678d63488a902e7b1fcee0ad3c87a8221719",
+      "maximum_bytes": 329
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/extensions/file.lua",
+      "input_path": "oracle_game/lua/includes/extensions/file.lua",
+      "sha256": "1954abeb6939345be7399282b1d140d793c0a07350807b2922205f9002c4ce7c",
+      "maximum_bytes": 708
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/extensions/game.lua",
+      "input_path": "oracle_game/lua/includes/extensions/game.lua",
+      "sha256": "8447bc38d92de48c51c0aa33bd20e288ba7f0d55549174ef30e0f9704b803432",
+      "maximum_bytes": 1345
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/extensions/math.lua",
+      "input_path": "oracle_game/lua/includes/extensions/math.lua",
+      "sha256": "6e893eb234be8d972e6503f16e6ba900e5676a82e38e3f5d7a1413e7f3d4469d",
+      "maximum_bytes": 7754
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/extensions/math/ease.lua",
+      "input_path": "oracle_game/lua/includes/extensions/math/ease.lua",
+      "sha256": "ac78b5148c06b9ba526b6c8b41bbd79a9380f79102b6ae8f58a944d4c60ed250",
+      "maximum_bytes": 4193
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/extensions/motionsensor.lua",
+      "input_path": "oracle_game/lua/includes/extensions/motionsensor.lua",
+      "sha256": "a914dfacd52d1f96b1f455f66000f66f6bf588df4386627210351275d7990388",
+      "maximum_bytes": 6937
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/extensions/net.lua",
+      "input_path": "oracle_game/lua/includes/extensions/net.lua",
+      "sha256": "da66bcd8eba462ed4dee081a85c23171eb18da9ca54066bc70d75bf2600ec608",
+      "maximum_bytes": 5714
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/extensions/player_auth.lua",
+      "input_path": "oracle_game/lua/includes/extensions/player_auth.lua",
+      "sha256": "82503c99c0470e3da1627d5d1c01970c33f0d22699243d5bdf8a7f54da1dbc5f",
+      "maximum_bytes": 3499
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/extensions/player.lua",
+      "input_path": "oracle_game/lua/includes/extensions/player.lua",
+      "sha256": "47216b3fdd769d6b6df1d205c68cd9e0205ed85ef93f4ad778355adc5f0ad92d",
+      "maximum_bytes": 7386
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/extensions/string.lua",
+      "input_path": "oracle_game/lua/includes/extensions/string.lua",
+      "sha256": "526c655d186f38101c1f9d5fd0d3cbe4dd545c96a51289316228265ec7635d0c",
+      "maximum_bytes": 13605
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/extensions/table.lua",
+      "input_path": "oracle_game/lua/includes/extensions/table.lua",
+      "sha256": "f200119c22973145a0f1081dc93ed9a1cb33924b32a836bd5a5a8f699e55488b",
+      "maximum_bytes": 19312
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/extensions/util.lua",
+      "input_path": "oracle_game/lua/includes/extensions/util.lua",
+      "sha256": "e313ae1a9922bcd4806c1575eb2bc5d6e051221b3b14186d9d6c385f00c52b2b",
+      "maximum_bytes": 10770
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/extensions/util/worldpicker.lua",
+      "input_path": "oracle_game/lua/includes/extensions/util/worldpicker.lua",
+      "sha256": "f418538194538d3d71e2a547bb03f93ac165e231f9414f1f05bca44968ea2f90",
+      "maximum_bytes": 1203
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/extensions/vector.lua",
+      "input_path": "oracle_game/lua/includes/extensions/vector.lua",
+      "sha256": "1474b892514c0e9a73e50179f8935a06452112f7831bd38a9c083fc3f05315a4",
+      "maximum_bytes": 348
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/extensions/weapon.lua",
+      "input_path": "oracle_game/lua/includes/extensions/weapon.lua",
+      "sha256": "bf073f0e4f84a84bb175ae4aaab4752665e10aefa3cfe7415719981343d59321",
+      "maximum_bytes": 1032
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/gmsave.lua",
+      "input_path": "oracle_game/lua/includes/gmsave.lua",
+      "sha256": "736da5811d3103e5f4197bc39d12cfa860c502b04c542723df14616c3cd28bc3",
+      "maximum_bytes": 3128
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/gmsave/entity_filters.lua",
+      "input_path": "oracle_game/lua/includes/gmsave/entity_filters.lua",
+      "sha256": "8343bdbf7331473e5f6359085e7cbc42f3d4583ed8f40456e1de54ea56493580",
+      "maximum_bytes": 3277
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/gmsave/physics.lua",
+      "input_path": "oracle_game/lua/includes/gmsave/physics.lua",
+      "sha256": "215a72b215547c2362723cb05163936e2de94cc8de2cfb9cebe0c5f150bbefad",
+      "maximum_bytes": 2117
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/gmsave/player.lua",
+      "input_path": "oracle_game/lua/includes/gmsave/player.lua",
+      "sha256": "cad2f09852e8944180977b36c7a2c04470c1c19ab94f4b237c1c646e51e36625",
+      "maximum_bytes": 448
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/gui/icon_progress.lua",
+      "input_path": "oracle_game/lua/includes/gui/icon_progress.lua",
+      "sha256": "6fde1f95b66a3c0b0cb53fb95e965f35e6bb013faa2cc3d8a03be0d1f916de8e",
+      "maximum_bytes": 1617
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/init_menu.lua",
+      "input_path": "oracle_game/lua/includes/init_menu.lua",
+      "sha256": "e0ae89b0c61742be242dc950dc5d1da293882cf68656480fb15376debfe365c1",
+      "maximum_bytes": 1412
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/init.lua",
+      "input_path": "oracle_game/lua/includes/init.lua",
+      "sha256": "04a0d82fa01f39c7470ae266aabfd1b38fce6ee9abbe01e93d2b70bf561ed276",
+      "maximum_bytes": 3610
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/menu.lua",
+      "input_path": "oracle_game/lua/includes/menu.lua",
+      "sha256": "86425f3b5571a841c353e7c4491f9217221752f433d88d6b447c8cd1a25e16bf",
+      "maximum_bytes": 422
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/ai_schedule.lua",
+      "input_path": "oracle_game/lua/includes/modules/ai_schedule.lua",
+      "sha256": "96d352c13831c565869dcf421e881afae1e90a99c3861bbe86a4e830ac52c593",
+      "maximum_bytes": 2557
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/ai_task.lua",
+      "input_path": "oracle_game/lua/includes/modules/ai_task.lua",
+      "sha256": "e7a7b2a4f6ab8a73858c1f8f79523cc7e9c10d138c7acc19764bf8f8409b63a2",
+      "maximum_bytes": 3104
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/baseclass.lua",
+      "input_path": "oracle_game/lua/includes/modules/baseclass.lua",
+      "sha256": "921206e5c4289b76498f72b8eaf7baaa717287359c077855034bb58612867e96",
+      "maximum_bytes": 1314
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/cleanup.lua",
+      "input_path": "oracle_game/lua/includes/modules/cleanup.lua",
+      "sha256": "9527b395e17f28a326966c38c778566201c01e84584b6ac74820736ad726c736",
+      "maximum_bytes": 6148
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/concommand.lua",
+      "input_path": "oracle_game/lua/includes/modules/concommand.lua",
+      "sha256": "601fc0205516b7bd30ea2364e8fda8f6f6aed57eedd0dcfb0e9ed6e2a01f9f34",
+      "maximum_bytes": 2913
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/constraint.lua",
+      "input_path": "oracle_game/lua/includes/modules/constraint.lua",
+      "sha256": "dca830cb5761f29515052c9eecf6efd109ee8f046b9df03a28b63325fa5d5548",
+      "maximum_bytes": 51994
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/construct.lua",
+      "input_path": "oracle_game/lua/includes/modules/construct.lua",
+      "sha256": "88e79a3ee84866cb1c47c0a2713fea7fce27d32d9f415c1e78f15ec7d1635037",
+      "maximum_bytes": 4254
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/controlpanel.lua",
+      "input_path": "oracle_game/lua/includes/modules/controlpanel.lua",
+      "sha256": "9cc8e68aca4a1aad9dfbf01fef1d78775ea3b6585ab2b58d5402b057376bb08e",
+      "maximum_bytes": 1119
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/cookie.lua",
+      "input_path": "oracle_game/lua/includes/modules/cookie.lua",
+      "sha256": "aa994de2369d25a3cf2b3f5e93c655ddba106183b2b822bfe70adeb05ce28a39",
+      "maximum_bytes": 2855
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/cvars.lua",
+      "input_path": "oracle_game/lua/includes/modules/cvars.lua",
+      "sha256": "1efaeaff72fa52c9fb25106df4e2c9854a063adcc8d8db5bfe1e55228f4917a1",
+      "maximum_bytes": 3713
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/draw.lua",
+      "input_path": "oracle_game/lua/includes/modules/draw.lua",
+      "sha256": "dd0dd41d9468bda1af9c47e41abe3d5944342b5e31b28fac5f44fa117da93026",
+      "maximum_bytes": 9761
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/drive.lua",
+      "input_path": "oracle_game/lua/includes/modules/drive.lua",
+      "sha256": "9409a1dea2c78cebb2eac4ff5a9feafd608d0758645aa3148bb0df5153ce30bb",
+      "maximum_bytes": 4721
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/duplicator.lua",
+      "input_path": "oracle_game/lua/includes/modules/duplicator.lua",
+      "sha256": "0bd44bce0bb789bde69e13de7e3ea525afc111f9aafa86340c7ea90dd058c3c6",
+      "maximum_bytes": 27478
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/effects.lua",
+      "input_path": "oracle_game/lua/includes/modules/effects.lua",
+      "sha256": "cb77c53d8e0d281dbd50f0885b527b7a1a547fd19fd24aa942942755fe038f5b",
+      "maximum_bytes": 1313
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/gamemode.lua",
+      "input_path": "oracle_game/lua/includes/modules/gamemode.lua",
+      "sha256": "7e78ffa9e34045d542a118d7807298eeb58e20cf340064db97ef7b9017b959f1",
+      "maximum_bytes": 2281
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/halo.lua",
+      "input_path": "oracle_game/lua/includes/modules/halo.lua",
+      "sha256": "d8a87b65b3d76f2b246d876556537031b9409b6ee9a22d4b06dfc9f8afd34b1a",
+      "maximum_bytes": 4309
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/hook.lua",
+      "input_path": "oracle_game/lua/includes/modules/hook.lua",
+      "sha256": "8343fb394834437c634c23a6e79594cd93e0cf3c94c160c25966a2c589255a2a",
+      "maximum_bytes": 4058
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/http.lua",
+      "input_path": "oracle_game/lua/includes/modules/http.lua",
+      "sha256": "0a60adfc0d1336d34928479820a0e071cdfc31f95053ebf8d1b61b07f28e0f32",
+      "maximum_bytes": 2013
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/killicon.lua",
+      "input_path": "oracle_game/lua/includes/modules/killicon.lua",
+      "sha256": "946c83aaf9db57a3374d0203c972dc79515137e066b1cd7895c29df739020234",
+      "maximum_bytes": 4648
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/list.lua",
+      "input_path": "oracle_game/lua/includes/modules/list.lua",
+      "sha256": "42ccc85aecd7fd63cc4532440e2accfdb32edbc2d96602f03279c8e8291ae15e",
+      "maximum_bytes": 1242
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/markup.lua",
+      "input_path": "oracle_game/lua/includes/modules/markup.lua",
+      "sha256": "382e476fd3fc78c56666aec54935ce1da716776d368bba7a1709f58fe5210032",
+      "maximum_bytes": 16143
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/matproxy.lua",
+      "input_path": "oracle_game/lua/includes/modules/matproxy.lua",
+      "sha256": "266da4ca60881fe273078907446c961c0a6a08b6651ddf18b46ac0197889d28a",
+      "maximum_bytes": 1465
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/menubar.lua",
+      "input_path": "oracle_game/lua/includes/modules/menubar.lua",
+      "sha256": "7935221d8e7919ab6c93a570cbddf627b9bce14def38c5cb13dc9bb82bfe0562",
+      "maximum_bytes": 671
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/notification.lua",
+      "input_path": "oracle_game/lua/includes/modules/notification.lua",
+      "sha256": "869769b67a4c505f62be7f7410e37e0a430a3995932fa853ccb266cb8c170690",
+      "maximum_bytes": 7758
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/numpad.lua",
+      "input_path": "oracle_game/lua/includes/modules/numpad.lua",
+      "sha256": "42534f63b43066c6c23d9bff976306bf452bd44a0bd7b94ec27024f3b5b516d7",
+      "maximum_bytes": 6289
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/player_manager.lua",
+      "input_path": "oracle_game/lua/includes/modules/player_manager.lua",
+      "sha256": "472ec20e5da4bb77ecb6cbb9ff3e40b0ba4dff20e0b14087147de647db90e53d",
+      "maximum_bytes": 18670
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/presets.lua",
+      "input_path": "oracle_game/lua/includes/modules/presets.lua",
+      "sha256": "447ea2329872f0fbfd6a6e80bfcd3f690b5b6bb2f51c198cb706f81bafcf0285",
+      "maximum_bytes": 2577
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/properties.lua",
+      "input_path": "oracle_game/lua/includes/modules/properties.lua",
+      "sha256": "75318edc5e099bba75e45a05e4740ad91627f760ea8736f71bcda9d7c960cac9",
+      "maximum_bytes": 6708
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/saverestore.lua",
+      "input_path": "oracle_game/lua/includes/modules/saverestore.lua",
+      "sha256": "884a2d03613b077b27c2623cb9a4ee7150a111094b1580f4922fa4fc77474398",
+      "maximum_bytes": 10267
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/scripted_ents.lua",
+      "input_path": "oracle_game/lua/includes/modules/scripted_ents.lua",
+      "sha256": "852df3a61a44ea566840b5046508e5be605b06e89efe7767a7c7e6e8b851ed84",
+      "maximum_bytes": 5993
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/search.lua",
+      "input_path": "oracle_game/lua/includes/modules/search.lua",
+      "sha256": "44ae52e60177a695e1e98dd82730d5ff6e3625cc7f564d39997d34e021e16dce",
+      "maximum_bytes": 867
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/spawnmenu.lua",
+      "input_path": "oracle_game/lua/includes/modules/spawnmenu.lua",
+      "sha256": "bad9ea37b7201c17a3aa6706ddcbd8c625f8ee6038bc42da9b8b712d9534ad48",
+      "maximum_bytes": 6805
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/team.lua",
+      "input_path": "oracle_game/lua/includes/modules/team.lua",
+      "sha256": "ddebc546683a5721917904c2aa4017c142d5c8395e5dd2a3400b61fcde4ed071",
+      "maximum_bytes": 4572
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/undo.lua",
+      "input_path": "oracle_game/lua/includes/modules/undo.lua",
+      "sha256": "250e190070bce06b862ec5bac5bb94d7b59e99a985fab05173b5c57710ce81f6",
+      "maximum_bytes": 15506
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/usermessage.lua",
+      "input_path": "oracle_game/lua/includes/modules/usermessage.lua",
+      "sha256": "5d62629a22ca0d4061a3d0f9e767aeb2bf3c7fb7abdaf25d382adaa9c19ff40f",
+      "maximum_bytes": 2200
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/utf8.lua",
+      "input_path": "oracle_game/lua/includes/modules/utf8.lua",
+      "sha256": "c9e805194a40ceafb1b2a4c10d5dd0ab0a5ff98d831db4a28b9f621c0ac44af7",
+      "maximum_bytes": 8003
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/weapons.lua",
+      "input_path": "oracle_game/lua/includes/modules/weapons.lua",
+      "sha256": "0a32c5a9ea38811549e723e2db83f1a69e2be2670fa744c0f5c7efff26711cee",
+      "maximum_bytes": 4528
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/modules/widget.lua",
+      "input_path": "oracle_game/lua/includes/modules/widget.lua",
+      "sha256": "7fa19ab800b2ca463ad5f91cecb2c9de97ba5823fa9538e4248be91b1cf5c51d",
+      "maximum_bytes": 3390
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/util.lua",
+      "input_path": "oracle_game/lua/includes/util.lua",
+      "sha256": "463cd33927912c14a4a9f70130d01e4935f9e4b514f0519fea916ac7d33df693",
+      "maximum_bytes": 17472
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/util/client.lua",
+      "input_path": "oracle_game/lua/includes/util/client.lua",
+      "sha256": "bdce825cf1384dcd983a2fe1d027efba695dadb11ec39fb77269cc4da453c36a",
+      "maximum_bytes": 14331
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/util/color.lua",
+      "input_path": "oracle_game/lua/includes/util/color.lua",
+      "sha256": "0945f9844a1c56695448284466e24171dd8ce605dd6630d3e25764bfe89093ca",
+      "maximum_bytes": 10640
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/util/javascript_util.lua",
+      "input_path": "oracle_game/lua/includes/util/javascript_util.lua",
+      "sha256": "19a382724f4d33a30ca46ceee1a380ed678cbf504d5e41d86d41c05019b0f891",
+      "maximum_bytes": 1787
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/util/model_database.lua",
+      "input_path": "oracle_game/lua/includes/util/model_database.lua",
+      "sha256": "cdf3851f5a7184223a2b96b20348bbafa2a035e82e0deccab532054ee5d46f78",
+      "maximum_bytes": 3122
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/util/sql.lua",
+      "input_path": "oracle_game/lua/includes/util/sql.lua",
+      "sha256": "90d2dfc57e988d6f09f6d63c1ed801f45db472ebe43663859d807079a990ecbb",
+      "maximum_bytes": 2787
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/util/tooltips.lua",
+      "input_path": "oracle_game/lua/includes/util/tooltips.lua",
+      "sha256": "d231cfaca0cbd96ccd3cbaa4878c48d5e0f7d9d4a47fcf55e1852b161343f9e6",
+      "maximum_bytes": 2187
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/util/vgui_showlayout.lua",
+      "input_path": "oracle_game/lua/includes/util/vgui_showlayout.lua",
+      "sha256": "ee4020a254f556014aab18ce2419e66a725fd9bc01a8faeb8d20942978dfb7ce",
+      "maximum_bytes": 881
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/util/workshop_files.lua",
+      "input_path": "oracle_game/lua/includes/util/workshop_files.lua",
+      "sha256": "4f5f9bee5dbba7f5167ef6820e37a6b702143077472573ae72142950cc302585",
+      "maximum_bytes": 9630
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/includes/vgui_base.lua",
+      "input_path": "oracle_game/lua/includes/vgui_base.lua",
+      "sha256": "c4399296b4a99e5b0460b42f5d8f8b3931f17281a407263634f9cc8602570180",
+      "maximum_bytes": 1858
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/drive/drive_base.lua",
+      "input_path": "oracle_game/lua/drive/drive_base.lua",
+      "sha256": "74e2ad601dcf4d3019fa5b6e0fe4da4cc1fb5063396cecfcf1449314a43b1310",
+      "maximum_bytes": 1945
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/drive/drive_noclip.lua",
+      "input_path": "oracle_game/lua/drive/drive_noclip.lua",
+      "sha256": "4fcac8efd60164c5f1a25b95ec63f1b3a83e23bcd5ac4c8b8ed4d2bad0af693b",
+      "maximum_bytes": 3146
+    },
+    {
+      "role": "isolated_game_lua",
+      "source_path": "garrysmod/lua/drive/drive_sandbox.lua",
+      "input_path": "oracle_game/lua/drive/drive_sandbox.lua",
+      "sha256": "5353500a1f1dcb48d91d14e1d29c008aa245df6f81253f22baf785100050a8bc",
+      "maximum_bytes": 5545
+    },
+    {
+      "role": "isolated_game_content",
+      "source_path": "garrysmod/steam.inf",
+      "input_path": "oracle_game/steam.inf",
+      "sha256": "6e6fef4daa4ea845b3e28d90947f3b5d701adecc050f091446f35af313970554",
+      "maximum_bytes": 60
+    },
+    {
+      "role": "isolated_game_content",
+      "source_path": "garrysmod/maps/gm_flatgrass.bsp",
+      "input_path": "oracle_game/maps/gm_flatgrass.bsp",
+      "sha256": "4dfd95ecb8f77a093e3079697b04c5be5675e8595c05639aaf57ad1541024d76",
+      "maximum_bytes": 47430424
+    },
+    {
+      "role": "shipped_content",
+      "source_path": "sourceengine/scripts/surfaceproperties.txt",
+      "input_path": "server/sourceengine/scripts/surfaceproperties.txt",
+      "sha256": "b75f463e4a5b351c0f9a155c100659ae0384003ae910d092a07398e611056e32",
+      "maximum_bytes": 23190
+    },
+    {
+      "role": "shipped_content",
+      "source_path": "sourceengine/scripts/surfaceproperties_hl2.txt",
+      "input_path": "server/sourceengine/scripts/surfaceproperties_hl2.txt",
+      "sha256": "6eb6c622f9d566515d0909d610c6f7213d327ed69545807696d74162ee3c0280",
+      "maximum_bytes": 2800
+    },
+    {
+      "role": "shipped_content",
+      "source_path": "sourceengine/scripts/surfaceproperties_manifest.txt",
+      "input_path": "server/sourceengine/scripts/surfaceproperties_manifest.txt",
+      "sha256": "d8bead334f07cd9f7cdfa30d691076b242ee469727aa0f0dcb734f3699d92a11",
+      "maximum_bytes": 595
+    },
+    {
+      "role": "controlled_game_file",
+      "source_path": "tool/VPhysicsSandboxGameRoot/gameinfo.txt",
+      "input_path": "oracle_game/gameinfo.txt",
+      "sha256": "0dd889c469d0f4df0f33237d33b4ee5b7975eea472abf79a991bb5046c064e8e",
+      "maximum_bytes": 407
+    },
+    {
+      "role": "controlled_game_file",
+      "source_path": "tool/VPhysicsSandboxGameRoot/gamemodes/garryspad_attestation/garryspad_attestation.txt",
+      "input_path": "oracle_game/gamemodes/garryspad_attestation/garryspad_attestation.txt",
+      "sha256": "1ef324a2a6760a326c822263986f2e0a02246fa5eae5bfbc892a7347e3bc26e5",
+      "maximum_bytes": 101
+    },
+    {
+      "role": "controlled_game_file",
+      "source_path": "tool/VPhysicsSandboxGameRoot/gamemodes/garryspad_attestation/gamemode/init.lua",
+      "input_path": "oracle_game/gamemodes/garryspad_attestation/gamemode/init.lua",
+      "sha256": "781b9b4c2121c87fc449670f9b612484413de1299e08b602f5cd9a67fa78546e",
+      "maximum_bytes": 52
+    },
+    {
+      "role": "controlled_game_file",
+      "source_path": "tool/VPhysicsSandboxGameRoot/gamemodes/garryspad_attestation/gamemode/shared.lua",
+      "input_path": "oracle_game/gamemodes/garryspad_attestation/gamemode/shared.lua",
+      "sha256": "c9bfcec0ba97015f48732410d446cc374c2fd46e9c66befac8a092ef58b554ca",
+      "maximum_bytes": 92
+    },
+    {
+      "role": "probe_lua",
+      "source_path": "tool/VPhysicsAttestationAddon/lua/autorun/server/garryspad_source_vphysics_attestation.lua",
+      "input_path": "oracle_game/lua/autorun/server/garryspad_source_vphysics_attestation.lua",
+      "sha256": "90bfa3748d7465938837ea9a9d3ba2e75f92bd47bbd085a39ea20bc4e3de6493",
+      "maximum_bytes": 19094
     }
   ]
 }

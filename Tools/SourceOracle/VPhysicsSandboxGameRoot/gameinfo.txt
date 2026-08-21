@@ -1,0 +1,21 @@
+"GameInfo"
+{
+	game	"Garry's PAD VPhysics Attestation"
+	title	""
+	type	multiplayer_only
+
+	FileSystem
+	{
+		SteamAppId	4000
+
+		SearchPaths
+		{
+			game+mod			|gameinfo_path|.
+			mod+mod_write+default_write_path	|gameinfo_path|.
+			game+game_write		|gameinfo_path|.
+			gamebin			|all_source_engine_paths|bin
+			game			|all_source_engine_paths|sourceengine
+			platform		|all_source_engine_paths|platform
+		}
+	}
+}

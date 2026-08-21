@@ -12,7 +12,7 @@ $inputs = Read-SourceOracleVPhysicsBuild24721267Inputs
 $spec = $inputs.spec
 $metadata = $inputs.metadata
 $files = @($spec.files)
-Assert-BuildInput ($files.Count -eq 28) 'Fixed build input must contain exactly 28 files'
+Assert-BuildInput ($files.Count -eq 126) 'Fixed build input must contain exactly 126 files'
 Assert-BuildInput `
     ([string]$spec.server.executable_input_path -ceq 'server/srcds_win64.exe') `
     'Fixed build input does not select the x64 srcds executable'
@@ -63,6 +63,56 @@ foreach ($entry in $files) {
 foreach ($path in $requiredRuntime) {
     Assert-BuildInput $sourcePaths.Contains($path) "Fixed runtime is missing $path"
 }
+
+$isolatedLua = @($files | Where-Object {
+    [string]$_.role -ceq 'isolated_game_lua'
+})
+Assert-BuildInput ($isolatedLua.Count -eq 88) `
+    'Fixed clean game root must contain exactly 88 shipped startup Lua files'
+Assert-BuildInput `
+    (@($isolatedLua | Where-Object {
+        -not [string]$_.source_path.StartsWith(
+            'garrysmod/lua/includes/',
+            [StringComparison]::Ordinal
+        ) -and -not [string]$_.source_path.StartsWith(
+            'garrysmod/lua/drive/',
+            [StringComparison]::Ordinal
+        )
+    }).Count -eq 0) `
+    'Fixed clean game root includes Lua outside includes/ and drive/'
+
+$exactCleanInputs = [ordered]@{
+    'garrysmod/steam.inf' = 'oracle_game/steam.inf'
+    'garrysmod/maps/gm_flatgrass.bsp' = 'oracle_game/maps/gm_flatgrass.bsp'
+    'sourceengine/scripts/surfaceproperties.txt' =
+        'server/sourceengine/scripts/surfaceproperties.txt'
+    'sourceengine/scripts/surfaceproperties_hl2.txt' =
+        'server/sourceengine/scripts/surfaceproperties_hl2.txt'
+    'sourceengine/scripts/surfaceproperties_manifest.txt' =
+        'server/sourceengine/scripts/surfaceproperties_manifest.txt'
+    'tool/VPhysicsSandboxGameRoot/gameinfo.txt' = 'oracle_game/gameinfo.txt'
+    'tool/VPhysicsSandboxGameRoot/gamemodes/garryspad_attestation/garryspad_attestation.txt' =
+        'oracle_game/gamemodes/garryspad_attestation/garryspad_attestation.txt'
+    'tool/VPhysicsSandboxGameRoot/gamemodes/garryspad_attestation/gamemode/init.lua' =
+        'oracle_game/gamemodes/garryspad_attestation/gamemode/init.lua'
+    'tool/VPhysicsSandboxGameRoot/gamemodes/garryspad_attestation/gamemode/shared.lua' =
+        'oracle_game/gamemodes/garryspad_attestation/gamemode/shared.lua'
+    'tool/VPhysicsAttestationAddon/lua/autorun/server/garryspad_source_vphysics_attestation.lua' =
+        'oracle_game/lua/autorun/server/garryspad_source_vphysics_attestation.lua'
+}
+foreach ($pair in $exactCleanInputs.GetEnumerator()) {
+    $matches = @($files | Where-Object {
+        [string]$_.source_path -ceq $pair.Key -and
+        [string]$_.input_path -ceq $pair.Value
+    })
+    Assert-BuildInput ($matches.Count -eq 1) `
+        "Fixed clean game root is missing $($pair.Key)"
+}
+Assert-BuildInput `
+    (@($files | Where-Object {
+        [string]$_.role -ceq 'probe_lua'
+    }).Count -eq 1) `
+    'Fixed clean game root must contain exactly one probe Lua file'
 
 $modelEntries = @($files | Where-Object {
     [string]$_.role -in @('model_mdl', 'model_phy', 'model_render_asset')

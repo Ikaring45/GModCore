@@ -47,10 +47,21 @@ function Copy-SourceOracleVPhysicsBuild24721267File {
         [Parameter(Mandatory)] [string]$StageRoot
     )
 
-    $source = Assert-SourceOracleSandboxNoReparsePath `
-        -Root $InstalledRoot `
-        -RelativePath ([string]$Entry.source_path) `
-        -RequireFile
+    $sourcePath = [string]$Entry.source_path
+    $source = if ([string]$Entry.role -in @('controlled_game_file', 'probe_lua')) {
+        if (-not $sourcePath.StartsWith('tool/', [StringComparison]::Ordinal)) {
+            throw "Controlled input does not originate from tool/: $sourcePath"
+        }
+        Assert-SourceOracleSandboxNoReparsePath `
+            -Root $script:VPhysicsBuild24721267ToolRoot `
+            -RelativePath $sourcePath.Substring('tool/'.Length) `
+            -RequireFile
+    } else {
+        Assert-SourceOracleSandboxNoReparsePath `
+            -Root $InstalledRoot `
+            -RelativePath $sourcePath `
+            -RequireFile
+    }
     $destination = Get-SourceOracleSandboxChildPath `
         -Root $StageRoot `
         -RelativePath ([string]$Entry.source_path)

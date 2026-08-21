@@ -24,7 +24,11 @@ $script:VPhysicsSandboxAllowedRoles = @(
         'server_runtime',
         'shipped_content',
         'shipped_lua',
-        'model_render_asset'
+        'model_render_asset',
+        'isolated_game_lua',
+        'isolated_game_content',
+        'controlled_game_file',
+        'probe_lua'
     )
 )
 $script:VPhysicsSandboxEmptyMount = '"mountcfg"' + "`r`n{`r`n}`r`n"
@@ -389,6 +393,21 @@ function Assert-SourceOracleVPhysicsSandboxInputSpec {
                 $inputPath -cne ('oracle_game/' + $modelStem + '.dx90.vtx')) {
                 throw 'model_render_asset is not the exact VVD or DX90 VTX companion'
             }
+        }
+        if ($role -in @(
+            'isolated_game_lua', 'isolated_game_content',
+            'controlled_game_file', 'probe_lua'
+        ) -and -not $inputPath.StartsWith('oracle_game/', [StringComparison]::Ordinal)) {
+            throw "$role must remain below the isolated game root"
+        }
+        if ($role -ceq 'isolated_game_lua' -and
+            (-not $sourcePath.StartsWith('garrysmod/lua/', [StringComparison]::Ordinal) -or
+             -not $inputPath.StartsWith('oracle_game/lua/', [StringComparison]::Ordinal))) {
+            throw 'isolated_game_lua must map shipped GMod Lua below oracle_game/lua'
+        }
+        if ($role -in @('controlled_game_file', 'probe_lua') -and
+            -not $sourcePath.StartsWith('tool/', [StringComparison]::Ordinal)) {
+            throw "$role must originate from the checked-in tool tree"
         }
         if ($role -in @('server_runtime', 'shipped_content', 'shipped_lua') -and
             -not $inputPath.StartsWith('server/', [StringComparison]::Ordinal)) {
