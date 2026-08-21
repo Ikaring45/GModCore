@@ -134,6 +134,7 @@ final class GMLuaUtilTraceTests: XCTestCase {
         XCTAssertEqual(request.kind, .line)
         XCTAssertTrue(request.ray.isRay)
         XCTAssertEqual(request.mask, SourceMasks.solid)
+        XCTAssertEqual(request.excludedEntityHandles, [])
         XCTAssertEqual(request.ray.actualStart, SourceVector3(0, 0, 10))
         XCTAssertEqual(request.ray.actualEnd, SourceVector3(0, 0, -10))
     }
@@ -268,7 +269,8 @@ final class GMLuaUtilTraceTests: XCTestCase {
         let cases = [
             ("util.TraceLine()", "table expected"),
             ("util.TraceLine({ start = 1 })", "Vector expected"),
-            ("util.TraceLine({ filter = Entity(0) })", "filter"),
+            ("util.TraceLine({ filter = function() return true end })", "filter"),
+            ("util.TraceLine({ filter = 'prop_physics' })", "filter"),
             ("util.TraceLine({ collisiongroup = 1 })", "COLLISION_GROUP_NONE"),
             ("util.TraceLine({ ignoreworld = true })", "ignoreworld"),
             ("util.TraceLine({ whitelist = true })", "whitelist"),
@@ -279,6 +281,27 @@ final class GMLuaUtilTraceTests: XCTestCase {
         for (expression, fragment) in cases {
             try assertLuaFailure(expression, contains: fragment, runtime: runtime)
         }
+    }
+
+    func testEntityAndEntityTableFiltersPreserveWorldTraceAndExactHandles() throws {
+        let provider = SyntheticWorldTraceProvider(mode: .hit)
+        let (runtime, adapter) = try runtimeWithWorld(provider: provider)
+        _ = adapter
+
+        try runtime.execute(
+            """
+            local tr = util.TraceLine({
+                start = Vector(0, 0, 10),
+                endpos = Vector(0, 0, -10),
+                filter = { Entity(0), NULL, Entity(0) }
+            })
+            assert(tr.Hit and tr.HitWorld and tr.Entity == Entity(0))
+            """,
+            sourceName: "@GMLuaUtilTraceEntityFilter.lua"
+        )
+
+        let request = try XCTUnwrap(provider.lastRequest)
+        XCTAssertEqual(request.excludedEntityHandles, [request.worldIdentity.handle])
     }
 
     func testClientTraceResolvesItsOwnWorldUserdataFromAValueOnlyProviderRequest() throws {

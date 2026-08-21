@@ -16,17 +16,23 @@ public struct GMLuaTraceRequest: Equatable, Sendable {
     public let ray: SourceRay
     public let mask: SourceContents
     public let worldIdentity: GMLuaSourceEntityIdentity
+    /// Complete realm-local handles named by an Entity/table filter. The BSP
+    /// provider has no dynamic candidates, so these do not alter its world
+    /// result; a later dynamic provider can apply them without reparsing Lua.
+    public let excludedEntityHandles: [SourceBaseHandle]
 
     init(
         kind: GMLuaTraceKind,
         ray: SourceRay,
         mask: SourceContents,
-        worldIdentity: GMLuaSourceEntityIdentity
+        worldIdentity: GMLuaSourceEntityIdentity,
+        excludedEntityHandles: [SourceBaseHandle]
     ) {
         self.kind = kind
         self.ray = ray
         self.mask = mask
         self.worldIdentity = worldIdentity
+        self.excludedEntityHandles = excludedEntityHandles
     }
 }
 
@@ -77,7 +83,7 @@ public enum GMLuaTraceBridgeError: Error, Equatable, CustomStringConvertible {
 public final class GMLuaTraceBridge: @unchecked Sendable {
     /// Inputs that are rejected unless they retain the documented defaults.
     public static let unavailableInputCapabilities = [
-        "filter", "collisiongroup != COLLISION_GROUP_NONE", "ignoreworld",
+        "function/string filter", "collisiongroup != COLLISION_GROUP_NONE", "ignoreworld",
         "whitelist", "hitclientonly",
     ]
 
@@ -310,7 +316,8 @@ public enum GMLuaUtilTrace {
                     configuration,
                     kind: kind,
                     function: functionName,
-                    state: state
+                    state: state,
+                    entityRegistry: entityRegistry
                 )
 
                 // Resolve Entity(0) only after validating the request and the
@@ -335,7 +342,8 @@ public enum GMLuaUtilTrace {
                     kind: kind,
                     ray: parsed.ray,
                     mask: parsed.mask,
-                    worldIdentity: worldIdentity
+                    worldIdentity: worldIdentity,
+                    excludedEntityHandles: parsed.excludedEntityHandles
                 )
 
                 let trace: SourceGameTrace
@@ -384,6 +392,7 @@ public enum GMLuaUtilTrace {
     private struct ParsedConfiguration {
         let ray: SourceRay
         let mask: SourceContents
+        let excludedEntityHandles: [SourceBaseHandle]
         let output: LuaTable?
     }
 
@@ -391,7 +400,8 @@ public enum GMLuaUtilTrace {
         _ table: LuaTable,
         kind: GMLuaTraceKind,
         function: String,
-        state: LuaState
+        state: LuaState,
+        entityRegistry: GMLuaEntityRegistry
     ) throws -> ParsedConfiguration {
         let start = try vectorField(
             "start",
@@ -441,10 +451,17 @@ public enum GMLuaUtilTrace {
         }
 
         let mask = try maskField(in: table, function: function, state: state)
+        let excludedEntityHandles = try filterField(
+            in: table,
+            function: function,
+            state: state,
+            entityRegistry: entityRegistry
+        )
         try rejectUnsupportedInputs(in: table, function: function, state: state)
         return ParsedConfiguration(
             ray: ray,
             mask: mask,
+            excludedEntityHandles: excludedEntityHandles,
             output: try outputField(in: table, function: function, state: state)
         )
     }
@@ -597,15 +614,6 @@ public enum GMLuaUtilTrace {
         function: String,
         state: LuaState
     ) throws {
-        let filter = try rawField("filter", in: table, state: state)
-        if case .nilValue = filter {
-            // Supported world-only default.
-        } else {
-            throw LuaError.runtime(
-                "\(function) field 'filter' requires dynamic entity tracing, which is not implemented"
-            )
-        }
-
         let collisionGroup = try optionalInt32Field(
             "collisiongroup",
             defaultValue: 0,
@@ -633,6 +641,58 @@ public enum GMLuaUtilTrace {
                 )
             }
         }
+    }
+
+    /// Entity and Entity-table filters are meaningful even before dynamic
+    /// collision exists: they describe candidates the provider must exclude,
+    /// while the immutable BSP world remains independently traceable. Function
+    /// and class-name filters require invoking dynamic candidate semantics and
+    /// remain explicitly unavailable.
+    private static func filterField(
+        in table: LuaTable,
+        function: String,
+        state: LuaState,
+        entityRegistry: GMLuaEntityRegistry
+    ) throws -> [SourceBaseHandle] {
+        let value = try rawField("filter", in: table, state: state)
+        if case .nilValue = value { return [] }
+
+        let values: [LuaValue]
+        if case let .table(filterTable) = value {
+            let pairs = try state.rawTablePairs(in: filterTable)
+            guard pairs.count <= 4_096 else {
+                throw LuaError.runtime(
+                    "\(function) field 'filter' exceeds 4096 Entity entries"
+                )
+            }
+            values = pairs.map(\.1)
+        } else {
+            values = [value]
+        }
+
+        var handles = Set<SourceBaseHandle>()
+        for filteredValue in values {
+            guard let object = GMLuaTypeSystem.typedObject(from: filteredValue),
+                  object.metaName == "Entity" || object.metaName == "Player" else {
+                throw LuaError.runtime(
+                    "\(function) field 'filter' supports only an Entity or table of Entities " +
+                        "until dynamic function/string filtering is implemented"
+                )
+            }
+            // `NULL` and stale invalid Entity userdata are valid filter values
+            // but cannot name a current collision candidate.
+            guard object.isValid else { continue }
+            if let identity = entityRegistry.canonicalIdentity(for: filteredValue) {
+                handles.insert(identity.handle)
+            } else if let identity = entityRegistry.sourceMirrorIdentity(for: filteredValue) {
+                handles.insert(identity.handle)
+            } else {
+                throw LuaError.runtime(
+                    "\(function) field 'filter' contains an Entity outside the current registry"
+                )
+            }
+        }
+        return handles.sorted { $0.rawValue < $1.rawValue }
     }
 
     private static func optionalInt32Field(
