@@ -554,7 +554,7 @@ public final class GModPlayableSession {
         let environment = try GMLuaGameEnvironmentConfiguration(
             maxPlayers: configuration.maxPlayers,
             mapName: configuration.map.rawValue,
-            sessionKind: .listenServer,
+            sessionKind: .singlePlayer,
             hostName: configuration.hostName
         )
         let engine = GMLuaEngineConfiguration(
