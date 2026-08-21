@@ -545,6 +545,17 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
         return payload.canonicalSnapshot
     }
 
+    /// Immutable canonical projection ordered by Source entity-list index.
+    /// Render and host consumers receive snapshots only; realm-local userdata
+    /// and sidecar tables remain owned by the Lua registry.
+    public var canonicalEntitySnapshots: [SourceCanonicalEntitySnapshot] {
+        lock.lock()
+        defer { lock.unlock() }
+        return canonicalSnapshotsByIndexLocked()
+            .sorted { $0.key < $1.key }
+            .map(\.value)
+    }
+
     private struct CanonicalProjection {
         var values: [Int: LuaValue]
         var playerIdentityByUserID: [Int: (index: Int, generation: UInt64)]

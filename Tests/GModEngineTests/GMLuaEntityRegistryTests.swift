@@ -458,6 +458,7 @@ final class GMLuaEntityRegistryTests: XCTestCase {
                 )
             )
         )
+        XCTAssertEqual(registry.canonicalEntitySnapshots, [firstSnapshot])
         let first = registry.entity(at: 21)
         runtime.state.setGlobal("REPLICATED_PROP", value: first)
         try runtime.execute("REPLICATED_PROP.sidecar = 'kept'")
@@ -482,6 +483,7 @@ final class GMLuaEntityRegistryTests: XCTestCase {
         }
         XCTAssertTrue(firstUserdata === updatedUserdata)
         try runtime.execute("assert(REPLICATED_PROP.sidecar == 'kept')")
+        XCTAssertEqual(registry.canonicalEntitySnapshots, [updatedSnapshot])
 
         let occupied = try registry.register(index: 22, className: "legacy_prop")
         let blockedSnapshot = canonicalProp(
@@ -520,6 +522,10 @@ final class GMLuaEntityRegistryTests: XCTestCase {
             )
         )
         XCTAssertEqual(registry.canonicalSnapshot(at: 22), blockedSnapshot)
+        XCTAssertEqual(
+            registry.canonicalEntitySnapshots,
+            [updatedSnapshot, blockedSnapshot]
+        )
 
         let removedSnapshot = canonicalProp(
             entryIndex: 21,
@@ -544,10 +550,15 @@ final class GMLuaEntityRegistryTests: XCTestCase {
         )
         XCTAssertFalse(try XCTUnwrap(GMLuaTypeSystem.typedObject(from: first)).isValid)
         XCTAssertEqual(registry.canonicalSnapshot(at: 21), replacementSnapshot)
+        XCTAssertEqual(
+            registry.canonicalEntitySnapshots,
+            [replacementSnapshot, blockedSnapshot]
+        )
 
         try registry.disconnectEntityReplication()
         XCTAssertNil(registry.canonicalSnapshot(at: 21))
         XCTAssertNil(registry.canonicalSnapshot(at: 22))
+        XCTAssertEqual(registry.canonicalEntitySnapshots, [])
         XCTAssertFalse(
             try registry.beginEntityReplication(generation: generation),
             "a disconnected generation must not be reusable"
