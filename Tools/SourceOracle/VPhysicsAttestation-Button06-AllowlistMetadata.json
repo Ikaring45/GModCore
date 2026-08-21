@@ -76,12 +76,46 @@
       "archive_index": 1,
       "byte_count": 269683853,
       "manifest_sha256": "dd20e110daf32f1c46c54afc20ba8c398b1a5fa46d410ce45563778e91f89d9a",
-      "whole_chunk_rehashed": false
+      "whole_chunk_rehashed": true,
+      "verification": "selected-pack-entry-and-fresh-app-4020-file-match"
+    },
+    "fresh_app_4020": {
+      "app_id": 4020,
+      "branch": "x86-64",
+      "build_id": "24721267",
+      "appmanifest_byte_count": 978,
+      "appmanifest_sha256": "b054854668f6906ad0d83f87fc6c396c25b39af9233f28013041e87d30ea4771",
+      "installed_depots": [
+        {
+          "depot_id": 1004,
+          "manifest_id": "5612541580377302256",
+          "byte_count": 64647928
+        },
+        {
+          "depot_id": 4021,
+          "manifest_id": "1585501278893556137",
+          "byte_count": 6640151027
+        },
+        {
+          "depot_id": 4022,
+          "manifest_id": "3751468375837603435",
+          "byte_count": 427974216
+        }
+      ]
     },
     "stock_sandbox_reference": {
       "logical_path": "gamemodes/sandbox/entities/weapons/gmod_tool/stools/button.lua",
       "line": 193,
       "registry": "ButtonModels"
+    },
+    "stock_spawnicon_reference": {
+      "logical_path": "garrysmod/settings/spawnlist_default/003-garry_s mod.txt",
+      "line": 116,
+      "entry_type": "model",
+      "model_path": "models/maxofs2d/button_06.mdl",
+      "byte_count": 5236,
+      "sha256": "06b5ccb7b977104f8eeb64b60e7e2f7088d6e58e94a309df464788e1aa3a076d",
+      "verification": "fresh-app-4020-build-24721267-default-spawnlist"
     },
     "bounded_read": {
       "method": "stored Zip64 entry plus VPK directory offset ranges",

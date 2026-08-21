@@ -159,8 +159,53 @@ Assert-SourceOracleVPhysicsSHA256 `
 Assert-SourceOracleVPhysicsSHA256 `
     -Value $provenance.chunk_vpk.manifest_sha256 `
     -Field 'chunk_vpk.manifest_sha256'
-Assert-Button06 (-not [bool]$provenance.chunk_vpk.whole_chunk_rehashed) `
-    'Metadata incorrectly claims a whole chunk rehash'
+Assert-Button06 ([bool]$provenance.chunk_vpk.whole_chunk_rehashed) `
+    'Fresh AppID 4020 chunk rehash is not recorded'
+Assert-ExactString `
+    $provenance.chunk_vpk `
+    'verification' `
+    'selected-pack-entry-and-fresh-app-4020-file-match'
+
+$fresh = $provenance.fresh_app_4020
+Assert-Button06 ([int64]$fresh.app_id -eq 4020) 'Fresh app ID differs'
+Assert-ExactString $fresh 'branch' 'x86-64'
+Assert-ExactString $fresh 'build_id' '24721267'
+Assert-SourceOracleVPhysicsSHA256 `
+    -Value $fresh.appmanifest_sha256 `
+    -Field 'fresh_app_4020.appmanifest_sha256'
+Assert-Button06 ([int64]$fresh.appmanifest_byte_count -eq 978) `
+    'Fresh AppID 4020 appmanifest size differs'
+$expectedDepots = [ordered]@{
+    '1004' = '5612541580377302256'
+    '4021' = '1585501278893556137'
+    '4022' = '3751468375837603435'
+}
+Assert-Button06 (@($fresh.installed_depots).Count -eq 3) `
+    'Fresh AppID 4020 depot set differs'
+foreach ($depot in @($fresh.installed_depots)) {
+    $depotID = [string]$depot.depot_id
+    Assert-Button06 $expectedDepots.Contains($depotID) `
+        "Unexpected fresh depot $depotID"
+    Assert-Button06 ([string]$depot.manifest_id -ceq $expectedDepots[$depotID]) `
+        "Fresh depot $depotID manifest differs"
+}
+
+$spawnIcon = $provenance.stock_spawnicon_reference
+Assert-ExactString `
+    $spawnIcon `
+    'logical_path' `
+    'garrysmod/settings/spawnlist_default/003-garry_s mod.txt'
+Assert-Button06 ([int64]$spawnIcon.line -eq 116) `
+    'Default SpawnIcon evidence line differs'
+Assert-ExactString $spawnIcon 'entry_type' 'model'
+Assert-ExactString $spawnIcon 'model_path' 'models/maxofs2d/button_06.mdl'
+Assert-Button06 ($spawnIcon.model_path -ceq $allowed.model_path) `
+    'Default SpawnIcon does not point to the allowlisted model'
+Assert-Button06 ([int64]$spawnIcon.byte_count -eq 5236) `
+    'Default spawnlist byte count differs'
+Assert-SourceOracleVPhysicsSHA256 `
+    -Value $spawnIcon.sha256 `
+    -Field 'stock_spawnicon_reference.sha256'
 Assert-Button06 (-not [bool]$provenance.bounded_read.whole_content_pack_revalidated) `
     'Metadata incorrectly claims a whole content-pack revalidation'
 Assert-Button06 `
