@@ -248,7 +248,7 @@ final class GModPermissionStoreTests: XCTestCase {
     }
 
     @MainActor
-    func testProblemsSnapshotShowsRealGrantsAndKeepsMenuBoundaryExplicit()
+    func testProblemsSnapshotShowsRealGrantsWithoutInventingAProblem()
         throws {
         let fixture = makeFixture()
         defer { fixture.cleanup() }
@@ -276,7 +276,7 @@ final class GModPermissionStoreTests: XCTestCase {
                 lifetime: .temporary
             ),
         ])
-        XCTAssertTrue(snapshot.problems.contains {
+        XCTAssertFalse(snapshot.problems.contains {
             $0.id == "permissions-menu-transport-unavailable"
         })
         XCTAssertFalse(snapshot.problems.contains {

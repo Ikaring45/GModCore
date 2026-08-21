@@ -363,18 +363,6 @@ enum GModAppProblemSnapshotBuilder {
             ), to: &problems)
         }
 
-        // The native store below is real, but it is not presented as the
-        // original MENU realm. Transport and the MENU Lua bridge remain
-        // explicit compatibility gaps until those systems exist.
-        appendUnique(GModAppProblemRecord(
-            id: "permissions-menu-transport-unavailable",
-            kind: .compatibility,
-            severity: .warning,
-            title: "#garryspad.problem.permissions-limited",
-            detail: "#garryspad.problem.permissions-limited-detail",
-            source: "permissions"
-        ), to: &problems)
-
         if let permissionPersistenceError {
             appendUnique(GModAppProblemRecord(
                 id: "permissions-persistence|\(permissionPersistenceError)",

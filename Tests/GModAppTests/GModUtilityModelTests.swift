@@ -87,7 +87,7 @@ final class GModUtilityModelTests: XCTestCase {
         XCTAssertTrue(snapshot.problems.contains { $0.kind == .luaError })
         XCTAssertTrue(snapshot.problems.contains { $0.kind == .contentPack })
         XCTAssertTrue(snapshot.problems.contains { $0.kind == .rendererFallback })
-        XCTAssertTrue(snapshot.problems.contains {
+        XCTAssertFalse(snapshot.problems.contains {
             $0.id == "permissions-menu-transport-unavailable"
         })
         XCTAssertEqual(snapshot.luaErrors.count, 1)
