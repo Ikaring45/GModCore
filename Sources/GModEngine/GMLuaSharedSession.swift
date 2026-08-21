@@ -61,8 +61,23 @@ public final class GMLuaSharedSession: @unchecked Sendable {
         let clientEndpoint: GMLuaNetEndpoint
         let playerIndex: Int
         let userID: Int
-        let generation: UInt64
+        /// Transport connection lifetime. This is deliberately independent
+        /// from an engine entity's packed EHANDLE generation.
+        let connectionGeneration: SourceEntityReplicationConnectionGeneration
+        /// Present only for the canonical replication path. Legacy `connect`
+        /// remains temporarily available without inventing a Source EHANDLE
+        /// for its direct Player mirror.
+        let playerIdentity: SourceCanonicalEntityIdentity?
+        let legacyPlayerGeneration: UInt64?
         let className: String
+        let replicationLease: CanonicalReplicationLease?
+        var replicationStream: SourceEntityReplicationServerStream?
+
+        var playerGeneration: UInt64 {
+            playerIdentity?.generation ?? legacyPlayerGeneration ?? 0
+        }
+
+        var usesCanonicalReplication: Bool { playerIdentity != nil }
 
         init(
             server: GMLuaRuntime,
@@ -70,23 +85,53 @@ public final class GMLuaSharedSession: @unchecked Sendable {
             clientEndpoint: GMLuaNetEndpoint,
             playerIndex: Int,
             userID: Int,
-            generation: UInt64,
-            className: String
+            connectionGeneration: SourceEntityReplicationConnectionGeneration,
+            playerIdentity: SourceCanonicalEntityIdentity? = nil,
+            legacyPlayerGeneration: UInt64? = nil,
+            className: String,
+            replicationLease: CanonicalReplicationLease? = nil,
+            replicationStream: SourceEntityReplicationServerStream? = nil
         ) {
             self.server = server
             self.client = client
             self.clientEndpoint = clientEndpoint
             self.playerIndex = playerIndex
             self.userID = userID
-            self.generation = generation
+            self.connectionGeneration = connectionGeneration
+            self.playerIdentity = playerIdentity
+            self.legacyPlayerGeneration = legacyPlayerGeneration
             self.className = className
+            self.replicationLease = replicationLease
+            self.replicationStream = replicationStream
+        }
+    }
+
+    /// Leaves the endpoint closure harmless after disconnect without adding a
+    /// second transport queue or retaining CLIENT registry ownership here.
+    private final class CanonicalReplicationLease: @unchecked Sendable {
+        private let lock = NSLock()
+        private var active = true
+
+        func withActive<Result>(
+            _ body: () throws -> Result
+        ) throws -> Result {
+            lock.lock()
+            defer { lock.unlock() }
+            guard active else { throw GMLuaSharedSessionError.clientNotConnected }
+            return try body()
+        }
+
+        func disconnect() {
+            lock.lock()
+            active = false
+            lock.unlock()
         }
     }
 
     private let connectionMutationLock = NSRecursiveLock()
     private let lock = NSLock()
     private weak var serverRuntime: GMLuaRuntime?
-    private var nextGeneration: UInt64 = 0
+    private var nextConnectionGeneration: UInt64 = 0
     private var connectionsByClient: [ObjectIdentifier: ConnectionRecord] = [:]
     private var clientByPlayerIndex: [Int: ObjectIdentifier] = [:]
     private var clientByUserID: [Int: ObjectIdentifier] = [:]
@@ -144,7 +189,7 @@ public final class GMLuaSharedSession: @unchecked Sendable {
         }
         guard serverRegistry.setPlayerInputButtons(
             index: record.playerIndex,
-            generation: record.generation,
+            generation: record.playerGeneration,
             buttons: buttons
         ) else {
             throw GMLuaSharedSessionError.missingRuntimeSurface(
@@ -153,6 +198,10 @@ public final class GMLuaSharedSession: @unchecked Sendable {
             )
         }
 
+        // Input buttons are transient host input, not canonical transform,
+        // motion, model, or lifecycle state. Keeping this narrow direct mirror
+        // preserves KeyDown semantics without letting CLIENT overwrite its
+        // replicated Source entity snapshot.
         for connected in connectedRecords {
             guard let registry = connected.client?.entityRegistry else {
                 throw GMLuaSharedSessionError.missingRuntimeSurface(
@@ -162,7 +211,7 @@ public final class GMLuaSharedSession: @unchecked Sendable {
             }
             guard registry.setPlayerInputButtons(
                 index: record.playerIndex,
-                generation: record.generation,
+                generation: record.playerGeneration,
                 buttons: buttons
             ) else {
                 throw GMLuaSharedSessionError.missingRuntimeSurface(
@@ -173,8 +222,9 @@ public final class GMLuaSharedSession: @unchecked Sendable {
         }
     }
 
-    /// Activates one client connection. Call this at a host lifecycle boundary,
-    /// normally the StartupOrchestrator player-connection stage.
+    /// Legacy direct-mirror connection retained until PlayableSession has moved
+    /// to ``connectCanonical(server:client:playerIdentity:authoritativeSnapshots:)``.
+    /// New gameplay integration must use the canonical FIFO path.
     public func connect(
         server: GMLuaRuntime,
         client: GMLuaRuntime,
@@ -195,6 +245,300 @@ public final class GMLuaSharedSession: @unchecked Sendable {
                 userID: userID ?? playerIndex,
                 className: className
             )
+        }
+    }
+
+    /// Connects a CLIENT to an already-authoritative SERVER entity snapshot.
+    ///
+    /// The SERVER registry must already project the supplied canonical Player;
+    /// this session never creates a second identity. The CLIENT replication
+    /// state and endpoint handler are armed synchronously, but the snapshot is
+    /// only enqueued into the existing net/console/entity FIFO. Therefore
+    /// `Entity`, `Player`, and `LocalPlayer` remain unavailable until the host
+    /// calls ``pump``. A startup host can perform that pump in its explicit
+    /// player-connection stage before dispatching `InitPostEntity`.
+    public func connectCanonical(
+        server: GMLuaRuntime,
+        client: GMLuaRuntime,
+        playerIdentity: SourceCanonicalEntityIdentity,
+        userID: Int? = nil,
+        authoritativeSnapshots: [SourceCanonicalEntitySnapshot]
+    ) throws {
+        guard !netTransport.isPumpingOnCurrentThread() else {
+            throw GMLuaSharedSessionError.lifecycleDuringPump("connect")
+        }
+        try netTransport.withExclusiveLifecycleBoundary {
+            connectionMutationLock.lock()
+            defer { connectionMutationLock.unlock() }
+            try connectCanonicalWhileLifecycleExclusive(
+                server: server,
+                client: client,
+                playerIdentity: playerIdentity,
+                userID: userID ?? playerIdentity.entryIndex,
+                authoritativeSnapshots: authoritativeSnapshots
+            )
+        }
+    }
+
+    private func connectCanonicalWhileLifecycleExclusive(
+        server: GMLuaRuntime,
+        client: GMLuaRuntime,
+        playerIdentity: SourceCanonicalEntityIdentity,
+        userID: Int,
+        authoritativeSnapshots: [SourceCanonicalEntitySnapshot]
+    ) throws {
+        guard server.realm == .server, client.realm == .client else {
+            throw GMLuaSharedSessionError.invalidRealm(
+                server: server.realm,
+                client: client.realm
+            )
+        }
+        guard !server.isClosed else {
+            throw GMLuaSharedSessionError.closedRuntime(.server)
+        }
+        guard !client.isClosed else {
+            throw GMLuaSharedSessionError.closedRuntime(.client)
+        }
+        let playerIndex = playerIdentity.entryIndex
+        guard playerIndex > 0 else {
+            throw GMLuaSharedSessionError.invalidPlayerIndex(playerIndex)
+        }
+        guard userID > 0 else {
+            throw GMLuaSharedSessionError.invalidUserID(userID)
+        }
+        guard server.netTransport === netTransport else {
+            throw GMLuaSharedSessionError.transportMismatch(.server)
+        }
+        guard client.netTransport === netTransport else {
+            throw GMLuaSharedSessionError.transportMismatch(.client)
+        }
+        guard let serverRegistry = server.entityRegistry else {
+            throw GMLuaSharedSessionError.missingRuntimeSurface(.server, "Entity registry")
+        }
+        guard let clientRegistry = client.entityRegistry else {
+            throw GMLuaSharedSessionError.missingRuntimeSurface(.client, "Entity registry")
+        }
+        guard let serverEndpoint = server.netEndpoint else {
+            throw GMLuaSharedSessionError.missingRuntimeSurface(.server, "net endpoint")
+        }
+        guard let clientEndpoint = client.netEndpoint else {
+            throw GMLuaSharedSessionError.missingRuntimeSurface(.client, "net endpoint")
+        }
+        guard let clientConsole = client.consoleCommandDispatcher else {
+            throw GMLuaSharedSessionError.missingRuntimeSurface(.client, "console dispatcher")
+        }
+        guard authoritativeSnapshots.contains(where: {
+            $0.identity == playerIdentity && $0.kind == .player
+        }) else {
+            throw GMLuaSharedSessionError.missingRuntimeSurface(
+                .server,
+                "canonical Player snapshot for EHANDLE \(playerIdentity.handle.rawValue)"
+            )
+        }
+        guard serverRegistry.canonicalIdentity(at: playerIndex) == playerIdentity,
+              Self.hasLiveEntity(serverRegistry.player(at: playerIndex)),
+              serverRegistry.canonicalIdentity(
+                  for: serverRegistry.player(forUserID: userID)
+              ) == playerIdentity else {
+            throw GMLuaSharedSessionError.missingRuntimeSurface(
+                .server,
+                "authoritative canonical Player EHANDLE \(playerIdentity.handle.rawValue)"
+            )
+        }
+
+        let clientIdentifier = ObjectIdentifier(client)
+        lock.lock()
+        if connectionsByClient[clientIdentifier] != nil {
+            lock.unlock()
+            throw GMLuaSharedSessionError.clientAlreadyConnected
+        }
+        if clientByPlayerIndex[playerIndex] != nil {
+            lock.unlock()
+            throw GMLuaSharedSessionError.playerIndexInUse(playerIndex)
+        }
+        if clientByUserID[userID] != nil {
+            lock.unlock()
+            throw GMLuaSharedSessionError.userIDInUse(userID)
+        }
+        if let existingServer = serverRuntime, existingServer !== server {
+            lock.unlock()
+            throw GMLuaSharedSessionError.differentServer
+        }
+        lock.unlock()
+
+        guard !Self.hasLiveEntity(clientRegistry.entity(at: playerIndex)),
+              !Self.hasLiveEntity(clientRegistry.player(forUserID: userID)) else {
+            throw GMLuaSharedSessionError.playerIndexInUse(playerIndex)
+        }
+
+        lock.lock()
+        guard connectionsByClient[clientIdentifier] == nil,
+              clientByPlayerIndex[playerIndex] == nil,
+              clientByUserID[userID] == nil else {
+            lock.unlock()
+            throw GMLuaSharedSessionError.clientAlreadyConnected
+        }
+        nextConnectionGeneration &+= 1
+        let connectionGeneration = SourceEntityReplicationConnectionGeneration(
+            rawValue: nextConnectionGeneration
+        )
+        lock.unlock()
+
+        var stream = try SourceEntityReplicationServerStream(
+            connectionGeneration: connectionGeneration
+        )
+        let initialPacket = try stream.makeSnapshot(authoritativeSnapshots)
+        let replicationLease = CanonicalReplicationLease()
+        let record = ConnectionRecord(
+            server: server,
+            client: client,
+            clientEndpoint: clientEndpoint,
+            playerIndex: playerIndex,
+            userID: userID,
+            connectionGeneration: connectionGeneration,
+            playerIdentity: playerIdentity,
+            className: SourceCanonicalEntityKind.player.className,
+            replicationLease: replicationLease,
+            replicationStream: stream
+        )
+
+        lock.lock()
+        guard connectionsByClient[clientIdentifier] == nil,
+              clientByPlayerIndex[playerIndex] == nil,
+              clientByUserID[userID] == nil else {
+            lock.unlock()
+            throw GMLuaSharedSessionError.clientAlreadyConnected
+        }
+        connectionsByClient[clientIdentifier] = record
+        clientByPlayerIndex[playerIndex] = clientIdentifier
+        clientByUserID[userID] = clientIdentifier
+        serverRuntime = server
+        lock.unlock()
+
+        var transportConnected = false
+        do {
+            guard try clientRegistry.beginEntityReplication(
+                generation: connectionGeneration,
+                playerUserIDs: [playerIndex: userID]
+            ) else {
+                throw GMLuaSharedSessionError.missingRuntimeSurface(
+                    .client,
+                    "fresh canonical entity replication generation"
+                )
+            }
+            try clientEndpoint.connectEntityReplicationHandler {
+                [clientRegistry] packet in
+                try replicationLease.withActive {
+                    let result = try clientRegistry.applyEntityReplicationPacket(
+                        packet
+                    )
+                    if case .applied = result,
+                       clientRegistry.canonicalIdentity(at: playerIndex) == playerIdentity {
+                        try clientRegistry.setLocalPlayer(
+                            index: playerIndex,
+                            generation: playerIdentity.generation
+                        )
+                    }
+                    return result
+                }
+            }
+            try netTransport.connectClientEndpoint(
+                clientEndpoint,
+                playerIndex: playerIndex,
+                generation: connectionGeneration.rawValue,
+                onDisconnect: { [weak self] in
+                    self?.cleanupConnection(
+                        clientIdentifier: clientIdentifier,
+                        connectionGeneration: connectionGeneration
+                    )
+                }
+            )
+            transportConnected = true
+            clientConsole.connectRemoteServer { [weak self, weak clientEndpoint] invocation in
+                guard let self, let clientEndpoint else {
+                    return .rejected(reason: "shared session is unavailable")
+                }
+                try self.netTransport.enqueueConsoleCommand(
+                    from: clientEndpoint,
+                    command: invocation.command,
+                    arguments: invocation.arguments
+                )
+                return .handled
+            }
+            try netTransport.enqueueEntityReplication(
+                initialPacket,
+                from: serverEndpoint,
+                to: clientEndpoint
+            )
+            guard !server.isClosed else {
+                throw GMLuaSharedSessionError.closedRuntime(.server)
+            }
+            guard !client.isClosed else {
+                throw GMLuaSharedSessionError.closedRuntime(.client)
+            }
+        } catch {
+            if transportConnected {
+                netTransport.disconnectClientEndpoint(clientEndpoint)
+            }
+            cleanupConnection(
+                clientIdentifier: clientIdentifier,
+                connectionGeneration: connectionGeneration
+            )
+            throw error
+        }
+    }
+
+    /// Enqueues one ordered SERVER entity delta for every canonical CLIENT.
+    /// Each connection keeps its own packet sequence while the existing
+    /// transport remains the sole global net/console/entity FIFO.
+    @discardableResult
+    public func publishCanonicalEntityUpdates(
+        _ operations: [SourceEntityReplicationOperation]
+    ) throws -> Int {
+        guard !operations.isEmpty else { return 0 }
+        guard !netTransport.isPumpingOnCurrentThread() else {
+            throw GMLuaSharedSessionError.lifecycleDuringPump(
+                "publish canonical entity updates"
+            )
+        }
+        return try netTransport.withExclusiveLifecycleBoundary {
+            connectionMutationLock.lock()
+            defer { connectionMutationLock.unlock() }
+
+            let records: [ConnectionRecord]
+            lock.lock()
+            records = connectionsByClient.values
+                .filter(\.usesCanonicalReplication)
+                .sorted { $0.playerIndex < $1.playerIndex }
+            lock.unlock()
+
+            var enqueued = 0
+            for record in records {
+                guard let server = record.server, !server.isClosed else {
+                    throw GMLuaSharedSessionError.closedRuntime(.server)
+                }
+                guard let serverEndpoint = server.netEndpoint else {
+                    throw GMLuaSharedSessionError.missingRuntimeSurface(
+                        .server,
+                        "net endpoint for canonical entity replication"
+                    )
+                }
+                guard var stream = record.replicationStream else {
+                    throw GMLuaSharedSessionError.missingRuntimeSurface(
+                        .server,
+                        "canonical entity replication stream"
+                    )
+                }
+                let packet = try stream.makeDelta(operations)
+                try netTransport.enqueueEntityReplication(
+                    packet,
+                    from: serverEndpoint,
+                    to: record.clientEndpoint
+                )
+                record.replicationStream = stream
+                enqueued += 1
+            }
+            return enqueued
         }
     }
 
@@ -302,15 +646,19 @@ public final class GMLuaSharedSession: @unchecked Sendable {
             lock.unlock()
             throw GMLuaSharedSessionError.clientAlreadyConnected
         }
-        nextGeneration &+= 1
-        let generation = nextGeneration
+        nextConnectionGeneration &+= 1
+        let connectionGeneration = SourceEntityReplicationConnectionGeneration(
+            rawValue: nextConnectionGeneration
+        )
+        let legacyPlayerGeneration = connectionGeneration.rawValue
         let record = ConnectionRecord(
             server: server,
             client: client,
             clientEndpoint: clientEndpoint,
             playerIndex: playerIndex,
             userID: resolvedUserID,
-            generation: generation,
+            connectionGeneration: connectionGeneration,
+            legacyPlayerGeneration: legacyPlayerGeneration,
             className: className
         )
         connectionsByClient[clientIdentifier] = record
@@ -323,7 +671,7 @@ public final class GMLuaSharedSession: @unchecked Sendable {
         do {
             _ = try serverRegistry.registerPlayerMirror(
                 index: playerIndex,
-                generation: generation,
+                generation: legacyPlayerGeneration,
                 userID: resolvedUserID,
                 className: className
             )
@@ -336,35 +684,35 @@ public final class GMLuaSharedSession: @unchecked Sendable {
                 }
                 _ = try clientRegistry.registerPlayerMirror(
                     index: existing.playerIndex,
-                    generation: existing.generation,
+                    generation: existing.playerGeneration,
                     userID: existing.userID,
                     className: existing.className
                 )
                 _ = try existingRegistry.registerPlayerMirror(
                     index: playerIndex,
-                    generation: generation,
+                    generation: legacyPlayerGeneration,
                     userID: resolvedUserID,
                     className: className
                 )
             }
             _ = try clientRegistry.registerPlayerMirror(
                 index: playerIndex,
-                generation: generation,
+                generation: legacyPlayerGeneration,
                 userID: resolvedUserID,
                 className: className
             )
             try clientRegistry.setLocalPlayer(
                 index: playerIndex,
-                generation: generation
+                generation: legacyPlayerGeneration
             )
             try netTransport.connectClientEndpoint(
                 clientEndpoint,
                 playerIndex: playerIndex,
-                generation: generation,
+                generation: connectionGeneration.rawValue,
                 onDisconnect: { [weak self] in
                     self?.cleanupConnection(
                         clientIdentifier: clientIdentifier,
-                        generation: generation
+                        connectionGeneration: connectionGeneration
                     )
                 }
             )
@@ -392,7 +740,7 @@ public final class GMLuaSharedSession: @unchecked Sendable {
             }
             cleanupConnection(
                 clientIdentifier: clientIdentifier,
-                generation: generation
+                connectionGeneration: connectionGeneration
             )
             throw error
         }
@@ -435,13 +783,13 @@ public final class GMLuaSharedSession: @unchecked Sendable {
 
     private func cleanupConnection(
         clientIdentifier: ObjectIdentifier,
-        generation: UInt64
+        connectionGeneration: SourceEntityReplicationConnectionGeneration
     ) {
         connectionMutationLock.lock()
         defer { connectionMutationLock.unlock() }
         lock.lock()
         guard let record = connectionsByClient[clientIdentifier],
-              record.generation == generation else {
+              record.connectionGeneration == connectionGeneration else {
             lock.unlock()
             return
         }
@@ -454,31 +802,40 @@ public final class GMLuaSharedSession: @unchecked Sendable {
         lock.unlock()
 
         record.client?.consoleCommandDispatcher?.disconnectRemoteServer()
+        record.replicationLease?.disconnect()
+        if record.usesCanonicalReplication {
+            if let departingRegistry = record.client?.entityRegistry {
+                try? departingRegistry.disconnectEntityReplication()
+            }
+            return
+        }
+
+        let playerGeneration = record.playerGeneration
         if let departingRegistry = record.client?.entityRegistry {
             departingRegistry.clearLocalPlayer(
                 index: record.playerIndex,
-                generation: generation
+                generation: playerGeneration
             )
             departingRegistry.unregisterPlayerMirror(
                 index: record.playerIndex,
-                generation: generation
+                generation: playerGeneration
             )
             for remaining in remainingRecords {
                 departingRegistry.unregisterPlayerMirror(
                     index: remaining.playerIndex,
-                    generation: remaining.generation
+                    generation: remaining.playerGeneration
                 )
             }
         }
         for remaining in remainingRecords {
             remaining.client?.entityRegistry?.unregisterPlayerMirror(
                 index: record.playerIndex,
-                generation: generation
+                generation: playerGeneration
             )
         }
         record.server?.entityRegistry?.unregisterPlayerMirror(
             index: record.playerIndex,
-            generation: generation
+            generation: playerGeneration
         )
     }
 

@@ -613,6 +613,43 @@ public final class SourceEntityList {
         markForDeletion(entity.refHandle)
     }
 
+    /// Rolls back one exact entity that was added only to obtain its EHANDLE
+    /// for an otherwise transactional publication attempt. This is not an
+    /// ordinary removal path: it accepts only the still-matching full handle
+    /// and object identity, rejects anything already published for deferred
+    /// deletion, invokes no removal callback, and never drains another
+    /// entity's pending deletion.
+    @discardableResult
+    func rollbackUnpublishedAddition(
+        _ handle: SourceBaseHandle,
+        entity expectedEntity: SourceEntity
+    ) -> Bool {
+        guard handle.isValid,
+              entity(for: handle) === expectedEntity,
+              expectedEntity.refHandle == handle,
+              !expectedEntity.isMarkedForDeletion,
+              !pendingDeletionSet.contains(handle) else { return false }
+
+        let entryIndex = handle.entryIndex
+        guard slots[entryIndex].serialNumber == handle.serialNumber,
+              slots[entryIndex].entity === expectedEntity else { return false }
+
+        removeSimThinkEntry(entryIndex: entryIndex)
+        expectedEntity.owningEntityList = nil
+        expectedEntity.refHandle = .invalid
+        expectedEntity.isNetworkable = false
+        slots[entryIndex].entity = nil
+        slots[entryIndex].serialNumber =
+            (slots[entryIndex].serialNumber + 1) & SourceEntityConstants.serialMask
+        if let activeIndex = activeEntryIndices.firstIndex(of: entryIndex) {
+            activeEntryIndices.remove(at: activeIndex)
+        }
+        if entryIndex >= SourceEntityConstants.maxEdicts {
+            freeNonNetworkableEntryIndices.append(entryIndex)
+        }
+        return true
+    }
+
     /// Deletes all still-matching handles and advances each slot serial. A stale
     /// queued handle can never remove a later occupant of a reused slot.
     @discardableResult

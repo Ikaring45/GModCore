@@ -31,9 +31,11 @@ No skipped or unfinished feature is reported as a pass. See
 [`LUA51_CONFORMANCE_STATUS.md`](LUA51_CONFORMANCE_STATUS.md) for the exact
 verification boundary.
 
-The 0.1.54 release carries the paired GLua runtime's bounded Sandbox slice
-forward and addresses the first physical-iPad rendering, movement, camera, and
-VGUI findings. It owns one SERVER and one CLIENT, loads the
+The 0.1.55 release restores the physical-iPad Q-menu Surface handoff and makes
+the sky-to-world Metal attachment store/load boundary explicit for tile GPUs.
+It also begins the canonical Source Entity path shared by world, Player, and
+future props without claiming prop spawning or physics yet. It owns one SERVER
+and one CLIENT, loads the
 original authorized Base/Sandbox/Derma/Spawnmenu Lua in measured order,
 creates the real `g_SpawnMenu`, and renders its Surface commands through the
 Metal overlay. The stock Weapons tab, tree categories, ContentIcons, tool
@@ -83,14 +85,15 @@ boundaries. Spawnmenu navigation and callbacks are exercised end to end, but
 an unsupported host action is still reported rather than presented as a
 successful spawn.
 
-The 0.1.54 Windows integration gate passes 485 XCTest cases plus 11/11
-Swift Testing Source-filesystem cases, with warnings treated as errors.
+The 0.1.55 focused Windows gates cover the Q-menu Surface handoff, bundled-map
+ordinary-world range retention, canonical Entity identity/lifecycle, registry
+projection, and net/console/entity FIFO with warnings treated as errors.
 The previously validated real 4.876 GB content pack validates all 2,641
 authorized payload SHA-256
 values and passes Home background, both maps, six-face painted sky, water,
 materials, Sandbox startup, and movement gates. That external pack was not
-re-read for the 0.1.54 correction. Embedded Metal source
-and pipeline contracts are checked locally, but the exact 0.1.54 Apple
+re-read for the 0.1.55 correction. Embedded Metal source
+and pipeline contracts are checked locally, but the exact 0.1.55 Apple
 package/app/Metal build, Simulator launch, and physical-iPad behavior remain
 CI/device gates rather than inferred passes.
 

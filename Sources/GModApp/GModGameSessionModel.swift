@@ -1546,6 +1546,16 @@ final class GModGameSessionModel: ObservableObject {
             ? "Single-touch VGUI; native cancel active; " +
                 "hover/wheel/keyboard pending"
             : "VGUI pointer idle"
+        // A Q/C lifecycle transition temporarily disables the host-frame
+        // mailbox. Do not make the first visible VGUI frame depend on a later
+        // MTKView callback: capture it immediately under the exact application
+        // and lane generation that just regained input ownership.
+        if isClientMenuOpen {
+            scheduleClientSurfaceRefresh(
+                applicationGeneration: sessionGeneration,
+                laneGeneration: laneGeneration
+            )
+        }
     }
 
     private func reportPointerCancellationFailure(_ failure: String?) {

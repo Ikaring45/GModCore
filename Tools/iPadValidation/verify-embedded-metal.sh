@@ -114,7 +114,7 @@ required_pipeline_contract = {
     "color.destinationRGBBlendFactor = .oneMinusSourceAlpha",
     "color.sourceAlphaBlendFactor = .one",
     "color.destinationAlphaBlendFactor = .oneMinusSourceAlpha",
-    "descriptor.colorAttachments[0].loadAction = .load",
+    "worldDescriptor.colorAttachments[0].loadAction = .load",
     "descriptor.depthAttachment.loadAction = .clear",
     "descriptor.mipmapLevelCount = bitmap.mipLevels.count",
     "for (level, mip) in bitmap.mipLevels.enumerated()",

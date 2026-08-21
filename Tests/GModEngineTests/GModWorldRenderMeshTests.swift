@@ -4,6 +4,36 @@ import XCTest
 @testable import GModGameSession
 
 final class GModWorldRenderMeshTests: XCTestCase {
+    func testBundledMapsRetainDominantOrdinaryWorldRanges() throws {
+        let expectations: [
+            (map: GModBundledMap, worldIndices: Int, sky3DIndices: Int)
+        ] = [
+            (.construct, 120_570, 3_426),
+            (.flatgrass, 36_042, 54),
+        ]
+
+        for expectation in expectations {
+            let bsp = try SourceBSP(
+                data: GModGameAssets.data(for: expectation.map, kind: .bsp)
+            )
+            let mesh = try GModWorldRenderMesh.build(from: bsp)
+            let worldIndices = mesh.materialRanges
+                .filter { $0.renderLayer == .world }
+                .reduce(0) { $0 + $1.indexCount }
+            let sky3DIndices = mesh.materialRanges
+                .filter { $0.renderLayer == .sky3D }
+                .reduce(0) { $0 + $1.indexCount }
+
+            XCTAssertEqual(worldIndices, expectation.worldIndices)
+            XCTAssertEqual(sky3DIndices, expectation.sky3DIndices)
+            XCTAssertGreaterThan(worldIndices, sky3DIndices * 20)
+            XCTAssertGreaterThan(worldIndices / 3, 1_000)
+            XCTAssertTrue(mesh.materialRanges.contains {
+                $0.renderLayer == .world && $0.indexCount > 0
+            })
+        }
+    }
+
     func testConstructWorldModelTriangulatesDeterministically() throws {
         let bsp = try SourceBSP(
             data: GModGameAssets.data(for: .construct, kind: .bsp)
