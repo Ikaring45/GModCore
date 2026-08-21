@@ -212,6 +212,9 @@ final class SourceCanonicalEntityTests: XCTestCase {
         XCTAssertEqual(pending.lifecycle, .pendingRemoval)
         XCTAssertNotNil(store.snapshot(for: created.identity))
         XCTAssertTrue(list.entity(for: created.identity.handle) is SourceCanonicalEntity)
+        XCTAssertFalse(store.orderedSnapshots.contains(where: {
+            $0.identity == created.identity
+        }))
 
         let removed = store.cleanupDeferredRemovals()
         XCTAssertEqual(removed.count, 1)

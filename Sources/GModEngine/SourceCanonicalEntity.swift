@@ -442,10 +442,17 @@ public final class SourceCanonicalEntityStore {
         entity(for: identity)?.snapshot
     }
 
-    /// Stable creation order for initial CLIENT replication.
+    /// Stable creation order for initial CLIENT replication. Entities already
+    /// queued for deferred removal are omitted: a newly attached CLIENT must
+    /// never observe a create packet whose lifecycle the replication protocol
+    /// rejects. Their existing realms retain the EHANDLE until cleanup emits
+    /// the final removed snapshot.
     public var orderedSnapshots: [SourceCanonicalEntitySnapshot] {
         handleOrder.compactMap { rawHandle in
-            entitiesByHandle[rawHandle]?.snapshot
+            guard let snapshot = entitiesByHandle[rawHandle]?.snapshot,
+                  snapshot.lifecycle != .pendingRemoval,
+                  snapshot.lifecycle != .removed else { return nil }
+            return snapshot
         }
     }
 
