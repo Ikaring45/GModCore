@@ -399,7 +399,7 @@ try {
         $false
     )
 
-    $executable = Join-Path $localRoot 'server\srcds_win64.exe'
+    $executable = Join-Path $localRoot 'server\srcds_console_win64.exe'
     $gameRoot = Join-Path $localRoot 'oracle_game'
     if (-not [IO.File]::Exists($executable) -or
         -not [IO.File]::Exists((Join-Path $gameRoot 'gameinfo.txt')) -or

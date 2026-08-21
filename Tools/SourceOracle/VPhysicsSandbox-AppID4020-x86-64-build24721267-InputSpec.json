@@ -8,7 +8,7 @@
   },
   "ownership_reference": "user-owned-playable-manifest-sha256:2755c232b55cfe6f466555c4e63d2c5b1c3a4c300910aaffdee5701a7e492045",
   "server": {
-    "executable_input_path": "server/srcds_win64.exe",
+    "executable_input_path": "server/srcds_console_win64.exe",
     "engine_input_path": "server/bin/win64/engine.dll",
     "game_server_input_path": "server/bin/win64/server.dll",
     "vphysics_input_path": "server/bin/win64/vphysics.dll",
@@ -21,9 +21,9 @@
   "files": [
     {
       "role": "server_executable",
-      "source_path": "srcds_win64.exe",
-      "input_path": "server/srcds_win64.exe",
-      "sha256": "b2412bd62ed6e44a6ce7af454fffb52bdd14e404e3916826d44fe63650197f64",
+      "source_path": "srcds_console_win64.exe",
+      "input_path": "server/srcds_console_win64.exe",
+      "sha256": "077039334d66d815f1047e68dd15edbed47aa8b0ddfe4980280690c08f8ca5f9",
       "maximum_bytes": 334672
     },
     {
@@ -905,8 +905,8 @@
       "role": "sandbox_bootstrap",
       "source_path": "tool/Run-SourceOracleVPhysicsSandboxGuest.ps1",
       "input_path": "sandbox/Run-SourceOracleVPhysicsSandboxGuest.ps1",
-      "sha256": "1011924a8438156233c6c65f09c0db6679c0ea8770659fe02a3745608902e5e5",
-      "maximum_bytes": 18504
+      "sha256": "28c0d6955f04f60c3b5aab083e49dcc94fc8cf9ec6c58ffb8cc965b8e281ae00",
+      "maximum_bytes": 18512
     }
   ]
 }

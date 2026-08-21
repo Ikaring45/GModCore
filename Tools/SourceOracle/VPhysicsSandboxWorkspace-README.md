@@ -29,7 +29,7 @@ has a separate bounded staging command:
   -StagePath H:\explicit\new-empty-stage
 ```
 
-Its checked-in spec selects `srcds_win64.exe`, the statically identified
+Its checked-in spec selects the x64 CUI `srcds_console_win64.exe`, the statically identified
 64-bit bootstrap/interface/import closure, the exact Steam appmanifest, the
 fixed `gm_flatgrass` map and GMod startup Lua, three surface-property files,
 four controlled gamemode files, one probe, one guest bootstrap, and only four

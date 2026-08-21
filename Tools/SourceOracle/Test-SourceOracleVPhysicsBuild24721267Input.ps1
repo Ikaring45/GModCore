@@ -14,14 +14,17 @@ $metadata = $inputs.metadata
 $files = @($spec.files)
 Assert-BuildInput ($files.Count -eq 127) 'Fixed build input must contain exactly 127 files'
 Assert-BuildInput `
-    ([string]$spec.server.executable_input_path -ceq 'server/srcds_win64.exe') `
-    'Fixed build input does not select the x64 srcds executable'
+    ([string]$spec.server.executable_input_path -ceq
+        'server/srcds_console_win64.exe') `
+    'Fixed build input does not select the x64 CUI srcds executable'
 Assert-BuildInput `
-    (@($files | Where-Object { [string]$_.source_path -ceq 'srcds.exe' }).Count -eq 0) `
-    'Fixed x64 build input still includes the 32-bit srcds executable'
+    (@($files | Where-Object {
+        [string]$_.source_path -in @('srcds.exe', 'srcds_win64.exe')
+    }).Count -eq 0) `
+    'Fixed x64 CUI input still includes a 32-bit or GUI srcds executable'
 
 $requiredRuntime = @(
-    'srcds_win64.exe',
+    'srcds_console_win64.exe',
     'steamclient64.dll',
     'tier0_s64.dll',
     'vstdlib_s64.dll',

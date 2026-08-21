@@ -149,6 +149,7 @@ foreach ($required in @(
     "'+gamemode'",
     "'+map'",
     "'+garryspad_source_vphysics_attestation_run'",
+    "'server\srcds_console_win64.exe'",
     "'C:\GarrysPAD\Output'",
     "'C:\Windows\System32\shutdown.exe'",
     'RedirectStandardOutput = true',
@@ -181,7 +182,8 @@ foreach ($forbidden in @(
     '(?i)Start-Process',
     '(?i)Enable-NetAdapter',
     '(?i)New-NetFirewallRule',
-    '(?i)garrysmod[/\\]addons'
+    '(?i)garrysmod[/\\]addons',
+    "'server\\srcds_win64\.exe'"
 )) {
     Assert-RunStatic ($guestText -notmatch $forbidden) `
         "Guest bootstrap contains forbidden behavior $forbidden"

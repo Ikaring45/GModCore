@@ -520,9 +520,7 @@ function Invoke-SourceOracleVPhysicsPreparedSandboxSingleRun {
             -not $owned.TerminateAndWait(10000, [uint32]0xE0560002)) {
             throw 'Validated Windows Sandbox owned Job did not terminate'
         }
-        if (-not (Wait-SourceOracleWindowsSandboxGuestShutdown -TimeoutSeconds 15)) {
-            throw 'Authenticated guest handoff arrived but Windows Sandbox did not shut down'
-        }
+        $guestShutdown = Wait-SourceOracleWindowsSandboxGuestShutdown -TimeoutSeconds 30
         if ($null -ne $guestFailure) {
             $exitText = if ($null -eq $guestFailure.srcds_exit_code) {
                 'unavailable'
@@ -533,8 +531,12 @@ function Invoke-SourceOracleVPhysicsPreparedSandboxSingleRun {
                 "Windows Sandbox guest rejected the run: $($guestFailure.error); " +
                 "srcds_exit_code=$exitText; timed_out=$($guestFailure.srcds_timed_out); " +
                 "stdout_tail=$($guestFailure.stdout_tail); " +
-                "stderr_tail=$($guestFailure.stderr_tail)"
+                "stderr_tail=$($guestFailure.stderr_tail); " +
+                "sandbox_shutdown=$guestShutdown"
             )
+        }
+        if (-not $guestShutdown) {
+            throw 'Authenticated result arrived but Windows Sandbox did not shut down'
         }
         return [pscustomobject][ordered]@{
             schema = [int64]1
