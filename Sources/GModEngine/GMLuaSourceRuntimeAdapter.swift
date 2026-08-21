@@ -257,6 +257,34 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
         }
     }
 
+    /// Returns the injected filesystem/Studio verdict. A closed adapter or an
+    /// omitted validator remains unavailable and is never promoted to valid.
+    public func validateCanonicalModel(
+        _ model: SourceEntityModelReference,
+        for kind: SourceCanonicalEntityKind
+    ) -> SourceCanonicalModelValidation {
+        netTransport.withExclusiveLifecycleBoundary {
+            mutationLock.lock()
+            defer { mutationLock.unlock() }
+            guard !isClosedStorage, !serverRuntime.isClosed else {
+                return .unavailable
+            }
+            return canonicalEntities.validateModel(model, for: kind)
+        }
+    }
+
+    /// Installs the SERVER native ABI only when the host explicitly connects
+    /// this adapter. Runtime construction by itself still cannot fake Entity
+    /// mutation support.
+    public func installCanonicalEntityLuaBridge() throws {
+        try withMutationBoundary {
+            try SourceCanonicalEntityGLuaBridge.install(
+                into: serverRuntime,
+                host: self
+            )
+        }
+    }
+
     /// Creates one engine-owned world, Player, or prop in the exact entity
     /// list driven by this adapter's SourceRuntimeKernel. Only SERVER receives
     /// the immediate authoritative projection.
@@ -346,6 +374,33 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
         try withMutationBoundary {
             try requireCanonicalServerProjectionLocked(identity)
             return try markCanonicalEntityForRemovalLocked(identity)
+        }
+    }
+
+    /// Reverses only a still-created canonical entity. This is used when a
+    /// multi-call GLua creation sequence cannot cross DispatchSpawn.
+    @discardableResult
+    public func rollbackCanonicalEntityCreation(
+        _ identity: SourceCanonicalEntityIdentity
+    ) throws -> SourceCanonicalEntitySnapshot {
+        try withMutationBoundary {
+            try requireCanonicalServerProjectionLocked(identity)
+            let snapshot = try canonicalEntities.rollbackCreated(
+                identity,
+                publishing: { [unowned self] removal in
+                    guard try self.requiredServerRegistryLocked()
+                        .applyAuthoritativeRemoval(removal) else {
+                        throw GMLuaSourceRuntimeAdapterError
+                            .canonicalRemovalProjectionMissing(removal.identity)
+                    }
+                }
+            )
+            if let index = canonicalEntityHandleOrder.firstIndex(
+                of: identity.handle.rawValue
+            ) {
+                canonicalEntityHandleOrder.remove(at: index)
+            }
+            return snapshot
         }
     }
 
@@ -1122,3 +1177,5 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
         "GMLuaSourceRuntimeAdapter.run.\(ObjectIdentifier(self))"
     }
 }
+
+extension GMLuaSourceRuntimeAdapter: SourceCanonicalEntityLuaHost {}

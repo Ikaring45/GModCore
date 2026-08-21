@@ -128,19 +128,38 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
     public var model: SourceEntityModelReference?
     public var solidType: SourceEntitySolidType
     public var moveType: SourceMoveType
+    /// Studio skin-family selection. Range validation against the loaded MDL
+    /// remains the responsibility of the real Studio asset boundary.
+    public var skin: Int
+    /// Local eye offset used by `CBasePlayer::EyePosition`/`GetShootPos`.
+    /// Keeping this beside the authoritative origin avoids a Lua-owned eye
+    /// position that can drift away from movement state.
+    public var viewOffset: SourceVector3
+    /// Full EHANDLE relationships. A nil vehicle is the truthful on-foot
+    /// state; neither relationship is reduced to an entry index.
+    public var vehicle: SourceCanonicalEntityIdentity?
+    public var creator: SourceCanonicalEntityIdentity?
 
     public init(
         transform: SourceEntityTransform = .identity,
         motion: SourceEntityMotionState = SourceEntityMotionState(),
         model: SourceEntityModelReference? = nil,
         solidType: SourceEntitySolidType = .none,
-        moveType: SourceMoveType = .none
+        moveType: SourceMoveType = .none,
+        skin: Int = 0,
+        viewOffset: SourceVector3 = .zero,
+        vehicle: SourceCanonicalEntityIdentity? = nil,
+        creator: SourceCanonicalEntityIdentity? = nil
     ) {
         self.transform = transform
         self.motion = motion
         self.model = model
         self.solidType = solidType
         self.moveType = moveType
+        self.skin = skin
+        self.viewOffset = viewOffset
+        self.vehicle = vehicle
+        self.creator = creator
     }
 
     /// Converts the canonical Player state into the existing movement core's
@@ -189,7 +208,13 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
                 moveType: .none
             )
         case .player:
-            return Self(solidType: .boundingBox, moveType: .walk)
+            // Source SDK's standing VEC_VIEW is 64 units above the player
+            // origin. Ducking can later authoritatively change this value.
+            return Self(
+                solidType: .boundingBox,
+                moveType: .walk,
+                viewOffset: SourceVector3(0, 0, 64)
+            )
         case .propPhysics:
             return Self(solidType: .vPhysics, moveType: .vPhysics)
         }
@@ -230,6 +255,10 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
     public let model: SourceEntityModelReference?
     public let solidType: SourceEntitySolidType
     public let moveType: SourceMoveType
+    public let skin: Int
+    public let viewOffset: SourceVector3
+    public let vehicle: SourceCanonicalEntityIdentity?
+    public let creator: SourceCanonicalEntityIdentity?
     public let lifecycle: SourceCanonicalEntityLifecycle
     public let isNetworkable: Bool
     public let revision: UInt64
@@ -245,7 +274,11 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         moveType: SourceMoveType,
         lifecycle: SourceCanonicalEntityLifecycle,
         isNetworkable: Bool,
-        revision: UInt64
+        revision: UInt64,
+        skin: Int = 0,
+        viewOffset: SourceVector3 = .zero,
+        vehicle: SourceCanonicalEntityIdentity? = nil,
+        creator: SourceCanonicalEntityIdentity? = nil
     ) {
         self.identity = identity
         self.kind = kind
@@ -255,6 +288,10 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         self.model = model
         self.solidType = solidType
         self.moveType = moveType
+        self.skin = skin
+        self.viewOffset = viewOffset
+        self.vehicle = vehicle
+        self.creator = creator
         self.lifecycle = lifecycle
         self.isNetworkable = isNetworkable
         self.revision = revision
@@ -280,6 +317,7 @@ public enum SourceCanonicalEntityError: Error, Equatable, CustomStringConvertibl
     case invalidWorldEntryIndex(Int)
     case invalidTransform
     case invalidMotion
+    case invalidSkin(Int)
     case invalidModelPath(String)
     case modelRequired(SourceCanonicalEntityKind)
     case modelValidationUnavailable(SourceEntityModelReference)
@@ -303,6 +341,8 @@ public enum SourceCanonicalEntityError: Error, Equatable, CustomStringConvertibl
             return "Source entity transform contains a non-finite component"
         case .invalidMotion:
             return "Source entity motion contains a non-finite or invalid component"
+        case let .invalidSkin(skin):
+            return "Source entity Studio skin index is invalid: \(skin)"
         case let .invalidModelPath(path):
             return "Source entity model path is structurally invalid: \(path)"
         case let .modelRequired(kind):
@@ -376,7 +416,11 @@ public final class SourceCanonicalEntity: SourceEntity {
             moveType: state.moveType,
             lifecycle: overrideLifecycle ?? lifecycle,
             isNetworkable: true,
-            revision: overrideRevision ?? revision
+            revision: overrideRevision ?? revision,
+            skin: state.skin,
+            viewOffset: state.viewOffset,
+            vehicle: state.vehicle,
+            creator: state.creator
         )
     }
 }
@@ -403,6 +447,21 @@ public final class SourceCanonicalEntityStore {
     }
 
     public var count: Int { entitiesByHandle.count }
+
+    /// Consults the injected filesystem/Studio boundary without manufacturing
+    /// success when that boundary is absent. Structural path rejection is also
+    /// reported as invalid, before any asset lookup occurs.
+    public func validateModel(
+        _ model: SourceEntityModelReference,
+        for kind: SourceCanonicalEntityKind
+    ) -> SourceCanonicalModelValidation {
+        do {
+            try validateModelPath(model, kind: kind)
+        } catch {
+            return .invalid
+        }
+        return modelValidator(model, kind)
+    }
 
     /// Creates a networkable canonical entity. All validation occurs before the
     /// Source slot is touched, and SourceEntityList itself performs the final
@@ -626,6 +685,47 @@ public final class SourceCanonicalEntityStore {
         return snapshot
     }
 
+    /// Reverses an `ents.Create` transaction that has not crossed Spawn. The
+    /// exact full handle is removed immediately only after its published realm
+    /// projection accepts the matching final removal snapshot. No unrelated
+    /// deferred deletion is drained.
+    @discardableResult
+    public func rollbackCreated(
+        _ identity: SourceCanonicalEntityIdentity
+    ) throws -> SourceCanonicalEntitySnapshot {
+        try rollbackCreated(identity, publishing: { _ in })
+    }
+
+    @discardableResult
+    func rollbackCreated(
+        _ identity: SourceCanonicalEntityIdentity,
+        publishing publish: (SourceCanonicalEntitySnapshot) throws -> Void
+    ) throws -> SourceCanonicalEntitySnapshot {
+        let entity = try requireEntity(identity)
+        guard entity.lifecycle == .created else {
+            throw SourceCanonicalEntityError.invalidLifecycleTransition(
+                from: entity.lifecycle,
+                to: .removed
+            )
+        }
+        let snapshot = entity.makeSnapshot(
+            identity: identity,
+            lifecycle: .removed,
+            revision: entity.revision &+ 1
+        )
+        try publish(snapshot)
+        precondition(
+            entityList.rollbackUnpublishedAddition(identity.handle, entity: entity),
+            "created canonical entity rollback lost its exact EHANDLE"
+        )
+        entity.transition(to: .removed)
+        entitiesByHandle.removeValue(forKey: identity.handle.rawValue)
+        if let index = handleOrder.firstIndex(of: identity.handle.rawValue) {
+            handleOrder.remove(at: index)
+        }
+        return snapshot
+    }
+
     /// Standalone cleanup boundary for dedicated tests and future hosts that do
     /// not yet use SourceRuntimeKernel. Integrated runtimes should call
     /// `didCleanup(capturedHandle:entity:)` from the kernel's removal callback.
@@ -703,6 +803,20 @@ public final class SourceCanonicalEntityStore {
         guard state.motion.isFinite else {
             throw SourceCanonicalEntityError.invalidMotion
         }
+        guard state.skin >= 0, state.skin <= Int(Int32.max) else {
+            throw SourceCanonicalEntityError.invalidSkin(state.skin)
+        }
+        guard state.viewOffset.x.isFinite,
+              state.viewOffset.y.isFinite,
+              state.viewOffset.z.isFinite else {
+            throw SourceCanonicalEntityError.invalidTransform
+        }
+
+        for relationship in [state.vehicle, state.creator].compactMap({ $0 }) {
+            guard entity(for: relationship) != nil else {
+                throw SourceCanonicalEntityError.unknownEntity(relationship)
+            }
+        }
 
         if let model = state.model {
             try validateModelPath(model, kind: kind)
@@ -713,7 +827,7 @@ public final class SourceCanonicalEntityStore {
             guard let model = state.model else {
                 throw SourceCanonicalEntityError.modelRequired(kind)
             }
-            switch modelValidator(model, kind) {
+            switch validateModel(model, for: kind) {
             case .valid:
                 break
             case .invalid:
