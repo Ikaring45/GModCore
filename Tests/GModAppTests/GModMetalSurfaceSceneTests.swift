@@ -181,7 +181,7 @@ final class GModMetalSurfaceSceneTests: XCTestCase {
         XCTAssertNil(rectangles[0].magnificationFilter)
         XCTAssertEqual(rectangles[1].minificationFilter, .anisotropic)
         XCTAssertEqual(rectangles[1].magnificationFilter, .point)
-        XCTAssertEqual(rectangles[2].minificationFilter, .none)
+        XCTAssertEqual(rectangles[2].minificationFilter, .some(.none))
         XCTAssertNil(rectangles[2].magnificationFilter)
 
         XCTAssertEqual(

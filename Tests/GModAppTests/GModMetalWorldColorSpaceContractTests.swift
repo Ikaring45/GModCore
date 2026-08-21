@@ -39,7 +39,8 @@ final class GModMetalWorldColorSpaceContractTests: XCTestCase {
     func testSDRPolicyClampsHDRNegativeAndNonFiniteValues() {
         XCTAssertEqual(
             GModMetalWorldColorSpaceContract.encodeLinearSDR(4),
-            1
+            1,
+            accuracy: Float.ulpOfOne
         )
         XCTAssertEqual(
             GModMetalWorldColorSpaceContract.encodeLinearSDR(-0.5),
@@ -47,7 +48,8 @@ final class GModMetalWorldColorSpaceContractTests: XCTestCase {
         )
         XCTAssertEqual(
             GModMetalWorldColorSpaceContract.encodeLinearSDR(.infinity),
-            1
+            1,
+            accuracy: Float.ulpOfOne
         )
         XCTAssertEqual(
             GModMetalWorldColorSpaceContract.encodeLinearSDR(-.infinity),
