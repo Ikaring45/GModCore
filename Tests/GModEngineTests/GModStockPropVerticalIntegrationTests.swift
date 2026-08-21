@@ -1,0 +1,208 @@
+import Foundation
+import XCTest
+@testable import GModEngine
+import GModGameAssets
+@testable import GModGameSession
+
+final class GModStockPropVerticalIntegrationTests: XCTestCase {
+    private let model = SourceEntityModelReference(
+        "models/maxofs2d/button_06.mdl"
+    )
+
+    func testOriginalSpawnIconCommandCreatesReplicatesAndRemovesButtonProp()
+        throws
+    {
+        let mdlData = Data("exact button_06 mdl fixture".utf8)
+        let phyData = Data("exact button_06 phy fixture".utf8)
+        let studioChecksum: Int32 = -1_817_891_700
+        let asset = try makeAttestedPropPhysicsTestAsset(
+            modelPath: model.path,
+            mdlSHA256: digest(mdlData),
+            phySHA256: digest(phyData),
+            studioChecksum: studioChecksum
+        )
+        let resolver = try GModAttestedPropPhysicsAssetResolver(
+            attestedAssets: [asset],
+            loadObservedAsset: { requested in
+                .loaded(GModObservedPropPhysicsAsset(
+                    normalizedModelPath: requested.path,
+                    mdlData: mdlData,
+                    phyData: phyData,
+                    studioChecksum: studioChecksum
+                ))
+            }
+        )
+        let renderCache = try GModStudioRenderableModelCache(
+            policy: GModStudioRenderableModelCachePolicy(
+                maximumEntryCount: 1,
+                maximumGeometryByteCount: 1_024
+            ),
+            compile: { [model] requested, bodyValue, skinFamilyIndex in
+                precondition(requested == model)
+                let normalizedPath = requested.path.lowercased()
+                let renderable = GModStudioRenderableModelSnapshot(
+                    checksum: studioChecksum,
+                    modelName: normalizedPath,
+                    lodIndex: 0,
+                    bodyValue: bodyValue,
+                    skinFamilyIndex: skinFamilyIndex,
+                    vertices: [GModDynamicModelVertex(
+                        position: .zero,
+                        normal: SourceVector3(0, 0, 1),
+                        textureCoordinate: .init(u: 0, v: 0)
+                    )],
+                    indices: [],
+                    drawRanges: []
+                )
+                return .resolved(GModStudioRenderableModelResource(
+                    id: GModStudioRenderableModelResourceID(
+                        normalizedModelPath: normalizedPath,
+                        checksum: studioChecksum,
+                        bodyValue: bodyValue,
+                        skinFamilyIndex: skinFamilyIndex
+                    ),
+                    model: renderable
+                ))
+            }
+        )
+        let session = try GModPlayableSession(
+            configuration: .init(map: .construct),
+            textMeasurer: nil,
+            logger: { _, _ in },
+            worldWalkCollisionProvider: nil,
+            canonicalModelValidator: { [model] candidate, kind in
+                candidate == model && kind == .propPhysics ? .valid : .invalid
+            },
+            attestedPropPhysicsAssetResolverForTesting: resolver,
+            studioModelRepositoryForTesting: GModStudioModelRepository(
+                reader: MissingStockPropStudioReader()
+            ),
+            studioRenderableModelCacheForTesting: renderCache
+        )
+        defer { _ = try? session.close() }
+
+        try session.serverRuntime.execute(
+            """
+            assert(game.SinglePlayer())
+            assert(util.IsValidModel("models/maxofs2d/button_06.mdl"))
+            assert(util.IsValidProp("models/maxofs2d/button_06.mdl"))
+            """,
+            sourceName: "=(stock button_06 eligibility)"
+        )
+        try session.clientRuntime.execute(
+            """
+            local effectDataA = EffectData()
+            local effectDataB = EffectData()
+            assert(effectDataA == effectDataB)
+            assert(TypeID(effectDataA) == TYPE_EFFECTDATA)
+            local dockProbe = vgui.Create("Panel")
+            dockProbe:DockPadding(1, 2, 3, 4)
+            dockProbe:DockMargin(5, 6, 7, 8)
+            local pl, pt, pr, pb = dockProbe:GetDockPadding()
+            local ml, mt, mr, mb = dockProbe:GetDockMargin()
+            assert(pl == 1 and pt == 2 and pr == 3 and pb == 4)
+            assert(ml == 5 and mt == 6 and mr == 7 and mb == 8)
+            STOCK_NETWORK_CREATED = {}
+            hook.Add("NetworkEntityCreated", "StockPropVertical", function(ent)
+                if ent:GetClass() == "prop_physics" then
+                    STOCK_NETWORK_CREATED[#STOCK_NETWORK_CREATED + 1] = ent
+                end
+            end)
+            """,
+            sourceName: "=(stock prop dock geometry ABI)"
+        )
+        try session.clientRuntime.execute(
+            "RunConsoleCommand('gm_spawn', " +
+                "'models/maxofs2d/button_06.mdl', '0', '')",
+            sourceName: "=(stock button_06 SpawnIcon command)"
+        )
+
+        let spawned = try session.runFixedTick()
+        if let failure = spawned.actionFailures.first {
+            XCTFail("first stock prop boundary: \(failure.message)")
+        }
+        XCTAssertEqual(spawned.actionFailures, [])
+        let serverProp = try XCTUnwrap(
+            session.sourceAdapter.canonicalEntitySnapshots.first {
+                $0.kind == .propPhysics
+            }
+        )
+        let clientProp = try XCTUnwrap(
+            session.clientCanonicalEntitySnapshots.first {
+                $0.kind == .propPhysics
+            }
+        )
+        XCTAssertEqual(clientProp.identity, serverProp.identity)
+        XCTAssertEqual(clientProp.model, model)
+        XCTAssertEqual(clientProp.lifecycle, .active)
+        XCTAssertTrue(serverProp.spawnEffect)
+        XCTAssertEqual(clientProp.spawnEffect, serverProp.spawnEffect)
+        XCTAssertEqual(clientProp.creationTime, serverProp.creationTime)
+        let effect = try XCTUnwrap(
+            session.clientRuntime.effects?.capturedRequests.last
+        )
+        XCTAssertEqual(effect.name, "propspawn")
+        XCTAssertEqual(effect.data.entityIdentity, serverProp.identity)
+        XCTAssertEqual(effect.data.origin.x, Double(clientProp.transform.origin.x))
+        XCTAssertEqual(effect.data.origin.y, Double(clientProp.transform.origin.y))
+        XCTAssertEqual(effect.data.origin.z, Double(clientProp.transform.origin.z))
+        XCTAssertTrue(effect.allowOverride)
+        XCTAssertEqual(effect.ignorePrediction, true)
+        XCTAssertTrue(
+            try XCTUnwrap(session.clientRuntime.achievements)
+                .capturedRequests.contains(.propSpawned)
+        )
+        let createdScene = try XCTUnwrap(
+            session.clientDynamicEntityRenderScene(ifChangedFrom: nil)
+        )
+        XCTAssertEqual(createdScene.resources.count, 1)
+        XCTAssertEqual(createdScene.instances.count, 1)
+        XCTAssertEqual(createdScene.instances[0].identity, serverProp.identity)
+        XCTAssertEqual(createdScene.instances[0].transform, clientProp.transform)
+        XCTAssertTrue(createdScene.issues.isEmpty)
+        try session.clientRuntime.execute(
+            """
+            assert(#STOCK_NETWORK_CREATED == 1)
+            assert(STOCK_NETWORK_CREATED[1]:GetSpawnEffect())
+            assert(STOCK_NETWORK_CREATED[1]:GetCreationTime() <= CurTime())
+            """,
+            sourceName: "=(stock prop network creation semantics)"
+        )
+
+        try session.serverRuntime.execute(
+            "Entity(\(serverProp.identity.index)):Remove()",
+            sourceName: "=(stock button_06 remove)"
+        )
+        _ = try session.runFixedTick()
+        XCTAssertFalse(session.sourceAdapter.canonicalEntitySnapshots.contains {
+            $0.identity == serverProp.identity
+        })
+        XCTAssertFalse(session.clientCanonicalEntitySnapshots.contains {
+            $0.identity == serverProp.identity
+        })
+        let removedScene = try XCTUnwrap(
+            session.clientDynamicEntityRenderScene(
+                ifChangedFrom: createdScene.revision
+            )
+        )
+        XCTAssertTrue(removedScene.resources.isEmpty)
+        XCTAssertTrue(removedScene.instances.isEmpty)
+        XCTAssertTrue(removedScene.issues.isEmpty)
+    }
+
+    private func digest(_ data: Data) -> String {
+        var hasher = GModContentSHA256()
+        hasher.update(data)
+        return hasher.hexadecimalDigest()
+    }
+}
+
+private struct MissingStockPropStudioReader: SourceStudioBoundedAssetReading {
+    func read(
+        path: String,
+        pathID: String?,
+        maximumBytes: Int
+    ) -> SourceStudioBoundedAssetReadOutcome {
+        .missing
+    }
+}
