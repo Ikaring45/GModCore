@@ -384,6 +384,9 @@ public final class GModPlayableSession {
     private let clientFileSystem: GMLuaMountedFileSystem
     private let worldWalkSolver: SourceWorldWalkSolver
     private let playerIdentity: SourceCanonicalEntityIdentity
+    private let studioRenderableModelCache: GModStudioRenderableModelCache?
+    private let dynamicEntityRenderSceneProjector:
+        GModDynamicEntityRenderSceneProjector?
     private var nextCommandNumber: Int32 = 1
     private var closedStorage = false
 
@@ -442,7 +445,10 @@ public final class GModPlayableSession {
         progress: @escaping GModPlayableSessionLoadingProgressHandler = { _ in },
         worldWalkCollisionProvider:
             (any SourceWorldWalkCollisionProvider)?,
-        canonicalModelValidator: SourceCanonicalModelValidator? = nil
+        canonicalModelValidator: SourceCanonicalModelValidator? = nil,
+        studioModelRepositoryForTesting: GModStudioModelRepository? = nil,
+        studioRenderableModelCacheForTesting:
+            GModStudioRenderableModelCache? = nil
     ) throws {
         let trimmedGamemode = configuration.gamemodeName
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -479,7 +485,22 @@ public final class GModPlayableSession {
                 for: configuration.map,
                 kind: .bsp
             )
-            loadedStudioModelRepository = nil
+            loadedStudioModelRepository = studioModelRepositoryForTesting
+        }
+        let loadedStudioRenderableModelCache: GModStudioRenderableModelCache?
+        let loadedDynamicEntityRenderSceneProjector:
+            GModDynamicEntityRenderSceneProjector?
+        if let loadedStudioModelRepository {
+            let cache = try studioRenderableModelCacheForTesting ??
+                GModStudioRenderableModelCache(
+                    repository: loadedStudioModelRepository
+                )
+            loadedStudioRenderableModelCache = cache
+            loadedDynamicEntityRenderSceneProjector = try
+                GModDynamicEntityRenderSceneProjector(resolver: cache)
+        } else {
+            loadedStudioRenderableModelCache = nil
+            loadedDynamicEntityRenderSceneProjector = nil
         }
         try mapAllocationPolicy.validate(
             .bspEncodedBytes,
@@ -699,6 +720,9 @@ public final class GModPlayableSession {
             playerIdentity = sourcePlayer.identity
             serverFileSystem = serverFiles
             clientFileSystem = clientFiles
+            studioRenderableModelCache = loadedStudioRenderableModelCache
+            dynamicEntityRenderSceneProjector =
+                loadedDynamicEntityRenderSceneProjector
             startupReport = GModPlayableSessionStartupReport(
                 map: configuration.map,
                 spawnPoint: loadedSpawn,
@@ -723,6 +747,32 @@ public final class GModPlayableSession {
     }
 
     public var isClosed: Bool { closedStorage }
+
+    /// Projects only replicated CLIENT `prop_physics` entities into immutable
+    /// renderer-neutral resources and instances. Player-only packets leave the
+    /// prop cursor unchanged and therefore avoid both an entity-array copy and
+    /// Studio cache work.
+    public func clientDynamicEntityRenderScene(
+        ifChangedFrom revision: UInt64?
+    ) throws -> GModDynamicEntityRenderSceneSnapshot? {
+        try ensureOpen()
+        guard let projector = dynamicEntityRenderSceneProjector else {
+            return nil
+        }
+        guard let registry = clientRuntime.entityRegistry else {
+            throw GModPlayableSessionError.missingRuntimeSurface(
+                .client,
+                "entity registry"
+            )
+        }
+        if let projection = registry.canonicalEntityProjection(
+            for: .propPhysics,
+            ifChangedFrom: projector.sourceProjectionCursor
+        ) {
+            _ = try projector.update(from: projection)
+        }
+        return projector.snapshot(ifChangedFrom: revision)
+    }
 
     /// Publishes the host-selected digital button word to both realm-local
     /// Player mirrors. Analog movement is intentionally not interpreted here.
@@ -961,6 +1011,9 @@ public final class GModPlayableSession {
         if sharedSession.connectedClientCount > 0 {
             try sharedSession.disconnect(client: clientRuntime)
         }
+        _ = try dynamicEntityRenderSceneProjector?.reset()
+        studioRenderableModelCache?.removeAll()
+        studioModelRepository?.removeAllCachedAssets()
         try sourceAdapter.close()
         let clientReport = clientRuntime.close()
         let serverReport = serverRuntime.close()

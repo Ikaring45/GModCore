@@ -189,6 +189,11 @@ public actor GModPlayableSessionLane {
     private let textMeasurer: (any GMLuaTextMeasurer)?
     private let worldWalkCollisionProvider:
         (any SourceWorldWalkCollisionProvider)?
+    private let canonicalModelValidatorForTesting:
+        SourceCanonicalModelValidator?
+    private let studioModelRepositoryForTesting: GModStudioModelRepository?
+    private let studioRenderableModelCacheForTesting:
+        GModStudioRenderableModelCache?
     private let shutdownCleanupObserverForTesting:
         (@Sendable (
             GModPlayableSessionLaneShutdownCleanupObservation
@@ -207,6 +212,9 @@ public actor GModPlayableSessionLane {
     public init(textMeasurer: (any GMLuaTextMeasurer)? = nil) {
         self.textMeasurer = textMeasurer
         worldWalkCollisionProvider = nil
+        canonicalModelValidatorForTesting = nil
+        studioModelRepositoryForTesting = nil
+        studioRenderableModelCacheForTesting = nil
         shutdownCleanupObserverForTesting = nil
     }
 
@@ -215,10 +223,21 @@ public actor GModPlayableSessionLane {
     init(
         textMeasurer: (any GMLuaTextMeasurer)? = nil,
         worldWalkCollisionProvider:
-            any SourceWorldWalkCollisionProvider
+            (any SourceWorldWalkCollisionProvider)?,
+        canonicalModelValidatorForTesting:
+            SourceCanonicalModelValidator? = nil,
+        studioModelRepositoryForTesting:
+            GModStudioModelRepository? = nil,
+        studioRenderableModelCacheForTesting:
+            GModStudioRenderableModelCache? = nil
     ) {
         self.textMeasurer = textMeasurer
         self.worldWalkCollisionProvider = worldWalkCollisionProvider
+        self.canonicalModelValidatorForTesting =
+            canonicalModelValidatorForTesting
+        self.studioModelRepositoryForTesting = studioModelRepositoryForTesting
+        self.studioRenderableModelCacheForTesting =
+            studioRenderableModelCacheForTesting
         shutdownCleanupObserverForTesting = nil
     }
 
@@ -232,6 +251,9 @@ public actor GModPlayableSessionLane {
     ) {
         textMeasurer = nil
         worldWalkCollisionProvider = nil
+        canonicalModelValidatorForTesting = nil
+        studioModelRepositoryForTesting = nil
+        studioRenderableModelCacheForTesting = nil
         self.shutdownCleanupObserverForTesting =
             shutdownCleanupObserverForTesting
     }
@@ -261,7 +283,11 @@ public actor GModPlayableSessionLane {
             textMeasurer: textMeasurer,
             logger: logger,
             progress: progress,
-            worldWalkCollisionProvider: worldWalkCollisionProvider
+            worldWalkCollisionProvider: worldWalkCollisionProvider,
+            canonicalModelValidator: canonicalModelValidatorForTesting,
+            studioModelRepositoryForTesting: studioModelRepositoryForTesting,
+            studioRenderableModelCacheForTesting:
+                studioRenderableModelCacheForTesting
         )
         session = replacement
         retainForShutdown(replacement)
@@ -358,6 +384,22 @@ public actor GModPlayableSessionLane {
         }
         try validate(expectedGeneration: expectedGeneration)
         return session.clientCanonicalEntitySnapshots
+    }
+
+    /// Returns the renderer-neutral dynamic prop scene only when its visual
+    /// revision differs from the caller's last consumed revision.
+    public func clientDynamicEntityRenderScene(
+        ifChangedFrom revision: UInt64?,
+        expectedGeneration: UInt64? = nil
+    ) throws -> GModDynamicEntityRenderSceneSnapshot? {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        return try session.clientDynamicEntityRenderScene(
+            ifChangedFrom: revision
+        )
     }
 
     public func renderClientVGUIFrame(
