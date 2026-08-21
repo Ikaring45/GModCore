@@ -5,6 +5,52 @@ import GModGameAssets
 import GModGameSession
 
 final class GarrysPADContentPackTests: XCTestCase {
+    func testStudioAssetReaderPreservesMissingOversizeAndPathIDBoundaries() throws {
+        let modelBytes = Data(repeating: 0x53, count: 16)
+        let fixture = try makeTemporaryZIP(entries: [
+            ("garrysmod/maps/gm_construct.bsp", Data("construct".utf8), 0),
+            ("garrysmod/maps/gm_flatgrass.bsp", Data("flatgrass".utf8), 0),
+            ("garrysmod/html/img/bg.jpg", Data([0xFF, 0xD8, 0xFF, 0xD9]), 0),
+            ("garrysmod/models/props/test.mdl", modelBytes, 0),
+        ])
+        defer { try? FileManager.default.removeItem(at: fixture) }
+
+        let source = try GModContentPackAssetSource(
+            pack: GarrysPADContentPack(url: fixture)
+        )
+        XCTAssertEqual(
+            source.read(
+                path: "models/props/test.mdl",
+                pathID: "GAME",
+                maximumBytes: modelBytes.count
+            ),
+            .data(modelBytes)
+        )
+        XCTAssertEqual(
+            source.read(
+                path: "models/props/missing.mdl",
+                pathID: "GAME",
+                maximumBytes: 64
+            ),
+            .missing
+        )
+        XCTAssertEqual(
+            source.read(
+                path: "models/props/test.mdl",
+                pathID: "GAME",
+                maximumBytes: 4
+            ),
+            .exceeded(actual: modelBytes.count)
+        )
+        guard case .failed = source.read(
+            path: "models/props/test.mdl",
+            pathID: "MOD",
+            maximumBytes: modelBytes.count
+        ) else {
+            return XCTFail("non-GAME Studio reads must not silently use GAME")
+        }
+    }
+
     func testStoredEntriesAreIndexedAndReadWithoutExtraction() throws {
         let fixture = try makeTemporaryZIP(entries: [
             ("garrysmod/maps/gm_construct.bsp", Data("construct".utf8), 0),
