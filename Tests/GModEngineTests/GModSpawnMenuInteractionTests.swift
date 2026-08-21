@@ -258,10 +258,17 @@ final class GModSpawnMenuInteractionTests: XCTestCase {
         XCTAssertFalse(weaponSoundReport.requests[0].hasAudioBacking)
         XCTAssertFalse(weaponSoundReport.diagnostics.overflowed)
         let weaponActionTick = try session.runFixedTick()
+        XCTAssertEqual(weaponActionTick.actionFailures.count, 1)
         let weaponFailure = try XCTUnwrap(weaponActionTick.actionFailures.first)
         XCTAssertEqual(weaponFailure.command, "gm_giveswep")
         XCTAssertEqual(weaponFailure.arguments, [weaponSpawnName.utf8String])
-        XCTAssertTrue(weaponFailure.message.contains("Alive"))
+        XCTAssertTrue(weaponFailure.message.contains("GetNWString"))
+        let canonicalPlayer = try XCTUnwrap(
+            session.sourceAdapter.canonicalEntitySnapshots.first {
+                $0.kind == .player
+            }
+        )
+        XCTAssertTrue(canonicalPlayer.motion.isAlive)
         XCTAssertFalse(session.isClosed)
         XCTAssertFalse(session.clientRuntime.isClosed)
         XCTAssertFalse(session.serverRuntime.isClosed)

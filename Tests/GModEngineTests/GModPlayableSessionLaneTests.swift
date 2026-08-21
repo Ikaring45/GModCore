@@ -246,11 +246,14 @@ final class GModPlayableSessionLaneTests: XCTestCase {
         _ = try await lane.close()
     }
 
-    func testSpawnActionFailureIsAValueInHostFrameAndLaneRemainsUsable() async throws {
+    func testUnavailableSpawnAssetLeavesCanonicalStateUnchangedAndLaneUsable() async throws {
         let lane = GModPlayableSessionLane()
         let snapshot = try await lane.start(
             configuration: GModPlayableSessionConfiguration(map: .construct)
         )
+        XCTAssertFalse(snapshot.canonicalEntities.contains {
+            $0.kind == .propPhysics
+        })
         try await lane.execute(
             "RunConsoleCommand('gm_spawn', 'models/props_c17/oildrum001.mdl', '0', '')",
             realm: .client,
@@ -258,19 +261,21 @@ final class GModPlayableSessionLaneTests: XCTestCase {
             expectedGeneration: snapshot.generation
         )
 
-        let failedActionFrame = try await lane.runHostFrame(
+        let actionFrame = try await lane.runHostFrame(
             fixedTickCount: 1,
             renderClientFrame: false,
             expectedGeneration: snapshot.generation,
             expectedInputEpoch: snapshot.inputEpoch
         )
-        XCTAssertEqual(failedActionFrame.fixedTicks.count, 1)
-        XCTAssertEqual(failedActionFrame.actionFailures.count, 1)
-        XCTAssertEqual(failedActionFrame.actionFailures.first?.command, "gm_spawn")
-        XCTAssertTrue(
-            failedActionFrame.actionFailures.first?.message.contains("Alive")
-                == true
+        XCTAssertEqual(actionFrame.fixedTicks.count, 1)
+        XCTAssertEqual(actionFrame.actionFailures, [])
+        let actionEntities = try await lane.clientCanonicalEntitySnapshots(
+            expectedGeneration: snapshot.generation
         )
+        XCTAssertFalse(actionEntities.contains { $0.kind == .propPhysics })
+        XCTAssertTrue(try XCTUnwrap(actionEntities.first {
+            $0.kind == .player
+        }).motion.isAlive)
 
         let laterFrame = try await lane.runHostFrame(
             fixedTickCount: 1,
