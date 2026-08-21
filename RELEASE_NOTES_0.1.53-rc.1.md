@@ -28,6 +28,10 @@ Lua wherever the compatibility runtime supports them.
 - iPad controls include movement, look, jump, Q, C, Pause, FIRE, ALT, and USE,
   with centralized ownership, cancellation handling, persisted sensitivity,
   inverted-Y support, and a 60/120 FPS preference.
+- Problems and Lua Errors retain typed source details. Permissions now has a
+  real temporary/permanent per-server store with grant, revoke, persistence,
+  and session clearing; network permission exchange stays explicitly
+  unavailable until multiplayer transport exists.
 
 ### VGUI and Spawnmenu
 
@@ -41,7 +45,10 @@ Lua wherever the compatibility runtime supports them.
 - A strict interaction test opens the real g_SpawnMenu, changes the Weapons
   tab and Half-Life 2 category, activates a genuine ContentIcon, opens the
   Button tool, selects a real SpawnIcon, resizes to a compact viewport, and
-  scrolls the real Balloon control panel through its DVScrollBar.
+  scrolls the real Balloon control panel through its DVScrollBar. The tested
+  ContentIcon grants and selects its Source-backed logical weapon; the tested
+  tool SpawnIcon updates the client tool mode/model. Disconnect cleanup removes
+  only weapons owned by the departing connection generation.
 - Missing VGUI calls are aggregated as structured Problems with class, method,
   source, and line rather than being reported as successful no-ops.
 
@@ -78,14 +85,15 @@ Lua wherever the compatibility runtime supports them.
 
 ## Validation for the candidate source tree
 
-- 480/480 Windows tests pass with warnings treated as errors.
-- 67/67 strict VGUI/Surface/stock-Q tests pass.
-- 51/51 strict Session/BSP/Renderer/Loading tests pass.
-- All 188 Swift source and test files parse.
+- 490/490 Windows tests pass with warnings treated as errors: 479 XCTest cases
+  plus 11 Swift Testing Source-filesystem cases.
+- The latest strict stock-Q interaction and 15/15 shared-session lifecycle
+  tests pass, including weapon/tool state and disconnect/reconnect cleanup.
+- All 196 Swift source and test files parse.
 - The real 4,876,093,827-byte content pack validates all 2,641 authorized
   payload SHA-256 values and passes Home background, both maps, painted sky,
   water, material, Sandbox startup, and movement gates.
-- Bundled maps, 2,162 client-content files, 28 fonts, and the 117-key English
+- Bundled maps, 2,162 client-content files, 28 fonts, and the 129-key English
   and Japanese catalogs pass their manifest contracts.
 - Embedded Metal source extraction finds all 12 required shader functions and
   11 pipeline contracts.
@@ -105,9 +113,10 @@ launch, accessibility smoke, and package XCTest gate.
   complete water/ladder/step movement, dynamic entity physics, multiplayer,
   Steam/authentication, Workshop/addon discovery, and a complete weapon/tool
   runtime are not implemented.
-- Keyboard, Voice, several Game Options, the full Permissions bridge, noclip,
-  meaningful entity undo, and full weapon selection/execution remain staged
-  compatibility work. Unavailable controls are labelled as such.
+- Keyboard, Voice, several Game Options, multiplayer permission transport,
+  noclip, meaningful entity undo, networked/predicted SWEP execution, and
+  general prop/entity spawning remain staged compatibility work. Unavailable
+  controls are labelled as such.
 - Source sound scripts, symbolic/rndwave/channel/pitch/loop semantics, spatial
   sound, sound.Play, EmitSound, and CreateSound are not covered by the current
   surface.PlaySound bridge.

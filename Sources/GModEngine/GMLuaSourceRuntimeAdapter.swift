@@ -341,6 +341,27 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
         }
     }
 
+    /// Nonthrowing lifecycle-cleanup variant used after a Player connection is
+    /// detached. It schedules deletion only when the complete Source handle is
+    /// still current; an index reused by a later generation is never touched.
+    @discardableResult
+    public func scheduleDeletionIfPresent(
+        _ identity: GMLuaSourceEntityIdentity
+    ) -> Bool {
+        guard !isAdapterOperationActiveOnCurrentThread else { return false }
+        return netTransport.withExclusiveLifecycleBoundary {
+            mutationLock.lock()
+            defer { mutationLock.unlock() }
+            guard !isClosedStorage,
+                  !serverRuntime.isClosed,
+                  kernel.entityList.entity(for: identity.handle) != nil else {
+                return false
+            }
+            kernel.entityList.markForDeletion(identity.handle)
+            return true
+        }
+    }
+
     /// Performs host mutations while the Source kernel and net delivery share
     /// one exclusive lifecycle boundary.
     @discardableResult

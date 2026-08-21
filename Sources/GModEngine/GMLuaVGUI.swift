@@ -103,6 +103,19 @@ public enum GMLuaHTMLDocumentLoadResult: Equatable, Sendable {
     case failed(message: String)
 }
 
+/// One native JavaScript callback endpoint registered by stock `DHTML`.
+/// The logical VGUI layer preserves registration identity; invocation and DOM
+/// execution remain an HTML-renderer responsibility.
+public struct GMLuaHTMLJavaScriptCallbackSnapshot: Equatable, Sendable {
+    public let objectName: LuaString
+    public let callbackName: LuaString
+
+    public init(objectName: LuaString, callbackName: LuaString) {
+        self.objectName = objectName
+        self.callbackName = callbackName
+    }
+}
+
 public struct GMLuaHTMLPanelStateSnapshot: Equatable, Sendable {
     public let panelIdentifier: Int
     public let requestedClassName: String
@@ -111,6 +124,8 @@ public struct GMLuaHTMLPanelStateSnapshot: Equatable, Sendable {
     public let url: LuaString?
     public let html: LuaString?
     public let failureMessage: String?
+    public let javascriptObjects: [LuaString]
+    public let javascriptCallbacks: [GMLuaHTMLJavaScriptCallbackSnapshot]
 
     public init(
         panelIdentifier: Int,
@@ -119,7 +134,9 @@ public struct GMLuaHTMLPanelStateSnapshot: Equatable, Sendable {
         requestIdentifier: UInt64,
         url: LuaString?,
         html: LuaString?,
-        failureMessage: String?
+        failureMessage: String?,
+        javascriptObjects: [LuaString],
+        javascriptCallbacks: [GMLuaHTMLJavaScriptCallbackSnapshot]
     ) {
         self.panelIdentifier = panelIdentifier
         self.requestedClassName = requestedClassName
@@ -128,6 +145,8 @@ public struct GMLuaHTMLPanelStateSnapshot: Equatable, Sendable {
         self.url = url
         self.html = html
         self.failureMessage = failureMessage
+        self.javascriptObjects = javascriptObjects
+        self.javascriptCallbacks = javascriptCallbacks
     }
 }
 
@@ -359,6 +378,8 @@ private final class GMLuaPanelValue: @unchecked Sendable {
     var htmlDocumentURL: LuaString?
     var htmlDocumentSource: LuaString?
     var htmlDocumentFailureMessage: String?
+    var htmlJavaScriptObjects: [LuaString] = []
+    var htmlJavaScriptCallbacks: [GMLuaHTMLJavaScriptCallbackSnapshot] = []
 
     init(
         identifier: Int,
@@ -785,7 +806,9 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
                 requestIdentifier: descriptor.htmlDocumentRequestIdentifier,
                 url: descriptor.htmlDocumentURL,
                 html: descriptor.htmlDocumentSource,
-                failureMessage: descriptor.htmlDocumentFailureMessage
+                failureMessage: descriptor.htmlDocumentFailureMessage,
+                javascriptObjects: descriptor.htmlJavaScriptObjects,
+                javascriptCallbacks: descriptor.htmlJavaScriptCallbacks
             )
         }
     }
@@ -2828,6 +2851,25 @@ public enum GMLuaVGUI {
                 let panel = try requiredHTMLPanel(arguments, "IsLoading")
                 return [.boolean(panel.htmlDocumentLoadState == .loading)]
             }),
+            ("NewObject", { arguments in
+                let panel = try requiredHTMLPanel(arguments, "NewObject")
+                let objectName = try requiredLuaString(arguments, 1, "NewObject")
+                if !panel.htmlJavaScriptObjects.contains(objectName) {
+                    panel.htmlJavaScriptObjects.append(objectName)
+                }
+                return []
+            }),
+            ("NewObjectCallback", { arguments in
+                let panel = try requiredHTMLPanel(arguments, "NewObjectCallback")
+                let registration = GMLuaHTMLJavaScriptCallbackSnapshot(
+                    objectName: try requiredLuaString(arguments, 1, "NewObjectCallback"),
+                    callbackName: try requiredLuaString(arguments, 2, "NewObjectCallback")
+                )
+                if !panel.htmlJavaScriptCallbacks.contains(registration) {
+                    panel.htmlJavaScriptCallbacks.append(registration)
+                }
+                return []
+            }),
             ("OpenURL", { arguments in
                 let panel = try requiredHTMLPanel(arguments, "OpenURL")
                 try registry.beginHTMLDocumentLoad(
@@ -2886,6 +2928,10 @@ public enum GMLuaVGUI {
             ("ChildCount", { arguments in
                 let panel = try requiredPanel(arguments, "ChildCount")
                 return [.number(Double(registry.children(of: panel.identifier).count))]
+            }),
+            ("HasChildren", { arguments in
+                let panel = try requiredPanel(arguments, "HasChildren")
+                return [.boolean(!registry.children(of: panel.identifier).isEmpty)]
             }),
             ("GetChild", { arguments in
                 let panel = try requiredPanel(arguments, "GetChild")

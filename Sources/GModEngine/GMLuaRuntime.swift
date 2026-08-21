@@ -375,6 +375,10 @@ public final class GMLuaRuntime {
                     into: state,
                     fileSystem: presetFileSystem
                 )
+                try GMLuaSpawnMenuEngine.install(
+                    into: state,
+                    fileSystem: presetFileSystem
+                )
             }
         } catch {
             // Initialization stays source-compatible with existing callers;
@@ -450,6 +454,17 @@ public final class GMLuaRuntime {
         state.register("MsgN") { [unowned self] arguments in
             self.logger("[\(self.realm.rawValue)][Lua] " + arguments.map(\.printable).joined(separator: "\t"))
             return []
+        }
+        if realm == .server {
+            // Single-device host-console projection only. This does not fan
+            // out a separate console message to every connected CLIENT.
+            state.register("MsgAll") { [unowned self] arguments in
+                self.logger(
+                    "[\(self.realm.rawValue)][Lua] " +
+                        arguments.map(\.printable).joined()
+                )
+                return []
+            }
         }
         state.register("ErrorNoHalt") { [unowned self] arguments in
             self.logger("[\(self.realm.rawValue)][Lua][ERROR] " + arguments.map(\.printable).joined())

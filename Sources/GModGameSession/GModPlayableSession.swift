@@ -554,6 +554,22 @@ public final class GModPlayableSession {
             )
             adapter = sourceAdapter
             try sourceAdapter.attach(client: client)
+            server.entityRegistry?.connectPlayerWeaponGiveHandler(
+                { [weak sourceAdapter] _, _, className in
+                    guard let sourceAdapter, !sourceAdapter.isClosed else {
+                        throw LuaError.runtime(
+                            "Player:Give cannot create '\(className)' because the Source runtime is closed"
+                        )
+                    }
+                    return try sourceAdapter.spawnNonNetworkableEntity(
+                        SourceEntity(className: className),
+                        kind: .weapon
+                    )
+                },
+                removalHandler: { [weak sourceAdapter] identity in
+                    sourceAdapter?.scheduleDeletionIfPresent(identity) == true
+                }
+            )
             let sourceWorldIdentity = try sourceAdapter.spawnNetworkableEntity(
                 SourceEntity(className: "worldspawn"),
                 at: 0
@@ -581,6 +597,22 @@ public final class GModPlayableSession {
                     )
                 }
             ).start(targetGamemodeNamed: trimmedGamemode)
+            if trimmedGamemode.caseInsensitiveCompare("sandbox") == .orderedSame {
+                // The connected single-player host owns the Sandbox loadout.
+                // Seed the stock tool gun through the same real Player:Give →
+                // SourceEntity path used by later spawn-menu weapon actions.
+                try server.execute(
+                    """
+                    local ply = assert( Player( \(configuration.playerUserID) ) )
+                    assert( IsValid( ply ), "connected Sandbox Player is unavailable" )
+                    if ( !ply:HasWeapon( "gmod_tool" ) ) then
+                        assert( IsValid( ply:Give( "gmod_tool" ) ) )
+                    end
+                    ply:SelectWeapon( "gmod_tool" )
+                    """,
+                    sourceName: "=(GModPlayableSession Sandbox initial loadout)"
+                )
+            }
             let delivered = try Self.drain(
                 session,
                 maximumDeliveries: 10_000

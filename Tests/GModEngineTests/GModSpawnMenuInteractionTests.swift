@@ -33,21 +33,9 @@ final class GModSpawnMenuInteractionTests: XCTestCase {
             }
         }
         XCTAssertTrue(weaponsContentReady)
-        // These asynchronous stock branches cross engine/HTML boundaries that
-        // are intentionally still explicit. Pin them here so the interaction
-        // test never turns a new timer error into swallowed diagnostic output.
-        XCTAssertEqual(timerFailures.count, 4)
-        XCTAssertEqual(
-            timerFailures.filter { $0.message.contains("spawnmenu_engine") }.count,
-            1
-        )
-        XCTAssertEqual(
-            timerFailures.filter { $0.message.contains("field 'Index'") }.count,
-            1
-        )
-        XCTAssertEqual(
-            timerFailures.filter { $0.message.contains("method 'NewObject'") }.count,
-            2
+        XCTAssertTrue(
+            timerFailures.isEmpty,
+            timerFailures.map(\.message).joined(separator: "\n")
         )
         let registry = try XCTUnwrap(session.clientRuntime.vguiRegistry)
         for _ in 0..<8 {
@@ -270,10 +258,22 @@ final class GModSpawnMenuInteractionTests: XCTestCase {
         XCTAssertFalse(weaponSoundReport.requests[0].hasAudioBacking)
         XCTAssertFalse(weaponSoundReport.diagnostics.overflowed)
         let weaponActionTick = try session.runFixedTick()
-        let weaponFailure = try XCTUnwrap(weaponActionTick.actionFailures.first)
-        XCTAssertEqual(weaponFailure.command, "gm_giveswep")
-        XCTAssertEqual(weaponFailure.arguments, [weaponSpawnName.utf8String])
-        XCTAssertTrue(weaponFailure.message.contains("Alive"))
+        XCTAssertEqual(
+            weaponActionTick.actionFailures,
+            [],
+            "stock weapon ContentIcon must complete through gm_giveswep"
+        )
+        try session.serverRuntime.execute(
+            """
+            local ply = Player( \(session.configuration.playerUserID) )
+            local class = \(String(reflecting: weaponSpawnName.utf8String))
+            assert( ply:Alive() and ply:HasWeapon( class ) )
+            assert( IsValid( ply:GetWeapon( class ) ) )
+            assert( ply:GetWeapon( class ):GetClass() == class )
+            assert( ply:GetActiveWeapon() == ply:GetWeapon( class ) )
+            """,
+            sourceName: "=(strict stock weapon ContentIcon host action result)"
+        )
         XCTAssertFalse(session.isClosed)
         XCTAssertFalse(session.clientRuntime.isClosed)
         XCTAssertFalse(session.serverRuntime.isClosed)
@@ -459,11 +459,23 @@ final class GModSpawnMenuInteractionTests: XCTestCase {
             "unexpected stock SpawnIcon release state: \(buttonIconReleaseState)"
         )
         let buttonCommandTick = try session.runFixedTick()
-        XCTAssertEqual(buttonCommandTick.actionFailures.count, 1)
-        let toolSelectionFailure = try XCTUnwrap(buttonCommandTick.actionFailures.first)
-        XCTAssertEqual(toolSelectionFailure.command, "gmod_tool")
-        XCTAssertEqual(toolSelectionFailure.arguments, ["button"])
-        XCTAssertFalse(toolSelectionFailure.message.isEmpty)
+        XCTAssertEqual(
+            buttonCommandTick.actionFailures,
+            [],
+            "stock Tool SpawnIcon must select gmod_tool without an action failure"
+        )
+        try session.serverRuntime.execute(
+            """
+            local ply = Player( \(session.configuration.playerUserID) )
+            assert( ply:HasWeapon( "gmod_tool" ) )
+            assert( ply:GetActiveWeapon() == ply:GetWeapon( "gmod_tool" ) )
+            """,
+            sourceName: "=(strict stock tool SpawnIcon server weapon result)"
+        )
+        try session.clientRuntime.execute(
+            "assert( GetConVar( 'gmod_toolmode' ):GetString() == 'button' )",
+            sourceName: "=(strict stock tool SpawnIcon targeted client result)"
+        )
         XCTAssertFalse(session.isClosed)
         XCTAssertFalse(session.clientRuntime.isClosed)
         XCTAssertFalse(session.serverRuntime.isClosed)

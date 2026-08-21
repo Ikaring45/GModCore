@@ -62,6 +62,449 @@ private final class SharedSessionAsyncResult: @unchecked Sendable {
 private final class SharedSessionHostIdentityError: Error, @unchecked Sendable {}
 
 final class GMLuaSharedSessionTests: XCTestCase {
+    func testPlayerInventoryUsesSourceBackedWeaponIdentityAcrossRealms() throws {
+        let pair = makePair()
+        let adapter = try GMLuaSourceRuntimeAdapter(serverRuntime: pair.server)
+        defer {
+            try? adapter.close()
+            _ = pair.client.close()
+            _ = pair.server.close()
+        }
+        try adapter.attach(client: pair.client)
+        try XCTUnwrap(pair.server.entityRegistry)
+            .connectPlayerWeaponGiveHandler(
+                { [weak adapter] _, _, className in
+                    guard let adapter else {
+                        throw LuaError.runtime("Source adapter was released")
+                    }
+                    return try adapter.spawnNonNetworkableEntity(
+                        SourceEntity(className: className),
+                        kind: .weapon
+                    )
+                },
+                removalHandler: { [weak adapter] identity in
+                    adapter?.scheduleDeletionIfPresent(identity) == true
+                }
+            )
+        try pair.session.connect(
+            server: pair.server,
+            client: pair.client,
+            playerIndex: 7,
+            userID: 70
+        )
+
+        try pair.server.execute(
+            """
+            local ply = Player(70)
+            assert(ply:Alive())
+            assert(ply:Nick() == "Player 70")
+            assert(ply:GetNWString("UserGroup", "user") == "user")
+            ply:SetNWString("UserGroup", "admin")
+            assert(not ply:HasWeapon("weapon_physgun"))
+            local weapon = ply:Give("weapon_physgun")
+            assert(weapon:IsValid() and weapon:IsWeapon())
+            assert(weapon:GetClass() == "weapon_physgun")
+            assert(ply:HasWeapon("WEAPON_PHYSGUN"))
+            assert(ply:GetWeapon("weapon_physgun") == weapon)
+            assert(#ply:GetWeapons() == 1 and ply:GetWeapons()[1] == weapon)
+            assert(ply:Give("weapon_physgun") == NULL)
+            ply:SelectWeapon("weapon_physgun")
+            assert(ply:GetActiveWeapon() == weapon)
+            """,
+            sourceName: "=(Source-backed Player inventory regression)"
+        )
+        try pair.client.execute(
+            """
+            local ply = LocalPlayer()
+            assert(ply:Alive() and ply:Nick() == "Player 70")
+            assert(ply:GetNWString("UserGroup", "user") == "admin")
+            assert(ply:HasWeapon("weapon_physgun"))
+            assert(ply:GetWeapon("weapon_physgun"):IsValid())
+            assert(ply:GetWeapon("weapon_physgun"):GetClass() == "weapon_physgun")
+            assert(ply:GetActiveWeapon() == ply:GetWeapon("weapon_physgun"))
+            """,
+            sourceName: "=(realm-local Player inventory mirror regression)"
+        )
+        try pair.session.updatePlayerAlive(for: pair.client, alive: false)
+        try pair.server.execute("assert(not Player(70):Alive())")
+        try pair.client.execute("assert(not LocalPlayer():Alive())")
+        try pair.session.updatePlayerAlive(for: pair.client, alive: true)
+        try pair.server.execute("assert(Player(70):Alive())")
+        try pair.session.updatePlayerNickname(
+            for: pair.client,
+            nickname: "Builder"
+        )
+        try pair.server.execute("assert(Player(70):Nick() == 'Builder')")
+        try pair.client.execute("assert(LocalPlayer():Nick() == 'Builder')")
+
+        let weaponIndexProbe = try pair.server.executeReturningValues(
+            "return Player(70):GetWeapon('weapon_physgun'):EntIndex()"
+        )
+        guard case let .number(weaponIndexValue) = weaponIndexProbe.first else {
+            return XCTFail("Source-backed Weapon has no entity index")
+        }
+        let weaponIndex = Int(weaponIndexValue)
+        let serverWeapon = try XCTUnwrap(pair.server.entityRegistry)
+            .entity(at: weaponIndex)
+        let clientWeapon = try XCTUnwrap(pair.client.entityRegistry)
+            .entity(at: weaponIndex)
+        XCTAssertFalse(
+            GMLuaTypeSystem.typedObject(from: serverWeapon) ===
+                GMLuaTypeSystem.typedObject(from: clientWeapon),
+            "Weapon userdata must remain realm-local"
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(pair.server.entityRegistry)
+                .sourceMirrorIdentity(for: serverWeapon),
+            try XCTUnwrap(pair.client.entityRegistry)
+                .sourceMirrorIdentity(for: clientWeapon)
+        )
+    }
+
+    func testDisconnectReleasesOnlyDepartingPlayerWeaponsAcrossReconnect() throws {
+        let session = GMLuaSharedSession()
+        let server = GMLuaRuntime(
+            realm: .server,
+            logger: { _ in },
+            netTransport: session.netTransport
+        )
+        let clientA = GMLuaRuntime(
+            realm: .client,
+            logger: { _ in },
+            netTransport: session.netTransport
+        )
+        let clientB = GMLuaRuntime(
+            realm: .client,
+            logger: { _ in },
+            netTransport: session.netTransport
+        )
+        let adapter = try GMLuaSourceRuntimeAdapter(serverRuntime: server)
+        defer {
+            try? adapter.close()
+            _ = clientB.close()
+            _ = clientA.close()
+            _ = server.close()
+        }
+        try adapter.attach(client: clientA)
+        try adapter.attach(client: clientB)
+        let serverRegistry = try XCTUnwrap(server.entityRegistry)
+        let clientARegistry = try XCTUnwrap(clientA.entityRegistry)
+        let clientBRegistry = try XCTUnwrap(clientB.entityRegistry)
+        serverRegistry.connectPlayerWeaponGiveHandler(
+            { [weak adapter] _, _, className in
+                guard let adapter else {
+                    throw LuaError.runtime("Source adapter was released")
+                }
+                return try adapter.spawnNonNetworkableEntity(
+                    SourceEntity(className: className),
+                    kind: .weapon
+                )
+            },
+            removalHandler: { [weak adapter] identity in
+                adapter?.scheduleDeletionIfPresent(identity) == true
+            }
+        )
+        try session.connect(
+            server: server,
+            client: clientA,
+            playerIndex: 7,
+            userID: 70
+        )
+        try session.connect(
+            server: server,
+            client: clientB,
+            playerIndex: 8,
+            userID: 80
+        )
+
+        try server.execute(
+            """
+            OLD_A_PLAYER = Player(70)
+            OLD_A_WEAPON = assert(OLD_A_PLAYER:Give("weapon_physgun"))
+            B_WEAPON = assert(Player(80):Give("gmod_tool"))
+            """
+        )
+        try clientA.execute(
+            """
+            OLD_A_PLAYER = LocalPlayer()
+            OLD_A_WEAPON = OLD_A_PLAYER:GetWeapon("weapon_physgun")
+            B_WEAPON = Player(80):GetWeapon("gmod_tool")
+            assert(OLD_A_WEAPON:IsValid() and B_WEAPON:IsValid())
+            """
+        )
+        try clientB.execute(
+            """
+            REMOTE_OLD_A_WEAPON = Player(70):GetWeapon("weapon_physgun")
+            B_WEAPON = LocalPlayer():GetWeapon("gmod_tool")
+            assert(REMOTE_OLD_A_WEAPON:IsValid() and B_WEAPON:IsValid())
+            """
+        )
+
+        let oldAIndexValues = try server.executeReturningValues(
+            "return OLD_A_WEAPON:EntIndex()"
+        )
+        let bIndexValues = try server.executeReturningValues(
+            "return B_WEAPON:EntIndex()"
+        )
+        guard case let .number(oldAIndexValue) = oldAIndexValues.first,
+              case let .number(bIndexValue) = bIndexValues.first else {
+            return XCTFail("Source-backed weapons have no entity indices")
+        }
+        let oldAIdentity = try XCTUnwrap(
+            serverRegistry.sourceMirrorIdentity(at: Int(oldAIndexValue))
+        )
+        let bIdentity = try XCTUnwrap(
+            serverRegistry.sourceMirrorIdentity(at: Int(bIndexValue))
+        )
+        XCTAssertEqual(
+            clientARegistry.sourceMirrorIdentity(at: oldAIdentity.index),
+            oldAIdentity
+        )
+        XCTAssertEqual(
+            clientBRegistry.sourceMirrorIdentity(at: oldAIdentity.index),
+            oldAIdentity
+        )
+        XCTAssertTrue(adapter.contains(oldAIdentity))
+        XCTAssertTrue(adapter.contains(bIdentity))
+
+        try session.disconnect(client: clientA)
+        try server.execute(
+            """
+            assert(not OLD_A_PLAYER:IsValid())
+            assert(Player(70) == NULL)
+            assert(Player(80):GetWeapon("gmod_tool") == B_WEAPON)
+            assert(OLD_A_WEAPON:IsValid()) -- deferred until the Source cleanup phase
+            """
+        )
+        try clientA.execute(
+            """
+            assert(not OLD_A_PLAYER:IsValid())
+            assert(LocalPlayer() == NULL)
+            assert(OLD_A_WEAPON:IsValid())
+            """
+        )
+        try clientB.execute(
+            """
+            assert(Player(70) == NULL)
+            assert(LocalPlayer():GetWeapon("gmod_tool") == B_WEAPON)
+            assert(REMOTE_OLD_A_WEAPON:IsValid())
+            """
+        )
+
+        try session.connect(
+            server: server,
+            client: clientA,
+            playerIndex: 7,
+            userID: 70
+        )
+        try server.execute(
+            """
+            assert(Player(70) ~= OLD_A_PLAYER)
+            assert(not Player(70):HasWeapon("weapon_physgun"))
+            NEW_A_WEAPON = assert(Player(70):Give("weapon_physgun"))
+            assert(NEW_A_WEAPON ~= OLD_A_WEAPON)
+            assert(Player(80):GetWeapon("gmod_tool") == B_WEAPON)
+            """
+        )
+        try clientA.execute(
+            """
+            assert(LocalPlayer() ~= OLD_A_PLAYER)
+            NEW_A_WEAPON = LocalPlayer():GetWeapon("weapon_physgun")
+            assert(NEW_A_WEAPON:IsValid() and NEW_A_WEAPON ~= OLD_A_WEAPON)
+            """
+        )
+        try clientB.execute(
+            """
+            NEW_A_WEAPON = Player(70):GetWeapon("weapon_physgun")
+            assert(NEW_A_WEAPON:IsValid() and NEW_A_WEAPON ~= REMOTE_OLD_A_WEAPON)
+            assert(LocalPlayer():GetWeapon("gmod_tool") == B_WEAPON)
+            """
+        )
+        let newAIndexValues = try server.executeReturningValues(
+            "return NEW_A_WEAPON:EntIndex()"
+        )
+        guard case let .number(newAIndexValue) = newAIndexValues.first else {
+            return XCTFail("replacement Source-backed weapon has no entity index")
+        }
+        let newAIdentity = try XCTUnwrap(
+            serverRegistry.sourceMirrorIdentity(at: Int(newAIndexValue))
+        )
+        XCTAssertNotEqual(newAIdentity, oldAIdentity)
+        XCTAssertTrue(adapter.contains(oldAIdentity))
+        XCTAssertTrue(adapter.contains(newAIdentity))
+        XCTAssertTrue(adapter.contains(bIdentity))
+
+        let cleanupReport = try adapter.runServerFixedTick()
+        XCTAssertEqual(cleanupReport.removedEntities, [oldAIdentity])
+        XCTAssertFalse(adapter.contains(oldAIdentity))
+        XCTAssertTrue(adapter.contains(newAIdentity))
+        XCTAssertTrue(adapter.contains(bIdentity))
+        XCTAssertNil(serverRegistry.sourceMirrorIdentity(at: oldAIdentity.index))
+        XCTAssertNil(clientARegistry.sourceMirrorIdentity(at: oldAIdentity.index))
+        XCTAssertNil(clientBRegistry.sourceMirrorIdentity(at: oldAIdentity.index))
+        XCTAssertEqual(
+            serverRegistry.sourceMirrorIdentity(at: newAIdentity.index),
+            newAIdentity
+        )
+        XCTAssertEqual(
+            serverRegistry.sourceMirrorIdentity(at: bIdentity.index),
+            bIdentity
+        )
+        try server.execute(
+            """
+            assert(OLD_A_WEAPON == NULL and not OLD_A_WEAPON:IsValid())
+            assert(Player(70):GetWeapon("weapon_physgun") == NEW_A_WEAPON)
+            assert(Player(80):GetWeapon("gmod_tool") == B_WEAPON)
+            """
+        )
+        try clientA.execute(
+            """
+            assert(OLD_A_WEAPON == NULL and not OLD_A_WEAPON:IsValid())
+            assert(LocalPlayer():GetWeapon("weapon_physgun") == NEW_A_WEAPON)
+            assert(Player(80):GetWeapon("gmod_tool") == B_WEAPON)
+            """
+        )
+        try clientB.execute(
+            """
+            assert(REMOTE_OLD_A_WEAPON == NULL and not REMOTE_OLD_A_WEAPON:IsValid())
+            assert(Player(70):GetWeapon("weapon_physgun") == NEW_A_WEAPON)
+            assert(LocalPlayer():GetWeapon("gmod_tool") == B_WEAPON)
+            """
+        )
+    }
+
+    func testServerPlayerConCommandTargetsClientAtPumpBoundaryAndDisconnectPurgesIt() throws {
+        let pair = makePair()
+        defer {
+            _ = pair.client.close()
+            _ = pair.server.close()
+        }
+        try pair.client.execute(
+            "CreateClientConVar('targeted_mode', 'old', true, false)"
+        )
+        try pair.session.connect(
+            server: pair.server,
+            client: pair.client,
+            playerIndex: 7,
+            userID: 70
+        )
+
+        try pair.server.execute(
+            "Player(70):ConCommand('targeted_mode \\\"new value\\\"')"
+        )
+        XCTAssertEqual(pair.session.netTransport.pendingDeliveryCount, 1)
+        try pair.client.execute(
+            "assert(GetConVar('targeted_mode'):GetString() == 'old')"
+        )
+        XCTAssertEqual(try pair.session.pump(), 1)
+        try pair.client.execute(
+            "assert(GetConVar('targeted_mode'):GetString() == 'new value')"
+        )
+
+        let report = try XCTUnwrap(pair.server.consoleCommandDispatcher)
+            .drainPlayerConsoleCommandRequestReport()
+        XCTAssertEqual(report.requests.count, 1)
+        XCTAssertEqual(report.requests[0].playerIndex, 7)
+        XCTAssertEqual(report.requests[0].outcome, .dispatched(commandCount: 1))
+
+        try pair.server.execute(
+            "Player(70):ConCommand('targeted_mode disconnected')"
+        )
+        let oldIdentity = try XCTUnwrap(pair.server.entityRegistry)
+            .playerNetworkIdentity(
+                from: try XCTUnwrap(pair.server.entityRegistry).player(at: 7),
+                function: "test"
+            )
+        XCTAssertEqual(pair.session.netTransport.pendingDeliveryCount, 1)
+        try pair.session.disconnect(client: pair.client)
+        XCTAssertEqual(
+            pair.session.netTransport.pendingDeliveryCount,
+            0,
+            "a generation-bound target delivery must not survive disconnect"
+        )
+        try pair.client.execute(
+            "assert(GetConVar('targeted_mode'):GetString() == 'new value')"
+        )
+
+        try pair.session.connect(
+            server: pair.server,
+            client: pair.client,
+            playerIndex: 7,
+            userID: 70
+        )
+        XCTAssertThrowsError(
+            try pair.session.netTransport.enqueueTargetedConsoleCommands(
+                from: try XCTUnwrap(pair.server.netEndpoint),
+                toPlayerIndex: 7,
+                expectedGeneration: oldIdentity.generation,
+                commands: [
+                    GMLuaConsoleCommandInvocation(
+                        realm: .server,
+                        command: "targeted_mode",
+                        arguments: ["must-not-reach-new-generation"]
+                    ),
+                ]
+            )
+        ) { error in
+            XCTAssertTrue(GMLuaRuntime.describe(error).contains("generation is stale"))
+        }
+        XCTAssertEqual(pair.session.netTransport.pendingDeliveryCount, 0)
+        try pair.client.execute(
+            "assert(GetConVar('targeted_mode'):GetString() == 'new value')"
+        )
+    }
+
+    func testTargetedConsoleBindingSurvivesAnotherSharedSessionDisconnect() throws {
+        let transport = GMLuaNetTransport()
+        let sessionA = GMLuaSharedSession(netTransport: transport)
+        let sessionB = GMLuaSharedSession(netTransport: transport)
+        let server = GMLuaRuntime(
+            realm: .server,
+            logger: { _ in },
+            netTransport: transport
+        )
+        let clientA = GMLuaRuntime(
+            realm: .client,
+            logger: { _ in },
+            netTransport: transport
+        )
+        let clientB = GMLuaRuntime(
+            realm: .client,
+            logger: { _ in },
+            netTransport: transport
+        )
+        defer {
+            _ = clientB.close()
+            _ = clientA.close()
+            _ = server.close()
+        }
+        try clientA.execute(
+            "CreateClientConVar('session_a_target', 'old', true, false)"
+        )
+        try sessionA.connect(
+            server: server,
+            client: clientA,
+            playerIndex: 7,
+            userID: 70
+        )
+        try sessionB.connect(
+            server: server,
+            client: clientB,
+            playerIndex: 8,
+            userID: 80
+        )
+
+        try sessionB.disconnect(client: clientB)
+        try server.execute(
+            "Player(70):ConCommand('session_a_target still-connected')"
+        )
+        XCTAssertEqual(transport.pendingDeliveryCount, 1)
+        XCTAssertEqual(try sessionA.pump(), 1)
+        try clientA.execute(
+            "assert(GetConVar('session_a_target'):GetString() == 'still-connected')"
+        )
+    }
+
     func testConnectionCreatesCanonicalRealmLocalPlayersAndSendToServerUsesServerMirror() throws {
         let pair = makePair()
         defer {

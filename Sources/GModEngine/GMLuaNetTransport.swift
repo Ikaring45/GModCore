@@ -75,10 +75,15 @@ private struct GMLuaConsolePacket: Sendable {
     let sequence: UInt64
     let sourceEndpointID: Int
     let destinationEndpointID: Int
-    let senderPlayerIndex: Int
+    let route: GMLuaConsolePacketRoute
     let connectionGeneration: UInt64
     let command: String
     let arguments: [String]
+}
+
+private enum GMLuaConsolePacketRoute: Sendable {
+    case clientToServer(senderPlayerIndex: Int)
+    case serverToClient(targetPlayerIndex: Int)
 }
 
 private enum GMLuaTransportDelivery: Sendable {
@@ -585,6 +590,39 @@ public final class GMLuaNetEndpoint: @unchecked Sendable {
         lock.lock()
         consoleCommandDispatcher = dispatcher
         lock.unlock()
+        if realm == .server {
+            dispatcher.connectTargetedClients {
+                [weak self] playerIndex, playerGeneration, commands in
+                guard let self else {
+                    throw LuaError.runtime(
+                        "Player:ConCommand cannot send: server net endpoint is unavailable"
+                    )
+                }
+                try self.enqueueTargetedConsoleCommands(
+                    toPlayerIndex: playerIndex,
+                    expectedGeneration: playerGeneration,
+                    commands: commands
+                )
+            }
+        }
+    }
+
+    private func enqueueTargetedConsoleCommands(
+        toPlayerIndex playerIndex: Int,
+        expectedGeneration: UInt64,
+        commands: [GMLuaConsoleCommandInvocation]
+    ) throws {
+        guard realm == .server, let transport else {
+            throw LuaError.runtime(
+                "Player:ConCommand cannot send: server net endpoint is unavailable"
+            )
+        }
+        try transport.enqueueTargetedConsoleCommands(
+            from: self,
+            toPlayerIndex: playerIndex,
+            expectedGeneration: expectedGeneration,
+            commands: commands
+        )
     }
 
     fileprivate func detachFromSession() {
@@ -675,6 +713,22 @@ public final class GMLuaNetEndpoint: @unchecked Sendable {
         case let .actionFailure(message):
             return message
         }
+    }
+
+    fileprivate func invokeTargetedClientConsoleCommand(
+        command: String,
+        arguments: [String]
+    ) throws {
+        guard realm == .client,
+              let dispatcher = consoleCommandDispatcher else {
+            throw LuaError.runtime(
+                "CLIENT targeted console command destination is unavailable"
+            )
+        }
+        try dispatcher.dispatchTargetedClientCommand(
+            command: command,
+            arguments: arguments
+        )
     }
 
     private func consoleCommandDestination(
@@ -1239,11 +1293,59 @@ public final class GMLuaNetTransport: @unchecked Sendable {
             sequence: nextSequence,
             sourceEndpointID: source.identifier,
             destinationEndpointID: destinationID,
-            senderPlayerIndex: connection.playerIndex,
+            route: .clientToServer(senderPlayerIndex: connection.playerIndex),
             connectionGeneration: connection.generation,
             command: command,
             arguments: arguments
         )))
+    }
+
+    /// Queues parsed SERVER `Player:ConCommand` requests for one connected
+    /// CLIENT. Every item captures the current connection generation, so a
+    /// disconnect/reconnect boundary cannot deliver it to a replacement
+    /// Player that reuses the same entity index.
+    func enqueueTargetedConsoleCommands(
+        from source: GMLuaNetEndpoint,
+        toPlayerIndex playerIndex: Int,
+        expectedGeneration: UInt64,
+        commands: [GMLuaConsoleCommandInvocation]
+    ) throws {
+        guard source.realm == .server else {
+            throw LuaError.runtime(
+                "targeted console commands require a SERVER endpoint"
+            )
+        }
+        guard !commands.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        guard serverEndpointID == source.identifier,
+              endpoints[source.identifier] === source,
+              source.state != nil else {
+            throw LuaError.runtime(
+                "Player:ConCommand cannot send: server transport is disconnected"
+            )
+        }
+        guard let destinationID = clientEndpointByPlayerIndex[playerIndex],
+              let connection = clientConnectionsByEndpoint[destinationID],
+              connection.playerIndex == playerIndex,
+              connection.generation == expectedGeneration,
+              endpoints[destinationID]?.state != nil else {
+            throw LuaError.runtime(
+                "Player:ConCommand target Player(\(playerIndex)) connection generation is stale"
+            )
+        }
+        for command in commands {
+            nextSequence &+= 1
+            deliveries.append(.console(GMLuaConsolePacket(
+                sequence: nextSequence,
+                sourceEndpointID: source.identifier,
+                destinationEndpointID: destinationID,
+                route: .serverToClient(targetPlayerIndex: playerIndex),
+                connectionGeneration: expectedGeneration,
+                command: command.command,
+                arguments: command.arguments
+            )))
+        }
     }
 
     /// Delivers queued packets in deterministic sequence order.
@@ -1331,35 +1433,50 @@ public final class GMLuaNetTransport: @unchecked Sendable {
                     throw error
                 }
             case let .console(packet):
-                try validateConnectionGeneration(
-                    endpoint: endpoint,
-                    sourceEndpointID: packet.sourceEndpointID,
-                    senderPlayerIndex: packet.senderPlayerIndex,
-                    generation: packet.connectionGeneration
-                )
-                if reportForwardedConsoleFailures {
-                    if let message = try endpoint
-                        .invokeConsoleCommandReportingCommandFailure(
-                        command: packet.command,
-                        arguments: packet.arguments,
-                        senderPlayerIndex: packet.senderPlayerIndex
-                    ) {
-                        consoleFailures.append(
-                            GMLuaForwardedConsoleCommandFailure(
-                                sequence: packet.sequence,
-                                command: packet.command,
-                                arguments: packet.arguments,
-                                message: message
+                switch packet.route {
+                case let .clientToServer(senderPlayerIndex):
+                    try validateConnectionGeneration(
+                        endpoint: endpoint,
+                        sourceEndpointID: packet.sourceEndpointID,
+                        senderPlayerIndex: senderPlayerIndex,
+                        generation: packet.connectionGeneration
+                    )
+                    if reportForwardedConsoleFailures {
+                        if let message = try endpoint
+                            .invokeConsoleCommandReportingCommandFailure(
+                            command: packet.command,
+                            arguments: packet.arguments,
+                            senderPlayerIndex: senderPlayerIndex
+                        ) {
+                            consoleFailures.append(
+                                GMLuaForwardedConsoleCommandFailure(
+                                    sequence: packet.sequence,
+                                    command: packet.command,
+                                    arguments: packet.arguments,
+                                    message: message
+                                )
                             )
-                        )
+                        } else {
+                            successful += 1
+                        }
                     } else {
+                        try endpoint.invokeConsoleCommand(
+                            command: packet.command,
+                            arguments: packet.arguments,
+                            senderPlayerIndex: senderPlayerIndex
+                        )
                         successful += 1
                     }
-                } else {
-                    try endpoint.invokeConsoleCommand(
+                case let .serverToClient(targetPlayerIndex):
+                    try validateTargetClientConnectionGeneration(
+                        endpoint: endpoint,
+                        sourceEndpointID: packet.sourceEndpointID,
+                        targetPlayerIndex: targetPlayerIndex,
+                        generation: packet.connectionGeneration
+                    )
+                    try endpoint.invokeTargetedClientConsoleCommand(
                         command: packet.command,
-                        arguments: packet.arguments,
-                        senderPlayerIndex: packet.senderPlayerIndex
+                        arguments: packet.arguments
                     )
                     successful += 1
                 }
@@ -1372,6 +1489,31 @@ public final class GMLuaNetTransport: @unchecked Sendable {
             successfulDeliveries: successful,
             forwardedConsoleFailures: consoleFailures
         )
+    }
+
+    private func validateTargetClientConnectionGeneration(
+        endpoint: GMLuaNetEndpoint,
+        sourceEndpointID: Int,
+        targetPlayerIndex: Int,
+        generation: UInt64
+    ) throws {
+        lock.lock()
+        let sourceIsCurrentServer = serverEndpointID == sourceEndpointID
+        let connection = clientConnectionsByEndpoint[endpoint.identifier]
+        lock.unlock()
+        guard endpoint.realm == .client,
+              sourceIsCurrentServer,
+              let connection,
+              connection.generation == generation else {
+            throw LuaError.runtime(
+                "queued targeted console command belongs to a stale player connection generation"
+            )
+        }
+        guard connection.playerIndex == targetPlayerIndex else {
+            throw LuaError.runtime(
+                "queued targeted console command target does not match its connected Player"
+            )
+        }
     }
 
     private func validateConnectionGeneration(

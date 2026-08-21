@@ -444,8 +444,9 @@ final class GModPlayableSessionTests: XCTestCase {
         defer { _ = try? session.close() }
 
         // This is the exact command enqueued by stock SpawnIcon.DoClick. The
-        // current host intentionally has no fake Player:Alive/ents/physics
-        // implementation, so the SERVER action must fail explicitly.
+        // Player:Alive is now backed by the connected host Player. The model
+        // validation/prop-creation host remains intentionally unavailable, so
+        // the SERVER action must still fail explicitly at that next boundary.
         try session.clientRuntime.execute(
             """
             RunConsoleCommand(
@@ -470,7 +471,10 @@ final class GModPlayableSessionTests: XCTestCase {
             failure.arguments,
             ["models/props_c17/oildrum001.mdl", "0", ""]
         )
-        XCTAssertTrue(failure.message.contains("Alive"))
+        XCTAssertTrue(
+            failure.message.contains("IsValidModel"),
+            failure.message
+        )
         XCTAssertEqual(session.sharedSession.netTransport.pendingDeliveryCount, 0)
         XCTAssertFalse(session.isClosed)
         XCTAssertFalse(session.serverRuntime.isClosed)

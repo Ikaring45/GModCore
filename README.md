@@ -78,11 +78,13 @@ This is not full Garry's Mod playability. Static props and Studio-model
 rendering, arbitrary addon mounting, Steam/authentication, sockets,
 prediction, displacement collision, complete step/water/ladder movement,
 dynamic entity physics, and a complete weapon/tool runtime remain explicit
-boundaries. Spawnmenu navigation and callbacks are exercised end to end, but
-an unsupported host action is still reported rather than presented as a
-successful spawn.
+boundaries. The exercised stock Weapons ContentIcon now grants and selects a
+Source-backed logical weapon, and the exercised Button-tool SpawnIcon updates
+the real client tool mode/model path. Networked/predicted SWEP behavior and
+prop/entity spawning, models, physics, and undo remain explicit unsupported
+boundaries rather than being presented as successful spawns.
 
-The 0.1.53 candidate Windows integration gate passes 469 XCTest cases plus
+The 0.1.53 candidate Windows integration gate passes 479 XCTest cases plus
 11/11 Swift Testing Source-filesystem cases, with warnings treated as errors.
 The real 4.876 GB content pack validates all 2,641 authorized payload SHA-256
 values and passes Home background, both maps, six-face painted sky, water,

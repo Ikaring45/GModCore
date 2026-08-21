@@ -155,6 +155,7 @@ targets.insert(
             dependencies: [
                 "GModApp",
                 "GModEngine",
+                "GModGameAssets",
                 "GModLua",
                 "GModMetal"
             ],

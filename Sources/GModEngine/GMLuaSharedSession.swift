@@ -63,6 +63,7 @@ public final class GMLuaSharedSession: @unchecked Sendable {
         let userID: Int
         let generation: UInt64
         let className: String
+        let gameplayState: GMLuaPlayerGameplayState
 
         init(
             server: GMLuaRuntime,
@@ -71,7 +72,8 @@ public final class GMLuaSharedSession: @unchecked Sendable {
             playerIndex: Int,
             userID: Int,
             generation: UInt64,
-            className: String
+            className: String,
+            gameplayState: GMLuaPlayerGameplayState
         ) {
             self.server = server
             self.client = client
@@ -80,6 +82,7 @@ public final class GMLuaSharedSession: @unchecked Sendable {
             self.userID = userID
             self.generation = generation
             self.className = className
+            self.gameplayState = gameplayState
         }
     }
 
@@ -173,6 +176,40 @@ public final class GMLuaSharedSession: @unchecked Sendable {
         }
     }
 
+    /// Publishes the host simulation's authoritative life state to every
+    /// realm-local mirror of one connected Player.
+    public func updatePlayerAlive(
+        for client: GMLuaRuntime,
+        alive: Bool
+    ) throws {
+        connectionMutationLock.lock()
+        defer { connectionMutationLock.unlock() }
+        lock.lock()
+        let record = connectionsByClient[ObjectIdentifier(client)]
+        lock.unlock()
+        guard let record else {
+            throw GMLuaSharedSessionError.clientNotConnected
+        }
+        record.gameplayState.setAlive(alive)
+    }
+
+    /// Publishes the host account/display name used by `Player:Nick` in every
+    /// realm-local mirror of one connected Player.
+    public func updatePlayerNickname(
+        for client: GMLuaRuntime,
+        nickname: String
+    ) throws {
+        connectionMutationLock.lock()
+        defer { connectionMutationLock.unlock() }
+        lock.lock()
+        let record = connectionsByClient[ObjectIdentifier(client)]
+        lock.unlock()
+        guard let record else {
+            throw GMLuaSharedSessionError.clientNotConnected
+        }
+        record.gameplayState.setNickname(nickname)
+    }
+
     /// Activates one client connection. Call this at a host lifecycle boundary,
     /// normally the StartupOrchestrator player-connection stage.
     public func connect(
@@ -180,7 +217,9 @@ public final class GMLuaSharedSession: @unchecked Sendable {
         client: GMLuaRuntime,
         playerIndex: Int = 1,
         userID: Int? = nil,
-        className: String = "player"
+        className: String = "player",
+        nickname: String? = nil,
+        alive: Bool = true
     ) throws {
         guard !netTransport.isPumpingOnCurrentThread() else {
             throw GMLuaSharedSessionError.lifecycleDuringPump("connect")
@@ -193,7 +232,9 @@ public final class GMLuaSharedSession: @unchecked Sendable {
                 client: client,
                 playerIndex: playerIndex,
                 userID: userID ?? playerIndex,
-                className: className
+                className: className,
+                nickname: nickname,
+                alive: alive
             )
         }
     }
@@ -203,7 +244,9 @@ public final class GMLuaSharedSession: @unchecked Sendable {
         client: GMLuaRuntime,
         playerIndex: Int,
         userID resolvedUserID: Int,
-        className: String
+        className: String,
+        nickname: String?,
+        alive: Bool
     ) throws {
         guard server.realm == .server, client.realm == .client else {
             throw GMLuaSharedSessionError.invalidRealm(
@@ -304,6 +347,10 @@ public final class GMLuaSharedSession: @unchecked Sendable {
         }
         nextGeneration &+= 1
         let generation = nextGeneration
+        let gameplayState = GMLuaPlayerGameplayState(
+            nickname: nickname ?? "Player \(resolvedUserID)",
+            alive: alive
+        )
         let record = ConnectionRecord(
             server: server,
             client: client,
@@ -311,7 +358,8 @@ public final class GMLuaSharedSession: @unchecked Sendable {
             playerIndex: playerIndex,
             userID: resolvedUserID,
             generation: generation,
-            className: className
+            className: className,
+            gameplayState: gameplayState
         )
         connectionsByClient[clientIdentifier] = record
         clientByPlayerIndex[playerIndex] = clientIdentifier
@@ -325,7 +373,8 @@ public final class GMLuaSharedSession: @unchecked Sendable {
                 index: playerIndex,
                 generation: generation,
                 userID: resolvedUserID,
-                className: className
+                className: className,
+                gameplayState: gameplayState
             )
             for existing in existingRecords {
                 guard let existingRegistry = existing.client?.entityRegistry else {
@@ -338,20 +387,23 @@ public final class GMLuaSharedSession: @unchecked Sendable {
                     index: existing.playerIndex,
                     generation: existing.generation,
                     userID: existing.userID,
-                    className: existing.className
+                    className: existing.className,
+                    gameplayState: existing.gameplayState
                 )
                 _ = try existingRegistry.registerPlayerMirror(
                     index: playerIndex,
                     generation: generation,
                     userID: resolvedUserID,
-                    className: className
+                    className: className,
+                    gameplayState: gameplayState
                 )
             }
             _ = try clientRegistry.registerPlayerMirror(
                 index: playerIndex,
                 generation: generation,
                 userID: resolvedUserID,
-                className: className
+                className: className,
+                gameplayState: gameplayState
             )
             try clientRegistry.setLocalPlayer(
                 index: playerIndex,
@@ -453,6 +505,9 @@ public final class GMLuaSharedSession: @unchecked Sendable {
         if !hasConnections { serverRuntime = nil }
         lock.unlock()
 
+        _ = record.server?.entityRegistry?.releasePlayerWeapons(
+            ownedBy: record.gameplayState
+        )
         record.client?.consoleCommandDispatcher?.disconnectRemoteServer()
         if let departingRegistry = record.client?.entityRegistry {
             departingRegistry.clearLocalPlayer(

@@ -13,6 +13,148 @@ public enum GMLuaEntityKind: String, Sendable {
     case vehicle = "Vehicle"
 }
 
+/// One host Player's gameplay state, shared by its realm-local userdata
+/// mirrors. Source entity identities remain realm-neutral; each registry
+/// resolves them back to its own canonical Weapon userdata on demand.
+final class GMLuaPlayerGameplayState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var nicknameStorage: String
+    private var aliveStorage: Bool
+    private var networkedStrings: [String: String] = [:]
+    private var weaponIdentityByClass: [String: GMLuaSourceEntityIdentity] = [:]
+    private var weaponClassOrder: [String] = []
+    private var activeWeaponClass: String?
+
+    init(nickname: String, alive: Bool = true) {
+        nicknameStorage = nickname
+        aliveStorage = alive
+    }
+
+    var nickname: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return nicknameStorage
+    }
+
+    func setNickname(_ nickname: String) {
+        lock.lock()
+        nicknameStorage = nickname
+        lock.unlock()
+    }
+
+    var isAlive: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return aliveStorage
+    }
+
+    func setAlive(_ alive: Bool) {
+        lock.lock()
+        aliveStorage = alive
+        lock.unlock()
+    }
+
+    func networkedString(for key: String, default fallback: String) -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return networkedStrings[key] ?? fallback
+    }
+
+    func setNetworkedString(_ value: String, for key: String) {
+        lock.lock()
+        networkedStrings[key] = value
+        lock.unlock()
+    }
+
+    func weaponIdentity(for className: String) -> GMLuaSourceEntityIdentity? {
+        lock.lock()
+        defer { lock.unlock() }
+        return weaponIdentityByClass[Self.weaponKey(className)]
+    }
+
+    func orderedWeaponIdentities() -> [GMLuaSourceEntityIdentity] {
+        lock.lock()
+        defer { lock.unlock() }
+        return weaponClassOrder.compactMap { weaponIdentityByClass[$0] }
+    }
+
+    /// Transfers ownership of every exact Source handle out of this one
+    /// connection generation. A replacement connection receives a new state,
+    /// so it can never inherit or later remove these identities.
+    func takeAllWeaponIdentities() -> [GMLuaSourceEntityIdentity] {
+        lock.lock()
+        defer { lock.unlock() }
+        let identities = weaponClassOrder.compactMap {
+            weaponIdentityByClass[$0]
+        }
+        weaponIdentityByClass.removeAll(keepingCapacity: false)
+        weaponClassOrder.removeAll(keepingCapacity: false)
+        activeWeaponClass = nil
+        return identities
+    }
+
+    func rememberWeapon(
+        className: String,
+        identity: GMLuaSourceEntityIdentity
+    ) {
+        let key = Self.weaponKey(className)
+        lock.lock()
+        if weaponIdentityByClass[key] == nil {
+            weaponClassOrder.append(key)
+        }
+        weaponIdentityByClass[key] = identity
+        lock.unlock()
+    }
+
+    @discardableResult
+    func forgetWeapon(
+        className: String,
+        expectedIdentity: GMLuaSourceEntityIdentity
+    ) -> Bool {
+        let key = Self.weaponKey(className)
+        lock.lock()
+        guard weaponIdentityByClass[key] == expectedIdentity else {
+            lock.unlock()
+            return false
+        }
+        weaponIdentityByClass.removeValue(forKey: key)
+        weaponClassOrder.removeAll { $0 == key }
+        if activeWeaponClass == key { activeWeaponClass = nil }
+        lock.unlock()
+        return true
+    }
+
+    @discardableResult
+    func selectWeapon(className: String) -> Bool {
+        let key = Self.weaponKey(className)
+        lock.lock()
+        defer { lock.unlock() }
+        guard weaponIdentityByClass[key] != nil else { return false }
+        activeWeaponClass = key
+        return true
+    }
+
+    func activeWeaponIdentity() -> GMLuaSourceEntityIdentity? {
+        lock.lock()
+        defer { lock.unlock() }
+        return activeWeaponClass.flatMap { weaponIdentityByClass[$0] }
+    }
+
+    private static func weaponKey(_ className: String) -> String {
+        className.lowercased()
+    }
+}
+
+typealias GMLuaPlayerWeaponGiveHandler = @Sendable (
+    _ playerIndex: Int,
+    _ playerGeneration: UInt64,
+    _ weaponClassName: String
+) throws -> GMLuaSourceEntityIdentity
+
+typealias GMLuaPlayerWeaponRemovalHandler = @Sendable (
+    _ identity: GMLuaSourceEntityIdentity
+) -> Bool
+
 private final class GMLuaEntityValue: @unchecked Sendable {
     let index: Int
     let kind: GMLuaEntityKind
@@ -20,6 +162,7 @@ private final class GMLuaEntityValue: @unchecked Sendable {
     let userID: Int?
     let semanticValidity: Bool
     let sourceOwner: GMLuaSourceMirrorOwner?
+    let playerGameplayState: GMLuaPlayerGameplayState?
     var className: String
     var inputButtons: SourceInputButtons = []
     var luaTable: LuaTable? = LuaTable()
@@ -31,6 +174,7 @@ private final class GMLuaEntityValue: @unchecked Sendable {
         userID: Int?,
         semanticValidity: Bool,
         sourceOwner: GMLuaSourceMirrorOwner?,
+        playerGameplayState: GMLuaPlayerGameplayState?,
         className: String
     ) {
         self.index = index
@@ -39,6 +183,7 @@ private final class GMLuaEntityValue: @unchecked Sendable {
         self.userID = userID
         self.semanticValidity = semanticValidity
         self.sourceOwner = sourceOwner
+        self.playerGameplayState = playerGameplayState
         self.className = className
     }
 }
@@ -57,6 +202,8 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
     private var values: [Int: LuaValue] = [:]
     private var playerIdentityByUserID: [Int: (index: Int, generation: UInt64)] = [:]
     private var localPlayerIdentity: (index: Int, generation: UInt64)?
+    private var playerWeaponGiveHandler: GMLuaPlayerWeaponGiveHandler?
+    private var playerWeaponRemovalHandler: GMLuaPlayerWeaponRemovalHandler?
 
     private init(
         state: LuaState,
@@ -83,6 +230,7 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
             userID: kind == .player ? index : nil,
             semanticValidity: true,
             sourceOwner: nil,
+            playerGameplayState: nil,
             replaceExisting: true,
             className: className
         )
@@ -93,7 +241,8 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
         index: Int,
         generation: UInt64,
         userID: Int,
-        className: String
+        className: String,
+        gameplayState: GMLuaPlayerGameplayState? = nil
     ) throws -> LuaValue {
         try register(
             index: index,
@@ -102,6 +251,7 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
             userID: userID,
             semanticValidity: true,
             sourceOwner: nil,
+            playerGameplayState: gameplayState,
             replaceExisting: true,
             className: className
         )
@@ -149,6 +299,7 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
             userID: userID,
             semanticValidity: semanticValidity,
             sourceOwner: owner,
+            playerGameplayState: nil,
             replaceExisting: false,
             className: className
         )
@@ -161,6 +312,7 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
         userID: Int?,
         semanticValidity: Bool,
         sourceOwner: GMLuaSourceMirrorOwner?,
+        playerGameplayState: GMLuaPlayerGameplayState?,
         replaceExisting: Bool,
         className: String
     ) throws -> LuaValue {
@@ -179,6 +331,9 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
             userID: userID,
             semanticValidity: semanticValidity,
             sourceOwner: sourceOwner,
+            playerGameplayState: kind == .player
+                ? playerGameplayState ?? GMLuaPlayerGameplayState(nickname: "Player")
+                : nil,
             className: className
         )
         let value = try typeSystem.makeObject(metaName: kind.rawValue, payload: payload)
@@ -446,6 +601,18 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
         function: String,
         argumentPosition: Int = 1
     ) throws -> Int {
+        try playerNetworkIdentity(
+            from: value,
+            function: function,
+            argumentPosition: argumentPosition
+        ).index
+    }
+
+    func playerNetworkIdentity(
+        from value: LuaValue,
+        function: String,
+        argumentPosition: Int = 1
+    ) throws -> (index: Int, generation: UInt64) {
         guard let object = GMLuaTypeSystem.typedObject(from: value),
               object.metaName == "Player" else {
             throw LuaError.runtime(
@@ -468,7 +635,7 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
                 "(stale Player generation)"
             )
         }
-        return payload.index
+        return (payload.index, payload.generation)
     }
 
     /// Installs a native Player method before the bundled Lua extensions load
@@ -483,6 +650,78 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
             for: .string(LuaString(name)),
             in: playerMetatable
         )
+    }
+
+    public func connectPlayerWeaponGiveHandler(
+        _ handler: @escaping @Sendable (
+            _ playerIndex: Int,
+            _ playerGeneration: UInt64,
+            _ weaponClassName: String
+        ) throws -> GMLuaSourceEntityIdentity,
+        removalHandler: @escaping @Sendable (
+            _ identity: GMLuaSourceEntityIdentity
+        ) -> Bool
+    ) {
+        lock.lock()
+        playerWeaponGiveHandler = handler
+        playerWeaponRemovalHandler = removalHandler
+        lock.unlock()
+    }
+
+    public func disconnectPlayerWeaponGiveHandler() {
+        lock.lock()
+        playerWeaponGiveHandler = nil
+        playerWeaponRemovalHandler = nil
+        lock.unlock()
+    }
+
+    /// Clears logical inventory first, then schedules only the complete Source
+    /// handles owned by that connection generation. The removal callback must
+    /// compare the full handle, not only its reusable entity index.
+    @discardableResult
+    func releasePlayerWeapons(
+        ownedBy gameplayState: GMLuaPlayerGameplayState
+    ) -> [GMLuaSourceEntityIdentity] {
+        let identities = gameplayState.takeAllWeaponIdentities()
+        lock.lock()
+        let removalHandler = playerWeaponRemovalHandler
+        lock.unlock()
+        guard let removalHandler else { return [] }
+        return identities.filter(removalHandler)
+    }
+
+    private func currentPlayerPayload(
+        from value: LuaValue?,
+        method: String
+    ) throws -> GMLuaEntityValue {
+        guard let value else {
+            throw LuaError.runtime(
+                "bad self to 'Player:\(method)' (Player expected, got no value)"
+            )
+        }
+        _ = try playerNetworkIndex(
+            from: value,
+            function: "Player:\(method)"
+        )
+        guard let payload = GMLuaTypeSystem.typedObject(from: value)?.payload
+                as? GMLuaEntityValue,
+              payload.playerGameplayState != nil else {
+            throw LuaError.runtime(
+                "Player:\(method) received a Player without host gameplay state"
+            )
+        }
+        return payload
+    }
+
+    private func canonicalWeapon(
+        identity: GMLuaSourceEntityIdentity
+    ) -> LuaValue? {
+        let value = entity(at: identity.index)
+        guard let object = GMLuaTypeSystem.typedObject(from: value),
+              object.isValid,
+              object.metaName == GMLuaEntityKind.weapon.rawValue,
+              sourceMirrorIdentity(for: value) == identity else { return nil }
+        return value
     }
 
     public var registeredCount: Int {
@@ -715,6 +954,246 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
             in: playerMetatable
         )
 
+        let playerAlive = entityNativeFunction("Player:Alive") { arguments in
+            let payload = try registry.currentPlayerPayload(
+                from: arguments.first,
+                method: "Alive"
+            )
+            return [.boolean(payload.playerGameplayState?.isAlive == true)]
+        }
+        try state.setRawTableValue(playerAlive, for: .string("Alive"), in: playerMetatable)
+
+        let playerNick = entityNativeFunction("Player:Nick") { arguments in
+            let payload = try registry.currentPlayerPayload(
+                from: arguments.first,
+                method: "Nick"
+            )
+            return [.string(LuaString(payload.playerGameplayState?.nickname ?? "Player"))]
+        }
+        try state.setRawTableValue(playerNick, for: .string("Nick"), in: playerMetatable)
+
+        let getNWString = entityNativeFunction("Player:GetNWString") { arguments in
+            let payload = try registry.currentPlayerPayload(
+                from: arguments.first,
+                method: "GetNWString"
+            )
+            let key = try requiredExactString(
+                arguments,
+                index: 1,
+                function: "GetNWString"
+            )
+            let fallback: String
+            if arguments.indices.contains(2) {
+                fallback = try requiredExactString(
+                    arguments,
+                    index: 2,
+                    function: "GetNWString"
+                )
+            } else {
+                fallback = ""
+            }
+            return [.string(LuaString(
+                payload.playerGameplayState?.networkedString(
+                    for: key,
+                    default: fallback
+                ) ?? fallback
+            ))]
+        }
+        try state.setRawTableValue(
+            getNWString,
+            for: .string("GetNWString"),
+            in: playerMetatable
+        )
+
+        if realm == .server {
+            let setNWString = entityNativeFunction("Player:SetNWString") { arguments in
+                let payload = try registry.currentPlayerPayload(
+                    from: arguments.first,
+                    method: "SetNWString"
+                )
+                let key = try requiredExactString(
+                    arguments,
+                    index: 1,
+                    function: "SetNWString"
+                )
+                let value = try requiredExactString(
+                    arguments,
+                    index: 2,
+                    function: "SetNWString"
+                )
+                payload.playerGameplayState?.setNetworkedString(value, for: key)
+                return []
+            }
+            try state.setRawTableValue(
+                setNWString,
+                for: .string("SetNWString"),
+                in: playerMetatable
+            )
+        }
+
+        let hasWeapon = entityNativeFunction("Player:HasWeapon") { arguments in
+            let payload = try registry.currentPlayerPayload(
+                from: arguments.first,
+                method: "HasWeapon"
+            )
+            let className = try requiredExactString(
+                arguments,
+                index: 1,
+                function: "HasWeapon"
+            )
+            guard let identity = payload.playerGameplayState?.weaponIdentity(
+                for: className
+            ) else { return [.boolean(false)] }
+            guard registry.canonicalWeapon(identity: identity) != nil else {
+                return [.boolean(false)]
+            }
+            return [.boolean(true)]
+        }
+        try state.setRawTableValue(
+            hasWeapon,
+            for: .string("HasWeapon"),
+            in: playerMetatable
+        )
+
+        let getWeapon = entityNativeFunction("Player:GetWeapon") { arguments in
+            let payload = try registry.currentPlayerPayload(
+                from: arguments.first,
+                method: "GetWeapon"
+            )
+            let className = try requiredExactString(
+                arguments,
+                index: 1,
+                function: "GetWeapon"
+            )
+            guard let identity = payload.playerGameplayState?.weaponIdentity(
+                for: className
+            ), let weapon = registry.canonicalWeapon(identity: identity) else {
+                return [nullValue]
+            }
+            return [weapon]
+        }
+        try state.setRawTableValue(
+            getWeapon,
+            for: .string("GetWeapon"),
+            in: playerMetatable
+        )
+
+        let getWeapons = entityNativeFunction("Player:GetWeapons") { arguments in
+            let payload = try registry.currentPlayerPayload(
+                from: arguments.first,
+                method: "GetWeapons"
+            )
+            let weapons = payload.playerGameplayState?.orderedWeaponIdentities()
+                .compactMap { registry.canonicalWeapon(identity: $0) } ?? []
+            return [.table(try valueArray(weapons, state: state))]
+        }
+        try state.setRawTableValue(
+            getWeapons,
+            for: .string("GetWeapons"),
+            in: playerMetatable
+        )
+
+        let getActiveWeapon = entityNativeFunction("Player:GetActiveWeapon") { arguments in
+            let payload = try registry.currentPlayerPayload(
+                from: arguments.first,
+                method: "GetActiveWeapon"
+            )
+            guard let identity = payload.playerGameplayState?.activeWeaponIdentity(),
+                  let weapon = registry.canonicalWeapon(identity: identity) else {
+                return [nullValue]
+            }
+            return [weapon]
+        }
+        try state.setRawTableValue(
+            getActiveWeapon,
+            for: .string("GetActiveWeapon"),
+            in: playerMetatable
+        )
+
+        if realm == .server {
+            let give = entityNativeFunction("Player:Give") { arguments in
+                let payload = try registry.currentPlayerPayload(
+                    from: arguments.first,
+                    method: "Give"
+                )
+                let className = try requiredExactString(
+                    arguments,
+                    index: 1,
+                    function: "Give"
+                )
+                guard !className.isEmpty else {
+                    throw LuaError.runtime(
+                        "bad argument #1 to 'Give' (non-empty string expected)"
+                    )
+                }
+                if let existing = payload.playerGameplayState?.weaponIdentity(
+                    for: className
+                ) {
+                    if registry.canonicalWeapon(identity: existing) != nil {
+                        return [nullValue]
+                    }
+                    _ = payload.playerGameplayState?.forgetWeapon(
+                        className: className,
+                        expectedIdentity: existing
+                    )
+                }
+                let handler: GMLuaPlayerWeaponGiveHandler? = {
+                    registry.lock.lock()
+                    defer { registry.lock.unlock() }
+                    return registry.playerWeaponGiveHandler
+                }()
+                guard let handler else {
+                    throw LuaError.runtime(
+                        "Player:Give cannot create '\(className)' because no Source weapon host is connected"
+                    )
+                }
+                let identity = try handler(
+                    payload.index,
+                    payload.generation,
+                    className
+                )
+                guard let weapon = registry.canonicalWeapon(identity: identity),
+                      let weaponPayload = GMLuaTypeSystem.typedObject(from: weapon)?.payload
+                        as? GMLuaEntityValue,
+                      weaponPayload.className.caseInsensitiveCompare(className)
+                        == .orderedSame else {
+                    throw LuaError.runtime(
+                        "Player:Give Source host returned a noncanonical Weapon for '\(className)'"
+                    )
+                }
+                payload.playerGameplayState?.rememberWeapon(
+                    className: className,
+                    identity: identity
+                )
+                return [weapon]
+            }
+            try state.setRawTableValue(give, for: .string("Give"), in: playerMetatable)
+
+            let selectWeapon = entityNativeFunction("Player:SelectWeapon") { arguments in
+                let payload = try registry.currentPlayerPayload(
+                    from: arguments.first,
+                    method: "SelectWeapon"
+                )
+                let className = try requiredExactString(
+                    arguments,
+                    index: 1,
+                    function: "SelectWeapon"
+                )
+                guard let identity = payload.playerGameplayState?.weaponIdentity(
+                    for: className
+                ), registry.canonicalWeapon(identity: identity) != nil else {
+                    return []
+                }
+                _ = payload.playerGameplayState?.selectWeapon(className: className)
+                return []
+            }
+            try state.setRawTableValue(
+                selectWeapon,
+                for: .string("SelectWeapon"),
+                in: playerMetatable
+            )
+        }
+
         let getTable = entityNativeFunction("Entity:GetTable") { arguments in
             _ = try descriptor(arguments.first, method: "GetTable")
             return [arguments.first.flatMap(registry.luaTable(for:)).map(LuaValue.table)
@@ -940,6 +1419,23 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
             return UInt32(bitPattern: Int32(number))
         }
         return UInt32(number)
+    }
+
+    private static func requiredExactString(
+        _ arguments: [LuaValue],
+        index: Int,
+        function: String
+    ) throws -> String {
+        guard arguments.indices.contains(index),
+              case let .string(value) = arguments[index] else {
+            let actual = arguments.indices.contains(index)
+                ? arguments[index].typeName
+                : "no value"
+            throw LuaError.runtime(
+                "bad argument #\(index) to '\(function)' (string expected, got \(actual))"
+            )
+        }
+        return value.utf8String
     }
 
     private static func entityIndex(_ arguments: [LuaValue], function: String) throws -> Int {

@@ -267,8 +267,10 @@ final class GModPlayableSessionLaneTests: XCTestCase {
         XCTAssertEqual(failedActionFrame.fixedTicks.count, 1)
         XCTAssertEqual(failedActionFrame.actionFailures.count, 1)
         XCTAssertEqual(failedActionFrame.actionFailures.first?.command, "gm_spawn")
+        // Connected Players now expose the real host-backed Alive state. The
+        // request must continue to the next honest prop-spawn boundary.
         XCTAssertTrue(
-            failedActionFrame.actionFailures.first?.message.contains("Alive")
+            failedActionFrame.actionFailures.first?.message.contains("IsValidModel")
                 == true
         )
 

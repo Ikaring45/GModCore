@@ -28,6 +28,15 @@ public typealias GMLuaConsoleCommandHostHandler = @Sendable (
     GMLuaConsoleCommandInvocation
 ) throws -> GMLuaConsoleCommandHostDisposition
 
+/// Host-owned SERVER route used by `Player:ConCommand`. The target player
+/// identity stays separate from the parsed commands so the session transport
+/// can bind every queued delivery to that player's connection generation.
+typealias GMLuaTargetedClientConsoleHandler = @Sendable (
+    _ playerIndex: Int,
+    _ playerGeneration: UInt64,
+    _ commands: [GMLuaConsoleCommandInvocation]
+) throws -> Void
+
 /// Additional host-owned predicate for GMod's binary console-command block
 /// policy. The input is the lowercased, argument-free command name.
 public typealias GMLuaConsoleCommandBlockPredicate = @Sendable (String) -> Bool
@@ -155,6 +164,7 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
     private let lock = NSLock()
     private var hostHandler: GMLuaConsoleCommandHostHandler?
     private var remoteServerHandler: GMLuaConsoleCommandHostHandler?
+    private var targetedClientHandler: GMLuaTargetedClientConsoleHandler?
     private var blockedCommandNames: Set<String> = []
     private var blockPredicate: GMLuaConsoleCommandBlockPredicate?
     private var registeredNamesByKey: [String: String] = [:]
@@ -312,6 +322,14 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
         )
     }
 
+    func connectTargetedClients(
+        _ handler: @escaping GMLuaTargetedClientConsoleHandler
+    ) {
+        lock.lock()
+        targetedClientHandler = handler
+        lock.unlock()
+    }
+
     private func addConsoleCommand(_ arguments: [LuaValue]) throws -> [LuaValue] {
         let name = try consoleString(
             arguments,
@@ -343,10 +361,11 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
                 "bad self to 'Player:ConCommand' (Player expected, got no value)"
             )
         }
-        let playerIndex = try entityRegistry.playerNetworkIndex(
+        let playerIdentity = try entityRegistry.playerNetworkIdentity(
             from: receiver,
             function: "Player:ConCommand"
         )
+        let playerIndex = playerIdentity.index
         let rawCommand = try requiredExactConsoleString(
             arguments,
             index: 1,
@@ -365,16 +384,6 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
             )
         }
 
-        guard realm == .client else {
-            let message = "Player:ConCommand SERVER target-client delivery is unavailable"
-            recordPlayerConsoleCommandRequest(
-                playerIndex: playerIndex,
-                rawCommand: rawCommand,
-                parsedCommands: invocations,
-                outcome: .failed(message: message)
-            )
-            throw LuaError.runtime(message)
-        }
         guard !parsed.isEmpty else {
             recordPlayerConsoleCommandRequest(
                 playerIndex: playerIndex,
@@ -396,6 +405,47 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
             // turning the Lua call itself into a successful engine dispatch.
             logger("ConCommand blocked! (\(name))")
             return []
+        }
+
+        if realm == .server {
+            let handler: GMLuaTargetedClientConsoleHandler? = {
+                lock.lock()
+                defer { lock.unlock() }
+                return targetedClientHandler
+            }()
+            guard let handler else {
+                let message =
+                    "Player:ConCommand cannot deliver because the target CLIENT is unavailable"
+                recordPlayerConsoleCommandRequest(
+                    playerIndex: playerIndex,
+                    rawCommand: rawCommand,
+                    parsedCommands: invocations,
+                    outcome: .failed(message: message)
+                )
+                throw LuaError.runtime(message)
+            }
+            do {
+                try handler(
+                    playerIndex,
+                    playerIdentity.generation,
+                    invocations
+                )
+                recordPlayerConsoleCommandRequest(
+                    playerIndex: playerIndex,
+                    rawCommand: rawCommand,
+                    parsedCommands: invocations,
+                    outcome: .dispatched(commandCount: parsed.count)
+                )
+                return []
+            } catch {
+                recordPlayerConsoleCommandRequest(
+                    playerIndex: playerIndex,
+                    rawCommand: rawCommand,
+                    parsedCommands: invocations,
+                    outcome: .failed(message: GMLuaRuntime.describe(error))
+                )
+                throw error
+            }
         }
 
         do {
@@ -429,6 +479,22 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
             )
             throw error
         }
+    }
+
+    /// Executes one host-targeted SERVER `Player:ConCommand` delivery through
+    /// the destination CLIENT's normal console ownership order. This is a pump
+    /// boundary entry point, not a shortcut to `concommand.Run`.
+    func dispatchTargetedClientCommand(
+        command: String,
+        arguments: [String]
+    ) throws {
+        guard realm == .client else {
+            throw LuaError.runtime("targeted console command destination is not CLIENT")
+        }
+        _ = try runConsoleCommand(
+            [.string(LuaString(command))] +
+                arguments.map { .string(LuaString($0)) }
+        )
     }
 
     private func runConsoleCommand(_ values: [LuaValue]) throws -> [LuaValue] {

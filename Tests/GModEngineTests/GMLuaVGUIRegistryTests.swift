@@ -5,6 +5,21 @@ import GModGameAssets
 import GModLua
 
 final class GMLuaVGUIRegistryTests: XCTestCase {
+    func testPanelHasChildrenTracksLiveNativeChildIdentity() throws {
+        let runtime = GMLuaRuntime(realm: .client, logger: { _ in })
+        try runtime.execute(
+            """
+            local parent = assert(vgui.Create("Panel"))
+            assert(parent:ChildCount() == 0 and not parent:HasChildren())
+            local child = assert(vgui.Create("Panel", parent))
+            assert(parent:ChildCount() == 1 and parent:HasChildren())
+            child:Remove()
+            assert(parent:ChildCount() == 0 and not parent:HasChildren())
+            """,
+            sourceName: "@GMLuaPanelHasChildrenRegression.lua"
+        )
+    }
+
     func testGUIMouseCoordinatesTrackHitTestPointerAndCancelToHiddenCursorSentinel() throws {
         let state = LuaState(output: { _ in })
         let typeSystem = try GMLuaTypeSystem.install(
@@ -255,6 +270,37 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
             assert(HTML_LIFECYCLE_LOG[#HTML_LIFECYCLE_LOG] == "begin:about:blank")
             """,
             sourceName: "@GMLuaHTMLLogicalLoadFailureRegression.lua"
+        )
+    }
+
+    func testHTMLJavaScriptObjectAndCallbackRegistrationIsRetainedLogically() throws {
+        let runtime = GMLuaRuntime(realm: .client, logger: { _ in })
+        let registry = try XCTUnwrap(runtime.vguiRegistry)
+
+        try runtime.execute(
+            """
+            local html = assert(vgui.Create("HTML"))
+            html:NewObject("console")
+            html:NewObject("console")
+            html:NewObjectCallback("console", "log")
+            html:NewObjectCallback("console", "log")
+
+            local ordinary = assert(vgui.Create("Panel"))
+            assert(not pcall(ordinary.NewObject, ordinary, "console"))
+            assert(not pcall(html.NewObject, html, 12))
+            assert(not pcall(html.NewObjectCallback, html, "console"))
+            """,
+            sourceName: "@GMLuaHTMLJavaScriptBridgeRegistrationRegression.lua"
+        )
+
+        let snapshot = try XCTUnwrap(registry.htmlPanelStateSnapshots.first)
+        XCTAssertEqual(snapshot.javascriptObjects, [LuaString("console")])
+        XCTAssertEqual(
+            snapshot.javascriptCallbacks,
+            [GMLuaHTMLJavaScriptCallbackSnapshot(
+                objectName: LuaString("console"),
+                callbackName: LuaString("log")
+            )]
         )
     }
 
