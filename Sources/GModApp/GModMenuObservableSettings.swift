@@ -4,6 +4,7 @@ import Foundation
 /// One observable snapshot lets MainView/loading overlays consume the exact
 /// catalog selected by the stock Home language control without reopening the
 /// content ZIP. Home remains the owner of language changes.
+@MainActor
 final class GModMenuLocalizationSelectionStore: ObservableObject {
     static let shared: GModMenuLocalizationSelectionStore = {
         let catalog = GModMenuLocalizationCatalog(

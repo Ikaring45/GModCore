@@ -165,6 +165,7 @@ final class GModMenuAudioTests: XCTestCase {
         )
     }
 
+    @MainActor
     func testAudioAndDeveloperSettingsPersistWithSafeDefaults() {
         let suite = "GModMenuSettingsTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!

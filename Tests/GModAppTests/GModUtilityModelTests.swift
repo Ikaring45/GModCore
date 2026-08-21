@@ -4,6 +4,7 @@ import GModMetal
 @testable import GModApp
 
 final class GModUtilityModelTests: XCTestCase {
+    @MainActor
     func testTouchLookAndFrameRatePreferencesClampPersistAndApplyPurely() {
         let suite = "GModInputVideoSettingsTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -49,6 +50,7 @@ final class GModUtilityModelTests: XCTestCase {
         XCTAssertEqual(inverted.pitch, -2, accuracy: 0.0001)
     }
 
+    @MainActor
     func testContentHostSettingsAreRealPersistentPreferences() {
         let suite = "GModUtilityModelTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!

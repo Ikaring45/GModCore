@@ -161,12 +161,13 @@ struct GModMenuAudioSettings: Equatable, Sendable {
 /// Persistent, observable audio values shared by Home and a future stock-like
 /// Options surface. The store owns policy only; the audio controller observes
 /// it and updates every active voice immediately.
+@MainActor
 final class GModMenuAudioSettingsStore: ObservableObject {
     static let shared = GModMenuAudioSettingsStore()
-    static let didChangeNotification = Notification.Name(
+    nonisolated static let didChangeNotification = Notification.Name(
         "GarrysPAD.MenuAudioSettingsDidChange"
     )
-    static let clearContentCachesNotification = Notification.Name(
+    nonisolated static let clearContentCachesNotification = Notification.Name(
         "GarrysPAD.ClearContentCaches"
     )
     static let masterVolumeKey = "GarrysPAD.Audio.MasterVolume.v1"
@@ -246,6 +247,7 @@ final class GModMenuAudioSettingsStore: ObservableObject {
 /// Developer chrome is opt-in and remains off for ordinary play. MainView can
 /// observe this shared store and gate stats, console and debug map buttons;
 /// Options can mutate it without knowing the UserDefaults key.
+@MainActor
 final class GModDeveloperDiagnosticsSettingsStore: ObservableObject {
     static let shared = GModDeveloperDiagnosticsSettingsStore()
     static let key = "GarrysPAD.DeveloperDiagnostics.Enabled.v1"
@@ -499,6 +501,7 @@ enum GModMenuVoicePoolPolicy {
     }
 }
 
+@MainActor
 final class GModMenuAudioController: NSObject, AVAudioPlayerDelegate {
     typealias Resolver = (_ logicalPath: String, _ maximumByteCount: UInt64) throws -> Data?
     typealias Diagnostic = (_ diagnostic: GModAudioDiagnostic) -> Void
@@ -543,7 +546,9 @@ final class GModMenuAudioController: NSObject, AVAudioPlayerDelegate {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.configureAudioSession(context: "application activation")
+            Task { @MainActor [weak self] in
+                self?.configureAudioSession(context: "application activation")
+            }
         })
         observers.append(center.addObserver(
             forName: AVAudioSession.interruptionNotification,
@@ -555,22 +560,28 @@ final class GModMenuAudioController: NSObject, AVAudioPlayerDelegate {
                   AVAudioSession.InterruptionType(rawValue: rawType) == .ended else {
                 return
             }
-            self?.configureAudioSession(context: "audio interruption end")
+            Task { @MainActor [weak self] in
+                self?.configureAudioSession(context: "audio interruption end")
+            }
         })
         observers.append(center.addObserver(
             forName: GModMenuAudioSettingsStore.didChangeNotification,
             object: settingsStore,
             queue: .main
         ) { [weak self] _ in
-            self?.applyVolumeToAllVoices()
+            Task { @MainActor [weak self] in
+                self?.applyVolumeToAllVoices()
+            }
         })
         observers.append(center.addObserver(
             forName: GModMenuAudioSettingsStore.clearContentCachesNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.stopAll()
-            self?.dataCache.removeAll()
+            Task { @MainActor [weak self] in
+                self?.stopAll()
+                self?.dataCache.removeAll()
+            }
         })
     }
 
@@ -621,11 +632,27 @@ final class GModMenuAudioController: NSObject, AVAudioPlayerDelegate {
         }
     }
 
-    func audioPlayerDecodeErrorDidOccur(
+    nonisolated func audioPlayerDecodeErrorDidOccur(
         _ player: AVAudioPlayer,
         error: Error?
     ) {
-        let voice = voices.values.first { $0.player === player }
+        let playerIdentifier = ObjectIdentifier(player)
+        let description = error?.localizedDescription ?? "unknown error"
+        Task { @MainActor [weak self] in
+            self?.handleDecodeError(
+                playerIdentifier: playerIdentifier,
+                description: description
+            )
+        }
+    }
+
+    private func handleDecodeError(
+        playerIdentifier: ObjectIdentifier,
+        description: String
+    ) {
+        let voice = voices.values.first {
+            ObjectIdentifier($0.player) == playerIdentifier
+        }
         if let voice {
             voices.removeValue(forKey: voice.id)
         }
@@ -633,8 +660,7 @@ final class GModMenuAudioController: NSObject, AVAudioPlayerDelegate {
             code: .decodeFailed,
             severity: .error,
             bus: voice?.bus ?? .menu,
-            message: "audio decode failed: " +
-                (error?.localizedDescription ?? "unknown error"),
+            message: "audio decode failed: " + description,
             logicalPath: voice?.path
         )
     }

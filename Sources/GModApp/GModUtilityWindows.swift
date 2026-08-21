@@ -105,6 +105,7 @@ private struct GModUtilityWindowFrame<Content: View>: View {
     }
 }
 
+@MainActor
 struct GModOptionsWindow: View {
     let localization: GModMenuLanguageSnapshot
     @ObservedObject var audio: GModMenuAudioSettingsStore
@@ -115,7 +116,7 @@ struct GModOptionsWindow: View {
     @ObservedObject var permissions: GModPermissionStore
     let currentMap: String?
     let onClose: () -> Void
-    let onLanguageChange: (String) -> Void
+    let onLanguageChange: @MainActor @Sendable (String) -> Void
     let onChooseZIP: () -> Void
     let onUnmountZIP: () -> Void
     let onRevalidateZIP: () -> Void

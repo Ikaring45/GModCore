@@ -163,6 +163,7 @@ final class GModMenuLocalizationTests: XCTestCase {
         }
     }
 
+    @MainActor
     func testHomeLanguageCallbackPublishesPackCatalogToNativeSurfaces() {
         let suite = "GModHomeLanguagePublicationTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -187,7 +188,8 @@ final class GModMenuLocalizationTests: XCTestCase {
         )
         XCTAssertEqual(selection.snapshot.code, "en")
 
-        let homeCallback: (GModMenuLanguageSnapshot) -> Void = { requested in
+        let homeCallback: @MainActor (GModMenuLanguageSnapshot) -> Void = {
+            requested in
             XCTAssertTrue(selection.publishHomeSelection(
                 requested,
                 catalog: catalog,

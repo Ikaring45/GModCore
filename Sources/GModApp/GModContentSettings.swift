@@ -3,6 +3,7 @@ import Foundation
 
 /// Garry's PAD-only preferences. They are deliberately separate from Source
 /// convars: only settings that the iPad host can actually honor live here.
+@MainActor
 final class GModContentSettingsStore: ObservableObject {
     static let shared = GModContentSettingsStore()
 

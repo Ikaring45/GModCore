@@ -11,6 +11,7 @@ import GModGameSession
 /// `mainmenu.lua` paints the background first and places a transparent DHTML
 /// panel over it. Garry's PAD mirrors that split: UIKit owns the background,
 /// while WKWebView runs the original menu HTML/CSS/Angular application.
+@MainActor
 struct GModHomeMenuView: UIViewRepresentable {
     private static let scheme = "garryspad"
     private static let menuPath = "garrysmod/html/menu.html"
@@ -188,6 +189,7 @@ struct GModHomeMenuView: UIViewRepresentable {
         coordinator.webView = nil
     }
 
+    @MainActor
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         static let messageName = "garrysPAD"
 

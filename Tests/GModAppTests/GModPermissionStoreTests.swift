@@ -3,6 +3,7 @@ import XCTest
 @testable import GModApp
 
 final class GModPermissionStoreTests: XCTestCase {
+    @MainActor
     func testTemporaryAndPermanentPermissionsAreIsolatedPerServer() throws {
         let fixture = makeFixture()
         defer { fixture.cleanup() }
@@ -48,6 +49,7 @@ final class GModPermissionStoreTests: XCTestCase {
         ])
     }
 
+    @MainActor
     func testOnlyPermanentPermissionsPersistAndSessionBoundaryClearsTemporary()
         throws {
         let fixture = makeFixture()
@@ -83,18 +85,18 @@ final class GModPermissionStoreTests: XCTestCase {
         )
     }
 
+    @MainActor
     func testChangesPublishExactlyOnceAndNoOpMutationsStaySilent() throws {
         let fixture = makeFixture()
         defer { fixture.cleanup() }
         let counter = NotificationCounter()
-        let observer = fixture.notificationCenter.addObserver(
-            forName: GModPermissionStore.didChangeNotification,
-            object: fixture.store,
-            queue: nil
-        ) { _ in
-            counter.value += 1
-        }
-        defer { fixture.notificationCenter.removeObserver(observer) }
+        fixture.notificationCenter.addObserver(
+            counter,
+            selector: #selector(NotificationCounter.didReceive(_:)),
+            name: GModPermissionStore.didChangeNotification,
+            object: fixture.store
+        )
+        defer { fixture.notificationCenter.removeObserver(counter) }
 
         XCTAssertTrue(try fixture.store.grant(
             "connect",
@@ -142,6 +144,7 @@ final class GModPermissionStoreTests: XCTestCase {
         XCTAssertEqual(counter.value, 5)
     }
 
+    @MainActor
     func testMalformedInputsAndPersistenceAreRejectedWithoutPartialGrants()
         throws {
         let fixture = makeFixture()
@@ -212,6 +215,7 @@ final class GModPermissionStoreTests: XCTestCase {
         )
     }
 
+    @MainActor
     func testConnectRejectsUnavailableTransportWithoutMutatingPermissions()
         throws {
         let fixture = makeFixture()
@@ -243,6 +247,7 @@ final class GModPermissionStoreTests: XCTestCase {
         XCTAssertEqual(fixture.store.collection, before)
     }
 
+    @MainActor
     func testProblemsSnapshotShowsRealGrantsAndKeepsMenuBoundaryExplicit()
         throws {
         let fixture = makeFixture()
@@ -279,6 +284,7 @@ final class GModPermissionStoreTests: XCTestCase {
         })
     }
 
+    @MainActor
     private func makeFixture() -> PermissionFixture {
         let suite = "GModPermissionStoreTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -296,8 +302,13 @@ final class GModPermissionStoreTests: XCTestCase {
     }
 }
 
-private final class NotificationCounter: @unchecked Sendable {
+@MainActor
+private final class NotificationCounter: NSObject {
     var value = 0
+
+    @objc func didReceive(_ notification: Notification) {
+        value += 1
+    }
 }
 
 private struct PermissionFixture {

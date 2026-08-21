@@ -5,13 +5,14 @@ import GModEngine
 /// Host-owned controls that are genuinely implemented by Garry's PAD.
 /// These do not impersonate Source mouse/video ConVars: the values directly
 /// drive the native touch-look path and MTKView cadence.
+@MainActor
 final class GModInputVideoSettingsStore: ObservableObject {
     static let shared = GModInputVideoSettingsStore()
 
-    static let minimumTouchLookSensitivity = 0.05
-    static let maximumTouchLookSensitivity = 1.50
-    static let defaultTouchLookSensitivity = 0.34
-    static let supportedFrameRates = [60, 120]
+    nonisolated static let minimumTouchLookSensitivity = 0.05
+    nonisolated static let maximumTouchLookSensitivity = 1.50
+    nonisolated static let defaultTouchLookSensitivity = 0.34
+    nonisolated static let supportedFrameRates = [60, 120]
 
     static let touchLookSensitivityKey =
         "GarrysPAD.Input.TouchLookSensitivity.v1"
@@ -63,7 +64,9 @@ final class GModInputVideoSettingsStore: ObservableObject {
         defaults.set(replacement, forKey: Self.preferredFrameRateKey)
     }
 
-    static func clampedTouchLookSensitivity(_ value: Double) -> Double {
+    nonisolated static func clampedTouchLookSensitivity(
+        _ value: Double
+    ) -> Double {
         guard value.isFinite else { return defaultTouchLookSensitivity }
         return Swift.max(
             minimumTouchLookSensitivity,
@@ -71,7 +74,7 @@ final class GModInputVideoSettingsStore: ObservableObject {
         )
     }
 
-    static func resolvedFrameRate(_ requested: Int) -> Int {
+    nonisolated static func resolvedFrameRate(_ requested: Int) -> Int {
         requested <= 60 ? 60 : 120
     }
 }

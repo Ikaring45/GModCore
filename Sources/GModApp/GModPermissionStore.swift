@@ -75,6 +75,7 @@ extension GModPermissionStoreError: LocalizedError {
 /// iPad Options/Problems windows. This deliberately does not register a MENU
 /// Lua global: the MENU realm and multiplayer transport are separate missing
 /// compatibility boundaries and remain reported as unavailable.
+@MainActor
 final class GModPermissionStore: ObservableObject {
     static let shared = GModPermissionStore()
     static let localServerIdentifier = "local://garrys-pad"

@@ -121,6 +121,7 @@ private enum GModPendingContentManagementAction: Equatable, Sendable {
     case revalidateZIP
 }
 
+@MainActor
 public struct GModMainView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var console: GModConsoleModel
@@ -846,7 +847,9 @@ public struct GModMainView: View {
                 permissions: permissions,
                 currentMap: game.activeMap?.rawValue,
                 onClose: { activeUtilityWindow = nil },
-                onLanguageChange: selectLanguageFromOptions,
+                onLanguageChange: { @MainActor languageCode in
+                    selectLanguageFromOptions(languageCode)
+                },
                 onChooseZIP: {
                     requestContentManagementAction(.chooseZIP)
                 },
