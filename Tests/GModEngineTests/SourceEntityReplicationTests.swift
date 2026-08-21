@@ -434,6 +434,7 @@ final class SourceEntityReplicationTests: XCTestCase {
             transform: SourceEntityTransform(
                 origin: SourceVector3(originX, 0, 0)
             ),
+            motion: SourceEntityMotionState(),
             model: SourceEntityModelReference("models/props_c17/oildrum001.mdl"),
             solidType: .vPhysics,
             moveType: .vPhysics,

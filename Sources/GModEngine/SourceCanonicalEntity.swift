@@ -33,6 +33,57 @@ public struct SourceEntityTransform: Equatable, Sendable {
     }
 }
 
+/// Engine-owned motion state shared by Player movement and future rigid-body
+/// entities. Position and view angles remain in ``SourceEntityTransform`` so
+/// there is still exactly one authoritative pose.
+public struct SourceEntityMotionState: Equatable, Sendable {
+    public var linearVelocity: SourceVector3
+    public var angularVelocity: SourceVector3
+    public var baseVelocity: SourceVector3
+    public var outputWishVelocity: SourceVector3
+    public var isOnGround: Bool
+    public var entityGravity: Float
+    public var surfaceFriction: Float
+    public var waterJumpTime: Float
+    public var isAlive: Bool
+
+    public init(
+        linearVelocity: SourceVector3 = .zero,
+        angularVelocity: SourceVector3 = .zero,
+        baseVelocity: SourceVector3 = .zero,
+        outputWishVelocity: SourceVector3 = .zero,
+        isOnGround: Bool = false,
+        entityGravity: Float = 0,
+        surfaceFriction: Float = 1,
+        waterJumpTime: Float = 0,
+        isAlive: Bool = true
+    ) {
+        self.linearVelocity = linearVelocity
+        self.angularVelocity = angularVelocity
+        self.baseVelocity = baseVelocity
+        self.outputWishVelocity = outputWishVelocity
+        self.isOnGround = isOnGround
+        self.entityGravity = entityGravity
+        self.surfaceFriction = surfaceFriction
+        self.waterJumpTime = waterJumpTime
+        self.isAlive = isAlive
+    }
+
+    fileprivate var isFinite: Bool {
+        Self.isFinite(linearVelocity) &&
+            Self.isFinite(angularVelocity) &&
+            Self.isFinite(baseVelocity) &&
+            Self.isFinite(outputWishVelocity) &&
+            entityGravity.isFinite &&
+            surfaceFriction.isFinite && surfaceFriction >= 0 &&
+            waterJumpTime.isFinite && waterJumpTime >= 0
+    }
+
+    private static func isFinite(_ vector: SourceVector3) -> Bool {
+        vector.x.isFinite && vector.y.isFinite && vector.z.isFinite
+    }
+}
+
 /// A requested Source model name, not proof that an MDL exists.
 ///
 /// Existence is deliberately decided by `SourceCanonicalModelValidator`. This
@@ -73,20 +124,60 @@ public enum SourceCanonicalEntityLifecycle: UInt8, CaseIterable, Equatable, Send
 /// lifetime or generation.
 public struct SourceCanonicalEntityState: Equatable, Sendable {
     public var transform: SourceEntityTransform
+    public var motion: SourceEntityMotionState
     public var model: SourceEntityModelReference?
     public var solidType: SourceEntitySolidType
     public var moveType: SourceMoveType
 
     public init(
         transform: SourceEntityTransform = .identity,
+        motion: SourceEntityMotionState = SourceEntityMotionState(),
         model: SourceEntityModelReference? = nil,
         solidType: SourceEntitySolidType = .none,
         moveType: SourceMoveType = .none
     ) {
         self.transform = transform
+        self.motion = motion
         self.model = model
         self.solidType = solidType
         self.moveType = moveType
+    }
+
+    /// Converts the canonical Player state into the existing movement core's
+    /// value input without transferring ownership to the host session.
+    public var playerWalkState: SourceWorldWalkState {
+        SourceWorldWalkState(
+            movement: SourceMoveData(
+                origin: transform.origin,
+                velocity: motion.linearVelocity,
+                baseVelocity: motion.baseVelocity,
+                outputWishVelocity: motion.outputWishVelocity,
+                isOnGround: motion.isOnGround,
+                entityGravity: motion.entityGravity,
+                surfaceFriction: motion.surfaceFriction,
+                waterJumpTime: motion.waterJumpTime,
+                isDead: !motion.isAlive
+            ),
+            viewAngles: transform.angles,
+            moveType: moveType
+        )
+    }
+
+    /// Commits one completed movement tick back into the canonical entity
+    /// candidate. The enclosing store transaction performs validation before
+    /// this state becomes visible.
+    public mutating func applyPlayerWalkState(_ walkState: SourceWorldWalkState) {
+        transform.origin = walkState.movement.origin
+        transform.angles = walkState.viewAngles
+        motion.linearVelocity = walkState.movement.velocity
+        motion.baseVelocity = walkState.movement.baseVelocity
+        motion.outputWishVelocity = walkState.movement.outputWishVelocity
+        motion.isOnGround = walkState.movement.isOnGround
+        motion.entityGravity = walkState.movement.entityGravity
+        motion.surfaceFriction = walkState.movement.surfaceFriction
+        motion.waterJumpTime = walkState.movement.waterJumpTime
+        motion.isAlive = !walkState.movement.isDead
+        moveType = walkState.moveType
     }
 
     public static func defaults(for kind: SourceCanonicalEntityKind) -> Self {
@@ -129,6 +220,7 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
     public let kind: SourceCanonicalEntityKind
     public let className: String
     public let transform: SourceEntityTransform
+    public let motion: SourceEntityMotionState
     public let model: SourceEntityModelReference?
     public let solidType: SourceEntitySolidType
     public let moveType: SourceMoveType
@@ -141,6 +233,7 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         kind: SourceCanonicalEntityKind,
         className: String,
         transform: SourceEntityTransform,
+        motion: SourceEntityMotionState,
         model: SourceEntityModelReference?,
         solidType: SourceEntitySolidType,
         moveType: SourceMoveType,
@@ -152,6 +245,7 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         self.kind = kind
         self.className = className
         self.transform = transform
+        self.motion = motion
         self.model = model
         self.solidType = solidType
         self.moveType = moveType
@@ -179,6 +273,7 @@ public enum SourceCanonicalEntityError: Error, Equatable, CustomStringConvertibl
     case unknownEntity(SourceCanonicalEntityIdentity)
     case invalidWorldEntryIndex(Int)
     case invalidTransform
+    case invalidMotion
     case invalidModelPath(String)
     case modelRequired(SourceCanonicalEntityKind)
     case modelValidationUnavailable(SourceEntityModelReference)
@@ -200,6 +295,8 @@ public enum SourceCanonicalEntityError: Error, Equatable, CustomStringConvertibl
             return "worldspawn must use Source entity index 0, got \(index)"
         case .invalidTransform:
             return "Source entity transform contains a non-finite component"
+        case .invalidMotion:
+            return "Source entity motion contains a non-finite or invalid component"
         case let .invalidModelPath(path):
             return "Source entity model path is structurally invalid: \(path)"
         case let .modelRequired(kind):
@@ -265,6 +362,7 @@ public final class SourceCanonicalEntity: SourceEntity {
             kind: kind,
             className: className,
             transform: stateStorage.transform,
+            motion: stateStorage.motion,
             model: stateStorage.model,
             solidType: stateStorage.solidType,
             moveType: stateStorage.moveType,
@@ -494,6 +592,9 @@ public final class SourceCanonicalEntityStore {
     ) throws {
         guard state.transform.isFinite else {
             throw SourceCanonicalEntityError.invalidTransform
+        }
+        guard state.motion.isFinite else {
+            throw SourceCanonicalEntityError.invalidMotion
         }
 
         if let model = state.model {

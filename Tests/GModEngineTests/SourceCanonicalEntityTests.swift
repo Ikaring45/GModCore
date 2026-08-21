@@ -135,6 +135,15 @@ final class SourceCanonicalEntityTests: XCTestCase {
 
         XCTAssertThrowsError(
             try store.update(player.identity) { state in
+                state.motion.linearVelocity.x = .infinity
+            }
+        ) { error in
+            XCTAssertEqual(error as? SourceCanonicalEntityError, .invalidMotion)
+        }
+        XCTAssertEqual(store.snapshot(for: player.identity), player)
+
+        XCTAssertThrowsError(
+            try store.update(player.identity) { state in
                 state.transform.angles.roll = .infinity
             }
         ) { error in
@@ -149,6 +158,35 @@ final class SourceCanonicalEntityTests: XCTestCase {
         XCTAssertEqual(updated.transform.origin, SourceVector3(1, 2, 3))
         XCTAssertEqual(updated.moveType, .noClip)
         XCTAssertEqual(updated.revision, 1)
+    }
+
+    func testPlayerWalkStateRoundTripsThroughCanonicalStateWithoutASecondOwner() {
+        let walk = SourceWorldWalkState(
+            movement: SourceMoveData(
+                origin: SourceVector3(10, 20, 30),
+                velocity: SourceVector3(1, 2, 3),
+                baseVelocity: SourceVector3(4, 5, 6),
+                outputWishVelocity: SourceVector3(7, 8, 9),
+                isOnGround: true,
+                entityGravity: 0.75,
+                surfaceFriction: 0.6,
+                waterJumpTime: 0.2,
+                isDead: false
+            ),
+            viewAngles: SourceQAngle(pitch: 11, yaw: 22, roll: 3),
+            moveType: .walk
+        )
+
+        var canonical = SourceCanonicalEntityState.defaults(for: .player)
+        canonical.motion.angularVelocity = SourceVector3(0, 0, 4)
+        canonical.applyPlayerWalkState(walk)
+
+        XCTAssertEqual(canonical.playerWalkState, walk)
+        XCTAssertEqual(canonical.transform.origin, walk.origin)
+        XCTAssertEqual(canonical.transform.angles, walk.viewAngles)
+        XCTAssertEqual(canonical.motion.linearVelocity, walk.velocity)
+        XCTAssertEqual(canonical.motion.angularVelocity, SourceVector3(0, 0, 4))
+        XCTAssertTrue(canonical.motion.isAlive)
     }
 
     func testRemovalIsDeferredAndCleanupReturnsExactRemovedGeneration() throws {

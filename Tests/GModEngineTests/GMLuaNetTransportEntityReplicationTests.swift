@@ -294,6 +294,7 @@ final class GMLuaNetTransportEntityReplicationTests: XCTestCase {
             kind: .propPhysics,
             className: SourceCanonicalEntityKind.propPhysics.className,
             transform: SourceEntityTransform(),
+            motion: SourceEntityMotionState(),
             model: SourceEntityModelReference("models/props_c17/oildrum001.mdl"),
             solidType: .vPhysics,
             moveType: .vPhysics,
