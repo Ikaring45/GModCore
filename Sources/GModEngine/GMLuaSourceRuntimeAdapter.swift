@@ -1028,12 +1028,14 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
                 }
             }
         }
-        _ = kernel.entityList.cleanupDeleteList { [unowned self] handle, entity in
-            guard let snapshot = self.canonicalEntities.didCleanup(
+        let canonicalStore = canonicalEntities
+        let serverRegistry = serverRuntime.entityRegistry
+        _ = kernel.entityList.cleanupDeleteList { handle, entity in
+            guard let snapshot = canonicalStore.didCleanup(
                 capturedHandle: handle,
                 entity: entity
             ) else { return }
-            guard let registry = self.serverRuntime.entityRegistry else {
+            guard let registry = serverRegistry else {
                 if firstCleanupError == nil {
                     firstCleanupError = GMLuaSourceRuntimeAdapterError
                         .missingRuntimeSurface(.server, "Entity registry")
