@@ -120,6 +120,30 @@ public struct GModMetalDynamicEntityMaterialBinding: Sendable, Equatable {
     }
 }
 
+/// Records the exact host-side outcome for one ordered Studio material lookup.
+/// A missing or failed Source material never becomes a fabricated bitmap.
+public enum GModMetalDynamicEntityMaterialResolution: Sendable, Equatable {
+    /// Used only by renderer-neutral callers that have not crossed the App
+    /// material boundary yet.
+    case unresolved
+    case resolved(candidate: String, bitmap: GModMetalSurfaceBitmap)
+    case sourceMissing
+    case materialWithoutBaseTexture(candidate: String)
+    case baseTextureMissing(candidate: String)
+    case decodeFailed(candidate: String, detail: String)
+    case retentionCapacityExceeded(
+        candidate: String,
+        requiredByteCount: Int,
+        retainedByteCount: Int,
+        maximumByteCount: Int
+    )
+
+    public var bitmap: GModMetalSurfaceBitmap? {
+        guard case let .resolved(_, bitmap) = self else { return nil }
+        return bitmap
+    }
+}
+
 public struct GModMetalDynamicEntityDrawRange: Sendable, Equatable {
     public let bodyPartIndex: Int
     public let submodelIndex: Int
@@ -127,6 +151,7 @@ public struct GModMetalDynamicEntityDrawRange: Sendable, Equatable {
     public let firstIndex: Int
     public let indexCount: Int
     public let material: GModMetalDynamicEntityMaterialBinding
+    public let materialResolution: GModMetalDynamicEntityMaterialResolution
 
     public init(
         bodyPartIndex: Int,
@@ -134,7 +159,9 @@ public struct GModMetalDynamicEntityDrawRange: Sendable, Equatable {
         meshIndex: Int,
         firstIndex: Int,
         indexCount: Int,
-        material: GModMetalDynamicEntityMaterialBinding
+        material: GModMetalDynamicEntityMaterialBinding,
+        materialResolution: GModMetalDynamicEntityMaterialResolution =
+            .unresolved
     ) {
         self.bodyPartIndex = bodyPartIndex
         self.submodelIndex = submodelIndex
@@ -142,6 +169,7 @@ public struct GModMetalDynamicEntityDrawRange: Sendable, Equatable {
         self.firstIndex = firstIndex
         self.indexCount = indexCount
         self.material = material
+        self.materialResolution = materialResolution
     }
 }
 

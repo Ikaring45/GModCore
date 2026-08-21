@@ -1,6 +1,24 @@
 import Foundation
 import GModEngine
 
+/// Lossless outcome for one Studio VMT candidate. Callers may continue to the
+/// next ordered candidate only for `materialMissing`; an existing VMT with an
+/// unusable base texture remains the authoritative stopping point.
+public enum GModMetalStudioMaterialCandidateResolution: Sendable, Equatable {
+    case materialMissing
+    case materialWithoutBaseTexture
+    case baseTextureMissing
+    case resolved(GModMetalSurfaceBitmap)
+}
+
+public enum GModMetalStudioMaterialCandidateError:
+    Error,
+    Sendable,
+    Equatable
+{
+    case resolvedMaterialHasNoBitmap(String)
+}
+
 /// Metal-facing adapter over the same VMT/VTF core used by IMaterial and
 /// ITexture. It performs only the alpha-premultiplication required by the
 /// Surface shader and retains a separately bounded bitmap cache so a frame
@@ -80,6 +98,31 @@ public final class GModMetalSurfaceSourceMaterialResolver:
         named logicalName: String
     ) throws -> GModMetalSurfaceBitmap? {
         try resolveTexture(named: logicalName, retainingAuthoredMipChain: true)
+    }
+
+    /// Resolves one ordered Studio VMT candidate without collapsing distinct
+    /// Source absence/failure boundaries into an optional bitmap.
+    public func resolveStudioMaterialCandidate(
+        named logicalName: String
+    ) throws -> GModMetalStudioMaterialCandidateResolution {
+        let resolved = try sourceMaterialResolver.resolve(
+            named: logicalName,
+            mipPolicy: .authoredChain
+        )
+        switch resolved.metadata.status {
+        case .materialMissing:
+            return .materialMissing
+        case .materialWithoutBaseTexture:
+            return .materialWithoutBaseTexture
+        case .baseTextureMissing:
+            return .baseTextureMissing
+        case .resolved:
+            guard let bitmap = try resolveWorldTexture(named: logicalName) else {
+                throw GModMetalStudioMaterialCandidateError
+                    .resolvedMaterialHasNoBitmap(logicalName)
+            }
+            return .resolved(bitmap)
+        }
     }
 
     private func resolveTexture(
