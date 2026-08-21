@@ -516,6 +516,10 @@ final class SourceWorldWalkTests: XCTestCase {
         for expected in expectedMaps {
             let data = try GModGameAssets.data(for: expected.map, kind: .bsp)
             let bsp = try SourceBSP(data: data)
+            XCTAssertEqual(
+                bsp.prebuiltWorldCollisionPrimitiveCount,
+                bsp.brushes.count
+            )
             let parsedSpawn = try XCTUnwrap(
                 try parsePlayerStarts(try XCTUnwrap(bsp.entities.text)).first
             )

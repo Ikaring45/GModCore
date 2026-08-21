@@ -467,6 +467,55 @@ final class GModGameSessionModelSupportTests: XCTestCase {
         ))
     }
 
+    func testSurfaceCaptureRunsOnlyForStableForegroundClientMenu() {
+        XCTAssertFalse(GModGameClientSurfaceCapturePolicy.shouldCapture(
+            activeMenu: nil,
+            transitioningMenu: nil
+        ))
+        XCTAssertTrue(GModGameClientSurfaceCapturePolicy.shouldCapture(
+            activeMenu: .spawn,
+            transitioningMenu: nil
+        ))
+        XCTAssertTrue(GModGameClientSurfaceCapturePolicy.shouldCapture(
+            activeMenu: .context,
+            transitioningMenu: nil
+        ))
+        XCTAssertFalse(GModGameClientSurfaceCapturePolicy.shouldCapture(
+            activeMenu: .spawn,
+            transitioningMenu: .context
+        ))
+    }
+
+    func testSurfaceRefreshQueueKeepsOnlyNewestGenerationRequest() {
+        var queue = GModGameSurfaceRefreshPendingQueue()
+        let firstGeneration = GModGameSessionGenerationToken(
+            application: 1,
+            lane: 10
+        )
+        let latestGeneration = GModGameSessionGenerationToken(
+            application: 2,
+            lane: 20
+        )
+        let first = GModGameSurfaceRefreshRequest(
+            generation: firstGeneration
+        )
+        let latest = GModGameSurfaceRefreshRequest(
+            generation: latestGeneration
+        )
+
+        queue.submit(first)
+        queue.submit(latest)
+        queue.submit(GModGameSurfaceRefreshRequest(
+            generation: latestGeneration
+        ))
+        XCTAssertEqual(queue.takeLatest(), latest)
+        XCTAssertNil(queue.takeLatest())
+
+        queue.submit(first)
+        queue.removeAll()
+        XCTAssertNil(queue.takeLatest())
+    }
+
     func testPointerQueueIsBoundedCoalescesMovesAndRetainsCriticalOrder() {
         let token = GModGameSessionGenerationToken(
             application: 1,

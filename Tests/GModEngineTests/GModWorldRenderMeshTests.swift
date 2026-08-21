@@ -82,6 +82,7 @@ final class GModWorldRenderMeshTests: XCTestCase {
             )
         )
         assertPaintedSkybox(mesh, sourceSurfaceCount: 2_411)
+        assertConstructSky3D(bsp: bsp, mesh: mesh)
         assertConstructFaceZeroSourceSemantics(bsp: bsp, mesh: mesh)
         assertFirstDisplacementSourceSemantics(bsp: bsp, mesh: mesh)
         assertRealHDRLightmapContract(bsp)
@@ -187,6 +188,51 @@ final class GModWorldRenderMeshTests: XCTestCase {
                 0, 5, 6, 1, 0, 6, 2, 1, 6, 7, 2, 6,
                 12, 7, 6, 11, 12, 6, 10, 11, 6, 5, 10, 6,
             ]
+        )
+    }
+
+    func testSkyVisibilityUsesSourceLeafFlags() {
+        let visibility = GModWorldSkyVisibility(
+            headNode: 0,
+            planes: [GModWorldSkyVisibilityPlane(
+                normal: SourceVector3(1, 0, 0),
+                distance: 0
+            )],
+            nodes: [GModWorldSkyVisibilityNode(
+                planeIndex: 0,
+                frontChild: -1,
+                backChild: -2
+            )],
+            leafFlags: [0x01, 0x04]
+        )
+
+        XCTAssertEqual(
+            visibility.visibility(at: SourceVector3(1, 0, 0)),
+            .sky3D
+        )
+        XCTAssertEqual(
+            visibility.visibility(at: SourceVector3(-1, 0, 0)),
+            .sky2D
+        )
+    }
+
+    func testSourcePotentialVisibilityDecodesLiteralAndZeroRun() throws {
+        let clusterCount = 24
+        let rowOffset = 4 + clusterCount * 8
+        var data = Data()
+        appendInt32(Int32(clusterCount), to: &data)
+        for _ in 0..<clusterCount {
+            appendInt32(Int32(rowOffset), to: &data)
+            appendInt32(Int32(rowOffset), to: &data)
+        }
+        data.append(contentsOf: [0x01, 0x00, 0x01, 0x02])
+
+        let visibility = try XCTUnwrap(
+            GModSourcePotentialVisibility(data: data)
+        )
+        XCTAssertEqual(
+            visibility.visibleClusters(from: 0),
+            Set([0, 17])
         )
     }
 
@@ -296,7 +342,9 @@ final class GModWorldRenderMeshTests: XCTestCase {
         }
         XCTAssertEqual(skyRanges.count, 6, file: file, line: line)
         XCTAssertTrue(
-            skyRanges.allSatisfy { $0.indexCount == 6 },
+            skyRanges.allSatisfy {
+                $0.indexCount == 6 && $0.renderLayer == .sky2D
+            },
             file: file,
             line: line
         )
@@ -342,6 +390,78 @@ final class GModWorldRenderMeshTests: XCTestCase {
                 line: line
             )
         }
+    }
+
+    private func assertConstructSky3D(
+        bsp: SourceBSP,
+        mesh: GModWorldRenderMesh,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        guard let sky = mesh.sky3D else {
+            XCTFail("expected real sky_camera metadata", file: file, line: line)
+            return
+        }
+        XCTAssertEqual(sky.origin, SourceVector3(-1_428, 1_645, 10_991.2))
+        XCTAssertEqual(sky.scale, 16)
+        XCTAssertEqual(sky.area, 1)
+        XCTAssertEqual(sky.cluster, 0)
+        XCTAssertGreaterThan(sky.sourceFaceCount, 0)
+        guard let pvs = GModSourcePotentialVisibility(data: bsp.lumps[4].data),
+              let visibleClusters = pvs.visibleClusters(from: Int(sky.cluster)) else {
+            XCTFail("expected real sky-camera PVS", file: file, line: line)
+            return
+        }
+        var expectedVisibleFaces = Set<Int>()
+        for leaf in bsp.leaves where
+            leaf.area == sky.area &&
+            leaf.cluster >= 0 &&
+            visibleClusters.contains(Int(leaf.cluster)) {
+            let first = Int(leaf.firstLeafFace)
+            let end = first + Int(leaf.leafFaceCount)
+            for index in first..<end where bsp.leafFaces.indices.contains(index) {
+                expectedVisibleFaces.insert(Int(bsp.leafFaces[index]))
+            }
+        }
+        XCTAssertEqual(
+            sky.sourceFaceCount,
+            expectedVisibleFaces.count,
+            "sky-camera geometry must come from its cluster PVS, not area union",
+            file: file,
+            line: line
+        )
+
+        guard let visibility = mesh.skyVisibility else {
+            XCTFail("expected Source leaf sky visibility", file: file, line: line)
+            return
+        }
+        XCTAssertEqual(
+            visibility.visibility(at: SourceVector3(704, 132, -79)),
+            .sky3D,
+            file: file,
+            line: line
+        )
+
+        let miniatureRanges = mesh.materialRanges.filter {
+            $0.renderLayer == .sky3D
+        }
+        XCTAssertFalse(miniatureRanges.isEmpty, file: file, line: line)
+        XCTAssertTrue(miniatureRanges.contains {
+            $0.materialName == "gm_construct/flatgrass"
+        })
+        XCTAssertTrue(mesh.materialRanges.contains {
+            $0.renderLayer == .world &&
+                $0.materialName == "gm_construct/flatgrass"
+        })
+        XCTAssertTrue(miniatureRanges.allSatisfy {
+            $0.firstIndex >= 0 &&
+                $0.firstIndex + $0.indexCount <= mesh.indices.count
+        })
+    }
+
+    private func appendInt32(_ value: Int32, to data: inout Data) {
+        var littleEndian = value.littleEndian
+        withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
     }
 
     private func assertConstructFaceZeroSourceSemantics(

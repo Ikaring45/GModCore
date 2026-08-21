@@ -31,8 +31,9 @@ No skipped or unfinished feature is reported as a pass. See
 [`LUA51_CONFORMANCE_STATUS.md`](LUA51_CONFORMANCE_STATUS.md) for the exact
 verification boundary.
 
-The 0.1.53 release-candidate branch carries the paired GLua runtime into a
-bounded playable Sandbox slice. It owns one SERVER and one CLIENT, loads the
+The 0.1.54 release carries the paired GLua runtime's bounded Sandbox slice
+forward and addresses the first physical-iPad rendering, movement, camera, and
+VGUI findings. It owns one SERVER and one CLIENT, loads the
 original authorized Base/Sandbox/Derma/Spawnmenu Lua in measured order,
 creates the real `g_SpawnMenu`, and renders its Surface commands through the
 Metal overlay. The stock Weapons tab, tree categories, ContentIcons, tool
@@ -82,14 +83,16 @@ boundaries. Spawnmenu navigation and callbacks are exercised end to end, but
 an unsupported host action is still reported rather than presented as a
 successful spawn.
 
-The 0.1.53 candidate Windows integration gate passes 469 XCTest cases plus
-11/11 Swift Testing Source-filesystem cases, with warnings treated as errors.
-The real 4.876 GB content pack validates all 2,641 authorized payload SHA-256
+The 0.1.54 Windows integration gate passes 485 XCTest cases plus 11/11
+Swift Testing Source-filesystem cases, with warnings treated as errors.
+The previously validated real 4.876 GB content pack validates all 2,641
+authorized payload SHA-256
 values and passes Home background, both maps, six-face painted sky, water,
-materials, Sandbox startup, and movement gates. Embedded Metal source and
-pipeline contracts are checked locally, but Apple package/app/Metal build,
-Simulator launch, and physical-iPad behavior remain CI/device gates rather
-than inferred passes.
+materials, Sandbox startup, and movement gates. That external pack was not
+re-read for the 0.1.54 correction. Embedded Metal source
+and pipeline contracts are checked locally, but the exact 0.1.54 Apple
+package/app/Metal build, Simulator launch, and physical-iPad behavior remain
+CI/device gates rather than inferred passes.
 
 The released 0.1.45 commit separately passes 170/170 Swift tests and the complete Engine
 strict-concurrency gate with warnings treated as errors. Its GC-enabled

@@ -14,6 +14,59 @@ public struct SourceQAngle: Equatable, Hashable, Sendable {
     public static let zero = SourceQAngle()
 }
 
+/// Source SDK `AngleVectors` basis in Source coordinates (+X forward, +Y
+/// left, +Z up). Retaining all three axes avoids reconstructing an arbitrary
+/// camera-up vector near vertical pitch, where a look-at implementation can
+/// otherwise snap between unrelated fallback axes.
+public struct SourceAngleBasis: Equatable, Hashable, Sendable {
+    public let forward: SourceVector3
+    public let right: SourceVector3
+    public let up: SourceVector3
+
+    public init(
+        forward: SourceVector3,
+        right: SourceVector3,
+        up: SourceVector3
+    ) {
+        self.forward = forward
+        self.right = right
+        self.up = up
+    }
+}
+
+public extension SourceQAngle {
+    /// Matches Source SDK 2013 `AngleVectors` expression order and handedness.
+    var sourceBasis: SourceAngleBasis {
+        let degreesToRadians = Float.pi / 180
+        let pitchRadians = pitch * degreesToRadians
+        let yawRadians = yaw * degreesToRadians
+        let rollRadians = roll * degreesToRadians
+        let sinePitch = sin(pitchRadians)
+        let cosinePitch = cos(pitchRadians)
+        let sineYaw = sin(yawRadians)
+        let cosineYaw = cos(yawRadians)
+        let sineRoll = sin(rollRadians)
+        let cosineRoll = cos(rollRadians)
+        return SourceAngleBasis(
+            forward: SourceVector3(
+                cosinePitch * cosineYaw,
+                cosinePitch * sineYaw,
+                -sinePitch
+            ),
+            right: SourceVector3(
+                -sineRoll * sinePitch * cosineYaw + cosineRoll * sineYaw,
+                -sineRoll * sinePitch * sineYaw - cosineRoll * cosineYaw,
+                -sineRoll * cosinePitch
+            ),
+            up: SourceVector3(
+                cosineRoll * sinePitch * cosineYaw + sineRoll * sineYaw,
+                cosineRoll * sinePitch * sineYaw - sineRoll * cosineYaw,
+                cosineRoll * cosinePitch
+            )
+        )
+    }
+}
+
 /// `IN_*` bits from Source SDK 2013 `in_buttons.h`.
 public struct SourceInputButtons: OptionSet, Equatable, Hashable, Sendable {
     public let rawValue: UInt32

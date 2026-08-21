@@ -1,7 +1,72 @@
 import XCTest
 import GModEngine
+import GModLua
 
 final class GMLuaLanguageTests: XCTestCase {
+    func testLabelKeepsRawPhraseKeyButMeasuresAndDrawsLocalizedText() throws {
+        struct PhraseProbeMeasurer: GMLuaTextMeasurer {
+            let fidelity = GMLuaTextMeasurementFidelity.platformGlyphMetrics
+
+            func measure(
+                _ text: LuaString,
+                using font: GMLuaFontDescriptor
+            ) -> GMLuaTextMeasurement {
+                switch text.utf8String {
+                case "武器": return GMLuaTextMeasurement(width: 40, height: 18)
+                case "#spawnmenu.category.weapons":
+                    return GMLuaTextMeasurement(width: 999, height: 99)
+                default:
+                    return GMLuaTextMeasurement(
+                        width: text.bytes.count * 7,
+                        height: 13
+                    )
+                }
+            }
+        }
+
+        let runtime = GMLuaRuntime(
+            realm: .client,
+            logger: { _ in },
+            textMeasurer: PhraseProbeMeasurer(),
+            languageConfiguration: GMLuaLanguageConfiguration(phrases: [
+                "spawnmenu.category.weapons": "武器"
+            ])
+        )
+        let registry = try XCTUnwrap(runtime.vguiRegistry)
+        let surface = try XCTUnwrap(runtime.surfaceCommandState)
+
+        try runtime.execute(
+            """
+            PHRASE_LABEL = assert(vgui.Create("Label"))
+            PHRASE_LABEL:SetText("#spawnmenu.category.weapons")
+            assert(PHRASE_LABEL:GetText() == "#spawnmenu.category.weapons")
+            local width, height = PHRASE_LABEL:GetTextSize()
+            assert(width == 40 and height == 18)
+            PHRASE_LABEL:SizeToContents()
+            assert(PHRASE_LABEL:GetWide() == 40 and PHRASE_LABEL:GetTall() == 18)
+
+            UNKNOWN_LABEL = assert(vgui.Create("Label"))
+            UNKNOWN_LABEL:SetPos(0, 30)
+            UNKNOWN_LABEL:SetText("#unknown.phrase")
+            assert(UNKNOWN_LABEL:GetText() == "#unknown.phrase")
+            """,
+            sourceName: "@GMLuaLocalizedLabelTextRegression.lua"
+        )
+
+        let frame = try registry.renderFrame(
+            surface: surface,
+            viewportWidth: 320,
+            viewportHeight: 180
+        )
+        let renderedTexts = frame.commands.compactMap { command -> LuaString? in
+            guard case let .text(value, _, _, _, _) = command else { return nil }
+            return value
+        }
+        XCTAssertTrue(renderedTexts.contains(LuaString("武器")))
+        XCTAssertTrue(renderedTexts.contains(LuaString("#unknown.phrase")))
+        XCTAssertFalse(renderedTexts.contains(LuaString("#spawnmenu.category.weapons")))
+    }
+
     func testRuntimeExposesLanguageOnlyToClientAndMenu() throws {
         for realm in [GMLuaRealm.client, .menu] {
             let runtime = GMLuaRuntime(realm: realm, logger: { _ in })

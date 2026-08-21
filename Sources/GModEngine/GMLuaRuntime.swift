@@ -358,7 +358,8 @@ public final class GMLuaRuntime {
                     into: state,
                     typeSystem: installedTypeSystem,
                     screenMetrics: installedScreenMetrics,
-                    surfaceCommandState: installedSurfaceCommandState
+                    surfaceCommandState: installedSurfaceCommandState,
+                    languageRegistry: languageRegistry
                 )
                 vguiRegistry = installedVGUIRegistry
                 dermaRegistry = try GMLuaDerma.install(
@@ -372,6 +373,10 @@ public final class GMLuaRuntime {
                     presetFileSystem = try LuaMemoryFileSystem()
                 }
                 presetStore = GMLuaPresets.install(
+                    into: state,
+                    fileSystem: presetFileSystem
+                )
+                try GMLuaSpawnMenuEngine.install(
                     into: state,
                     fileSystem: presetFileSystem
                 )

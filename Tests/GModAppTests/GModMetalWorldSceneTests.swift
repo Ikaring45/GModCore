@@ -1,8 +1,32 @@
 import Foundation
 import XCTest
+import GModEngine
 @testable import GModMetal
 
 final class GModMetalWorldSceneTests: XCTestCase {
+    func testSourceLeafSkyVisibilityGates2DAnd3DPasses() {
+        XCTAssertFalse(
+            GModMetalSkyVisibilityRenderContract.draws2D(.notVisible)
+        )
+        XCTAssertFalse(
+            GModMetalSkyVisibilityRenderContract.draws3D(.notVisible)
+        )
+        XCTAssertTrue(GModMetalSkyVisibilityRenderContract.draws2D(.sky2D))
+        XCTAssertFalse(GModMetalSkyVisibilityRenderContract.draws3D(.sky2D))
+        XCTAssertTrue(GModMetalSkyVisibilityRenderContract.draws2D(.sky3D))
+        XCTAssertTrue(GModMetalSkyVisibilityRenderContract.draws3D(.sky3D))
+    }
+
+    func testSourceSkyPassOrderClearsDepthBeforeOrdinaryWorld() {
+        XCTAssertEqual(
+            GModMetalWorldPassOrderContract.orderedLayers,
+            [.sky2D, .sky3D, .world]
+        )
+        XCTAssertTrue(
+            GModMetalWorldPassOrderContract.clearsDepthBetweenSkyAndWorld
+        )
+    }
+
     func testMaterialResolutionPreservesMissingDecodeAndRetentionOutcomes() throws {
         let resolved = try fixtureBitmap(named: "resolved-outcome")
         let ranges = [
@@ -97,7 +121,8 @@ final class GModMetalWorldSceneTests: XCTestCase {
                 materialName: "skybox/painted\(face.rawValue)",
                 firstIndex: 6 + offset * 3,
                 indexCount: 3,
-                bitmap: offset < 2 ? bitmap : nil
+                bitmap: offset < 2 ? bitmap : nil,
+                renderLayer: .sky2D
             ))
         }
 
@@ -124,6 +149,112 @@ final class GModMetalWorldSceneTests: XCTestCase {
         )
     }
 
+    func testWorldSamplerUsesAuthoredVTFMipsAndFlags() throws {
+        func bitmap(
+            _ flags: SourceVTFTextureFlags
+        ) throws -> GModMetalSurfaceBitmap {
+            let base = Data(repeating: 255, count: 4 * 4 * 4)
+            return try GModMetalSurfaceBitmap(
+                resourceIdentifier: "sampler-\(flags.rawValue)",
+                width: 4,
+                height: 4,
+                premultipliedRGBA8: base,
+                mipLevels: [
+                    .init(width: 4, height: 4, premultipliedRGBA8: base),
+                    .init(
+                        width: 2,
+                        height: 2,
+                        premultipliedRGBA8: Data(repeating: 128, count: 16)
+                    ),
+                    .init(
+                        width: 1,
+                        height: 1,
+                        premultipliedRGBA8: Data([64, 64, 64, 255])
+                    ),
+                ],
+                sourceTextureFlags: flags
+            )
+        }
+
+        let bilinear = GModMetalWorldSamplerConfiguration(
+            bitmap: try bitmap([]),
+            renderLayer: .world
+        )
+        XCTAssertEqual(bilinear.minFilter, .linear)
+        XCTAssertEqual(bilinear.magFilter, .linear)
+        XCTAssertEqual(bilinear.mipFilter, .nearest)
+        XCTAssertEqual(bilinear.sAddressMode, .repeat)
+        XCTAssertEqual(bilinear.tAddressMode, .repeat)
+        XCTAssertEqual(bilinear.maximumAnisotropy, 1)
+
+        let trilinear = GModMetalWorldSamplerConfiguration(
+            bitmap: try bitmap([.trilinear, .clampS]),
+            renderLayer: .world
+        )
+        XCTAssertEqual(trilinear.mipFilter, .linear)
+        XCTAssertEqual(trilinear.sAddressMode, .clampToEdge)
+        XCTAssertEqual(trilinear.tAddressMode, .repeat)
+
+        let pointNoMip = GModMetalWorldSamplerConfiguration(
+            bitmap: try bitmap([.pointSample, .noMip, .clampT]),
+            renderLayer: .world
+        )
+        XCTAssertEqual(pointNoMip.minFilter, .nearest)
+        XCTAssertEqual(pointNoMip.magFilter, .nearest)
+        XCTAssertEqual(pointNoMip.mipFilter, .notMipmapped)
+        XCTAssertEqual(pointNoMip.tAddressMode, .clampToEdge)
+
+        let anisotropicSky = GModMetalWorldSamplerConfiguration(
+            bitmap: try bitmap([.anisotropic]),
+            renderLayer: .sky2D
+        )
+        XCTAssertEqual(anisotropicSky.mipFilter, .linear)
+        XCTAssertEqual(anisotropicSky.maximumAnisotropy, 8)
+        XCTAssertEqual(anisotropicSky.sAddressMode, .clampToEdge)
+        XCTAssertEqual(anisotropicSky.tAddressMode, .clampToEdge)
+    }
+
+    func testSky3DBakedProjectionMatchesValveMiniatureSpace() {
+        let sky = GModMetalWorldSky3D(
+            sourceOrigin: SIMD3<Float>(-1_428, 1_645, 10_991.2),
+            scale: 16
+        )
+        let planes = GModMetalSky3DProjectionContract.bakedClipPlanes(
+            scale: sky.scale
+        )
+
+        XCTAssertEqual(planes.near / sky.scale, 2, accuracy: 0.0001)
+        XCTAssertEqual(
+            planes.far / sky.scale,
+            Float(3).squareRoot() * 2 * 16_384,
+            accuracy: 0.01
+        )
+        XCTAssertEqual(
+            GModMetalSky3DProjectionContract.sourceCameraEye(
+                worldEye: SIMD3<Float>(704, 132, -79),
+                sky: sky
+            ),
+            sky.sourceOrigin + SIMD3<Float>(704, 132, -79) / 16
+        )
+    }
+
+    func testWorldBitmapRetentionChargesSharedRangeIdentityOnce() throws {
+        let shared = try fixtureBitmap(named: "shared")
+        let other = try fixtureBitmap(named: "other")
+        var budget = GModMetalWorldBitmapRetentionBudget(maximumByteCount: 4)
+
+        XCTAssertTrue(budget.retain(shared))
+        XCTAssertEqual(budget.retainedByteCount, 4)
+        XCTAssertTrue(budget.retain(shared))
+        XCTAssertEqual(
+            budget.retainedByteCount,
+            4,
+            "world and sky3D ranges sharing one bitmap must not double-charge bytes"
+        )
+        XCTAssertFalse(budget.retain(other))
+        XCTAssertEqual(budget.retainedByteCount, 4)
+    }
+
     func testMovingCameraBeyondSkyCubeCannotIntroduceSkyTranslationOrParallax() {
         let original = fixtureScene(materialRanges: [])
         let moved = original.updatingCamera(
@@ -146,6 +277,60 @@ final class GModMetalWorldSceneTests: XCTestCase {
         XCTAssertEqual(moved.materialRanges, original.materialRanges)
         XCTAssertTrue(GModMetalSkyboxRenderContract.depthCompareAlwaysPasses)
         XCTAssertFalse(GModMetalSkyboxRenderContract.depthWritesEnabled)
+    }
+
+    func testCameraUpdateCarriesContinuousSourceUpThroughVerticalPitch() {
+        func dot(_ lhs: SIMD3<Float>, _ rhs: SIMD3<Float>) -> Float {
+            lhs.x * rhs.x + lhs.y * rhs.y + lhs.z * rhs.z
+        }
+        func crossLengthSquared(
+            _ lhs: SIMD3<Float>,
+            _ rhs: SIMD3<Float>
+        ) -> Float {
+            let value = SIMD3<Float>(
+                lhs.y * rhs.z - lhs.z * rhs.y,
+                lhs.z * rhs.x - lhs.x * rhs.z,
+                lhs.x * rhs.y - lhs.y * rhs.x
+            )
+            return dot(value, value)
+        }
+        let original = fixtureScene(materialRanges: [])
+        let below = SourceQAngle(pitch: 87.43, yaw: 90).sourceBasis
+        let above = SourceQAngle(pitch: 87.45, yaw: 90).sourceBasis
+        let belowScene = original.updatingCamera(
+            eye: .zero,
+            forward: SIMD3<Float>(
+                below.forward.x,
+                below.forward.y,
+                below.forward.z
+            ),
+            up: SIMD3<Float>(below.up.x, below.up.y, below.up.z)
+        )
+        let aboveScene = original.updatingCamera(
+            eye: .zero,
+            forward: SIMD3<Float>(
+                above.forward.x,
+                above.forward.y,
+                above.forward.z
+            ),
+            up: SIMD3<Float>(above.up.x, above.up.y, above.up.z)
+        )
+
+        XCTAssertGreaterThan(
+            dot(belowScene.metalCameraUp, aboveScene.metalCameraUp),
+            0.999_999
+        )
+        XCTAssertGreaterThan(
+            crossLengthSquared(
+                aboveScene.metalCameraForward,
+                aboveScene.metalCameraUp
+            ),
+            0.999_99
+        )
+        XCTAssertEqual(
+            aboveScene.metalCameraUp,
+            GModMetalWorldScene.convertSourceVector(aboveScene.cameraUp)
+        )
     }
 
     func testCameraUpdateRetainsBoundedLinearLightmapAtlasAndSecondUVStream() {

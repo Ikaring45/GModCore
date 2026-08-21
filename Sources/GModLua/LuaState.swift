@@ -820,11 +820,31 @@ public final class LuaState {
             let iterator = values.indices.contains(0) ? values[0] : .nilValue
             let state = values.indices.contains(1) ? values[1] : .nilValue
             var controlValue = values.indices.contains(2) ? values[2] : .nilValue
+
+            // The iterator triple is hidden Lua 5.1 VM state. It is not
+            // reachable through the lexical environment, but statement
+            // safe-points may collect while the loop body is running. Root
+            // the triple in the active frame for the lifetime of the loop;
+            // stock SortedPairsByMemberValue otherwise loses its ephemeral
+            // iterator-state table between iterations.
+            let stack = currentCallStack()
+            let frameIndex = stack.frames.count - 1
+            let temporaryIndex = stack.frames[frameIndex].temporaries.count
+            stack.frames[frameIndex].temporaries.append(contentsOf: [
+                iterator,
+                state,
+                controlValue
+            ])
+            defer {
+                stack.frames[frameIndex].temporaries.removeSubrange(temporaryIndex...)
+            }
+
             while true {
                 let results = try callValue(iterator, arguments: [state, controlValue])
                 let first = results.first ?? .nilValue
                 if isNil(first) { break }
                 controlValue = first
+                stack.frames[frameIndex].temporaries[temporaryIndex + 2] = first
 
                 // Like numeric-for control variables, generic-for variables get
                 // distinct closed bindings for each completed iteration.

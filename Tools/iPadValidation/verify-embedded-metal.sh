@@ -114,6 +114,13 @@ required_pipeline_contract = {
     "color.destinationRGBBlendFactor = .oneMinusSourceAlpha",
     "color.sourceAlphaBlendFactor = .one",
     "color.destinationAlphaBlendFactor = .oneMinusSourceAlpha",
+    "descriptor.colorAttachments[0].loadAction = .load",
+    "descriptor.depthAttachment.loadAction = .clear",
+    "descriptor.mipmapLevelCount = bitmap.mipLevels.count",
+    "for (level, mip) in bitmap.mipLevels.enumerated()",
+    "GModMetalSky3DProjectionContract.bakedClipPlanes",
+    "GModMetalSurfaceTextureUploadContract.mipmapLevelCount",
+    "$0.renderLayer == .sky3D && $0.waterSurface != nil",
 }
 missing_contract = sorted(
     phrase for phrase in required_pipeline_contract if phrase not in normalized_swift

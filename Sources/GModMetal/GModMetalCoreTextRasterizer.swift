@@ -256,9 +256,15 @@ public final class GModMetalCoreTextRasterizer:
 
             let ascent = CTFontGetAscent(font)
             for (index, line) in coreTextLines.enumerated() {
+                // The explicit transform gives this raw bitmap context a
+                // top-left, y-down user space. Core Text's baseline still has
+                // to be expressed from the opposite edge: using `ascent` as a
+                // top-down baseline maps almost the entire glyph above the
+                // bitmap after the CTM flip and leaves only a clipped strip.
+                let lineTop = CGFloat(index * max(1, descriptor.size))
                 context.textPosition = CGPoint(
                     x: 0,
-                    y: CGFloat(index * max(1, descriptor.size)) + ascent
+                    y: CGFloat(height) - lineTop - ascent
                 )
                 CTLineDraw(line, context)
             }

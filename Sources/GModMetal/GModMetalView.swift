@@ -392,6 +392,9 @@ public struct GModMetalView:
         private var skyboxSamplerState:
             MTLSamplerState?
 
+        private var worldSamplerStates:
+            [GModMetalWorldSamplerConfiguration: MTLSamplerState] = [:]
+
         private let pendingSceneLock = NSLock()
 
         private enum PendingWorldScene {
@@ -495,10 +498,13 @@ public struct GModMetalView:
             case invalidLightmapTextureCoordinate(index: Int)
             case invalidMaterialRange(index: Int)
             case invalidSkyboxRanges
+            case invalidSky3DMetadata
             case invalidWaterMaterialRange(index: Int)
             case invalidCameraEye
             case invalidCameraForward
             case zeroCameraForward
+            case invalidCameraUp
+            case degenerateCameraBasis
             case vertexBufferAllocationFailed
             case indexBufferAllocationFailed
 
@@ -536,6 +542,8 @@ public struct GModMetalView:
                     return "material range \(index) is invalid or overlaps the index buffer"
                 case .invalidSkyboxRanges:
                     return "skybox ranges must contain one named set of six unique faces"
+                case .invalidSky3DMetadata:
+                    return "3D sky ranges require finite sky_camera origin and positive scale"
                 case let .invalidWaterMaterialRange(index):
                     return "water material range \(index) contains non-finite or mismatched Source inputs"
                 case .invalidCameraEye:
@@ -544,6 +552,10 @@ public struct GModMetalView:
                     return "camera forward is non-finite"
                 case .zeroCameraForward:
                     return "camera forward has zero length"
+                case .invalidCameraUp:
+                    return "camera up is non-finite"
+                case .degenerateCameraBasis:
+                    return "camera forward and up do not form a basis"
                 case .vertexBufferAllocationFailed:
                     return "Metal vertex-buffer allocation failed"
                 case .indexBufferAllocationFailed:
@@ -1653,6 +1665,14 @@ public struct GModMetalView:
                     index: scene.materialRanges.count
                 )
             }
+            if scene.materialRanges.contains(where: { $0.renderLayer == .sky3D }) {
+                guard let sky3D = scene.sky3D,
+                      isFinite(sky3D.sourceOrigin),
+                      sky3D.scale.isFinite,
+                      sky3D.scale > 0 else {
+                    throw WorldSceneError.invalidSky3DMetadata
+                }
+            }
             let skyboxRanges = scene.materialRanges.filter {
                 $0.skyboxFace != nil
             }
@@ -1722,18 +1742,39 @@ public struct GModMetalView:
         ) -> [String: GModMetalSurfaceBitmap] {
             var required: [String: GModMetalSurfaceBitmap] = [:]
             for range in scene.materialRanges {
+                switch range.renderLayer {
+                case .world:
+                    break
+                case .sky2D:
+                    guard GModMetalSkyVisibilityRenderContract.draws2D(
+                        scene.skyboxVisibility
+                    ) else { continue }
+                case .sky3D:
+                    guard GModMetalSkyVisibilityRenderContract.draws3D(
+                        scene.skyboxVisibility
+                    ) else { continue }
+                }
                 if let bitmap = range.materialResolution.bitmap {
                     required[Self.worldTextureKey(
                         for: bitmap,
                         isSRGB: true
                     )] = bitmap
                 }
+                let waterCameraZ: Float
+                if range.renderLayer == .sky3D, let sky3D = scene.sky3D {
+                    waterCameraZ = GModMetalSky3DProjectionContract.sourceCameraEye(
+                        worldEye: scene.cameraEye,
+                        sky: sky3D
+                    ).z
+                } else {
+                    waterCameraZ = scene.cameraEye.z
+                }
                 if let surface = range.waterSurface,
                    let material = range.waterMaterial,
                    GModMetalWaterRenderContract.shouldRender(
                        material,
                        surface: surface,
-                       cameraZ: scene.cameraEye.z
+                       cameraZ: waterCameraZ
                    ),
                    let normalBitmap = material.normalBitmap {
                     required[Self.worldTextureKey(
@@ -1762,6 +1803,20 @@ public struct GModMetalView:
                   lengthSquared > Float.ulpOfOne
             else {
                 throw WorldSceneError.zeroCameraForward
+            }
+            guard isFinite(scene.cameraUp), isFinite(scene.metalCameraUp) else {
+                throw WorldSceneError.invalidCameraUp
+            }
+            let upLengthSquared = simd_length_squared(scene.metalCameraUp)
+            let rightLengthSquared = simd_length_squared(simd_cross(
+                scene.metalCameraForward,
+                scene.metalCameraUp
+            ))
+            guard upLengthSquared.isFinite,
+                  upLengthSquared > Float.ulpOfOne,
+                  rightLengthSquared.isFinite,
+                  rightLengthSquared > Float.ulpOfOne else {
+                throw WorldSceneError.degenerateCameraBasis
             }
         }
 
@@ -1897,6 +1952,49 @@ public struct GModMetalView:
                 }
                 return
             }
+            if let scene = activeWorldScene,
+               let mesh = cachedWorldMesh,
+               mesh.identifier == scene.meshIdentifier,
+               mesh.vertexCount == scene.metalPositions.count,
+               mesh.indexCount == scene.indices.count {
+                worldTextureUploadFailureReason = nil
+                guard let skyEncoder = commandBuffer.makeRenderCommandEncoder(
+                    descriptor: descriptor
+                ) else {
+                    worldFramePresentationSink.fail(
+                        meshIdentifier: scene.meshIdentifier,
+                        reason: .renderEncoderCreationFailed
+                    )
+                    return
+                }
+                skyEncoder.setCullMode(.none)
+                drawWorldSky(
+                    scene: scene,
+                    mesh: mesh,
+                    viewport: drawableViewport,
+                    device: device,
+                    solidPipeline: worldPipeline,
+                    texturedPipeline: worldTexturedPipeline,
+                    lightmappedPipeline: worldLightmappedPipeline,
+                    texturedLightmappedPipeline: worldTexturedLightmappedPipeline,
+                    missingMaterialPipeline: worldMissingMaterialPipeline,
+                    skyboxPipeline: worldSkyboxPipeline,
+                    waterSolidPipeline: worldWaterSolidPipeline,
+                    waterNormalPipeline: worldWaterNormalPipeline,
+                    worldDepthState: depthState,
+                    skyboxDepthState: skyboxDepthState,
+                    waterDepthState: waterDepthState,
+                    worldSampler: worldSamplerState,
+                    lightmapSampler: worldLightmapSamplerState,
+                    skyboxSampler: skyboxSamplerState,
+                    encoder: skyEncoder
+                )
+                skyEncoder.endEncoding()
+                descriptor.colorAttachments[0].loadAction = .load
+                descriptor.depthAttachment.loadAction = .clear
+            } else {
+                worldTextureUploadFailureReason = nil
+            }
             guard let encoder = commandBuffer.makeRenderCommandEncoder(
                 descriptor: descriptor
             ) else {
@@ -1997,6 +2095,268 @@ public struct GModMetalView:
             commandBuffer.commit()
         }
 
+        /// Encodes Source's background passes into their own depth lifetime.
+        /// The following ordinary-world encoder clears depth while loading the
+        /// sky color, matching Source's 2D sky -> 3D sky -> world ordering.
+        private func drawWorldSky(
+            scene: GModMetalWorldScene,
+            mesh: CachedWorldMesh,
+            viewport: SIMD2<Int>,
+            device: MTLDevice,
+            solidPipeline: MTLRenderPipelineState,
+            texturedPipeline: MTLRenderPipelineState,
+            lightmappedPipeline: MTLRenderPipelineState,
+            texturedLightmappedPipeline: MTLRenderPipelineState,
+            missingMaterialPipeline: MTLRenderPipelineState,
+            skyboxPipeline: MTLRenderPipelineState,
+            waterSolidPipeline: MTLRenderPipelineState,
+            waterNormalPipeline: MTLRenderPipelineState,
+            worldDepthState: MTLDepthStencilState,
+            skyboxDepthState: MTLDepthStencilState,
+            waterDepthState: MTLDepthStencilState,
+            worldSampler: MTLSamplerState,
+            lightmapSampler: MTLSamplerState,
+            skyboxSampler: MTLSamplerState,
+            encoder: MTLRenderCommandEncoder
+        ) {
+            let width = Swift.max(1, viewport.x)
+            let height = Swift.max(1, viewport.y)
+            let sky2DProjection = Self.makePerspectiveMatrix(
+                verticalFieldOfViewRadians: 75 * .pi / 180,
+                aspect: Float(width) / Float(height),
+                near: 1,
+                far: 65_536
+            )
+            encoder.setVertexBuffer(mesh.vertexBuffer, offset: 0, index: 0)
+            var uploadBudget = WorldUploadBudget()
+
+            func setUniforms(
+                eye: SIMD3<Float>,
+                projection: simd_float4x4
+            ) {
+                let view = Self.makeViewMatrix(
+                    eye: eye,
+                    forward: scene.metalCameraForward,
+                    up: scene.metalCameraUp
+                )
+                var uniforms = WorldUniforms(
+                    viewProjection: simd_mul(projection, view),
+                    lightDirection: SIMD4<Float>(0.35, 0.80, 0.48, 0)
+                )
+                withUnsafeBytes(of: &uniforms) { bytes in
+                    guard let address = bytes.baseAddress else { return }
+                    encoder.setVertexBytes(address, length: bytes.count, index: 1)
+                    encoder.setFragmentBytes(address, length: bytes.count, index: 1)
+                }
+            }
+            func draw(_ range: GModMetalWorldMaterialRange) {
+                encoder.drawIndexedPrimitives(
+                    type: .triangle,
+                    indexCount: range.indexCount,
+                    indexType: .uint32,
+                    indexBuffer: mesh.indexBuffer,
+                    indexBufferOffset: range.firstIndex * MemoryLayout<UInt32>.stride
+                )
+            }
+
+            let draws2DSky = GModMetalSkyVisibilityRenderContract.draws2D(
+                scene.skyboxVisibility
+            )
+            let skyboxRanges = draws2DSky
+                ? scene.materialRanges.filter { $0.renderLayer == .sky2D }
+                : []
+            setUniforms(
+                eye: scene.metalSkyboxCameraEye,
+                projection: sky2DProjection
+            )
+            encoder.setDepthStencilState(skyboxDepthState)
+            encoder.setFragmentSamplerState(skyboxSampler, index: 0)
+            var rendered = 0
+            var missing = 0
+            var pending = 0
+            for range in skyboxRanges {
+                guard let bitmap = range.bitmap else {
+                    missing += 1
+                    continue
+                }
+                guard let texture = worldTexture(
+                    for: bitmap,
+                    device: device,
+                    uploadBudget: &uploadBudget
+                ) else {
+                    pending += 1
+                    continue
+                }
+                encoder.setRenderPipelineState(skyboxPipeline)
+                encoder.setFragmentTexture(texture, index: 0)
+                if let configuration = range.samplerConfiguration,
+                   let sampler = samplerStateForWorldTexture(
+                       for: configuration,
+                       device: device
+                   ) {
+                    encoder.setFragmentSamplerState(sampler, index: 0)
+                }
+                draw(range)
+                rendered += 1
+            }
+            lastSkyboxRenderedFaceCount = rendered
+            lastSkyboxMissingFaceCount = missing
+            lastSkyboxPendingFaceCount = pending
+
+            guard GModMetalSkyVisibilityRenderContract.draws3D(
+                scene.skyboxVisibility
+            ) else { return }
+
+            let sky3DRanges = scene.materialRanges.filter {
+                $0.renderLayer == .sky3D && $0.waterSurface == nil
+            }
+            let sky3DWaterRanges = scene.materialRanges.filter {
+                $0.renderLayer == .sky3D && $0.waterSurface != nil
+            }
+            guard !sky3DRanges.isEmpty || !sky3DWaterRanges.isEmpty,
+                  let sky3D = scene.sky3D else { return }
+            let clipPlanes = GModMetalSky3DProjectionContract.bakedClipPlanes(
+                scale: sky3D.scale
+            )
+            let sky3DProjection = Self.makePerspectiveMatrix(
+                verticalFieldOfViewRadians: 75 * .pi / 180,
+                aspect: Float(width) / Float(height),
+                near: clipPlanes.near,
+                far: clipPlanes.far
+            )
+            setUniforms(
+                eye: scene.metalCameraEye,
+                projection: sky3DProjection
+            )
+            encoder.setDepthStencilState(worldDepthState)
+            encoder.setFragmentSamplerState(worldSampler, index: 0)
+            let lightmapTexture: MTLTexture?
+            if let atlas = scene.lightmapAtlas,
+               let cachedWorldLightmap,
+               cachedWorldLightmap.identifier == atlas.identifier,
+               cachedWorldLightmap.width == atlas.width,
+               cachedWorldLightmap.height == atlas.height,
+               cachedWorldLightmap.byteCount == atlas.linearRGBA16Float.count {
+                lightmapTexture = cachedWorldLightmap.texture
+            } else {
+                lightmapTexture = nil
+            }
+            encoder.setFragmentTexture(lightmapTexture, index: 1)
+            encoder.setFragmentSamplerState(
+                lightmapTexture == nil ? nil : lightmapSampler,
+                index: 1
+            )
+            for range in sky3DRanges {
+                if let bitmap = range.bitmap,
+                   let texture = worldTexture(
+                       for: bitmap,
+                       device: device,
+                       uploadBudget: &uploadBudget
+                   ) {
+                    encoder.setRenderPipelineState(
+                        lightmapTexture == nil
+                            ? texturedPipeline
+                            : texturedLightmappedPipeline
+                    )
+                    encoder.setFragmentTexture(texture, index: 0)
+                    if let configuration = range.samplerConfiguration,
+                       let sampler = samplerStateForWorldTexture(
+                           for: configuration,
+                           device: device
+                       ) {
+                        encoder.setFragmentSamplerState(sampler, index: 0)
+                    }
+                } else if range.bitmap != nil {
+                    encoder.setRenderPipelineState(
+                        lightmapTexture == nil
+                            ? solidPipeline
+                            : lightmappedPipeline
+                    )
+                    encoder.setFragmentTexture(nil, index: 0)
+                } else if range.materialName != nil {
+                    encoder.setRenderPipelineState(missingMaterialPipeline)
+                    encoder.setFragmentTexture(nil, index: 0)
+                } else {
+                    encoder.setRenderPipelineState(
+                        lightmapTexture == nil
+                            ? solidPipeline
+                            : lightmappedPipeline
+                    )
+                    encoder.setFragmentTexture(nil, index: 0)
+                }
+                draw(range)
+            }
+
+            let skyCameraZ = GModMetalSky3DProjectionContract.sourceCameraEye(
+                worldEye: scene.cameraEye,
+                sky: sky3D
+            ).z
+            encoder.setDepthStencilState(waterDepthState)
+            encoder.setFragmentSamplerState(worldSampler, index: 0)
+            for range in sky3DWaterRanges {
+                guard let surface = range.waterSurface,
+                      let material = range.waterMaterial,
+                      GModMetalWaterRenderContract.shouldRender(
+                        material,
+                        surface: surface,
+                        cameraZ: skyCameraZ
+                      ),
+                      let alpha = GModMetalWaterRenderContract.fallbackAlpha(
+                        material
+                      ) else { continue }
+                let angleRadians = (material.textureScrollAngleDegrees ?? 0) *
+                    .pi / 180
+                let direction = SIMD2<Float>(
+                    cos(angleRadians),
+                    sin(angleRadians)
+                )
+                var uniforms = WorldWaterUniforms(
+                    fogColorAndAlpha: SIMD4<Float>(
+                        material.fogColor * alpha,
+                        alpha
+                    ),
+                    scrollDirectionRateAndTime: SIMD4<Float>(
+                        direction.x,
+                        direction.y,
+                        material.textureScrollRate ?? 0,
+                        scene.sourceFixedTime
+                    )
+                )
+                withUnsafeBytes(of: &uniforms) { bytes in
+                    guard let address = bytes.baseAddress else { return }
+                    encoder.setFragmentBytes(
+                        address,
+                        length: bytes.count,
+                        index: 2
+                    )
+                }
+                if let normalBitmap = material.normalBitmap,
+                   let normalTexture = worldTexture(
+                    for: normalBitmap,
+                    device: device,
+                    uploadBudget: &uploadBudget,
+                    isSRGB: false
+                   ) {
+                    encoder.setRenderPipelineState(waterNormalPipeline)
+                    encoder.setFragmentTexture(normalTexture, index: 0)
+                    let configuration = GModMetalWorldSamplerConfiguration(
+                        bitmap: normalBitmap,
+                        renderLayer: .sky3D
+                    )
+                    if let sampler = samplerStateForWorldTexture(
+                        for: configuration,
+                        device: device
+                    ) {
+                        encoder.setFragmentSamplerState(sampler, index: 0)
+                    }
+                } else {
+                    encoder.setRenderPipelineState(waterSolidPipeline)
+                    encoder.setFragmentTexture(nil, index: 0)
+                }
+                draw(range)
+            }
+        }
+
         private func drawWorld(
             scene: GModMetalWorldScene,
             mesh: CachedWorldMesh,
@@ -2018,7 +2378,6 @@ public struct GModMetalView:
             skyboxSampler: MTLSamplerState,
             encoder: MTLRenderCommandEncoder
         ) -> WorldDrawResult {
-            worldTextureUploadFailureReason = nil
             let width = Swift.max(1, viewport.x)
             let height = Swift.max(1, viewport.y)
             let aspect = Float(width) / Float(height)
@@ -2049,7 +2408,8 @@ public struct GModMetalView:
             func setUniforms(eye: SIMD3<Float>) {
                 let view = Self.makeViewMatrix(
                     eye: eye,
-                    forward: scene.metalCameraForward
+                    forward: scene.metalCameraForward,
+                    up: scene.metalCameraUp
                 )
                 var uniforms = WorldUniforms(
                     viewProjection: simd_mul(projection, view),
@@ -2080,44 +2440,6 @@ public struct GModMetalView:
                 )
             }
 
-            let skyboxRanges = ranges.filter { $0.skyboxFace != nil }
-            if !skyboxRanges.isEmpty {
-                // Source 2D sky has rotation but no translation/parallax. The
-                // cube can therefore never be walked out of, regardless of its
-                // fixed directional vertex coordinates.
-                setUniforms(eye: scene.metalSkyboxCameraEye)
-                encoder.setDepthStencilState(skyboxDepthState)
-                encoder.setFragmentSamplerState(skyboxSampler, index: 0)
-                var rendered = 0
-                var missing = 0
-                var pending = 0
-                for range in skyboxRanges {
-                    guard let bitmap = range.bitmap else {
-                        missing += 1
-                        continue
-                    }
-                    guard let texture = worldTexture(
-                        for: bitmap,
-                        device: device,
-                        uploadBudget: &uploadBudget
-                    ) else {
-                        pending += 1
-                        continue
-                    }
-                    encoder.setRenderPipelineState(skyboxPipeline)
-                    encoder.setFragmentTexture(texture, index: 0)
-                    draw(range)
-                    rendered += 1
-                }
-                lastSkyboxRenderedFaceCount = rendered
-                lastSkyboxMissingFaceCount = missing
-                lastSkyboxPendingFaceCount = pending
-            } else {
-                lastSkyboxRenderedFaceCount = 0
-                lastSkyboxMissingFaceCount = 0
-                lastSkyboxPendingFaceCount = 0
-            }
-
             setUniforms(eye: scene.metalCameraEye)
             encoder.setDepthStencilState(worldDepthState)
             encoder.setFragmentSamplerState(worldSampler, index: 0)
@@ -2142,7 +2464,7 @@ public struct GModMetalView:
             var pendingRangeCount = 0
             var lightmappedRangeCount = 0
             for range in ranges where
-                range.skyboxFace == nil && range.waterSurface == nil {
+                range.renderLayer == .world && range.waterSurface == nil {
                 if let bitmap = range.bitmap {
                     if let texture = worldTexture(
                         for: bitmap,
@@ -2155,6 +2477,13 @@ public struct GModMetalView:
                                 : texturedLightmappedPipeline
                         )
                         encoder.setFragmentTexture(texture, index: 0)
+                        if let configuration = range.samplerConfiguration,
+                           let sampler = samplerStateForWorldTexture(
+                               for: configuration,
+                               device: device
+                           ) {
+                            encoder.setFragmentSamplerState(sampler, index: 0)
+                        }
                         texturedRangeCount += 1
                         if lightmapTexture != nil {
                             lightmappedRangeCount += 1
@@ -2197,7 +2526,8 @@ public struct GModMetalView:
             var waterNormalMappedRangeCount = 0
             var waterMissingMaterialRangeCount = 0
             var waterPendingNormalRangeCount = 0
-            for range in ranges where range.waterSurface != nil {
+            for range in ranges where
+                range.renderLayer == .world && range.waterSurface != nil {
                 guard let surface = range.waterSurface,
                       let material = range.waterMaterial else {
                     waterMissingMaterialRangeCount += 1
@@ -2253,6 +2583,16 @@ public struct GModMetalView:
                     ) {
                         encoder.setRenderPipelineState(waterNormalPipeline)
                         encoder.setFragmentTexture(normalTexture, index: 0)
+                        let configuration = GModMetalWorldSamplerConfiguration(
+                            bitmap: normalBitmap,
+                            renderLayer: range.renderLayer
+                        )
+                        if let sampler = samplerStateForWorldTexture(
+                            for: configuration,
+                            device: device
+                        ) {
+                            encoder.setFragmentSamplerState(sampler, index: 0)
+                        }
                         waterNormalMappedRangeCount += 1
                     } else {
                         encoder.setRenderPipelineState(waterSolidPipeline)
@@ -2300,7 +2640,7 @@ public struct GModMetalView:
             if let cached = cachedWorldTextures[key], cached.bitmap == bitmap {
                 return cached.texture
             }
-            let byteCount = bitmap.premultipliedRGBA8.count
+            let byteCount = bitmap.totalByteCount
             guard uploadBudget.reserve(
                 byteCount: byteCount
             ) else { return nil }
@@ -2308,8 +2648,9 @@ public struct GModMetalView:
                 pixelFormat: isSRGB ? .rgba8Unorm_srgb : .rgba8Unorm,
                 width: bitmap.width,
                 height: bitmap.height,
-                mipmapped: false
+                mipmapped: bitmap.mipLevels.count > 1
             )
+            descriptor.mipmapLevelCount = bitmap.mipLevels.count
             descriptor.usage = .shaderRead
             descriptor.storageMode = .shared
             guard let texture = device.makeTexture(descriptor: descriptor) else {
@@ -2320,14 +2661,16 @@ public struct GModMetalView:
                 )
                 return nil
             }
-            bitmap.premultipliedRGBA8.withUnsafeBytes { bytes in
-                guard let base = bytes.baseAddress else { return }
-                texture.replace(
-                    region: MTLRegionMake2D(0, 0, bitmap.width, bitmap.height),
-                    mipmapLevel: 0,
-                    withBytes: base,
-                    bytesPerRow: bitmap.width * 4
-                )
+            for (level, mip) in bitmap.mipLevels.enumerated() {
+                mip.premultipliedRGBA8.withUnsafeBytes { bytes in
+                    guard let base = bytes.baseAddress else { return }
+                    texture.replace(
+                        region: MTLRegionMake2D(0, 0, mip.width, mip.height),
+                        mipmapLevel: level,
+                        withBytes: base,
+                        bytesPerRow: mip.width * 4
+                    )
+                }
             }
             cachedWorldTextures[key] = CachedSurfaceTexture(
                 bitmap: bitmap,
@@ -2341,6 +2684,38 @@ public struct GModMetalView:
             isSRGB: Bool
         ) -> String {
             (isSRGB ? "srgb:" : "linear:") + bitmap.cacheIdentifier
+        }
+
+        private func samplerStateForWorldTexture(
+            for configuration: GModMetalWorldSamplerConfiguration,
+            device: MTLDevice
+        ) -> MTLSamplerState? {
+            if let cached = worldSamplerStates[configuration] {
+                return cached
+            }
+            let descriptor = MTLSamplerDescriptor()
+            descriptor.minFilter = configuration.minFilter == .nearest
+                ? .nearest
+                : .linear
+            descriptor.magFilter = configuration.magFilter == .nearest
+                ? .nearest
+                : .linear
+            switch configuration.mipFilter {
+            case .notMipmapped: descriptor.mipFilter = .notMipmapped
+            case .nearest: descriptor.mipFilter = .nearest
+            case .linear: descriptor.mipFilter = .linear
+            }
+            descriptor.sAddressMode = configuration.sAddressMode == .clampToEdge
+                ? .clampToEdge
+                : .repeat
+            descriptor.tAddressMode = configuration.tAddressMode == .clampToEdge
+                ? .clampToEdge
+                : .repeat
+            descriptor.maxAnisotropy = configuration.maximumAnisotropy
+            guard let sampler = device.makeSamplerState(descriptor: descriptor)
+            else { return nil }
+            worldSamplerStates[configuration] = sampler
+            return sampler
         }
 
         private func drawSurface(
@@ -2557,7 +2932,7 @@ public struct GModMetalView:
                 return cached.texture
             }
 
-            let byteCount = bitmap.premultipliedRGBA8.count
+            let byteCount = bitmap.totalByteCount
             guard byteCount <= SurfaceUploadBudget.maximumSingleTextureByteCount
             else {
                 surfaceSceneIssue =
@@ -2580,6 +2955,8 @@ public struct GModMetalView:
                 height: bitmap.height,
                 mipmapped: false
             )
+            descriptor.mipmapLevelCount =
+                GModMetalSurfaceTextureUploadContract.mipmapLevelCount
             descriptor.storageMode = .shared
             descriptor.usage = [.shaderRead]
             guard let texture = device.makeTexture(descriptor: descriptor) else {
@@ -2592,12 +2969,7 @@ public struct GModMetalView:
                 bytes -> Bool in
                 guard let address = bytes.baseAddress else { return false }
                 texture.replace(
-                    region: MTLRegionMake2D(
-                        0,
-                        0,
-                        bitmap.width,
-                        bitmap.height
-                    ),
+                    region: MTLRegionMake2D(0, 0, bitmap.width, bitmap.height),
                     mipmapLevel: 0,
                     withBytes: address,
                     bytesPerRow: bitmap.width * 4
@@ -2644,7 +3016,7 @@ public struct GModMetalView:
         private func removeCachedSurfaceTexture(_ key: String) {
             if let removed = cachedSurfaceTextures.removeValue(forKey: key) {
                 cachedSurfaceTextureByteCount -=
-                    removed.bitmap.premultipliedRGBA8.count
+                    removed.bitmap.totalByteCount
             }
             cachedSurfaceTextureOrder.removeAll { $0 == key }
             cachedSurfaceTextureByteCount = max(0, cachedSurfaceTextureByteCount)
@@ -2666,14 +3038,12 @@ public struct GModMetalView:
 
         private static func makeViewMatrix(
             eye: SIMD3<Float>,
-            forward rawForward: SIMD3<Float>
+            forward rawForward: SIMD3<Float>,
+            up rawUp: SIMD3<Float>
         ) -> simd_float4x4 {
             let forward = simd_normalize(rawForward)
-            let preferredUp = SIMD3<Float>(0, 1, 0)
-            let alternateUp = SIMD3<Float>(0, 0, 1)
-            let upSeed = abs(simd_dot(forward, preferredUp)) > 0.999
-                ? alternateUp
-                : preferredUp
+            let projectedUp = rawUp - forward * simd_dot(rawUp, forward)
+            let upSeed = simd_normalize(projectedUp)
             let right = simd_normalize(simd_cross(forward, upSeed))
             let up = simd_cross(right, forward)
             let backward = -forward

@@ -617,6 +617,17 @@ public struct SourceBSP: Sendable, Equatable {
     /// `SourceBSPTextureData.nameStringTableID`.
     public let textureNames: [String]
 
+    /// Brush order is deliberately identical to `brushes`, so BSP broad-phase
+    /// indices can address this immutable world directly after it is built
+    /// exactly once during BSP initialization.
+    private let prebuiltWorldCollision: SourceCollisionWorld
+
+    /// Test-visible structural invariant for the BSP/collision hot path.
+    /// A valid BSP owns exactly one prebuilt primitive per parsed brush.
+    var prebuiltWorldCollisionPrimitiveCount: Int {
+        prebuiltWorldCollision.primitives.count
+    }
+
     public init(
         data: Data,
         versionPolicy: SourceBSPVersionPolicy = .verifiedSourceSDK2013
@@ -1149,6 +1160,13 @@ public struct SourceBSP: Sendable, Equatable {
                 }
             }
         }
+
+        prebuiltWorldCollision = Self.makeWorldCollision(
+            planes: planes,
+            textureInfo: textureInfo,
+            brushes: brushes,
+            brushSides: brushSides
+        )
     }
 
     public func textureName(forTextureDataIndex index: Int) -> String? {
@@ -1278,16 +1296,21 @@ public struct SourceBSP: Sendable, Equatable {
         return contents
     }
 
-    /// Converts every parsed BSP brush into the existing deterministic convex
-    /// collision core. World-tree traces below normally use only brushes
-    /// referenced by leaves crossed by the sweep.
+    /// Returns a mask-filtered value view of the collision primitives built at
+    /// BSP load. World-tree traces below avoid even this filtered-array copy by
+    /// addressing the prebuilt world with leaf-selected brush indices.
     public func collisionWorld(
         mask: SourceContents = SourceMasks.all
     ) -> SourceCollisionWorld {
-        let selected = brushes.indices.filter { index in
-            UInt32(bitPattern: brushes[index].contents) & mask.rawValue != 0
+        let selected = prebuiltWorldCollision.primitives.filter { primitive in
+            switch primitive {
+            case let .axisAlignedBox(collider):
+                return !collider.contents.intersection(mask).isEmpty
+            case let .convexBrush(brush):
+                return !brush.contents.intersection(mask).isEmpty
+            }
         }
-        return collisionWorld(brushIndices: selected)
+        return SourceCollisionWorld(primitives: selected)
     }
 
     /// Traverses the BSP node tree as a broad phase, de-duplicates brushes in
@@ -1299,11 +1322,10 @@ public struct SourceBSP: Sendable, Equatable {
         tolerance: Float = SourceCollisionConstants.distanceEpsilon,
         headNode: Int32? = nil
     ) throws -> SourceGameTrace {
-        let indices = try brushIndicesIntersected(by: ray, headNode: headNode).filter { index in
-            UInt32(bitPattern: brushes[index].contents) & mask.rawValue != 0
-        }
-        return collisionWorld(brushIndices: indices).trace(
+        let indices = try brushIndicesIntersected(by: ray, headNode: headNode)
+        return prebuiltWorldCollision.trace(
             ray,
+            candidatePrimitiveIndices: indices,
             mask: mask,
             tolerance: tolerance
         )
@@ -1387,13 +1409,33 @@ public struct SourceBSP: Sendable, Equatable {
         return result
     }
 
-    private func collisionWorld(brushIndices: [Int]) -> SourceCollisionWorld {
-        SourceCollisionWorld(
-            primitives: brushIndices.map { .convexBrush(convexBrush(at: $0)) }
-        )
+    private static func makeWorldCollision(
+        planes: [SourceBSPPlane],
+        textureInfo: [SourceBSPTextureInfo],
+        brushes: [SourceBSPBrush],
+        brushSides: [SourceBSPBrushSide]
+    ) -> SourceCollisionWorld {
+        var primitives: [SourceCollisionPrimitive] = []
+        primitives.reserveCapacity(brushes.count)
+        for brushIndex in brushes.indices {
+            primitives.append(.convexBrush(makeConvexBrush(
+                at: brushIndex,
+                planes: planes,
+                textureInfo: textureInfo,
+                brushes: brushes,
+                brushSides: brushSides
+            )))
+        }
+        return SourceCollisionWorld(primitives: primitives)
     }
 
-    private func convexBrush(at brushIndex: Int) -> SourceConvexBrush {
+    private static func makeConvexBrush(
+        at brushIndex: Int,
+        planes: [SourceBSPPlane],
+        textureInfo: [SourceBSPTextureInfo],
+        brushes: [SourceBSPBrush],
+        brushSides: [SourceBSPBrushSide]
+    ) -> SourceConvexBrush {
         let brush = brushes[brushIndex]
         let start = Int(brush.firstSide)
         let end = start + Int(brush.sideCount)
@@ -1408,14 +1450,16 @@ public struct SourceBSP: Sendable, Equatable {
         }
         let firstSurface: SourceTraceSurface
         if let firstRealSide = sides.first(where: { $0.bevel == 0 }) {
-            firstSurface = surface(for: firstRealSide)
+            firstSurface = surface(for: firstRealSide, textureInfo: textureInfo)
         } else {
             firstSurface = SourceTraceSurface()
         }
         let planeSurfaces: [SourceTraceSurface] = sides.map { side in
             // Bevels are collision-only planes; preserve the first real side's
             // metadata if one becomes the entering clip plane.
-            side.bevel == 0 ? surface(for: side) : firstSurface
+            side.bevel == 0
+                ? surface(for: side, textureInfo: textureInfo)
+                : firstSurface
         }
         return SourceConvexBrush(
             planes: convertedPlanes,
@@ -1426,7 +1470,10 @@ public struct SourceBSP: Sendable, Equatable {
         )
     }
 
-    private func surface(for side: SourceBSPBrushSide) -> SourceTraceSurface {
+    private static func surface(
+        for side: SourceBSPBrushSide,
+        textureInfo: [SourceBSPTextureInfo]
+    ) -> SourceTraceSurface {
         guard side.textureInfoIndex >= 0 else { return SourceTraceSurface() }
         let info = textureInfo[Int(side.textureInfoIndex)]
         return SourceTraceSurface(flags: UInt16(truncatingIfNeeded: info.flags))

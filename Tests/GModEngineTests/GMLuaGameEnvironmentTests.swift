@@ -7,7 +7,8 @@ final class GMLuaGameEnvironmentTests: XCTestCase {
         let configuration = try GMLuaGameEnvironmentConfiguration(
             maxPlayers: 24,
             mapName: "ttt_minecraft_b5",
-            sessionKind: .dedicatedServer
+            sessionKind: .dedicatedServer,
+            hostName: "Dedicated test host"
         )
         let runtime = GMLuaRuntime(
             realm: .server,
@@ -29,7 +30,8 @@ final class GMLuaGameEnvironmentTests: XCTestCase {
             sourceName: "@GLuaGameEnvironmentRegression.lua"
         )
         try runtime.execute(
-            "assert(GLUA_GAME_ENVIRONMENT_REGRESSION_OK == true)"
+            "assert(GLUA_GAME_ENVIRONMENT_REGRESSION_OK == true); " +
+                "assert(GetHostName() == 'Dedicated test host')"
         )
     }
 
@@ -50,7 +52,8 @@ final class GMLuaGameEnvironmentTests: XCTestCase {
         environment.connect(try GMLuaGameEnvironmentConfiguration(
             maxPlayers: 1,
             mapName: "gm_flatgrass",
-            sessionKind: .singlePlayer
+            sessionKind: .singlePlayer,
+            hostName: "Local test host"
         ))
         try runtime.execute(
             "assert(game.MaxPlayers() == 1); " +
@@ -83,12 +86,20 @@ final class GMLuaGameEnvironmentTests: XCTestCase {
         XCTAssertThrowsError(try GMLuaGameEnvironmentConfiguration(
             maxPlayers: 0,
             mapName: "gm_construct",
-            sessionKind: .listenServer
+            sessionKind: .listenServer,
+            hostName: "Invalid player count"
         ))
         XCTAssertThrowsError(try GMLuaGameEnvironmentConfiguration(
             maxPlayers: 16,
             mapName: "maps/gm_construct.bsp",
-            sessionKind: .listenServer
+            sessionKind: .listenServer,
+            hostName: "Invalid map"
+        ))
+        XCTAssertThrowsError(try GMLuaGameEnvironmentConfiguration(
+            maxPlayers: 16,
+            mapName: "gm_construct",
+            sessionKind: .listenServer,
+            hostName: "  "
         ))
     }
 }

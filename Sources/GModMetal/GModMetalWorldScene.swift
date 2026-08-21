@@ -9,6 +9,121 @@ public enum GModMetalSkyboxFace: String, CaseIterable, Sendable, Equatable, Hash
     case down = "dn"
 }
 
+public enum GModMetalWorldRenderLayer: String, Sendable, Equatable, Hashable {
+    case world
+    case sky3D
+    case sky2D
+}
+
+public enum GModMetalSkyboxVisibility: Sendable, Equatable {
+    case notVisible
+    case sky3D
+    case sky2D
+}
+
+enum GModMetalSkyVisibilityRenderContract {
+    static func draws2D(_ visibility: GModMetalSkyboxVisibility) -> Bool {
+        visibility == .sky3D || visibility == .sky2D
+    }
+
+    static func draws3D(_ visibility: GModMetalSkyboxVisibility) -> Bool {
+        visibility == .sky3D
+    }
+}
+
+public struct GModMetalWorldSky3D: Sendable, Equatable {
+    /// `sky_camera` origin in Source coordinates before mesh baking.
+    public let sourceOrigin: SIMD3<Float>
+    /// Positive Source `sky_camera` scale used by `(vertex - origin) * scale`.
+    public let scale: Float
+
+    public init(sourceOrigin: SIMD3<Float>, scale: Float) {
+        self.sourceOrigin = sourceOrigin
+        self.scale = scale
+    }
+}
+
+public enum GModMetalTextureFilter: Sendable, Equatable, Hashable {
+    case nearest
+    case linear
+}
+
+public enum GModMetalTextureMipFilter: Sendable, Equatable, Hashable {
+    case notMipmapped
+    case nearest
+    case linear
+}
+
+public enum GModMetalTextureAddressMode: Sendable, Equatable, Hashable {
+    case `repeat`
+    case clampToEdge
+}
+
+/// Metal-independent sampler policy derived from the real VTF header. This is
+/// intentionally test-visible so point/no-mip/clamp semantics cannot regress
+/// into a blanket blur workaround.
+public struct GModMetalWorldSamplerConfiguration: Sendable, Equatable, Hashable {
+    public let minFilter: GModMetalTextureFilter
+    public let magFilter: GModMetalTextureFilter
+    public let mipFilter: GModMetalTextureMipFilter
+    public let sAddressMode: GModMetalTextureAddressMode
+    public let tAddressMode: GModMetalTextureAddressMode
+    public let maximumAnisotropy: Int
+
+    public init(
+        bitmap: GModMetalSurfaceBitmap,
+        renderLayer: GModMetalWorldRenderLayer
+    ) {
+        let flags = bitmap.sourceTextureFlags ?? []
+        let point = flags.contains(.pointSample)
+        minFilter = point ? .nearest : .linear
+        magFilter = point ? .nearest : .linear
+        if bitmap.mipLevels.count <= 1 || flags.contains(.noMip) {
+            mipFilter = .notMipmapped
+        } else if flags.contains(.trilinear) || flags.contains(.anisotropic) {
+            mipFilter = .linear
+        } else {
+            mipFilter = .nearest
+        }
+        let forceSkyClamp = renderLayer == .sky2D
+        sAddressMode = forceSkyClamp || flags.contains(.clampS)
+            ? .clampToEdge
+            : .repeat
+        tAddressMode = forceSkyClamp || flags.contains(.clampT)
+            ? .clampToEdge
+            : .repeat
+        maximumAnisotropy = flags.contains(.anisotropic) &&
+            mipFilter != .notMipmapped ? 8 : 1
+    }
+}
+
+/// App-side CPU retention budget for immutable world textures. Material ranges
+/// can reference the same decoded bitmap in multiple Source render layers; the
+/// bytes are charged once by cache identity while every range keeps the value.
+public struct GModMetalWorldBitmapRetentionBudget: Sendable, Equatable {
+    public let maximumByteCount: Int
+    public private(set) var retainedByteCount = 0
+    private var retainedIdentifiers = Set<String>()
+
+    public init(maximumByteCount: Int) {
+        self.maximumByteCount = Swift.max(0, maximumByteCount)
+    }
+
+    public mutating func retain(_ bitmap: GModMetalSurfaceBitmap) -> Bool {
+        if retainedIdentifiers.contains(bitmap.cacheIdentifier) {
+            return true
+        }
+        let required = bitmap.totalByteCount
+        guard required <= maximumByteCount,
+              retainedByteCount <= maximumByteCount - required else {
+            return false
+        }
+        retainedIdentifiers.insert(bitmap.cacheIdentifier)
+        retainedByteCount += required
+        return true
+    }
+}
+
 /// Test-visible policy shared by scene construction and the Metal pass. A
 /// Source 2D sky follows camera rotation only, is drawn as the background, and
 /// must never occlude ordinary world geometry.
@@ -16,6 +131,34 @@ enum GModMetalSkyboxRenderContract {
     static let cameraEye = SIMD3<Float>.zero
     static let depthCompareAlwaysPasses = true
     static let depthWritesEnabled = false
+}
+
+enum GModMetalWorldPassOrderContract {
+    static let orderedLayers: [GModMetalWorldRenderLayer] = [
+        .sky2D, .sky3D, .world,
+    ]
+    static let clearsDepthBetweenSkyAndWorld = true
+}
+
+/// Valve's `CSkyboxView::DrawInternal` uses zNear 2 and
+/// `MAX_TRACE_LENGTH` in miniature sky space. Because this renderer bakes
+/// `(vertex - skyOrigin) * scale`, both clip planes must be multiplied by the
+/// same real `sky_camera` scale to remain projection-equivalent.
+enum GModMetalSky3DProjectionContract {
+    static let sourceNear: Float = 2
+    static let maximumCoordinate: Float = 16_384
+    static let sourceFar: Float = Float(3).squareRoot() * 2 * maximumCoordinate
+
+    static func bakedClipPlanes(scale: Float) -> (near: Float, far: Float) {
+        (sourceNear * scale, sourceFar * scale)
+    }
+
+    static func sourceCameraEye(
+        worldEye: SIMD3<Float>,
+        sky: GModMetalWorldSky3D
+    ) -> SIMD3<Float> {
+        sky.sourceOrigin + worldEye / sky.scale
+    }
 }
 
 public struct GModMetalWorldWaterSurface: Sendable, Equatable {
@@ -121,6 +264,15 @@ public struct GModMetalWorldMaterialRange: Sendable, Equatable {
     public let skyboxFace: GModMetalSkyboxFace?
     public let waterSurface: GModMetalWorldWaterSurface?
     public let waterMaterial: GModMetalWorldWaterMaterial?
+    public let renderLayer: GModMetalWorldRenderLayer
+    public var samplerConfiguration: GModMetalWorldSamplerConfiguration? {
+        bitmap.map {
+            GModMetalWorldSamplerConfiguration(
+                bitmap: $0,
+                renderLayer: renderLayer
+            )
+        }
+    }
 
     public init(
         materialName: String?,
@@ -128,13 +280,15 @@ public struct GModMetalWorldMaterialRange: Sendable, Equatable {
         indexCount: Int,
         bitmap: GModMetalSurfaceBitmap?,
         waterSurface: GModMetalWorldWaterSurface? = nil,
-        waterMaterial: GModMetalWorldWaterMaterial? = nil
+        waterMaterial: GModMetalWorldWaterMaterial? = nil,
+        renderLayer: GModMetalWorldRenderLayer = .world
     ) {
         self.materialName = materialName
         self.firstIndex = firstIndex
         self.indexCount = indexCount
         self.waterSurface = waterSurface
         self.waterMaterial = waterMaterial
+        self.renderLayer = renderLayer
         if let bitmap {
             materialResolution = .resolved(bitmap)
         } else if waterSurface != nil || materialName == nil {
@@ -142,7 +296,9 @@ public struct GModMetalWorldMaterialRange: Sendable, Equatable {
         } else {
             materialResolution = .sourceMissing
         }
-        let skybox = Self.skyboxBinding(for: materialName)
+        let skybox = renderLayer == .sky2D
+            ? Self.skyboxBinding(for: materialName)
+            : nil
         skyboxName = skybox?.name
         skyboxFace = skybox?.face
     }
@@ -153,7 +309,8 @@ public struct GModMetalWorldMaterialRange: Sendable, Equatable {
         indexCount: Int,
         materialResolution: GModMetalWorldMaterialResolution,
         waterSurface: GModMetalWorldWaterSurface? = nil,
-        waterMaterial: GModMetalWorldWaterMaterial? = nil
+        waterMaterial: GModMetalWorldWaterMaterial? = nil,
+        renderLayer: GModMetalWorldRenderLayer = .world
     ) {
         self.materialName = materialName
         self.firstIndex = firstIndex
@@ -161,7 +318,10 @@ public struct GModMetalWorldMaterialRange: Sendable, Equatable {
         self.materialResolution = materialResolution
         self.waterSurface = waterSurface
         self.waterMaterial = waterMaterial
-        let skybox = Self.skyboxBinding(for: materialName)
+        self.renderLayer = renderLayer
+        let skybox = renderLayer == .sky2D
+            ? Self.skyboxBinding(for: materialName)
+            : nil
         skyboxName = skybox?.name
         skyboxFace = skybox?.face
     }
@@ -390,6 +550,8 @@ public struct GModMetalWorldScene: Sendable, Equatable {
     public let materialDiagnostics: GModMetalWorldMaterialDiagnostics
     public let lightmapAtlas: GModMetalWorldLightmapAtlas?
     public let lightmapDiagnostics: GModMetalWorldLightmapDiagnostics
+    public let sky3D: GModMetalWorldSky3D?
+    public let skyboxVisibility: GModMetalSkyboxVisibility
     /// Fixed Source session time. Pause freezes this value, so material
     /// proxies such as TextureScroll freeze with the singleplayer world.
     public let sourceFixedTime: Float
@@ -397,10 +559,12 @@ public struct GModMetalWorldScene: Sendable, Equatable {
     /// Camera values in Source coordinates.
     public let cameraEye: SIMD3<Float>
     public let cameraForward: SIMD3<Float>
+    public let cameraUp: SIMD3<Float>
 
     /// Camera values converted to Metal coordinates.
     public let metalCameraEye: SIMD3<Float>
     public let metalCameraForward: SIMD3<Float>
+    public let metalCameraUp: SIMD3<Float>
 
     /// A 2D Source skybox follows camera rotation but never camera translation.
     /// The renderer uses this zero eye for its dedicated sky pass.
@@ -417,8 +581,11 @@ public struct GModMetalWorldScene: Sendable, Equatable {
         materialRanges: [GModMetalWorldMaterialRange] = [],
         lightmapAtlas: GModMetalWorldLightmapAtlas? = nil,
         lightmapDiagnostics: GModMetalWorldLightmapDiagnostics = .init(),
+        sky3D: GModMetalWorldSky3D? = nil,
+        skyboxVisibility: GModMetalSkyboxVisibility = .notVisible,
         cameraEye: SIMD3<Float>,
         cameraForward: SIMD3<Float>,
+        cameraUp: SIMD3<Float> = SIMD3<Float>(0, 0, 1),
         sourceFixedTime: Float = 0
     ) {
         self.meshIdentifier = meshIdentifier
@@ -438,11 +605,15 @@ public struct GModMetalWorldScene: Sendable, Equatable {
         self.materialDiagnostics = Self.makeMaterialDiagnostics(materialRanges)
         self.lightmapAtlas = lightmapAtlas
         self.lightmapDiagnostics = lightmapDiagnostics
+        self.sky3D = sky3D
+        self.skyboxVisibility = skyboxVisibility
         self.sourceFixedTime = sourceFixedTime
         self.cameraEye = cameraEye
         self.cameraForward = cameraForward
+        self.cameraUp = cameraUp
         self.metalCameraEye = Self.convertSourceVector(cameraEye)
         self.metalCameraForward = Self.convertSourceVector(cameraForward)
+        self.metalCameraUp = Self.convertSourceVector(cameraUp)
     }
 
     /// Returns a camera-updated value while sharing the immutable mesh array
@@ -450,6 +621,8 @@ public struct GModMetalWorldScene: Sendable, Equatable {
     public func updatingCamera(
         eye: SIMD3<Float>,
         forward: SIMD3<Float>,
+        up: SIMD3<Float>? = nil,
+        skyboxVisibility: GModMetalSkyboxVisibility? = nil,
         sourceFixedTime: Float? = nil
     ) -> Self {
         Self(
@@ -464,8 +637,11 @@ public struct GModMetalWorldScene: Sendable, Equatable {
             materialRanges: materialRanges,
             lightmapAtlas: lightmapAtlas,
             lightmapDiagnostics: lightmapDiagnostics,
+            sky3D: sky3D,
+            skyboxVisibility: skyboxVisibility ?? self.skyboxVisibility,
             cameraEye: eye,
             cameraForward: forward,
+            cameraUp: up ?? cameraUp,
             sourceFixedTime: sourceFixedTime ?? self.sourceFixedTime
         )
     }
@@ -490,8 +666,11 @@ public struct GModMetalWorldScene: Sendable, Equatable {
         materialRanges: [GModMetalWorldMaterialRange],
         lightmapAtlas: GModMetalWorldLightmapAtlas?,
         lightmapDiagnostics: GModMetalWorldLightmapDiagnostics,
+        sky3D: GModMetalWorldSky3D?,
+        skyboxVisibility: GModMetalSkyboxVisibility,
         cameraEye: SIMD3<Float>,
         cameraForward: SIMD3<Float>,
+        cameraUp: SIMD3<Float>,
         sourceFixedTime: Float
     ) {
         self.meshIdentifier = meshIdentifier
@@ -506,11 +685,15 @@ public struct GModMetalWorldScene: Sendable, Equatable {
         self.materialDiagnostics = Self.makeMaterialDiagnostics(materialRanges)
         self.lightmapAtlas = lightmapAtlas
         self.lightmapDiagnostics = lightmapDiagnostics
+        self.sky3D = sky3D
+        self.skyboxVisibility = skyboxVisibility
         self.sourceFixedTime = sourceFixedTime
         self.cameraEye = cameraEye
         self.cameraForward = cameraForward
+        self.cameraUp = cameraUp
         self.metalCameraEye = Self.convertSourceVector(cameraEye)
         self.metalCameraForward = Self.convertSourceVector(cameraForward)
+        self.metalCameraUp = Self.convertSourceVector(cameraUp)
     }
 
     private static func makeMaterialDiagnostics(

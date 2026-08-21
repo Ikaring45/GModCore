@@ -65,6 +65,40 @@ public struct GMLuaMountedGame: Sendable, Equatable {
     }
 }
 
+/// One host-reported Workshop/GMA entry returned by `engine.GetAddons()`.
+/// The eight fields mirror the public engine ABI; an empty host snapshot is a
+/// truthful no-addons result, while a disconnected registry still fails.
+public struct GMLuaMountedAddon: Sendable, Equatable {
+    public let downloaded: Bool
+    public let models: Int
+    public let title: String
+    public let file: String
+    public let mounted: Bool
+    public let workshopID: String
+    public let size: Int
+    public let updated: Int
+
+    public init(
+        downloaded: Bool,
+        models: Int,
+        title: String,
+        file: String,
+        mounted: Bool,
+        workshopID: String,
+        size: Int,
+        updated: Int
+    ) {
+        self.downloaded = downloaded
+        self.models = models
+        self.title = title
+        self.file = file
+        self.mounted = mounted
+        self.workshopID = workshopID
+        self.size = size
+        self.updated = updated
+    }
+}
+
 /// Host-owned snapshot used by native, read-only `engine` queries.
 ///
 /// Passing an empty snapshot is meaningful and reports that the connected
@@ -75,15 +109,18 @@ public struct GMLuaMountedGame: Sendable, Equatable {
 /// be inferred faithfully from the installed Lua filesystem.
 public struct GMLuaEngineConfiguration: Sendable, Equatable {
     public let games: [GMLuaMountedGame]
+    public let addons: [GMLuaMountedAddon]
     public let isPlayingDemo: Bool
     public let isRecordingDemo: Bool
 
     public init(
         games: [GMLuaMountedGame],
+        addons: [GMLuaMountedAddon] = [],
         isPlayingDemo: Bool,
         isRecordingDemo: Bool
     ) {
         self.games = games
+        self.addons = addons
         self.isPlayingDemo = isPlayingDemo
         self.isRecordingDemo = isRecordingDemo
     }
@@ -203,6 +240,46 @@ public final class GMLuaEngineRegistry: @unchecked Sendable {
         try state.setRawTableValue(
             .nativeFunction(getGames),
             for: .string("GetGames"),
+            in: engineTable
+        )
+
+        let getAddons = LuaNativeFunctionBox(
+            { [unowned state, registry] _ in
+                let addons = try registry.requiredConfiguration(
+                    for: "engine.GetAddons"
+                ).addons
+                let result = LuaTable()
+                for (offset, addon) in addons.enumerated() {
+                    let entry = LuaTable()
+                    for (name, value) in [
+                        ("downloaded", LuaValue.boolean(addon.downloaded)),
+                        ("models", .number(Double(addon.models))),
+                        ("title", .string(LuaString(addon.title))),
+                        ("file", .string(LuaString(addon.file))),
+                        ("mounted", .boolean(addon.mounted)),
+                        ("wsid", .string(LuaString(addon.workshopID))),
+                        ("size", .number(Double(addon.size))),
+                        ("updated", .number(Double(addon.updated)))
+                    ] {
+                        try state.setRawTableValue(
+                            value,
+                            for: .string(LuaString(name)),
+                            in: entry
+                        )
+                    }
+                    try state.setRawTableValue(
+                        .table(entry),
+                        for: .number(Double(offset + 1)),
+                        in: result
+                    )
+                }
+                return [.table(result)]
+            },
+            debugName: "engine.GetAddons"
+        )
+        try state.setRawTableValue(
+            .nativeFunction(getAddons),
+            for: .string("GetAddons"),
             in: engineTable
         )
 

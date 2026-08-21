@@ -474,6 +474,8 @@ final class SourceBSPTests: XCTestCase {
             end: SourceVector3(10, 0, 0)
         )
 
+        XCTAssertEqual(bsp.prebuiltWorldCollisionPrimitiveCount, bsp.brushes.count)
+
         let maskedOut = try bsp.traceWorld(ray, mask: .water)
         XCTAssertFalse(maskedOut.didHit)
         XCTAssertEqual(maskedOut.fraction, 1)
@@ -492,6 +494,14 @@ final class SourceBSPTests: XCTestCase {
 
         XCTAssertEqual(bsp.collisionWorld(mask: .solid).primitives.count, 1)
         XCTAssertTrue(bsp.collisionWorld(mask: .water).primitives.isEmpty)
+
+        // The former hot path rebuilt the selected brush planes and a new
+        // collision world for every call. Repeated traces now address the one
+        // prebuilt primitive array while preserving the exact value result.
+        for _ in 0..<256 {
+            XCTAssertEqual(try bsp.traceWorld(ray, mask: .solid), hit)
+            XCTAssertEqual(try bsp.traceWorld(ray, mask: .water), maskedOut)
+        }
     }
 
     func testWorldTraceCarriesExactEnteringBrushSideSurface() throws {

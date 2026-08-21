@@ -3,6 +3,7 @@ import GModLua
 
 public enum GMLuaStartupStage: String, Sendable, Equatable {
     case clientDermaBootstrap
+    case clientNotificationBootstrap
     case clientPostProcessBootstrap
     case clientVGUIBootstrap
     case clientMaterialProxyBootstrap
@@ -130,7 +131,7 @@ public enum GMLuaStartupError: Error, CustomStringConvertible {
 ///      -> scripted weapons -> OnGamemodeLoaded -> PostGamemodeLoaded -> Initialize
 ///      -> InitPostEntity
 ///
-/// CLIENT Derma bootstrap -> Base -> shared autorun -> client autorun -> addon boundary
+/// CLIENT Derma bootstrap -> notification module -> Base -> shared autorun -> client autorun -> addon boundary
 ///      -> postprocess -> VGUI controls -> material proxies -> Default skin -> target
 ///      -> scripted weapons -> OnGamemodeLoaded -> PostGamemodeLoaded -> Initialize
 ///      -> InitPostEntity
@@ -189,6 +190,12 @@ public final class GMLuaStartupOrchestrator {
                 path: "lua/derma/init.lua",
                 stage: .clientDermaBootstrap,
                 detail: "engine-invoked Derma runtime loaded after core and before Base",
+                runtime: runtime
+            )
+            try loadRequiredClientBootstrap(
+                path: "lua/includes/modules/notification.lua",
+                stage: .clientNotificationBootstrap,
+                detail: "stock notification module preloaded before Base and target gamemode notices",
                 runtime: runtime
             )
         }

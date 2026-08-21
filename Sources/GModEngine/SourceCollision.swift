@@ -389,32 +389,78 @@ public struct SourceCollisionWorld: Equatable, Sendable {
         tolerance: Float = SourceCollisionConstants.distanceEpsilon,
         shouldHitEntity: ((SourceBaseHandle?) -> Bool)? = nil
     ) -> SourceGameTrace {
+        traceCandidates(
+            ray,
+            primitiveIndices: primitives.indices,
+            mask: mask,
+            tolerance: tolerance,
+            shouldHitEntity: shouldHitEntity
+        )
+    }
+
+    /// Traces an ordered broad-phase selection without copying its collision
+    /// primitives into a temporary world. The indices remain caller ordered:
+    /// first-hit tie behavior and start-solid merging therefore match `trace`.
+    ///
+    /// This is internal because candidate indices are meaningful only to the
+    /// immutable world that produced them. `SourceBSP` uses brush indices as a
+    /// one-to-one primitive index after building its world once at load time.
+    func trace(
+        _ ray: SourceRay,
+        candidatePrimitiveIndices: [Int],
+        mask: SourceContents = SourceMasks.all,
+        tolerance: Float = SourceCollisionConstants.distanceEpsilon,
+        shouldHitEntity: ((SourceBaseHandle?) -> Bool)? = nil
+    ) -> SourceGameTrace {
+        traceCandidates(
+            ray,
+            primitiveIndices: candidatePrimitiveIndices,
+            mask: mask,
+            tolerance: tolerance,
+            shouldHitEntity: shouldHitEntity
+        )
+    }
+
+    private func traceCandidates<Indices: Sequence>(
+        _ ray: SourceRay,
+        primitiveIndices: Indices,
+        mask: SourceContents,
+        tolerance: Float,
+        shouldHitEntity: ((SourceBaseHandle?) -> Bool)?
+    ) -> SourceGameTrace where Indices.Element == Int {
         var result = SourceGameTrace(ray: ray)
 
-        for primitive in primitives {
+        for primitiveIndex in primitiveIndices {
+            let primitive = primitives[primitiveIndex]
             guard intersects(primitive.contents, mask) else { continue }
             if let shouldHitEntity, !shouldHitEntity(primitive.entityHandle) { continue }
 
             let candidate = trace(ray, against: primitive, tolerance: tolerance)
             guard candidate.didHit else { continue }
-
-            if candidate.startSolid {
-                if !result.startSolid {
-                    result = candidate
-                } else {
-                    result.allSolid = result.allSolid || candidate.allSolid
-                    result.fractionLeftSolid = max(
-                        result.fractionLeftSolid,
-                        candidate.fractionLeftSolid
-                    )
-                    result.contents.formUnion(candidate.contents)
-                }
-            } else if !result.startSolid && candidate.fraction < result.fraction {
-                result = candidate
-            }
+            merge(candidate, into: &result)
         }
 
         return result
+    }
+
+    private func merge(
+        _ candidate: SourceGameTrace,
+        into result: inout SourceGameTrace
+    ) {
+        if candidate.startSolid {
+            if !result.startSolid {
+                result = candidate
+            } else {
+                result.allSolid = result.allSolid || candidate.allSolid
+                result.fractionLeftSolid = max(
+                    result.fractionLeftSolid,
+                    candidate.fractionLeftSolid
+                )
+                result.contents.formUnion(candidate.contents)
+            }
+        } else if !result.startSolid && candidate.fraction < result.fraction {
+            result = candidate
+        }
     }
 
     public func trace(

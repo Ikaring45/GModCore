@@ -33,22 +33,10 @@ final class GModSpawnMenuInteractionTests: XCTestCase {
             }
         }
         XCTAssertTrue(weaponsContentReady)
-        // These asynchronous stock branches cross engine/HTML boundaries that
-        // are intentionally still explicit. Pin them here so the interaction
-        // test never turns a new timer error into swallowed diagnostic output.
-        XCTAssertEqual(timerFailures.count, 4)
-        XCTAssertEqual(
-            timerFailures.filter { $0.message.contains("spawnmenu_engine") }.count,
-            1
-        )
-        XCTAssertEqual(
-            timerFailures.filter { $0.message.contains("field 'Index'") }.count,
-            1
-        )
-        XCTAssertEqual(
-            timerFailures.filter { $0.message.contains("method 'NewObject'") }.count,
-            2
-        )
+        // Native spawnlist loading, Lua 5.1 iterator roots, and DHTML bridge
+        // registration are engine boundaries now. The stock asynchronous Q
+        // initialization must not leave any accepted timer failures behind.
+        XCTAssertEqual(timerFailures, [])
         let registry = try XCTUnwrap(session.clientRuntime.vguiRegistry)
         for _ in 0..<8 {
             _ = try session.renderClientVGUIFrame()

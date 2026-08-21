@@ -363,6 +363,50 @@ final class GMLuaPlatformImageAndVPKTests: XCTestCase {
         }
     }
 
+    func testSourceMaterialResolverRetainsAuthoredVTFMipChainAndFlags() throws {
+        let base = Array(repeating: UInt8(10), count: 4 * 4 * 4)
+        let mip1 = Array(repeating: UInt8(20), count: 2 * 2 * 4)
+        let mip2 = [UInt8(30), 31, 32, 255]
+        let flags: SourceVTFTextureFlags = [.trilinear, .clampS, .anisotropic]
+        let files: [String: Data] = [
+            "materials/synthetic/mipped.vmt": Data(
+                "\"LightmappedGeneric\" { \"$basetexture\" \"synthetic/mipped\" }".utf8
+            ),
+            "materials/synthetic/mipped.vtf": makeRGBA8888VTF(
+                width: 4,
+                height: 4,
+                pixels: base,
+                mipPixelsByLevel: [mip1, mip2],
+                flags: flags
+            ),
+        ]
+        let resolver = GMLuaSourceMaterialResolver { path in
+            files[path.lowercased()]
+        }
+
+        let mipZero = try resolver.resolve(named: "synthetic/mipped")
+        XCTAssertEqual(mipZero.mipImages.map(\.width), [4])
+        XCTAssertEqual(mipZero.decodedByteCount, base.count)
+
+        let material = try resolver.resolve(
+            named: "synthetic/mipped",
+            mipPolicy: .authoredChain
+        )
+        XCTAssertEqual(material.sourceTextureFlags, flags)
+        XCTAssertEqual(material.mipImages.map(\.width), [4, 2, 1])
+        XCTAssertEqual(material.mipImages.map(\.height), [4, 2, 1])
+        XCTAssertEqual(material.mipImages.map(\.rgbaBytes), [
+            Data(base), Data(mip1), Data(mip2),
+        ])
+        XCTAssertEqual(material.rgbaBytes, Data(base))
+        XCTAssertEqual(material.decodedByteCount, base.count + mip1.count + mip2.count)
+        XCTAssertEqual(resolver.cachedEntryCount, 2)
+        XCTAssertEqual(
+            resolver.cachedImageByteCount,
+            base.count * 2 + mip1.count + mip2.count
+        )
+    }
+
     func testVPKRejectsChecksumMismatchAndV2FileDataSectionOverrun() throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -566,9 +610,17 @@ private final class SourceMaterialLoadRecorder: @unchecked Sendable {
 private func makeRGBA8888VTF(
     width: Int,
     height: Int,
-    pixels: [UInt8]
+    pixels: [UInt8],
+    mipPixelsByLevel: [[UInt8]] = [],
+    flags: SourceVTFTextureFlags = []
 ) -> Data {
     precondition(width > 0 && height > 0 && pixels.count == width * height * 4)
+    for (offset, mip) in mipPixelsByLevel.enumerated() {
+        let level = offset + 1
+        precondition(
+            mip.count == max(1, width >> level) * max(1, height >> level) * 4
+        )
+    }
     var bytes = [UInt8](repeating: 0, count: 80)
     func write(_ value: UInt16, at offset: Int) {
         bytes[offset] = UInt8(truncatingIfNeeded: value)
@@ -586,12 +638,16 @@ private func makeRGBA8888VTF(
     write(UInt32(80), at: 12)
     write(UInt16(width), at: 16)
     write(UInt16(height), at: 18)
+    write(flags.rawValue, at: 20)
     write(UInt16(1), at: 24)
     write(Float(1).bitPattern, at: 48)
     write(UInt32(bitPattern: SourceVTFImageFormat.rgba8888.rawValue), at: 52)
-    bytes[56] = 1
+    bytes[56] = UInt8(1 + mipPixelsByLevel.count)
     write(UInt32(bitPattern: SourceVTFImageFormat.unknown.rawValue), at: 57)
     write(UInt16(1), at: 63)
+    for mip in mipPixelsByLevel.reversed() {
+        bytes.append(contentsOf: mip)
+    }
     bytes.append(contentsOf: pixels)
     return Data(bytes)
 }

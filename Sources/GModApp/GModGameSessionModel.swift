@@ -267,6 +267,8 @@ final class GModGameSessionModel: ObservableObject {
     private var pointerEpoch: UInt64?
     private var inputEpoch: UInt64?
     private var surfaceRequestRevision: UInt64 = 0
+    private var surfaceRefreshQueue = GModGameSurfaceRefreshPendingQueue()
+    private var surfaceRefreshTask: Task<Void, Never>?
     private var inputSuspensionInFlight = false
     private var pauseMenuNotificationPending = false
     private var lastSurfaceFailure: String?
@@ -274,6 +276,7 @@ final class GModGameSessionModel: ObservableObject {
     private var lastMovementRejectionReason:
         SourceWorldWalkUnsupportedReason?
     private var firstWorldFrameGate = GModGameFirstWorldFrameGate()
+    private var worldSkyVisibility: GModWorldSkyVisibility?
 
     var loadingProgress: GModPlayableSessionLoadingProgress {
         loadingState.progress
@@ -369,6 +372,7 @@ final class GModGameSessionModel: ObservableObject {
         activeMap = nil
         loadingMap = map
         worldScene = nil
+        worldSkyVisibility = nil
         lastRendererFailure = nil
         surfaceScene = nil
         surfaceDiagnostics = nil
@@ -468,6 +472,7 @@ final class GModGameSessionModel: ObservableObject {
                     .init(stage: .awaitingFirstMetalFrame),
                     requestedGeneration: requestedGeneration
                 )
+                worldSkyVisibility = snapshot.worldMesh.skyVisibility
                 worldScene = preparedWorldScene
                 surfaceStatus = "VGUI surface awaiting first client frame"
                 if isInputSuspended {
@@ -687,6 +692,7 @@ final class GModGameSessionModel: ObservableObject {
         playerOrigin = .zero
         viewAngles = .zero
         worldScene = nil
+        worldSkyVisibility = nil
         surfaceScene = nil
         surfaceDiagnostics = nil
         surfaceStatus = "VGUI surface idle"
@@ -758,6 +764,7 @@ final class GModGameSessionModel: ObservableObject {
         playerOrigin = .zero
         viewAngles = .zero
         worldScene = nil
+        worldSkyVisibility = nil
         surfaceScene = nil
         surfaceDiagnostics = nil
         surfaceStatus = "VGUI surface idle"
@@ -893,7 +900,7 @@ final class GModGameSessionModel: ObservableObject {
                         : "VGUI pointer idle"
                     surfaceStatus = activeClientMenu.map {
                         "\($0.statusName) open; awaiting VGUI frame"
-                    } ?? "\(menu.statusName) closed; awaiting VGUI frame"
+                    } ?? "\(menu.statusName) closed; VGUI surface idle"
                     if activeClientMenu == nil {
                         surfaceScene = nil
                         surfaceDiagnostics = nil
@@ -1019,32 +1026,10 @@ final class GModGameSessionModel: ObservableObject {
                 reportFailures(clientFrame)
             }
             playClientSurfaceSounds(report.clientSurfaceSounds)
-            guard !isClientMenuTransitioning else { return }
-            let surfaceToken = beginSurfaceRequest(
+            scheduleClientSurfaceRefresh(
                 applicationGeneration: activeToken.generation.application,
                 laneGeneration: activeToken.generation.lane
             )
-            do {
-                let snapshot = try await lane.renderClientVGUIFrame(
-                    expectedGeneration: activeToken.generation.lane
-                )
-                await buildAndPublishSurfaceScene(
-                    snapshot,
-                    token: surfaceToken
-                )
-            } catch {
-                guard isReady, surfaceToken.matches(
-                    application: sessionGeneration,
-                    lane: laneGeneration,
-                    requestRevision: surfaceRequestRevision,
-                    activeMenu: activeClientMenu
-                ) else {
-                    return
-                }
-                publishSurfaceFailure(
-                    "live VGUI render failed: \(GMLuaRuntime.describe(error))"
-                )
-            }
         } catch {
             if isReady, !isInputSuspended,
                !inputSuspensionInFlight, !isClientMenuTransitioning,
@@ -1135,6 +1120,92 @@ final class GModGameSessionModel: ObservableObject {
 
     private func invalidateSurfaceRequests() {
         surfaceRequestRevision &+= 1
+        surfaceRefreshQueue.removeAll()
+    }
+
+    private func scheduleClientSurfaceRefresh(
+        applicationGeneration: UInt64,
+        laneGeneration: UInt64
+    ) {
+        guard GModGameClientSurfaceCapturePolicy.shouldCapture(
+            activeMenu: activeClientMenu,
+            transitioningMenu: transitioningClientMenu
+        ) else {
+            surfaceRefreshQueue.removeAll()
+            if surfaceScene != nil || surfaceDiagnostics != nil {
+                surfaceRequestRevision &+= 1
+                surfaceScene = nil
+                surfaceDiagnostics = nil
+                surfaceStatus = "VGUI surface idle"
+            }
+            return
+        }
+        let generation = GModGameSessionGenerationToken(
+            application: applicationGeneration,
+            lane: laneGeneration
+        )
+        surfaceRefreshQueue.submit(GModGameSurfaceRefreshRequest(
+            generation: generation
+        ))
+        guard surfaceRefreshTask == nil else { return }
+        surfaceRefreshTask = Task { [weak self] in
+            guard let self else { return }
+            await self.drainClientSurfaceRefreshes()
+        }
+    }
+
+    private func drainClientSurfaceRefreshes() async {
+        while let request = surfaceRefreshQueue.takeLatest() {
+            await refreshClientSurface(
+                request: request
+            )
+        }
+        surfaceRefreshTask = nil
+    }
+
+    /// Captures one renderer-facing frame for the current foreground Q/C
+    /// owner. Pointer callbacks mutate Lua synchronously and enqueue this work
+    /// in the same host input cycle; the latest-only refresh queue keeps scene
+    /// construction from blocking subsequent pointer delivery.
+    private func refreshClientSurface(
+        request: GModGameSurfaceRefreshRequest
+    ) async {
+        guard GModGameClientSurfaceCapturePolicy.shouldCapture(
+            activeMenu: activeClientMenu,
+            transitioningMenu: transitioningClientMenu
+        ) else {
+            if surfaceScene != nil || surfaceDiagnostics != nil {
+                invalidateSurfaceRequests()
+                surfaceScene = nil
+                surfaceDiagnostics = nil
+                surfaceStatus = "VGUI surface idle"
+            }
+            return
+        }
+        let surfaceToken = beginSurfaceRequest(
+            applicationGeneration: request.generation.application,
+            laneGeneration: request.generation.lane
+        )
+        do {
+            let snapshot = try await lane.renderClientVGUIFrame(
+                expectedGeneration: request.generation.lane
+            )
+            await buildAndPublishSurfaceScene(snapshot, token: surfaceToken)
+        } catch {
+            guard isReady, !isInputSuspended,
+                  !isClientMenuTransitioning,
+                  surfaceToken.matches(
+                      application: sessionGeneration,
+                      lane: self.laneGeneration,
+                      requestRevision: surfaceRequestRevision,
+                      activeMenu: activeClientMenu
+                  ) else {
+                return
+            }
+            publishSurfaceFailure(
+                "live VGUI render failed: \(GMLuaRuntime.describe(error))"
+            )
+        }
     }
 
     private func consumePointer(_ sample: GModGamePointerSample) async {
@@ -1170,6 +1241,10 @@ final class GModGameSessionModel: ObservableObject {
                 "VGUI pointer panel=\(panel) callbacks=" +
                 "\(result.callbackNames.count)"
             lastPointerFailure = nil
+            scheduleClientSurfaceRefresh(
+                applicationGeneration: sample.generation.application,
+                laneGeneration: sample.generation.lane
+            )
         } catch {
             guard sample.generation.application == sessionGeneration,
                   sample.pointerEpoch == pointerEpoch else {
@@ -1322,6 +1397,7 @@ final class GModGameSessionModel: ObservableObject {
         pointerEpoch = nil
         inputEpoch = nil
         worldScene = nil
+        worldSkyVisibility = nil
         surfaceScene = nil
         surfaceDiagnostics = nil
         activeClientMenu = nil
@@ -1507,9 +1583,16 @@ final class GModGameSessionModel: ObservableObject {
 
     private func publishCameraScene() {
         guard let worldScene else { return }
+        let eye = Self.cameraEye(for: playerOrigin)
+        let sourceEye = SourceVector3(eye.x, eye.y, eye.z)
+        let skyboxVisibility = Self.metalSkyboxVisibility(
+            worldSkyVisibility?.visibility(at: sourceEye) ?? .notVisible
+        )
         self.worldScene = worldScene.updatingCamera(
-            eye: Self.cameraEye(for: playerOrigin),
+            eye: eye,
             forward: Self.cameraForward(for: viewAngles),
+            up: Self.cameraUp(for: viewAngles),
+            skyboxVisibility: skyboxVisibility,
             sourceFixedTime: Float(fixedTickCount) *
                 SourceGlobalVars.intervalPerTick
         )
@@ -1523,8 +1606,9 @@ final class GModGameSessionModel: ObservableObject {
         viewAngles: SourceQAngle,
         textureResolver: GModMetalSurfaceSourceMaterialResolver
     ) throws -> GModMetalWorldScene {
-        let maximumRetainedTextureBytes = 128 * 1_024 * 1_024
-        var retainedTextureBytes = 0
+        var retentionBudget = GModMetalWorldBitmapRetentionBudget(
+            maximumByteCount: 128 * 1_024 * 1_024
+        )
         let meshIdentifier =
             "session-\(sessionGeneration):\(map.rawValue):" +
             "\(mesh.vertices.count):\(mesh.indices.count)"
@@ -1545,21 +1629,17 @@ final class GModGameSessionModel: ObservableObject {
                 materialResolution = .notApplicable
             } else if let name = range.materialName {
                 do {
-                    if let resolved = try textureResolver.resolveSurfaceTexture(
+                    if let resolved = try textureResolver.resolveWorldTexture(
                         named: name
                     ) {
-                        let requiredByteCount =
-                            resolved.premultipliedRGBA8.count
-                        if requiredByteCount <= maximumRetainedTextureBytes,
-                           retainedTextureBytes <=
-                            maximumRetainedTextureBytes - requiredByteCount {
+                        let requiredByteCount = resolved.totalByteCount
+                        if retentionBudget.retain(resolved) {
                             materialResolution = .resolved(resolved)
-                            retainedTextureBytes += requiredByteCount
                         } else {
                             materialResolution = .retentionCapacityExceeded(
                                 requiredByteCount: requiredByteCount,
-                                retainedByteCount: retainedTextureBytes,
-                                maximumByteCount: maximumRetainedTextureBytes
+                                retainedByteCount: retentionBudget.retainedByteCount,
+                                maximumByteCount: retentionBudget.maximumByteCount
                             )
                         }
                     } else {
@@ -1573,13 +1653,20 @@ final class GModGameSessionModel: ObservableObject {
             } else {
                 materialResolution = .notApplicable
             }
+            let renderLayer: GModMetalWorldRenderLayer
+            switch range.renderLayer {
+            case .world: renderLayer = .world
+            case .sky3D: renderLayer = .sky3D
+            case .sky2D: renderLayer = .sky2D
+            }
             return GModMetalWorldMaterialRange(
                 materialName: range.materialName,
                 firstIndex: range.firstIndex,
                 indexCount: range.indexCount,
                 materialResolution: materialResolution,
                 waterSurface: waterSurface,
-                waterMaterial: waterMaterial
+                waterMaterial: waterMaterial,
+                renderLayer: renderLayer
             )
         }
         let lightmapAtlas = mesh.lightmapAtlas.map {
@@ -1644,8 +1731,28 @@ final class GModGameSessionModel: ObservableObject {
                     mesh.diagnostics.ignoredBumpLightFaceCount,
                 clampedChannelCount: mesh.lightmapAtlas?.clampedChannelCount ?? 0
             ),
+            sky3D: mesh.sky3D.map {
+                GModMetalWorldSky3D(
+                    sourceOrigin: SIMD3<Float>(
+                        $0.origin.x,
+                        $0.origin.y,
+                        $0.origin.z
+                    ),
+                    scale: $0.scale
+                )
+            },
+            skyboxVisibility: metalSkyboxVisibility(
+                mesh.skyVisibility?.visibility(
+                    at: SourceVector3(
+                        playerOrigin.x,
+                        playerOrigin.y,
+                        playerOrigin.z + 64
+                    )
+                ) ?? .notVisible
+            ),
             cameraEye: cameraEye(for: playerOrigin),
-            cameraForward: cameraForward(for: viewAngles)
+            cameraForward: cameraForward(for: viewAngles),
+            cameraUp: cameraUp(for: viewAngles)
         )
     }
 
@@ -1658,15 +1765,25 @@ final class GModGameSessionModel: ObservableObject {
     nonisolated private static func cameraForward(
         for angles: SourceQAngle
     ) -> SIMD3<Float> {
-        let degreesToRadians = Double.pi / 180
-        let pitch = Double(angles.pitch) * degreesToRadians
-        let yaw = Double(angles.yaw) * degreesToRadians
-        let cosinePitch = Float(cos(pitch))
-        return SIMD3<Float>(
-            cosinePitch * Float(cos(yaw)),
-            cosinePitch * Float(sin(yaw)),
-            -Float(sin(pitch))
-        )
+        let forward = angles.sourceBasis.forward
+        return SIMD3<Float>(forward.x, forward.y, forward.z)
+    }
+
+    nonisolated private static func cameraUp(
+        for angles: SourceQAngle
+    ) -> SIMD3<Float> {
+        let up = angles.sourceBasis.up
+        return SIMD3<Float>(up.x, up.y, up.z)
+    }
+
+    nonisolated private static func metalSkyboxVisibility(
+        _ visibility: GModWorldSkyboxVisibility
+    ) -> GModMetalSkyboxVisibility {
+        return switch visibility {
+        case .notVisible: .notVisible
+        case .sky3D: .sky3D
+        case .sky2D: .sky2D
+        }
     }
 
     private func appendLog(_ value: String) {

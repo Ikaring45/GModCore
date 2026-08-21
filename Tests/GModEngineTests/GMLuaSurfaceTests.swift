@@ -885,7 +885,7 @@ final class GMLuaSurfaceTests: XCTestCase {
         XCTAssertTrue(frame.captureDiagnostics.overflowed)
     }
 
-    func testLabelInsetsFollowValveAlignedEdgeAndPreserveNegativeOrigins() throws {
+    func testAllSourceContentAlignmentsMapInsetsAndOriginsExactly() throws {
         struct FixedLabelMeasurer: GMLuaTextMeasurer {
             let fidelity = GMLuaTextMeasurementFidelity.platformGlyphMetrics
 
@@ -913,25 +913,24 @@ final class GMLuaSurfaceTests: XCTestCase {
         )
         try state.execute(
             """
-            local function label(name, x, y, alignment)
+            local function label(name, x, alignment)
                 local value = vgui.Create("Label")
                 value:SetName(name)
-                value:SetPos(x, y)
-                value:SetSize(10, 6)
+                value:SetPos(x, 20)
+                value:SetSize(40, 30)
                 value:SetText(name)
                 value:SetTextInset(3, 1)
                 value:SetContentAlignment(alignment)
                 return value
             end
-            NORTHWEST = label("northwest", 20, 20, 7)
-            CENTER = label("center", 50, 50, 5)
-            CENTER:SetSize(9, 5)
-            SOUTHEAST = label("southeast", 80, 80, 3)
+            for alignment = 1, 9 do
+                label("align" .. alignment, (alignment - 1) * 50, alignment)
+            end
             """,
             sourceName: "@GMLuaSurfaceLabelInsetAlignment.lua"
         )
 
-        let tree = registry.renderTree(viewportWidth: 200, viewportHeight: 200)
+        let tree = registry.renderTree(viewportWidth: 500, viewportHeight: 100)
         XCTAssertTrue(tree.allSatisfy { panel in
             panel.textInsetX == 3 && panel.textInsetY == 1
         })
@@ -940,8 +939,8 @@ final class GMLuaSurfaceTests: XCTestCase {
         })
         let frame = try registry.renderFrame(
             surface: surface,
-            viewportWidth: 200,
-            viewportHeight: 200
+            viewportWidth: 500,
+            viewportHeight: 100
         )
         let positions = Dictionary(uniqueKeysWithValues: frame.commands.compactMap {
             command -> (String, GMLuaCursorPosition)? in
@@ -950,17 +949,17 @@ final class GMLuaSurfaceTests: XCTestCase {
             }
             return (value.utf8String, position)
         })
-        XCTAssertEqual(
-            positions["northwest"],
-            GMLuaCursorPosition(x: 23, y: 21)
-        )
-        XCTAssertEqual(
-            positions["center"],
-            GMLuaCursorPosition(x: 45, y: 49)
-        )
-        XCTAssertEqual(
-            positions["southeast"],
-            GMLuaCursorPosition(x: 67, y: 77)
-        )
+        let horizontalOffsets = [3.0, 10, 17, 3, 10, 17, 3, 10, 17]
+        let verticalOffsets = [21.0, 21, 21, 11, 11, 11, 1, 1, 1]
+        for alignment in 1...9 {
+            XCTAssertEqual(
+                positions["align\(alignment)"],
+                GMLuaCursorPosition(
+                    x: Double((alignment - 1) * 50) + horizontalOffsets[alignment - 1],
+                    y: 20 + verticalOffsets[alignment - 1]
+                ),
+                "Source content alignment \(alignment)"
+            )
+        }
     }
 }

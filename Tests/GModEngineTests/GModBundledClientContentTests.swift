@@ -5,6 +5,29 @@ import GModGameAssets
 import GModLua
 
 final class GModBundledClientContentTests: XCTestCase {
+    func testRealBundledVTFResolverRetainsEveryAuthoredMip() throws {
+        let encoded = try GModGameAssets.clientContentData(
+            for: "materials/vgui/gmod_tool.vtf"
+        )
+        let vtf = try SourceVTFFile(data: encoded)
+        XCTAssertEqual(vtf.mipCount, 9)
+
+        let resolver = GMLuaSourceMaterialResolver { logicalPath in
+            try? GModGameAssets.clientContentData(for: logicalPath)
+        }
+        let resolved = try resolver.resolve(
+            named: "vgui/gmod_tool",
+            mipPolicy: .authoredChain
+        )
+        XCTAssertEqual(resolved.sourceTextureFlags, vtf.flags)
+        XCTAssertEqual(resolved.mipImages.count, vtf.mipCount)
+        for (level, image) in resolved.mipImages.enumerated() {
+            XCTAssertEqual(image.width, max(1, vtf.width >> level))
+            XCTAssertEqual(image.height, max(1, vtf.height >> level))
+            XCTAssertEqual(image.rgbaBytes.count, image.width * image.height * 4)
+        }
+    }
+
     func testManifestCoversExactAuthorizedBaseClientContent() throws {
         let manifest = try GModGameAssets.clientContentManifest()
 
@@ -371,7 +394,13 @@ final class GModBundledClientContentTests: XCTestCase {
         XCTAssertEqual(client.compatibilityGaps, [])
         XCTAssertEqual(delivered, 0)
         try client.execute(
-            "assert(IsValid(LocalPlayer()) and LocalPlayer() == Entity(1))",
+            """
+            assert(IsValid(LocalPlayer()) and LocalPlayer() == Entity(1))
+            assert(type(notification) == "table")
+            assert(type(notification.AddLegacy) == "function")
+            assert(type(notification.AddProgress) == "function")
+            assert(type(notification.Kill) == "function")
+            """,
             sourceName: "=(bundled client-content LocalPlayer identity)"
         )
     }
@@ -406,7 +435,8 @@ final class GModBundledClientContentTests: XCTestCase {
         let environment = try GMLuaGameEnvironmentConfiguration(
             maxPlayers: 32,
             mapName: "gm_construct",
-            sessionKind: .listenServer
+            sessionKind: .listenServer,
+            hostName: "GMod Bundled Client Test"
         )
         let engine = GMLuaEngineConfiguration(
             games: [],
