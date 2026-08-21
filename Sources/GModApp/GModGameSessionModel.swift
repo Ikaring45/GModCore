@@ -1653,6 +1653,12 @@ final class GModGameSessionModel: ObservableObject {
             } else {
                 materialResolution = .notApplicable
             }
+            let renderLayer: GModMetalWorldRenderLayer
+            switch range.renderLayer {
+            case .world: renderLayer = .world
+            case .sky3D: renderLayer = .sky3D
+            case .sky2D: renderLayer = .sky2D
+            }
             return GModMetalWorldMaterialRange(
                 materialName: range.materialName,
                 firstIndex: range.firstIndex,
@@ -1660,11 +1666,7 @@ final class GModGameSessionModel: ObservableObject {
                 materialResolution: materialResolution,
                 waterSurface: waterSurface,
                 waterMaterial: waterMaterial,
-                renderLayer: switch range.renderLayer {
-                case .world: .world
-                case .sky3D: .sky3D
-                case .sky2D: .sky2D
-                }
+                renderLayer: renderLayer
             )
         }
         let lightmapAtlas = mesh.lightmapAtlas.map {
