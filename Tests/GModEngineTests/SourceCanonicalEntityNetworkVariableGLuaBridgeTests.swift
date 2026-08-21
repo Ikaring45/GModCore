@@ -336,4 +336,3 @@ final class SourceCanonicalEntityNetworkVariableGLuaBridgeTests: XCTestCase {
         )
     }
 }
-
