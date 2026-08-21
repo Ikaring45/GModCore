@@ -373,6 +373,7 @@ public final class GModPlayableSession {
     public let clientRuntime: GMLuaRuntime
     public let sharedSession: GMLuaSharedSession
     public let sourceAdapter: GMLuaSourceRuntimeAdapter
+    public let studioModelRepository: GModStudioModelRepository?
     public let bsp: SourceBSP
     public let worldMesh: GModWorldRenderMesh
     public let worldIdentity: GMLuaSourceEntityIdentity
@@ -426,7 +427,8 @@ public final class GModPlayableSession {
         ) -> Void,
         progress: @escaping GModPlayableSessionLoadingProgressHandler = { _ in },
         worldWalkCollisionProvider:
-            (any SourceWorldWalkCollisionProvider)?
+            (any SourceWorldWalkCollisionProvider)?,
+        canonicalModelValidator: SourceCanonicalModelValidator? = nil
     ) throws {
         let trimmedGamemode = configuration.gamemodeName
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -447,6 +449,7 @@ public final class GModPlayableSession {
         progress(.init(stage: .readingBSP))
         let mapAllocationPolicy = GModMapAllocationPolicy.iPadValidated
         let bspData: Data
+        let loadedStudioModelRepository: GModStudioModelRepository?
         if let contentPackURL = configuration.contentPackURL {
             let pack = try GarrysPADContentPack(url: contentPackURL)
             bspData = try pack.data(
@@ -454,11 +457,15 @@ public final class GModPlayableSession {
                 maximumByteCount:
                     mapAllocationPolicy.maximumBSPEncodedByteCount
             )
+            loadedStudioModelRepository = GModStudioModelRepository(
+                reader: try GModContentPackAssetSource(pack: pack)
+            )
         } else {
             bspData = try GModGameAssets.data(
                 for: configuration.map,
                 kind: .bsp
             )
+            loadedStudioModelRepository = nil
         }
         try mapAllocationPolicy.validate(
             .bspEncodedBytes,
@@ -564,10 +571,25 @@ public final class GModPlayableSession {
                 )
             )
 
+            let activeModelValidator: SourceCanonicalModelValidator?
+            if let canonicalModelValidator {
+                activeModelValidator = canonicalModelValidator
+            } else if let loadedStudioModelRepository {
+                activeModelValidator = { model, kind in
+                    loadedStudioModelRepository.validation(
+                        for: model,
+                        kind: kind
+                    )
+                }
+            } else {
+                activeModelValidator = nil
+            }
             let sourceAdapter = try GMLuaSourceRuntimeAdapter(
-                serverRuntime: server
+                serverRuntime: server,
+                canonicalModelValidator: activeModelValidator
             )
             adapter = sourceAdapter
+            try sourceAdapter.installCanonicalEntityLuaBridge()
             // This attachment owns only CLIENT Tick/Think clocking. The
             // adapter has no legacy entities in this session, and canonical
             // Entity state reaches CLIENT exclusively through SharedSession's
@@ -646,6 +668,7 @@ public final class GModPlayableSession {
             clientRuntime = client
             sharedSession = session
             self.sourceAdapter = sourceAdapter
+            studioModelRepository = loadedStudioModelRepository
             bsp = loadedBSP
             worldMesh = loadedWorldMesh
             worldIdentity = sourceWorldIdentity

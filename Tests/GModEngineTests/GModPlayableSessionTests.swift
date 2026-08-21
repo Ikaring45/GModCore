@@ -437,15 +437,23 @@ final class GModPlayableSessionTests: XCTestCase {
         )
     }
 
-    func testMissingSpawnAPIIsReportedWithoutClosingOrDesynchronizingRealms() throws {
+    func testSpawnRouteStopsAtTruthfulPhysicsEligibilityWithoutClosingRealms() throws {
         let session = try GModPlayableSession(
-            configuration: GModPlayableSessionConfiguration(map: .construct)
+            configuration: GModPlayableSessionConfiguration(map: .construct),
+            textMeasurer: nil,
+            logger: { _, _ in },
+            worldWalkCollisionProvider: nil,
+            canonicalModelValidator: { model, kind in
+                model.path == "models/props_c17/oildrum001.mdl" &&
+                    kind == .propPhysics ? .valid : .invalid
+            }
         )
         defer { _ = try? session.close() }
 
         // This is the exact command enqueued by stock SpawnIcon.DoClick. The
-        // current host intentionally has no fake Player:Alive/ents/physics
-        // implementation, so the SERVER action must fail explicitly.
+        // canonical Player and model validator are real at this boundary. The
+        // route must now stop at the still-unimplemented PHY collision verdict
+        // instead of promoting an opaque PHY companion to a valid prop.
         try session.clientRuntime.execute(
             """
             RunConsoleCommand(
@@ -473,7 +481,7 @@ final class GModPlayableSessionTests: XCTestCase {
             failure.arguments,
             ["models/props_c17/oildrum001.mdl", "0", ""]
         )
-        XCTAssertTrue(failure.message.contains("Alive"))
+        XCTAssertTrue(failure.message.contains("IsValidProp"))
         XCTAssertEqual(session.sharedSession.netTransport.pendingDeliveryCount, 0)
         XCTAssertFalse(session.isClosed)
         XCTAssertFalse(session.serverRuntime.isClosed)
