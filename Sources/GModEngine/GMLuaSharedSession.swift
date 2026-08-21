@@ -427,18 +427,14 @@ public final class GMLuaSharedSession: @unchecked Sendable {
                 )
             }
             try clientEndpoint.connectEntityReplicationHandler {
-                [weak client] packet in
+                [clientRegistry] packet in
                 try replicationLease.withActive {
-                    guard let registry = client?.entityRegistry else {
-                        throw GMLuaSharedSessionError.missingRuntimeSurface(
-                            .client,
-                            "Entity registry during canonical replication"
-                        )
-                    }
-                    let result = try registry.applyEntityReplicationPacket(packet)
+                    let result = try clientRegistry.applyEntityReplicationPacket(
+                        packet
+                    )
                     if case .applied = result,
-                       registry.canonicalIdentity(at: playerIndex) == playerIdentity {
-                        try registry.setLocalPlayer(
+                       clientRegistry.canonicalIdentity(at: playerIndex) == playerIdentity {
+                        try clientRegistry.setLocalPlayer(
                             index: playerIndex,
                             generation: playerIdentity.generation
                         )
