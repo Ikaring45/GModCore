@@ -355,6 +355,147 @@ final class GModDynamicEntityMetalSceneBuilderTests: XCTestCase {
         XCTAssertEqual(replacedApp.generation.sourceConnection.rawValue, 1)
         XCTAssertEqual(probe.calls, [candidate, candidate, candidate])
     }
+
+    func testCurrentBudgetFailureClearsButStaleFailureCannotClearNewerScene()
+        throws
+    {
+        let candidate = "materials/models/props/crate.vmt"
+        let probe = MaterialProbe(results: [
+            candidate: .bitmap(try fixtureBitmap(name: "budget", seed: 80)),
+        ])
+        let builder = try GModDynamicEntityMetalSceneBuilder(
+            policy: policy(
+                bitmapBytes: 128,
+                maximumTotalVertexCount: 3
+            ),
+            resolveMaterial: { [probe] in try probe.resolve($0) }
+        )
+        let firstSnapshot = scene(
+            revision: 1,
+            connection: 9,
+            resources: [resource(candidates: [candidate])]
+        )
+        let firstScene = try XCTUnwrap(builder.build(
+            from: firstSnapshot,
+            applicationGeneration: 4,
+            laneGeneration: 6
+        ))
+        var publishedScene: GModMetalDynamicEntityScene? = firstScene
+        var consumedSourceRevision: UInt64? = firstSnapshot.revision
+
+        let rejectedSnapshot = scene(
+            revision: 2,
+            connection: 9,
+            resources: [resource(
+                path: "models/props/oversize.mdl",
+                checksum: 99,
+                candidates: [candidate],
+                vertexCount: 4
+            )],
+            resourcePath: "models/props/oversize.mdl",
+            resourceChecksum: 99,
+            entityRevision: 2
+        )
+        var rejectionDescription: String?
+        XCTAssertThrowsError(try builder.build(
+            from: rejectedSnapshot,
+            applicationGeneration: 4,
+            laneGeneration: 6
+        )) { error in
+            XCTAssertEqual(
+                error as? GModMetalDynamicEntitySceneError,
+                .countBudgetExceeded(kind: "vertex", requested: 4, cap: 3)
+            )
+            rejectionDescription = GMLuaRuntime.describe(error)
+        }
+        let failure = try XCTUnwrap(rejectionDescription)
+        let rejectedRequest = GModDynamicEntitySceneBuildRequest(
+            snapshot: rejectedSnapshot,
+            applicationGeneration: 4,
+            laneGeneration: 6,
+            buildEpoch: 7,
+            requestRevision: 2
+        )
+        let rejectedResult = GModDynamicEntitySceneBuildResult(
+            scene: nil,
+            failure: failure
+        )
+
+        switch GModDynamicEntitySceneBuildCompletion.resolve(
+            request: rejectedRequest,
+            result: rejectedResult,
+            currentBuildEpoch: 7,
+            currentRequestRevision: 2,
+            currentApplicationGeneration: 4,
+            currentLaneGeneration: 6,
+            isReady: true
+        ) {
+        case let .reject(revision, receivedFailure):
+            consumedSourceRevision = revision
+            publishedScene = nil
+            builder.reset()
+            XCTAssertEqual(receivedFailure, failure)
+        default:
+            XCTFail("the current failed conversion must be rejected")
+        }
+        XCTAssertEqual(consumedSourceRevision, 2)
+        XCTAssertNil(publishedScene)
+        XCTAssertNil(builder.currentScene)
+
+        let newerSnapshot = scene(
+            revision: 3,
+            connection: 9,
+            resources: [resource(candidates: [candidate])],
+            x: 30,
+            entityRevision: 3
+        )
+        let newerScene = try XCTUnwrap(builder.build(
+            from: newerSnapshot,
+            applicationGeneration: 4,
+            laneGeneration: 6
+        ))
+        let newerRequest = GModDynamicEntitySceneBuildRequest(
+            snapshot: newerSnapshot,
+            applicationGeneration: 4,
+            laneGeneration: 6,
+            buildEpoch: 8,
+            requestRevision: 3
+        )
+        switch GModDynamicEntitySceneBuildCompletion.resolve(
+            request: newerRequest,
+            result: GModDynamicEntitySceneBuildResult(
+                scene: newerScene,
+                failure: nil
+            ),
+            currentBuildEpoch: 8,
+            currentRequestRevision: 3,
+            currentApplicationGeneration: 4,
+            currentLaneGeneration: 6,
+            isReady: true
+        ) {
+        case let .publish(revision, scene):
+            consumedSourceRevision = revision
+            publishedScene = scene
+        default:
+            XCTFail("the newer valid conversion must publish")
+        }
+
+        let staleCompletion = GModDynamicEntitySceneBuildCompletion.resolve(
+            request: rejectedRequest,
+            result: rejectedResult,
+            currentBuildEpoch: 8,
+            currentRequestRevision: 3,
+            currentApplicationGeneration: 4,
+            currentLaneGeneration: 6,
+            isReady: true
+        )
+        if case .reject = staleCompletion {
+            publishedScene = nil
+        }
+        XCTAssertEqual(staleCompletion, .discard)
+        XCTAssertEqual(consumedSourceRevision, 3)
+        XCTAssertEqual(publishedScene, newerScene)
+    }
 }
 
 private enum FixtureMaterialError: Error, Sendable, CustomStringConvertible {
@@ -400,13 +541,14 @@ private final class MaterialProbe: @unchecked Sendable {
 }
 
 private func policy(
-    bitmapBytes: Int
+    bitmapBytes: Int,
+    maximumTotalVertexCount: Int = 1_024
 ) -> GModDynamicEntityMetalSceneBuilderPolicy {
     GModDynamicEntityMetalSceneBuilderPolicy(
         metalScene: GModMetalDynamicEntityScenePolicy(
             maximumResourceCount: 16,
             maximumInstanceCount: 32,
-            maximumTotalVertexCount: 1_024,
+            maximumTotalVertexCount: maximumTotalVertexCount,
             maximumTotalIndexCount: 3_072,
             maximumTotalDrawRangeCount: 128,
             maximumGeometryByteCount: 1_024 * 1_024,

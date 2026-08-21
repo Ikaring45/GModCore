@@ -17,7 +17,7 @@ private struct GModSurfaceBuildResult: Sendable {
     let failure: String?
 }
 
-private struct GModDynamicEntitySceneBuildRequest: Sendable {
+struct GModDynamicEntitySceneBuildRequest: Sendable {
     let snapshot: GModDynamicEntityRenderSceneSnapshot
     let applicationGeneration: UInt64
     let laneGeneration: UInt64
@@ -25,9 +25,47 @@ private struct GModDynamicEntitySceneBuildRequest: Sendable {
     let requestRevision: UInt64
 }
 
-private struct GModDynamicEntitySceneBuildResult: Sendable {
+struct GModDynamicEntitySceneBuildResult: Sendable {
     let scene: GModMetalDynamicEntityScene?
     let failure: String?
+}
+
+enum GModDynamicEntitySceneBuildCompletion: Equatable, Sendable {
+    case discard
+    case publish(
+        consumedSourceRevision: UInt64,
+        scene: GModMetalDynamicEntityScene?
+    )
+    case reject(
+        consumedSourceRevision: UInt64,
+        failure: String
+    )
+
+    static func resolve(
+        request: GModDynamicEntitySceneBuildRequest,
+        result: GModDynamicEntitySceneBuildResult,
+        currentBuildEpoch: UInt64,
+        currentRequestRevision: UInt64,
+        currentApplicationGeneration: UInt64,
+        currentLaneGeneration: UInt64?,
+        isReady: Bool
+    ) -> Self {
+        guard request.buildEpoch == currentBuildEpoch,
+              request.requestRevision == currentRequestRevision,
+              request.applicationGeneration == currentApplicationGeneration,
+              request.laneGeneration == currentLaneGeneration,
+              isReady else { return .discard }
+        if let failure = result.failure {
+            return .reject(
+                consumedSourceRevision: request.snapshot.revision,
+                failure: failure
+            )
+        }
+        return .publish(
+            consumedSourceRevision: request.snapshot.revision,
+            scene: result.scene
+        )
+    }
 }
 
 struct GModGameFirstWorldFrameGate: Equatable, Sendable {
@@ -1180,7 +1218,6 @@ final class GModGameSessionModel: ObservableObject {
                   self.laneGeneration == laneGeneration,
                   isReady,
                   let snapshot else { return }
-            lastDynamicEntitySourceRevision = snapshot.revision
             for issue in snapshot.issues.prefix(16) {
                 appendLog(
                     "[CLIENT][PROP][EHANDLE " +
@@ -1245,18 +1282,39 @@ final class GModGameSessionModel: ObservableObject {
                     )
                 }
             }.value
-            guard request.buildEpoch == dynamicEntitySceneBuildEpoch,
-                  request.requestRevision == dynamicEntitySceneBuildRevision,
-                  request.applicationGeneration == sessionGeneration,
-                  request.laneGeneration == laneGeneration,
-                  isReady else { continue }
-            if let failure = build.failure {
-                appendLog("[CLIENT][PROP] Metal scene rejected: \(failure)")
-            } else if let scene = build.scene {
+            switch GModDynamicEntitySceneBuildCompletion.resolve(
+                request: request,
+                result: build,
+                currentBuildEpoch: dynamicEntitySceneBuildEpoch,
+                currentRequestRevision: dynamicEntitySceneBuildRevision,
+                currentApplicationGeneration: sessionGeneration,
+                currentLaneGeneration: laneGeneration,
+                isReady: isReady
+            ) {
+            case .discard:
+                continue
+            case let .publish(consumedSourceRevision, scene):
+                lastDynamicEntitySourceRevision = consumedSourceRevision
                 dynamicEntityScene = scene
+            case let .reject(consumedSourceRevision, failure):
+                appendLog("[CLIENT][PROP] Metal scene rejected: \(failure)")
+                rejectCurrentDynamicEntitySceneBuild(
+                    consuming: consumedSourceRevision
+                )
             }
         }
         dynamicEntitySceneBuildTask = nil
+    }
+
+    private func rejectCurrentDynamicEntitySceneBuild(
+        consuming sourceRevision: UInt64
+    ) {
+        dynamicEntitySceneBuildEpoch &+= 1
+        dynamicEntitySceneBuildRevision &+= 1
+        pendingDynamicEntitySceneBuild = nil
+        lastDynamicEntitySourceRevision = sourceRevision
+        dynamicEntitySceneBuilder.reset()
+        dynamicEntityScene = nil
     }
 
     private func invalidateDynamicEntityScene() {
