@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://garryspad.invalid/schemas/vphysics-standalone-attestation-incomplete.schema.json",
+  "title": "Bounded standalone VPhysics partial attestation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "kind", "status", "source_sdk_commit", "interfaces", "input", "phy_keyvalues", "collision", "object", "guard", "scope", "elapsed_milliseconds"],
+  "properties": {
+    "schema": { "const": 1 },
+    "kind": { "const": "standalone-vphysics-collision-attestation" },
+    "status": { "const": "incomplete" },
+    "source_sdk_commit": { "const": "c8f4c6351162fbff83bfa5a428d45d1e6eed3824" },
+    "interfaces": {
+      "type": "object", "additionalProperties": false, "required": ["collision", "physics"],
+      "properties": { "collision": { "const": "VPhysicsCollision007" }, "physics": { "const": "VPhysics031" } }
+    },
+    "input": {
+      "type": "object", "additionalProperties": false,
+      "required": ["app_id", "branch", "build_id", "dll_sha256", "dll_architecture", "model_path", "mdl_bytes", "mdl_sha256", "phy_bytes", "phy_sha256", "studio_checksum", "solid_index"],
+      "properties": {
+        "app_id": { "const": 4020 }, "branch": { "const": "x86-64" }, "build_id": { "const": "24721267" },
+        "dll_sha256": { "$ref": "#/$defs/sha256" }, "dll_architecture": { "const": "x86_64" },
+        "model_path": { "const": "models/maxofs2d/button_06.mdl" },
+        "mdl_bytes": { "const": 2540 }, "mdl_sha256": { "$ref": "#/$defs/sha256" },
+        "phy_bytes": { "const": 880 }, "phy_sha256": { "$ref": "#/$defs/sha256" },
+        "studio_checksum": { "const": -1817891700 }, "solid_index": { "const": 0 }
+      }
+    },
+    "phy_keyvalues": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mass_raw", "surfaceprop_raw", "damping_raw", "rotdamping_raw", "inertia_scale_raw", "volume_raw"],
+      "properties": {
+        "mass_raw": { "type": "string" }, "surfaceprop_raw": { "type": "string" },
+        "damping_raw": { "type": "string" }, "rotdamping_raw": { "type": "string" },
+        "inertia_scale_raw": { "type": "string" }, "volume_raw": { "type": "string" }
+      }
+    },
+    "collision": {
+      "type": "object", "additionalProperties": false,
+      "required": ["complete", "solid_count", "convex_count", "triangle_count", "aabb_mins", "aabb_maxs", "mass_center", "parts"],
+      "properties": {
+        "complete": { "const": false }, "solid_count": { "const": 1 },
+        "convex_count": { "const": 0 }, "triangle_count": { "const": 0 },
+        "aabb_mins": { "$ref": "#/$defs/vector3" }, "aabb_maxs": { "$ref": "#/$defs/vector3" },
+        "mass_center": { "$ref": "#/$defs/vector3" }, "parts": { "type": "array", "maxItems": 0 }
+      }
+    },
+    "object": {
+      "type": "object", "additionalProperties": false,
+      "required": ["complete", "material_index_input", "material_index_note", "mass_kg", "principal_inertia", "is_static", "is_asleep", "is_collision_enabled", "is_gravity_enabled", "is_motion_enabled"],
+      "properties": {
+        "complete": { "const": false }, "material_index_input": { "const": -1 },
+        "material_index_note": { "type": "string", "minLength": 1 }, "mass_kg": { "const": 0 },
+        "principal_inertia": { "$ref": "#/$defs/vector3" }, "is_static": { "const": false },
+        "is_asleep": { "const": false }, "is_collision_enabled": { "const": false },
+        "is_gravity_enabled": { "const": false }, "is_motion_enabled": { "const": false }
+      }
+    },
+    "guard": {
+      "type": "object", "additionalProperties": false, "required": ["abi_call_returned", "stage", "exception_code"],
+      "properties": { "abi_call_returned": { "const": false }, "stage": { "const": 2 }, "exception_code": { "const": 3221225477 } }
+    },
+    "scope": {
+      "type": "object", "additionalProperties": false,
+      "required": ["gmod_or_srcds_launched", "steam_launched", "network_used_by_probe", "util_is_valid_prop_attested", "limitations"],
+      "properties": {
+        "gmod_or_srcds_launched": { "const": false }, "steam_launched": { "const": false },
+        "network_used_by_probe": { "const": false }, "util_is_valid_prop_attested": { "const": false },
+        "limitations": { "type": "array", "minItems": 3, "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "elapsed_milliseconds": { "type": "integer", "minimum": 0, "maximum": 15000 }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "vector3": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "type": "number" } }
+  }
+}
