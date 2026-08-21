@@ -122,6 +122,16 @@ enum GMLuaRemoteConsoleCommandDispatchOutcome: Sendable, Equatable {
     case actionFailure(message: String)
 }
 
+/// Host-private transaction around one outer CLIENT -> SERVER forwarded
+/// command. The dispatcher deliberately does not expose this to Lua and keeps
+/// only a weak host reference so command registration cannot retain engine
+/// lifetime.
+protocol GMLuaForwardedConsoleCommandTransactionHost: AnyObject {
+    func withForwardedConsoleCommandTransaction(
+        _ body: () throws -> GMLuaRemoteConsoleCommandDispatchOutcome
+    ) throws -> GMLuaRemoteConsoleCommandDispatchOutcome
+}
+
 /// Carries a host/lifecycle/invariant error through a nested Lua call without
 /// flattening its concrete type or object identity into a Lua error string.
 private final class GMLuaConsoleFatalSentinel: Error, @unchecked Sendable {
@@ -155,6 +165,8 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
     private let lock = NSLock()
     private var hostHandler: GMLuaConsoleCommandHostHandler?
     private var remoteServerHandler: GMLuaConsoleCommandHostHandler?
+    private weak var forwardedCommandTransactionHost:
+        (any GMLuaForwardedConsoleCommandTransactionHost)?
     private var blockedCommandNames: Set<String> = []
     private var blockPredicate: GMLuaConsoleCommandBlockPredicate?
     private var registeredNamesByKey: [String: String] = [:]
@@ -277,6 +289,25 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
     func disconnectRemoteServer() {
         lock.lock()
         remoteServerHandler = nil
+        lock.unlock()
+    }
+
+    func connectForwardedCommandTransactionHost(
+        _ host: any GMLuaForwardedConsoleCommandTransactionHost
+    ) {
+        lock.lock()
+        forwardedCommandTransactionHost = host
+        lock.unlock()
+    }
+
+    func disconnectForwardedCommandTransactionHost(
+        _ host: any GMLuaForwardedConsoleCommandTransactionHost
+    ) {
+        lock.lock()
+        if let current = forwardedCommandTransactionHost,
+           current === host {
+            forwardedCommandTransactionHost = nil
+        }
         lock.unlock()
     }
 
@@ -675,6 +706,35 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
             throw LuaError.runtime("remote console command destination is not SERVER")
         }
 
+        let transactionHost: (any GMLuaForwardedConsoleCommandTransactionHost)? = {
+            lock.lock()
+            defer { lock.unlock() }
+            return forwardedCommandTransactionHost
+        }()
+        if let transactionHost {
+            return try transactionHost.withForwardedConsoleCommandTransaction {
+                try self.dispatchRemoteCommandWithoutTransaction(
+                    command: command,
+                    arguments: arguments,
+                    caller: caller,
+                    reportActionFailures: reportActionFailures
+                )
+            }
+        }
+        return try dispatchRemoteCommandWithoutTransaction(
+            command: command,
+            arguments: arguments,
+            caller: caller,
+            reportActionFailures: reportActionFailures
+        )
+    }
+
+    private func dispatchRemoteCommandWithoutTransaction(
+        command: String,
+        arguments: [String],
+        caller: LuaValue,
+        reportActionFailures: Bool
+    ) throws -> GMLuaRemoteConsoleCommandDispatchOutcome {
         let handledLuaConVar: Bool
         if let value = arguments.first {
             handledLuaConVar = conVars.setConsoleValue(value, for: command)

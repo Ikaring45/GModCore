@@ -650,6 +650,33 @@ public final class SourceEntityList {
         return true
     }
 
+    /// Transaction-only variant for an exact addition that entered deferred
+    /// deletion inside the same still-unpublished host action. It first
+    /// withdraws only that full handle from the pending queue, then reuses the
+    /// ordinary exact unpublished rollback. No cleanup callback is invoked and
+    /// no other pending deletion is drained.
+    @discardableResult
+    func rollbackUnpublishedTransactionAddition(
+        _ handle: SourceBaseHandle,
+        entity expectedEntity: SourceEntity
+    ) -> Bool {
+        guard handle.isValid,
+              entity(for: handle) === expectedEntity,
+              expectedEntity.refHandle == handle else { return false }
+
+        if expectedEntity.isMarkedForDeletion || pendingDeletionSet.contains(handle) {
+            guard expectedEntity.isMarkedForDeletion,
+                  pendingDeletionSet.contains(handle),
+                  let pendingIndex = pendingDeletion.firstIndex(of: handle) else {
+                return false
+            }
+            pendingDeletion.remove(at: pendingIndex)
+            pendingDeletionSet.remove(handle)
+            expectedEntity.isMarkedForDeletion = false
+        }
+        return rollbackUnpublishedAddition(handle, entity: expectedEntity)
+    }
+
     /// Deletes all still-matching handles and advances each slot serial. A stale
     /// queued handle can never remove a later occupant of a reused slot.
     @discardableResult

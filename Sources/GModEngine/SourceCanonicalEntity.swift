@@ -758,6 +758,45 @@ public final class SourceCanonicalEntityStore {
         return snapshot
     }
 
+    /// Host-private rollback for an entity whose complete mutation history is
+    /// still unpublished outside one engine transaction. Unlike ordinary
+    /// removal this accepts created, spawned, or active state, emits no Source
+    /// cleanup callback, and removes only the exact full EHANDLE/object pair.
+    /// If this same unpublished action queued deferred removal, only that exact
+    /// handle is withdrawn from SourceEntityList's pending queue first.
+    @discardableResult
+    func rollbackUnpublished(
+        _ identity: SourceCanonicalEntityIdentity,
+        publishing publish: (SourceCanonicalEntitySnapshot) throws -> Void
+    ) throws -> SourceCanonicalEntitySnapshot {
+        let entity = try requireEntity(identity)
+        guard entity.lifecycle != .removed else {
+            throw SourceCanonicalEntityError.invalidLifecycleTransition(
+                from: entity.lifecycle,
+                to: .removed
+            )
+        }
+        let snapshot = entity.makeSnapshot(
+            identity: identity,
+            lifecycle: .removed,
+            revision: entity.revision &+ 1
+        )
+        try publish(snapshot)
+        precondition(
+            entityList.rollbackUnpublishedTransactionAddition(
+                identity.handle,
+                entity: entity
+            ),
+            "unpublished canonical entity rollback lost its exact EHANDLE"
+        )
+        entity.transition(to: .removed)
+        entitiesByHandle.removeValue(forKey: identity.handle.rawValue)
+        if let index = handleOrder.firstIndex(of: identity.handle.rawValue) {
+            handleOrder.remove(at: index)
+        }
+        return snapshot
+    }
+
     /// Standalone cleanup boundary for dedicated tests and future hosts that do
     /// not yet use SourceRuntimeKernel. Integrated runtimes should call
     /// `didCleanup(capturedHandle:entity:)` from the kernel's removal callback.

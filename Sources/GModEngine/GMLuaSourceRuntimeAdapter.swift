@@ -48,6 +48,8 @@ public enum GMLuaSourceRuntimeAdapterError: Error, CustomStringConvertible {
     case canonicalMutationJournalCapacityExceeded(maximum: Int)
     case canonicalBodyGroupResolverUnavailable
     case canonicalBodyGroupModelMissing(SourceCanonicalEntityIdentity)
+    case forwardedConsoleCommandTransactionOutsidePump
+    case forwardedConsoleCommandTransactionCheckpointChanged
 
     public var description: String {
         switch self {
@@ -81,7 +83,37 @@ public enum GMLuaSourceRuntimeAdapterError: Error, CustomStringConvertible {
             return "canonical Studio body-group resolver is unavailable"
         case let .canonicalBodyGroupModelMissing(identity):
             return "Source entity EHANDLE \(identity.handle.rawValue) has no Studio model for body-group resolution"
+        case .forwardedConsoleCommandTransactionOutsidePump:
+            return "forwarded console command transaction requires the active transport pump boundary"
+        case .forwardedConsoleCommandTransactionCheckpointChanged:
+            return "forwarded console command changed a pre-existing canonical transaction prefix"
         }
+    }
+}
+
+private struct GMLuaForwardedConsoleCommandCheckpoint {
+    let journalPrefix: [SourceEntityReplicationOperation]
+    let canonicalHandlePrefix: [UInt32]
+    let cleanupJournalReservations: Int
+}
+
+private struct GMLuaForwardedConsoleCommandActionFailure: Error {
+    let outcome: GMLuaRemoteConsoleCommandDispatchOutcome
+}
+
+private struct GMLuaForwardedConsoleCommandRollbackFailure:
+    Error,
+    CustomStringConvertible
+{
+    let original: Error?
+    let rollback: Error
+
+    var description: String {
+        if let original {
+            return "forwarded console command failed with \(original); " +
+                "canonical rollback also failed with \(rollback)"
+        }
+        return "forwarded console command canonical rollback failed with \(rollback)"
     }
 }
 
@@ -223,6 +255,12 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
         guard let timerScheduler = serverRuntime.timerScheduler else {
             throw GMLuaSourceRuntimeAdapterError.missingRuntimeSurface(.server, "timer scheduler")
         }
+        guard let consoleDispatcher = serverRuntime.consoleCommandDispatcher else {
+            throw GMLuaSourceRuntimeAdapterError.missingRuntimeSurface(
+                .server,
+                "console dispatcher"
+            )
+        }
         let initialSourceTime = Double(SourceGlobalVars().currentTime)
         let initialTimerTime = timerScheduler.currentTime
         guard initialTimerTime == initialSourceTime else {
@@ -245,6 +283,7 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
             modelValidator: canonicalModelValidator
         )
         self.canonicalBodyGroupResolver = canonicalBodyGroupResolver
+        consoleDispatcher.connectForwardedCommandTransactionHost(self)
     }
 
     public var attachedClientCount: Int {
@@ -557,6 +596,67 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
                 canonicalEntityHandleOrder.remove(at: index)
             }
             return snapshot
+        }
+    }
+
+    /// Runs one outer CLIENT-originated SERVER command under the narrow host
+    /// transaction used by the stock `gm_spawn` vertical. Lua globals, timers,
+    /// hooks, ConVars, undo, and mutations of pre-existing canonical entities
+    /// are intentionally outside this current guarantee. A body failure does
+    /// remove every canonical entity created after the checkpoint, its SERVER
+    /// projection, its journal suffix, and transport work staged by the same
+    /// command. A Lua `pcall` that catches its own error returns `.handled` and
+    /// therefore commits normally.
+    func withForwardedConsoleCommandTransaction(
+        _ body: () throws -> GMLuaRemoteConsoleCommandDispatchOutcome
+    ) throws -> GMLuaRemoteConsoleCommandDispatchOutcome {
+        guard netTransport.isPumpingOnCurrentThread() else {
+            throw GMLuaSourceRuntimeAdapterError
+                .forwardedConsoleCommandTransactionOutsidePump
+        }
+        let checkpoint = try makeForwardedConsoleCommandCheckpoint()
+
+        do {
+            return try netTransport.withStagedForwardedConsoleDeliveries {
+                let result: Result<GMLuaRemoteConsoleCommandDispatchOutcome, Error>
+                do {
+                    result = .success(try body())
+                } catch {
+                    result = .failure(error)
+                }
+
+                switch result {
+                case .success(.handled):
+                    return .handled
+                case let .success(outcome):
+                    do {
+                        try rollbackForwardedConsoleCommand(to: checkpoint)
+                    } catch {
+                        throw GMLuaForwardedConsoleCommandRollbackFailure(
+                            original: nil,
+                            rollback: error
+                        )
+                    }
+                    // Throwing this private control value makes the transport
+                    // staging scope discard its deliveries/count. The value is
+                    // converted back to the reporting outcome outside it.
+                    throw GMLuaForwardedConsoleCommandActionFailure(
+                        outcome: outcome
+                    )
+                case let .failure(original):
+                    do {
+                        try rollbackForwardedConsoleCommand(to: checkpoint)
+                    } catch {
+                        throw GMLuaForwardedConsoleCommandRollbackFailure(
+                            original: original,
+                            rollback: error
+                        )
+                    }
+                    throw original
+                }
+            }
+        } catch let actionFailure as GMLuaForwardedConsoleCommandActionFailure {
+            return actionFailure.outcome
         }
     }
 
@@ -994,6 +1094,98 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
         )
     }
 
+    private func makeForwardedConsoleCommandCheckpoint() throws
+        -> GMLuaForwardedConsoleCommandCheckpoint
+    {
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
+        try ensureOpenLocked()
+        return GMLuaForwardedConsoleCommandCheckpoint(
+            journalPrefix: canonicalMutationJournal,
+            canonicalHandlePrefix: canonicalEntityHandleOrder,
+            cleanupJournalReservations: canonicalCleanupJournalReservations
+        )
+    }
+
+    private func rollbackForwardedConsoleCommand(
+        to checkpoint: GMLuaForwardedConsoleCommandCheckpoint
+    ) throws {
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
+        try ensureOpenLocked()
+
+        guard canonicalMutationJournal.count >= checkpoint.journalPrefix.count,
+              Array(
+                  canonicalMutationJournal.prefix(checkpoint.journalPrefix.count)
+              ) == checkpoint.journalPrefix,
+              canonicalEntityHandleOrder.count >=
+                checkpoint.canonicalHandlePrefix.count,
+              Array(
+                  canonicalEntityHandleOrder.prefix(
+                      checkpoint.canonicalHandlePrefix.count
+                  )
+              ) == checkpoint.canonicalHandlePrefix,
+              canonicalCleanupJournalReservations ==
+                checkpoint.cleanupJournalReservations else {
+            throw GMLuaSourceRuntimeAdapterError
+                .forwardedConsoleCommandTransactionCheckpointChanged
+        }
+
+        let newHandles = Array(
+            canonicalEntityHandleOrder.dropFirst(
+                checkpoint.canonicalHandlePrefix.count
+            )
+        )
+        let newHandleSet = Set(newHandles)
+        let journalSuffix = canonicalMutationJournal.dropFirst(
+            checkpoint.journalPrefix.count
+        )
+        guard journalSuffix.allSatisfy({
+            newHandleSet.contains(Self.canonicalIdentity(of: $0).handle.rawValue)
+        }) else {
+            // Restoring arbitrary pre-existing entity state requires a fully
+            // general Lua/engine transaction and is outside the gm_spawn
+            // vertical. Never truncate such a mutation into inconsistency.
+            throw GMLuaSourceRuntimeAdapterError
+                .forwardedConsoleCommandTransactionCheckpointChanged
+        }
+
+        let registry = try requiredServerRegistryLocked()
+        for rawHandle in newHandles {
+            let identity = SourceCanonicalEntityIdentity(
+                handle: SourceBaseHandle.unsafeFromIndex(rawHandle)
+            )
+            guard canonicalEntities.entity(for: identity) != nil,
+                  registry.canonicalIdentity(at: identity.entryIndex) == identity else {
+                throw GMLuaSourceRuntimeAdapterError
+                    .forwardedConsoleCommandTransactionCheckpointChanged
+            }
+        }
+
+        for rawHandle in newHandles.reversed() {
+            let identity = SourceCanonicalEntityIdentity(
+                handle: SourceBaseHandle.unsafeFromIndex(rawHandle)
+            )
+            _ = try canonicalEntities.rollbackUnpublished(
+                identity,
+                publishing: { removal in
+                    guard try registry.applyAuthoritativeRemoval(removal) else {
+                        throw GMLuaSourceRuntimeAdapterError
+                            .canonicalRemovalProjectionMissing(removal.identity)
+                    }
+                }
+            )
+            guard canonicalEntityHandleOrder.last == rawHandle else {
+                throw GMLuaSourceRuntimeAdapterError
+                    .forwardedConsoleCommandTransactionCheckpointChanged
+            }
+            canonicalEntityHandleOrder.removeLast()
+        }
+        canonicalMutationJournal.removeLast(
+            canonicalMutationJournal.count - checkpoint.journalPrefix.count
+        )
+    }
+
     private func preflightCanonicalMutationJournalLocked(
         additionalOperations: Int
     ) throws {
@@ -1276,6 +1468,8 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
     private func teardownLocked() -> Error? {
         guard !isClosedStorage else { return nil }
         isClosedStorage = true
+        serverRuntime.consoleCommandDispatcher?
+            .disconnectForwardedCommandTransactionHost(self)
         var firstCleanupError: Error?
 
         let records = entityHandleOrder.compactMap { entityRecordsByHandle[$0] }
@@ -1401,4 +1595,7 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
     }
 }
 
-extension GMLuaSourceRuntimeAdapter: SourceCanonicalEntityLuaHost {}
+extension GMLuaSourceRuntimeAdapter:
+    SourceCanonicalEntityLuaHost,
+    GMLuaForwardedConsoleCommandTransactionHost
+{}
