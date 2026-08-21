@@ -9,6 +9,8 @@ import GModLua
 public enum GMLuaAchievementRequest: Sendable, Equatable {
     /// Increment the "Menu User" spawn-menu-open counter once.
     case spawnMenuOpened
+    /// Increment the bundled Sandbox prop-spawn counter once.
+    case propSpawned
 }
 
 public typealias GMLuaAchievementRequestSink = @Sendable (
@@ -141,6 +143,20 @@ public final class GMLuaAchievements: @unchecked Sendable {
         try state.setRawTableValue(
             spawnMenuOpen,
             for: .string("SpawnMenuOpen"),
+            in: table
+        )
+        let spawnedProp = LuaValue.nativeFunction(
+            LuaNativeFunctionBox(
+                { [bridge] _ in
+                    bridge.capture(.propSpawned)
+                    return []
+                },
+                debugName: "achievements.SpawnedProp"
+            )
+        )
+        try state.setRawTableValue(
+            spawnedProp,
+            for: .string("SpawnedProp"),
             in: table
         )
         state.setGlobal("achievements", value: .table(table))
