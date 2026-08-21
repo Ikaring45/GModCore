@@ -619,9 +619,25 @@ public final class GModPlayableSession {
             } else {
                 activeModelValidator = nil
             }
+            let activeBodyGroupResolver: SourceCanonicalBodyGroupResolver?
+            if let loadedStudioModelRepository {
+                activeBodyGroupResolver = {
+                    model,
+                    subModelIDs,
+                    currentBodyValue in
+                    try loadedStudioModelRepository.bodyValue(
+                        for: model,
+                        applyingBodyGroups: subModelIDs,
+                        to: currentBodyValue
+                    )
+                }
+            } else {
+                activeBodyGroupResolver = nil
+            }
             let sourceAdapter = try GMLuaSourceRuntimeAdapter(
                 serverRuntime: server,
-                canonicalModelValidator: activeModelValidator
+                canonicalModelValidator: activeModelValidator,
+                canonicalBodyGroupResolver: activeBodyGroupResolver
             )
             adapter = sourceAdapter
             try sourceAdapter.installCanonicalEntityLuaBridge()

@@ -49,6 +49,39 @@ public struct GModStudioModelRepositoryCachePolicy: Sendable, Equatable {
     )
 }
 
+/// Fail-closed reasons a validated Studio asset could not supply the exact
+/// body-part table required by GLua `Entity:SetBodyGroups`.
+public enum GModStudioBodyGroupResolutionError: Error, Sendable, Equatable,
+    CustomStringConvertible
+{
+    case assetUnavailable(SourceStudioModelAssetUnavailable)
+    case unsupportedMetadata(SourceStudioMeshUnsupportedFeature)
+    case meshDecode(SourceStudioModelMeshDecodeError)
+    case inconsistentChecksum(expected: Int32, actual: Int32)
+    case inconsistentModelName(expected: String, actual: String)
+    case selection(SourceStudioBodyGroupSelectionError)
+    case unexpected(type: String)
+
+    public var description: String {
+        switch self {
+        case let .assetUnavailable(reason):
+            return "Studio body-group asset is unavailable: \(reason)"
+        case let .unsupportedMetadata(feature):
+            return "unsupported Studio body-group metadata: \(feature)"
+        case let .meshDecode(error):
+            return "Studio body-group mesh decode failed: \(error)"
+        case let .inconsistentChecksum(expected, actual):
+            return "Studio body-group checksum \(actual) does not match \(expected)"
+        case let .inconsistentModelName(expected, actual):
+            return "Studio body-group model '\(actual)' does not match '\(expected)'"
+        case let .selection(error):
+            return "Studio body-group selection failed: \(error)"
+        case let .unexpected(type):
+            return "Studio body-group resolution failed with unexpected \(type)"
+        }
+    }
+}
+
 /// Session-owned, bounded Studio asset cache.
 ///
 /// The repository resolves one explicit companion set and retains the exact
@@ -73,6 +106,10 @@ public final class GModStudioModelRepository: @unchecked Sendable {
         SourceStudioModelAssetPaths,
         SourceStudioModelAssetRequirement
     ) -> SourceStudioModelAssetLoadOutcome
+    private let decodeRootMesh: @Sendable (
+        SourceStudioImmutableRenderPayload,
+        SourceStudioMeshDecodeBudget
+    ) throws -> SourceStudioModelMeshSnapshot
     private var cache: [CacheKey: CacheEntry] = [:]
     private var leastToMostRecent: [CacheKey] = []
     private var retainedRawByteCount = 0
@@ -90,11 +127,26 @@ public final class GModStudioModelRepository: @unchecked Sendable {
         loadAsset = { paths, requirement in
             loader.load(paths: paths, requirement: requirement)
         }
+        decodeRootMesh = { payload, meshBudget in
+            try SourceStudioModelMeshDecoder.decodeRootLOD(
+                payload,
+                budget: meshBudget
+            )
+        }
     }
 
     init(
         variant: GModStudioModelVTXVariant = .directX90,
         cachePolicy: GModStudioModelRepositoryCachePolicy = .initialIpadProp,
+        decodeRootMesh: @escaping @Sendable (
+            SourceStudioImmutableRenderPayload,
+            SourceStudioMeshDecodeBudget
+        ) throws -> SourceStudioModelMeshSnapshot = { payload, meshBudget in
+            try SourceStudioModelMeshDecoder.decodeRootLOD(
+                payload,
+                budget: meshBudget
+            )
+        },
         loadAsset: @escaping @Sendable (
             SourceStudioModelAssetPaths,
             SourceStudioModelAssetRequirement
@@ -102,6 +154,7 @@ public final class GModStudioModelRepository: @unchecked Sendable {
     ) {
         self.variant = variant
         self.cachePolicy = cachePolicy
+        self.decodeRootMesh = decodeRootMesh
         self.loadAsset = loadAsset
     }
 
@@ -135,6 +188,71 @@ public final class GModStudioModelRepository: @unchecked Sendable {
                     .totalByteBudgetExceeded:
                 return .unavailable
             }
+        }
+    }
+
+    /// Resolves Source's packed `m_nBody` exclusively from the validated MDL,
+    /// VVD, and selected VTX hierarchy. It does not infer decimal places or
+    /// accept header-only/model-name evidence as body-part metadata.
+    public func bodyValue(
+        for model: SourceEntityModelReference,
+        applyingBodyGroups subModelIDs: String,
+        to currentBodyValue: Int,
+        compilePolicy: GModStudioRenderableModelCompilePolicy =
+            .initialIpadProp
+    ) throws -> Int {
+        let asset: SourceStudioModelAsset
+        switch renderAsset(for: model) {
+        case let .loaded(loaded):
+            asset = loaded
+        case let .unavailable(reason):
+            throw GModStudioBodyGroupResolutionError.assetUnavailable(reason)
+        }
+
+        let mesh: SourceStudioModelMeshSnapshot
+        do {
+            mesh = try decodeRootMesh(
+                asset.renderPayload,
+                compilePolicy.meshDecodeBudget
+            )
+        } catch let error as SourceStudioModelMeshDecodeError {
+            if case let .unsupported(feature) = error {
+                throw GModStudioBodyGroupResolutionError
+                    .unsupportedMetadata(feature)
+            }
+            throw GModStudioBodyGroupResolutionError.meshDecode(error)
+        } catch {
+            throw GModStudioBodyGroupResolutionError.unexpected(
+                type: String(reflecting: type(of: error))
+            )
+        }
+
+        let expectedChecksum = asset.validation.checksum
+        guard mesh.checksum == expectedChecksum else {
+            throw GModStudioBodyGroupResolutionError.inconsistentChecksum(
+                expected: expectedChecksum,
+                actual: mesh.checksum
+            )
+        }
+        let expectedName = asset.renderPayload.model.header.name
+        guard mesh.modelName == expectedName else {
+            throw GModStudioBodyGroupResolutionError.inconsistentModelName(
+                expected: expectedName,
+                actual: mesh.modelName
+            )
+        }
+
+        do {
+            return try mesh.bodyValue(
+                applyingBodyGroups: subModelIDs,
+                to: currentBodyValue
+            )
+        } catch let error as SourceStudioBodyGroupSelectionError {
+            throw GModStudioBodyGroupResolutionError.selection(error)
+        } catch {
+            throw GModStudioBodyGroupResolutionError.unexpected(
+                type: String(reflecting: type(of: error))
+            )
         }
     }
 
