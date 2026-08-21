@@ -1128,7 +1128,8 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
                 onEntityRemoved: { [unowned self] handle, entity in
                     if let identity = self.didCleanupCanonicalEntityLocked(
                         handle: handle,
-                        entity: entity
+                        entity: entity,
+                        hookFailures: &hookFailures
                     ) {
                         removedEntities.append(identity)
                         return
@@ -1306,7 +1307,8 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
 
     private func didCleanupCanonicalEntityLocked(
         handle: SourceBaseHandle,
-        entity: SourceEntity
+        entity: SourceEntity,
+        hookFailures: inout [GMLuaSourceHookFailure]
     ) -> SourceCanonicalEntityIdentity? {
         guard let snapshot = canonicalEntities.didCleanup(
             capturedHandle: handle,
@@ -1326,6 +1328,19 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
             preconditionFailure(
                 "preflighted SERVER canonical registry disappeared during cleanup"
             )
+        }
+        let luaEntity = registry.entity(at: snapshot.identity.entryIndex)
+        if registry.canonicalIdentity(for: luaEntity) == snapshot.identity,
+           let message = serverRuntime.dispatchContainedHostHook(
+               named: "EntityRemoved",
+               arguments: [luaEntity, .boolean(false)]
+           ) {
+            hookFailures.append(GMLuaSourceHookFailure(
+                realm: .server,
+                event: "EntityRemoved",
+                clientAttachmentOrder: nil,
+                message: message
+            ))
         }
         let applied = try? registry.applyAuthoritativeRemoval(snapshot)
         precondition(

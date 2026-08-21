@@ -185,10 +185,74 @@ final class GModStockPropVerticalIntegrationTests: XCTestCase {
         )
 
         try session.serverRuntime.execute(
+            """
+            STOCK_SERVER_REMOVE_CALLBACKS = 0
+            STOCK_SERVER_REMOVED_HOOKS = 0
+            local prop = Entity(\(serverProp.identity.entryIndex))
+            prop:CallOnRemove("stock-removal", function(ent, marker)
+                assert(IsValid(ent))
+                assert(Entity(\(serverProp.identity.entryIndex)) == ent)
+                assert(marker == "server-extra")
+                STOCK_SERVER_REMOVE_CALLBACKS = STOCK_SERVER_REMOVE_CALLBACKS + 1
+            end, "server-extra")
+            prop:CallOnRemove("stock-cancelled", function()
+                error("removed stock SERVER callback ran")
+            end)
+            prop:RemoveCallOnRemove("stock-cancelled")
+            hook.Add("EntityRemoved", "StockServerRemoval", function(ent, fullUpdate)
+                if ent ~= prop then return end
+                assert(IsValid(ent))
+                assert(fullUpdate == false)
+                STOCK_SERVER_REMOVED_HOOKS = STOCK_SERVER_REMOVED_HOOKS + 1
+            end)
+            """,
+            sourceName: "=(stock prop SERVER removal callbacks)"
+        )
+        try session.clientRuntime.execute(
+            """
+            STOCK_CLIENT_REMOVE_CALLBACKS = 0
+            STOCK_CLIENT_REMOVED_HOOKS = 0
+            local prop = Entity(\(clientProp.identity.entryIndex))
+            prop:CallOnRemove("stock-removal", function(ent, marker)
+                assert(IsValid(ent))
+                assert(Entity(\(clientProp.identity.entryIndex)) == ent)
+                assert(marker == "client-extra")
+                STOCK_CLIENT_REMOVE_CALLBACKS = STOCK_CLIENT_REMOVE_CALLBACKS + 1
+            end, "client-extra")
+            prop:CallOnRemove("stock-cancelled", function()
+                error("removed stock CLIENT callback ran")
+            end)
+            prop:RemoveCallOnRemove("stock-cancelled")
+            hook.Add("EntityRemoved", "StockClientRemoval", function(ent, fullUpdate)
+                if ent ~= prop then return end
+                assert(IsValid(ent))
+                assert(fullUpdate == false)
+                STOCK_CLIENT_REMOVED_HOOKS = STOCK_CLIENT_REMOVED_HOOKS + 1
+            end)
+            """,
+            sourceName: "=(stock prop CLIENT removal callbacks)"
+        )
+
+        try session.serverRuntime.execute(
             "Entity(\(serverProp.identity.index)):Remove()",
             sourceName: "=(stock button_06 remove)"
         )
-        _ = try session.runFixedTick()
+        let removal = try session.runFixedTick()
+        XCTAssertEqual(removal.server.hookFailures, [])
+        try session.serverRuntime.execute(
+            """
+            assert(STOCK_SERVER_REMOVE_CALLBACKS == 1)
+            assert(STOCK_SERVER_REMOVED_HOOKS == 1)
+            """,
+            sourceName: "=(stock prop SERVER removal results)"
+        )
+        try session.clientRuntime.execute(
+            """
+            assert(STOCK_CLIENT_REMOVE_CALLBACKS == 1)
+            assert(STOCK_CLIENT_REMOVED_HOOKS == 1)
+            """,
+            sourceName: "=(stock prop CLIENT removal results)"
+        )
         XCTAssertFalse(session.sourceAdapter.canonicalEntitySnapshots.contains {
             $0.identity == serverProp.identity
         })

@@ -377,6 +377,26 @@ public enum SourceCanonicalEntityGLuaBridge {
             )
             return [.number(Double(snapshot.moveType.rawValue))]
         }
+        try setMethod("Entity:IsConstraint", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Entity:IsConstraint"
+            )
+            switch snapshot.kind {
+            case .world, .player, .propPhysics:
+                return [.boolean(false)]
+            }
+        }
+        try setMethod("Entity:IsWidget", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Entity:IsWidget"
+            )
+            switch snapshot.kind {
+            case .world, .player, .propPhysics:
+                return [.boolean(false)]
+            }
+        }
         try setMethod("Entity:GetSkin", on: entityMetatable) { arguments in
             let snapshot = try requiredSnapshot(arguments.first, function: "Entity:GetSkin")
             return [.number(Double(snapshot.skin))]

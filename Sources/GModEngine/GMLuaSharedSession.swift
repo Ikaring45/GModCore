@@ -433,7 +433,16 @@ public final class GMLuaSharedSession: @unchecked Sendable {
                         clientRegistry.canonicalEntitySnapshots.map(\.identity)
                     )
                     let result = try clientRegistry.applyEntityReplicationPacket(
-                        packet
+                        packet,
+                        beforeRemoving: { entities in
+                            guard let client else { return }
+                            for entity in entities {
+                                _ = client.dispatchContainedHostHook(
+                                    named: "EntityRemoved",
+                                    arguments: [entity, .boolean(false)]
+                                )
+                            }
+                        }
                     )
                     if case .applied = result,
                        clientRegistry.canonicalIdentity(at: playerIndex) == playerIdentity {
@@ -452,7 +461,7 @@ public final class GMLuaSharedSession: @unchecked Sendable {
                             let entity = clientRegistry.entity(
                                 at: snapshot.identity.entryIndex
                             )
-                            try client.dispatchHostHook(
+                            _ = client.dispatchContainedHostHook(
                                 named: "NetworkEntityCreated",
                                 arguments: [entity]
                             )

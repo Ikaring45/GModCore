@@ -471,6 +471,35 @@ public final class GMLuaRuntime {
             self.logger("[\(self.realm.rawValue)][Lua][ERROR] " + arguments.map(\.printable).joined())
             return []
         }
+        state.register("ProtectedCall") { [unowned self] arguments in
+            guard let function = arguments.first else {
+                throw LuaError.runtime(
+                    "bad argument #1 to 'ProtectedCall' (function expected, got no value)"
+                )
+            }
+            switch function {
+            case .luaFunction, .nativeFunction:
+                break
+            default:
+                throw LuaError.runtime(
+                    "bad argument #1 to 'ProtectedCall' " +
+                        "(function expected, got \(function.typeName))"
+                )
+            }
+            do {
+                _ = try self.state.call(
+                    function,
+                    arguments: Array(arguments.dropFirst())
+                )
+                return [.boolean(true)]
+            } catch {
+                self.logger(
+                    "[\(self.realm.rawValue)][Lua][ERROR] " +
+                        Self.describe(error)
+                )
+                return [.boolean(false)]
+            }
+        }
         if realm == .server {
             state.register("__gmod_AddNetworkString") { [unowned self] arguments in
                 guard let first = arguments.first, case let .string(name) = first else {

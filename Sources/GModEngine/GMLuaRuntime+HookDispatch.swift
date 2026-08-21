@@ -27,4 +27,33 @@ extension GMLuaRuntime {
             arguments: [.string(LuaString(event)), gamemode] + arguments
         )
     }
+
+    /// Runs an engine-originated hook without allowing an addon failure to
+    /// unwind the host lifecycle operation which produced the event. Source
+    /// has already committed that operation by this boundary, so retrying the
+    /// packet/tick would duplicate observable Lua work. The ordinary GLua
+    /// error surface receives the diagnostic when it is available.
+    @discardableResult
+    func dispatchContainedHostHook(
+        named event: String,
+        arguments: [LuaValue] = []
+    ) -> String? {
+        do {
+            try dispatchHostHook(named: event, arguments: arguments)
+            return nil
+        } catch {
+            let message = "host hook \(event) failed: \(Self.describe(error))"
+            let reporter = state.getGlobal("ErrorNoHaltWithStack")
+            switch reporter {
+            case .luaFunction, .nativeFunction:
+                _ = try? state.call(
+                    reporter,
+                    arguments: [.string(LuaString(message + "\n"))]
+                )
+            default:
+                break
+            }
+            return message
+        }
+    }
 }

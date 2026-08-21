@@ -87,6 +87,13 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
     private var localPlayerIdentity: (index: Int, generation: UInt64)?
     private var entityReplicationState = SourceEntityReplicationClientState()
     private var entityReplicationPlayerUserIDs: [Int: Int] = [:]
+    /// Serializes the two-phase CLIENT apply boundary while EntityRemoved Lua
+    /// observes the still-live userdata immediately before invalidation.
+    private let entityReplicationMutationLock = NSLock()
+    /// Detached userdata prepared for the accepted packet must remain rooted
+    /// if an EntityRemoved callback explicitly runs Lua collection before the
+    /// projection becomes registry-visible.
+    private var entityReplicationPendingReferences: [LuaValue] = []
 
     private init(
         state: LuaState,
@@ -427,6 +434,9 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
             }
         }
 
+        entityReplicationMutationLock.lock()
+        defer { entityReplicationMutationLock.unlock() }
+
         lock.lock()
         do {
             var candidateState = entityReplicationState
@@ -454,9 +464,24 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
     public func applyEntityReplicationPacket(
         _ packet: SourceEntityReplicationPacket
     ) throws -> SourceEntityReplicationApplyResult {
+        try applyEntityReplicationPacket(packet, beforeRemoving: { _ in })
+    }
+
+    /// Applies one validated packet while exposing its exact remove operations
+    /// immediately before the affected realm-local userdata is invalidated.
+    /// The callback is deliberately nonthrowing: addon failures are contained
+    /// by the host dispatcher so an accepted FIFO packet cannot be replayed.
+    @discardableResult
+    func applyEntityReplicationPacket(
+        _ packet: SourceEntityReplicationPacket,
+        beforeRemoving: ([LuaValue]) -> Void
+    ) throws -> SourceEntityReplicationApplyResult {
         guard realm == .client else {
             throw GMLuaCanonicalEntityRegistryError.clientRealmRequired
         }
+
+        entityReplicationMutationLock.lock()
+        defer { entityReplicationMutationLock.unlock() }
 
         lock.lock()
         do {
@@ -476,8 +501,33 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
                 target: target,
                 preferredPlayerUserIDs: entityReplicationPlayerUserIDs
             )
+
+            let removedValues = removalIdentities(in: packet).compactMap {
+                identity -> LuaValue? in
+                guard let value = values[identity.entryIndex],
+                      let payload = GMLuaTypeSystem.typedObject(from: value)?
+                        .payload as? GMLuaEntityValue,
+                      payload.canonicalSnapshot?.identity == identity else {
+                    return nil
+                }
+                return value
+            }
+            entityReplicationPendingReferences = projection.values.values
+                .flatMap { value -> [LuaValue] in
+                    guard let payload = GMLuaTypeSystem.typedObject(from: value)?
+                            .payload as? GMLuaEntityValue,
+                          let table = payload.luaTable else { return [value] }
+                    return [value, .table(table)]
+                }
+            // GLua's EntityRemoved contract runs immediately before removal.
+            // Release the ordinary registry lock so Entity methods and the
+            // original CallOnRemove implementation can read the sidecar table.
+            lock.unlock()
+            beforeRemoving(removedValues)
+            lock.lock()
             commitCanonicalProjectionLocked(projection)
             entityReplicationState = candidateState
+            entityReplicationPendingReferences.removeAll(keepingCapacity: true)
             lock.unlock()
             state.refreshGarbageCollectionRootProviders()
             return result
@@ -494,6 +544,9 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
         guard realm == .client else {
             throw GMLuaCanonicalEntityRegistryError.clientRealmRequired
         }
+
+        entityReplicationMutationLock.lock()
+        defer { entityReplicationMutationLock.unlock() }
 
         lock.lock()
         do {
@@ -736,6 +789,16 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
             snapshots[index] = snapshot
         }
         return snapshots
+    }
+
+    private func removalIdentities(
+        in packet: SourceEntityReplicationPacket
+    ) -> [SourceCanonicalEntityIdentity] {
+        guard case let .delta(operations) = packet.payload else { return [] }
+        return operations.compactMap { operation in
+            guard case let .remove(snapshot) = operation else { return nil }
+            return snapshot.identity
+        }
     }
 
     private static func luaKind(
@@ -1044,7 +1107,8 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
                 as? GMLuaEntityValue else { return nil }
             return payload.luaTable
         }.map(LuaValue.table)
-        return canonical + tables + [nullValue, semanticIndex]
+        return canonical + tables + entityReplicationPendingReferences +
+            [nullValue, semanticIndex]
     }
 
     fileprivate func all(kind: GMLuaEntityKind? = nil) -> [LuaValue] {
