@@ -612,8 +612,11 @@ public final class GMLuaRuntime {
             end
             util.KeyValuesToTable = __gmod_KeyValuesToTable
             util.KeyValuesToTablePreserveOrder = __gmod_KeyValuesToTablePreserveOrder
+            -- MENU loads the shared net extension because Garry's Mod exposes
+            -- the client-side Lua surface there too. It has no gameplay
+            -- endpoint, but the extension still owns logical receiver state.
+            net = net or {}
             if __gmod_network_realm then
-                net = net or {}
                 net.Start = __gmod_net_Start
                 net.Abort = __gmod_net_Abort
                 net.WriteBit = __gmod_net_WriteBit

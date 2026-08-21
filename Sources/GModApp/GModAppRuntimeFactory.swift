@@ -151,6 +151,25 @@ public final class GModAppRuntimeFactory: @unchecked Sendable {
         )
     }
 
+    /// Builds the trusted MENU realm with the same CoreText measurement
+    /// boundary used by gameplay VGUI. Home, Options, Problems, and Console
+    /// therefore share one Derma layout contract instead of falling back to
+    /// logical glyph estimates.
+    public func makeMenuSession(
+        fileSystem: any LuaVirtualFileSystem & Sendable,
+        initialViewport: GMLuaViewportSize = .logicalDesktopDefault,
+        languageConfiguration: GMLuaLanguageConfiguration = .empty,
+        logger: @escaping (String) -> Void
+    ) -> GMLuaMenuSession {
+        GMLuaMenuSession(
+            fileSystem: fileSystem,
+            initialViewport: initialViewport,
+            textMeasurer: textMeasurer,
+            languageConfiguration: languageConfiguration,
+            logger: logger
+        )
+    }
+
     @discardableResult
     public func mountContentPack(
         _ pack: GarrysPADContentPack
