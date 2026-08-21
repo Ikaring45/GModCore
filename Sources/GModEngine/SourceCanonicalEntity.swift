@@ -360,18 +360,20 @@ public final class SourceCanonicalEntity: SourceEntity {
 
     fileprivate func makeSnapshot(
         identity: SourceCanonicalEntityIdentity,
+        state overrideState: SourceCanonicalEntityState? = nil,
         lifecycle overrideLifecycle: SourceCanonicalEntityLifecycle? = nil,
         revision overrideRevision: UInt64? = nil
     ) -> SourceCanonicalEntitySnapshot {
-        SourceCanonicalEntitySnapshot(
+        let state = overrideState ?? stateStorage
+        return SourceCanonicalEntitySnapshot(
             identity: identity,
             kind: kind,
             className: className,
-            transform: stateStorage.transform,
-            motion: stateStorage.motion,
-            model: stateStorage.model,
-            solidType: stateStorage.solidType,
-            moveType: stateStorage.moveType,
+            transform: state.transform,
+            motion: state.motion,
+            model: state.model,
+            solidType: state.solidType,
+            moveType: state.moveType,
             lifecycle: overrideLifecycle ?? lifecycle,
             isNetworkable: true,
             revision: overrideRevision ?? revision
@@ -411,6 +413,25 @@ public final class SourceCanonicalEntityStore {
         at requestedEntryIndex: Int? = nil,
         state requestedState: SourceCanonicalEntityState? = nil
     ) throws -> SourceCanonicalEntitySnapshot {
+        try create(
+            kind: kind,
+            at: requestedEntryIndex,
+            state: requestedState,
+            publishing: { _ in }
+        )
+    }
+
+    /// Publishes the immutable creation snapshot before the new entity becomes
+    /// part of this store. A failed publisher rolls back only the exact fresh
+    /// EHANDLE and advances its slot serial, leaving every deferred deletion
+    /// and removal callback untouched.
+    @discardableResult
+    func create(
+        kind: SourceCanonicalEntityKind,
+        at requestedEntryIndex: Int? = nil,
+        state requestedState: SourceCanonicalEntityState? = nil,
+        publishing publish: (SourceCanonicalEntitySnapshot) throws -> Void
+    ) throws -> SourceCanonicalEntitySnapshot {
         let entryIndex = try resolveEntryIndex(for: kind, requested: requestedEntryIndex)
         let state = requestedState ?? .defaults(for: kind)
         try validate(state: state, kind: kind, lifecycle: .created)
@@ -423,9 +444,21 @@ public final class SourceCanonicalEntityStore {
             throw SourceCanonicalEntityError.entityList(error)
         }
 
+        let identity = SourceCanonicalEntityIdentity(handle: handle)
+        let snapshot = entity.makeSnapshot(identity: identity)
+        do {
+            try publish(snapshot)
+        } catch {
+            precondition(
+                entityList.rollbackUnpublishedAddition(handle, entity: entity),
+                "fresh canonical entity rollback lost its exact EHANDLE"
+            )
+            throw error
+        }
+
         entitiesByHandle[handle.rawValue] = entity
         handleOrder.append(handle.rawValue)
-        return entity.makeSnapshot(identity: SourceCanonicalEntityIdentity(handle: handle))
+        return snapshot
     }
 
     public func entity(
@@ -463,6 +496,17 @@ public final class SourceCanonicalEntityStore {
         _ identity: SourceCanonicalEntityIdentity,
         _ mutation: (inout SourceCanonicalEntityState) throws -> Void
     ) throws -> SourceCanonicalEntitySnapshot {
+        try update(identity, mutation, publishing: { _ in })
+    }
+
+    /// Validates and publishes a prospective snapshot before committing its
+    /// state. A throwing publisher therefore leaves state and revision exact.
+    @discardableResult
+    func update(
+        _ identity: SourceCanonicalEntityIdentity,
+        _ mutation: (inout SourceCanonicalEntityState) throws -> Void,
+        publishing publish: (SourceCanonicalEntitySnapshot) throws -> Void
+    ) throws -> SourceCanonicalEntitySnapshot {
         let entity = try requireEntity(identity)
         guard entity.lifecycle != .pendingRemoval, entity.lifecycle != .removed else {
             throw SourceCanonicalEntityError.invalidLifecycleTransition(
@@ -474,8 +518,14 @@ public final class SourceCanonicalEntityStore {
         var candidate = entity.state
         try mutation(&candidate)
         try validate(state: candidate, kind: entity.kind, lifecycle: entity.lifecycle)
+        let snapshot = entity.makeSnapshot(
+            identity: identity,
+            state: candidate,
+            revision: entity.revision &+ 1
+        )
+        try publish(snapshot)
         entity.commit(candidate)
-        return entity.makeSnapshot(identity: identity)
+        return snapshot
     }
 
     /// Mirrors `DispatchSpawn`: a prop cannot cross this boundary until a real
@@ -483,6 +533,14 @@ public final class SourceCanonicalEntityStore {
     @discardableResult
     public func spawn(
         _ identity: SourceCanonicalEntityIdentity
+    ) throws -> SourceCanonicalEntitySnapshot {
+        try spawn(identity, publishing: { _ in })
+    }
+
+    @discardableResult
+    func spawn(
+        _ identity: SourceCanonicalEntityIdentity,
+        publishing publish: (SourceCanonicalEntitySnapshot) throws -> Void
     ) throws -> SourceCanonicalEntitySnapshot {
         let entity = try requireEntity(identity)
         guard entity.lifecycle == .created else {
@@ -492,13 +550,27 @@ public final class SourceCanonicalEntityStore {
             )
         }
         try validate(state: entity.state, kind: entity.kind, lifecycle: .spawned)
+        let snapshot = entity.makeSnapshot(
+            identity: identity,
+            lifecycle: .spawned,
+            revision: entity.revision &+ 1
+        )
+        try publish(snapshot)
         entity.transition(to: .spawned)
-        return entity.makeSnapshot(identity: identity)
+        return snapshot
     }
 
     @discardableResult
     public func activate(
         _ identity: SourceCanonicalEntityIdentity
+    ) throws -> SourceCanonicalEntitySnapshot {
+        try activate(identity, publishing: { _ in })
+    }
+
+    @discardableResult
+    func activate(
+        _ identity: SourceCanonicalEntityIdentity,
+        publishing publish: (SourceCanonicalEntitySnapshot) throws -> Void
     ) throws -> SourceCanonicalEntitySnapshot {
         let entity = try requireEntity(identity)
         guard entity.lifecycle == .spawned else {
@@ -507,8 +579,14 @@ public final class SourceCanonicalEntityStore {
                 to: .active
             )
         }
+        let snapshot = entity.makeSnapshot(
+            identity: identity,
+            lifecycle: .active,
+            revision: entity.revision &+ 1
+        )
+        try publish(snapshot)
         entity.transition(to: .active)
-        return entity.makeSnapshot(identity: identity)
+        return snapshot
     }
 
     /// UTIL_Remove-compatible scheduling. The EHANDLE and snapshots remain
@@ -517,9 +595,19 @@ public final class SourceCanonicalEntityStore {
     public func markForRemoval(
         _ identity: SourceCanonicalEntityIdentity
     ) throws -> SourceCanonicalEntitySnapshot {
+        try markForRemoval(identity, publishing: { _ in })
+    }
+
+    @discardableResult
+    func markForRemoval(
+        _ identity: SourceCanonicalEntityIdentity,
+        publishing publish: (SourceCanonicalEntitySnapshot) throws -> Void
+    ) throws -> SourceCanonicalEntitySnapshot {
         let entity = try requireEntity(identity)
         if entity.lifecycle == .pendingRemoval {
-            return entity.makeSnapshot(identity: identity)
+            let snapshot = entity.makeSnapshot(identity: identity)
+            try publish(snapshot)
+            return snapshot
         }
         guard entity.lifecycle != .removed else {
             throw SourceCanonicalEntityError.invalidLifecycleTransition(
@@ -527,9 +615,15 @@ public final class SourceCanonicalEntityStore {
                 to: .pendingRemoval
             )
         }
+        let snapshot = entity.makeSnapshot(
+            identity: identity,
+            lifecycle: .pendingRemoval,
+            revision: entity.revision &+ 1
+        )
+        try publish(snapshot)
         entity.transition(to: .pendingRemoval)
         entityList.markForDeletion(identity.handle)
-        return entity.makeSnapshot(identity: identity)
+        return snapshot
     }
 
     /// Standalone cleanup boundary for dedicated tests and future hosts that do
