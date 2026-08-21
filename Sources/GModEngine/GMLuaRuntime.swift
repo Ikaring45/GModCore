@@ -23,6 +23,7 @@ public final class GMLuaRuntime {
     private(set) var typeSystem: GMLuaTypeSystem?
     public private(set) var entityRegistry: GMLuaEntityRegistry?
     public private(set) var achievements: GMLuaAchievements?
+    public private(set) var effects: GMLuaEffects?
     public private(set) var chat: GMLuaChat?
     public private(set) var input: GMLuaInput?
     public private(set) var sound: GMLuaSound?
@@ -253,6 +254,12 @@ public final class GMLuaRuntime {
             achievements = try GMLuaAchievements.install(
                 into: state,
                 realm: realm
+            )
+            effects = try GMLuaEffects.install(
+                into: state,
+                realm: realm,
+                typeSystem: installedTypeSystem,
+                entityRegistry: installedEntityRegistry
             )
             traceBridge = try GMLuaUtilTrace.install(
                 into: state,
