@@ -14,11 +14,30 @@ private final class GModMountedContentSource: @unchecked Sendable {
         lock.unlock()
     }
 
-    func data(for logicalPath: String) throws -> Data? {
+    func unmount() {
+        lock.lock()
+        source = nil
+        lock.unlock()
+    }
+
+    func data(
+        for logicalPath: String,
+        maximumByteCount: UInt64 = 64 * 1_024 * 1_024
+    ) throws -> Data? {
         lock.lock()
         let current = source
         lock.unlock()
-        return try current?.data(for: logicalPath)
+        return try current?.data(
+            for: logicalPath,
+            maximumByteCount: maximumByteCount
+        )
+    }
+
+    func mountedArchiveURL() -> URL? {
+        lock.lock()
+        let url = source?.pack.archiveURL
+        lock.unlock()
+        return url
     }
 }
 
@@ -56,6 +75,37 @@ public final class GModAppRuntimeFactory: @unchecked Sendable {
                 }
             }
         }
+
+    /// Resolves a bounded generic asset through the exact active content-pack
+    /// mount used by Metal: loose ZIP files first, then nested VPKs, then the
+    /// audited package fallback. The active source changes transactionally
+    /// only after ContentModel validates a replacement ZIP.
+    func mountedContentData(
+        for logicalPath: String,
+        maximumByteCount: UInt64
+    ) throws -> Data? {
+        if let mounted = try Self.processMountedContentSource.data(
+            for: logicalPath,
+            maximumByteCount: maximumByteCount
+        ) {
+            return mounted
+        }
+        do {
+            let bundled = try GModGameAssets.clientContentData(
+                for: logicalPath
+            )
+            return UInt64(bundled.count) <= maximumByteCount
+                ? bundled
+                : nil
+        } catch let error as GModGameAssetError {
+            switch error {
+            case .missingResource:
+                return nil
+            case .invalidManifest, .invalidContentPath:
+                throw error
+            }
+        }
+    }
 
     private static let processSurfaceTextRasterizer =
         GModMetalCoreTextRasterizer(
@@ -118,7 +168,35 @@ public final class GModAppRuntimeFactory: @unchecked Sendable {
 
     func activateContentPack(_ source: GModContentPackAssetSource) {
         Self.processMountedContentSource.mount(source)
+        clearContentCaches()
+    }
+
+    func unmountContentPack() {
+        Self.processMountedContentSource.unmount()
+        clearContentCaches()
+    }
+
+    func clearContentCaches() {
         Self.processSurfaceTextureResolver.removeAllCachedTextures()
+        Self.processSurfaceTextRasterizer.removeAllCachedGlyphs()
+        NotificationCenter.default.post(
+            name: GModMenuAudioSettingsStore.clearContentCachesNotification,
+            object: nil
+        )
+    }
+
+    func cacheDiagnostics() -> (textures: Int, textureBytes: Int, glyphs: Int,
+        glyphBytes: Int) {
+        (
+            Self.processSurfaceTextureResolver.cachedEntryCount,
+            Self.processSurfaceTextureResolver.cachedTextureByteCount,
+            Self.processSurfaceTextRasterizer.cachedGlyphCount,
+            Self.processSurfaceTextRasterizer.cachedGlyphByteCount
+        )
+    }
+
+    func mountedContentPackURLForTesting() -> URL? {
+        Self.processMountedContentSource.mountedArchiveURL()
     }
 
     public func makePlayableSession(

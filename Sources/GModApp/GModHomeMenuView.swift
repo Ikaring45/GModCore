@@ -1,4 +1,3 @@
-import AVFoundation
 import Foundation
 import SwiftUI
 import UIKit
@@ -12,6 +11,7 @@ import GModGameSession
 /// `mainmenu.lua` paints the background first and places a transparent DHTML
 /// panel over it. Garry's PAD mirrors that split: UIKit owns the background,
 /// while WKWebView runs the original menu HTML/CSS/Angular application.
+@MainActor
 struct GModHomeMenuView: UIViewRepresentable {
     private static let scheme = "garryspad"
     private static let menuPath = "garrysmod/html/menu.html"
@@ -22,13 +22,62 @@ struct GModHomeMenuView: UIViewRepresentable {
     let backgroundJPEG: Data
     let logoPNG: Data?
     let onSelectMap: (GModBundledMap) -> Void
+    let isInGame: Bool
+    let preferredLanguageCode: String?
+    let menuBackgroundsEnabled: Bool
+    let problemCount: Int
+    let problemSeverity: Int
+    let onMenuAction: ((GModHomeMenuAction) -> Void)?
+    let onLanguageChange: ((GModMenuLanguageSnapshot) -> Void)?
+    let onDiagnostic: ((GModAppProblemRecord) -> Void)?
+    let audioController: GModMenuAudioController
+
+    init(
+        pack: GarrysPADContentPack,
+        assetSource: GModContentPackAssetSource?,
+        backgroundJPEG: Data,
+        logoPNG: Data?,
+        onSelectMap: @escaping (GModBundledMap) -> Void,
+        isInGame: Bool = false,
+        preferredLanguageCode: String? = nil,
+        menuBackgroundsEnabled: Bool = true,
+        problemCount: Int = 0,
+        problemSeverity: Int = 0,
+        onMenuAction: ((GModHomeMenuAction) -> Void)? = nil,
+        onLanguageChange: ((GModMenuLanguageSnapshot) -> Void)? = nil,
+        onDiagnostic: ((GModAppProblemRecord) -> Void)? = nil,
+        audioController: GModMenuAudioController
+    ) {
+        self.pack = pack
+        self.assetSource = assetSource
+        self.backgroundJPEG = backgroundJPEG
+        self.logoPNG = logoPNG
+        self.onSelectMap = onSelectMap
+        self.isInGame = isInGame
+        self.preferredLanguageCode = preferredLanguageCode
+        self.menuBackgroundsEnabled = menuBackgroundsEnabled
+        self.problemCount = problemCount
+        self.problemSeverity = problemSeverity
+        self.onMenuAction = onMenuAction
+        self.onLanguageChange = onLanguageChange
+        self.onDiagnostic = onDiagnostic
+        self.audioController = audioController
+    }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             pack: pack,
             assetSource: assetSource,
             fallbackBackgroundJPEG: backgroundJPEG,
-            onSelectMap: onSelectMap
+            onSelectMap: onSelectMap,
+            isInGame: isInGame,
+            menuBackgroundsEnabled: menuBackgroundsEnabled,
+            problemCount: problemCount,
+            problemSeverity: problemSeverity,
+            onMenuAction: onMenuAction,
+            onLanguageChange: onLanguageChange,
+            onDiagnostic: onDiagnostic,
+            audioController: audioController
         )
     }
 
@@ -47,7 +96,17 @@ struct GModHomeMenuView: UIViewRepresentable {
             name: Coordinator.messageName
         )
         configuration.userContentController.addUserScript(WKUserScript(
-            source: Self.engineFacadeScript,
+            source: GModMenuWebContract.zoomLockScript,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
+        configuration.userContentController.addUserScript(WKUserScript(
+            source: context.coordinator.engineFacadeScript(),
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
+        configuration.userContentController.addUserScript(WKUserScript(
+            source: GModMenuWebContract.htmlAudioBridgeScript,
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
@@ -61,8 +120,12 @@ struct GModHomeMenuView: UIViewRepresentable {
             injectionTime: .atDocumentEnd,
             forMainFrameOnly: true
         ))
+        configuration.allowsInlineMediaPlayback = true
 
-        let webView = WKWebView(frame: .zero, configuration: configuration)
+        let webView = GModZoomLockedWebView(
+            frame: .zero,
+            configuration: configuration
+        )
         webView.navigationDelegate = context.coordinator
         webView.isOpaque = false
         webView.backgroundColor = .clear
@@ -76,6 +139,7 @@ struct GModHomeMenuView: UIViewRepresentable {
 
         let container = GModHomeMenuContainerView(webView: webView)
         context.coordinator.webView = webView
+        context.coordinator.publishLanguageSnapshot()
         context.coordinator.installBackground(into: container)
 
         if let entry = try? pack.entry(for: Self.menuPath),
@@ -96,10 +160,25 @@ struct GModHomeMenuView: UIViewRepresentable {
 
     func updateUIView(_ uiView: UIView, context: Context) {
         context.coordinator.onSelectMap = onSelectMap
+        context.coordinator.updateIsInGame(isInGame, in: context.coordinator.webView)
+        context.coordinator.updatePreferredLanguage(
+            preferredLanguageCode,
+            in: context.coordinator.webView
+        )
+        context.coordinator.updateBackgroundEnabled(menuBackgroundsEnabled)
+        context.coordinator.updateProblemStatus(
+            count: problemCount,
+            severity: problemSeverity,
+            in: context.coordinator.webView
+        )
+        context.coordinator.onMenuAction = onMenuAction
+        context.coordinator.onLanguageChange = onLanguageChange
+        context.coordinator.onDiagnostic = onDiagnostic
     }
 
     static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
         coordinator.stopBackgroundAnimation()
+        coordinator.stopAudio()
         if let webView = coordinator.webView {
             webView.configuration.userContentController.removeScriptMessageHandler(
                 forName: Coordinator.messageName
@@ -110,43 +189,150 @@ struct GModHomeMenuView: UIViewRepresentable {
         coordinator.webView = nil
     }
 
+    @MainActor
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         static let messageName = "garrysPAD"
 
         fileprivate let contentHandler: ContentSchemeHandler
         weak var webView: WKWebView?
         var onSelectMap: (GModBundledMap) -> Void
+        private var isInGame: Bool
+        private var menuBackgroundsEnabled: Bool
+        private var problemCount: Int
+        private var problemSeverity: Int
+        var onMenuAction: ((GModHomeMenuAction) -> Void)?
+        var onLanguageChange: ((GModMenuLanguageSnapshot) -> Void)?
+        var onDiagnostic: ((GModAppProblemRecord) -> Void)?
 
         private let pack: GarrysPADContentPack
-        private let assetSource: GModContentPackAssetSource?
         private let fallbackBackgroundJPEG: Data
-        private var soundPlayers: [String: AVAudioPlayer] = [:]
+        private let languageCatalog: GModMenuLocalizationCatalog
+        private let languagePreferenceStore: GModMenuLanguagePreferenceStore
+        private var languageSnapshot: GModMenuLanguageSnapshot
+        private let audioController: GModMenuAudioController
         private weak var backgroundContainer: GModHomeMenuContainerView?
 
         init(
             pack: GarrysPADContentPack,
             assetSource: GModContentPackAssetSource?,
             fallbackBackgroundJPEG: Data,
-            onSelectMap: @escaping (GModBundledMap) -> Void
+            onSelectMap: @escaping (GModBundledMap) -> Void,
+            isInGame: Bool,
+            menuBackgroundsEnabled: Bool,
+            problemCount: Int,
+            problemSeverity: Int,
+            onMenuAction: ((GModHomeMenuAction) -> Void)?,
+            onLanguageChange: ((GModMenuLanguageSnapshot) -> Void)?,
+            onDiagnostic: ((GModAppProblemRecord) -> Void)?,
+            audioController: GModMenuAudioController
         ) {
             self.pack = pack
-            self.assetSource = assetSource
             self.fallbackBackgroundJPEG = fallbackBackgroundJPEG
             contentHandler = ContentSchemeHandler(
                 pack: pack,
                 assetSource: assetSource
             )
             self.onSelectMap = onSelectMap
-            super.init()
-            try? AVAudioSession.sharedInstance().setCategory(
-                .ambient,
-                options: [.mixWithOthers]
+            self.isInGame = isInGame
+            self.menuBackgroundsEnabled = menuBackgroundsEnabled
+            self.problemCount = max(0, problemCount)
+            self.problemSeverity = max(0, min(2, problemSeverity))
+            self.onMenuAction = onMenuAction
+            self.onLanguageChange = onLanguageChange
+            self.onDiagnostic = onDiagnostic
+            self.audioController = audioController
+            let appPhrases = GModBundledAppLocalization.load {
+                print("[Garry's PAD][Menu][language] \($0)")
+            }
+            let catalog = GModMenuLocalizationCatalog.load(
+                from: pack,
+                appPhrasesByLanguage: appPhrases
+            ) {
+                print("[Garry's PAD][Menu][language] \($0)")
+            }
+            languageCatalog = catalog
+            let preferenceStore = GModMenuLanguagePreferenceStore()
+            languagePreferenceStore = preferenceStore
+            let code = preferenceStore.resolvedLanguageCode(
+                availableLanguageCodes: catalog.availableLanguageCodes
             )
+            languageSnapshot = catalog.snapshot(languageCode: code)
+            super.init()
+        }
+
+        func engineFacadeScript() -> String {
+            GModMenuWebContract.languageFacadeScript(
+                snapshot: languageSnapshot,
+                availableLanguageCodes: languageCatalog.availableLanguageCodes
+            ) + GModMenuWebContract.problemStatusScript(
+                count: problemCount,
+                severity: problemSeverity
+            ) + """
+
+            window.__garrysPadIsInGame=\(isInGame ? "true" : "false");
+            window.util={MotionSensorAvailable:function(cb){
+              if(typeof cb==='function')cb(false);return false;
+            }};
+            """
+        }
+
+        func updateIsInGame(_ replacement: Bool, in webView: WKWebView?) {
+            guard replacement != isInGame else { return }
+            isInGame = replacement
+            webView?.evaluateJavaScript("""
+            window.__garrysPadIsInGame=\(replacement ? "true" : "false");
+            if(typeof SetInGame==='function') SetInGame(window.__garrysPadIsInGame);
+            """)
+        }
+
+        func updatePreferredLanguage(_ rawCode: String?, in webView: WKWebView?) {
+            guard let rawCode else { return }
+            let code = GModMenuLocalizationCatalog.normalizedCode(rawCode)
+            guard code != languageSnapshot.code,
+                  languageCatalog.contains(languageCode: code) else {
+                return
+            }
+            selectLanguage(code, in: webView)
+        }
+
+        func updateBackgroundEnabled(_ enabled: Bool) {
+            guard enabled != menuBackgroundsEnabled else { return }
+            menuBackgroundsEnabled = enabled
+            let data = enabled ? preferredBackgroundData() : nil
+            backgroundContainer?.setBackgroundImage(data.flatMap(UIImage.init(data:)))
+        }
+
+        func updateProblemStatus(
+            count replacementCount: Int,
+            severity replacementSeverity: Int,
+            in webView: WKWebView?
+        ) {
+            let count = max(0, replacementCount)
+            let severity = max(0, min(2, replacementSeverity))
+            guard count != problemCount || severity != problemSeverity else { return }
+            problemCount = count
+            problemSeverity = severity
+            webView?.evaluateJavaScript(GModMenuWebContract.problemStatusScript(
+                count: count,
+                severity: severity
+            ))
+        }
+
+        func publishLanguageSnapshot() {
+            GModMenuLocalizationSelectionStore.shared.publish(
+                languageSnapshot,
+                availableLanguageCodes: languageCatalog.availableLanguageCodes
+            )
+            onLanguageChange?(languageSnapshot)
+        }
+
+        func stopAudio() {
+            audioController.stop(bus: .menu)
         }
 
         fileprivate func installBackground(into container: GModHomeMenuContainerView) {
             backgroundContainer = container
-            let data = preferredBackgroundData()
+            let data = menuBackgroundsEnabled ? preferredBackgroundData() : nil
             container.setBackgroundImage(data.flatMap(UIImage.init(data:)))
         }
 
@@ -289,15 +475,25 @@ struct GModHomeMenuView: UIViewRepresentable {
             }
 
             if action == "startMap",
-               let name = body["map"] as? String,
-               let map = GModBundledMap(rawValue: name) {
-                onSelectMap(map)
+               let name = body["map"] as? String {
+                handleMenuAction(.startMap(name), in: message.webView)
                 return
             }
 
             if action == "sound",
                let name = body["name"] as? String {
-                playSound(named: name)
+                audioController.play(name, origin: .lua)
+                return
+            }
+
+            if action == "htmlSound",
+               let name = body["name"] as? String {
+                let documentURL = (body["base"] as? String).flatMap(URL.init(string:))
+                audioController.play(
+                    name,
+                    origin: .html,
+                    documentURL: documentURL
+                )
                 return
             }
 
@@ -305,6 +501,16 @@ struct GModHomeMenuView: UIViewRepresentable {
                 let level = body["level"] as? String ?? "info"
                 let text = body["message"] as? String ?? ""
                 print("[Garry's PAD][Menu][\(level)] \(text)")
+                if level.lowercased() == "js" || level.lowercased() == "error" {
+                    onDiagnostic?(GModAppProblemRecord(
+                        id: "menu|\(level)|\(text)",
+                        kind: .compatibility,
+                        severity: .error,
+                        title: "#garryspad.problem.menu",
+                        detail: text,
+                        source: "WKWebView"
+                    ))
+                }
                 return
             }
 
@@ -313,8 +519,8 @@ struct GModHomeMenuView: UIViewRepresentable {
                 return
             }
 
-            if let map = Self.mapCommand(in: command) {
-                onSelectMap(map)
+            if let parsed = GModHomeMenuCommandParser.parse(command) {
+                handleMenuAction(parsed, in: message.webView)
             } else if command.contains("UpdateServerSettings") {
                 message.webView?.evaluateJavaScript(Self.serverSettingsScript)
             }
@@ -331,6 +537,14 @@ struct GModHomeMenuView: UIViewRepresentable {
             document.body.style.backgroundColor='transparent';
             if(window.__garrysPadRepairImages) window.__garrysPadRepairImages();
             """)
+            webView.evaluateJavaScript(GModMenuWebContract.applyLanguageScript(
+                snapshot: languageSnapshot,
+                availableLanguageCodes: languageCatalog.availableLanguageCodes
+            ))
+            webView.evaluateJavaScript(GModMenuWebContract.problemStatusScript(
+                count: problemCount,
+                severity: problemSeverity
+            ))
         }
 
         func webView(
@@ -349,53 +563,51 @@ struct GModHomeMenuView: UIViewRepresentable {
             print("[Garry's PAD][Menu][provisional] \(error)")
         }
 
-        private func playSound(named rawName: String) {
-            let name = rawName
-                .replacingOccurrences(of: "\\", with: "/")
-                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                .lowercased()
-            guard !name.isEmpty,
-                  !name.split(separator: "/").contains(".."),
-                  ["wav", "mp3"].contains(
-                      URL(fileURLWithPath: name).pathExtension.lowercased()
-                  ) else {
-                return
-            }
-            let logicalPath = name.hasPrefix("sound/")
-                ? name
-                : "sound/\(name)"
-            if let existing = soundPlayers[logicalPath] {
-                existing.currentTime = 0
-                existing.play()
-                return
-            }
-            guard let assetSource else { return }
-            let data: Data
-            do {
-                guard let loaded = try assetSource.data(for: logicalPath) else {
+        private func handleMenuAction(
+            _ action: GModHomeMenuAction,
+            in webView: WKWebView?
+        ) {
+            onMenuAction?(action)
+            switch action {
+            case let .startMap(name):
+                guard let map = GModBundledMap(rawValue: name) else {
+                    print("[Garry's PAD][Menu][command] unavailable bundled map: \(name)")
                     return
                 }
-                data = loaded
-            } catch {
-                return
+                onSelectMap(map)
+            case let .setLanguage(rawCode):
+                selectLanguage(rawCode, in: webView)
+            case .hideGameUI, .openOptions, .openProblems, .disconnect, .quit:
+                guard onMenuAction != nil else {
+                    print(
+                        "[Garry's PAD][Menu][integration] parent callback required for \(action)"
+                    )
+                    return
+                }
             }
-            guard let player = try? AVAudioPlayer(data: data) else { return }
-            player.prepareToPlay()
-            soundPlayers[logicalPath] = player
-            player.play()
         }
 
-        private static func mapCommand(in command: String) -> GModBundledMap? {
-            let compact = command
-                .replacingOccurrences(of: " ", with: "")
-                .replacingOccurrences(of: "'", with: "\"")
-                .lowercased()
-            guard compact.contains("runconsolecommand(\"map\",") else {
-                return nil
+        private func selectLanguage(_ rawCode: String, in webView: WKWebView?) {
+            let code = GModMenuLocalizationCatalog.normalizedCode(rawCode)
+            guard languageCatalog.contains(languageCode: code) else {
+                print(
+                    "[Garry's PAD][Menu][language] rejected unavailable language: \(rawCode)"
+                )
+                return
             }
-            if compact.contains("\"gm_construct\"") { return .construct }
-            if compact.contains("\"gm_flatgrass\"") { return .flatgrass }
-            return nil
+            guard languagePreferenceStore.persist(
+                languageCode: code,
+                availableLanguageCodes: languageCatalog.availableLanguageCodes
+            ) else {
+                print("[Garry's PAD][Menu][language] persistence rejected: \(code)")
+                return
+            }
+            languageSnapshot = languageCatalog.snapshot(languageCode: code)
+            publishLanguageSnapshot()
+            webView?.evaluateJavaScript(GModMenuWebContract.applyLanguageScript(
+                snapshot: languageSnapshot,
+                availableLanguageCodes: languageCatalog.availableLanguageCodes
+            ))
         }
 
         static let serverSettingsScript = """
@@ -405,17 +617,6 @@ struct GModHomeMenuView: UIViewRepresentable {
         }
         """
     }
-
-    private static let engineFacadeScript = """
-    window.util={MotionSensorAvailable:function(cb){if(typeof cb==='function')cb(false);return false;}};
-    window.language={Update:function(key,cb){var labels={
-      back_to_main_menu:'Back to Main Menu',resume_game:'Resume Game',
-      new_game:'Start New Game',find_mp_game:'Find Multiplayer Game',
-      addons:'Addons',dupes:'Dupes',saves:'Saves',demos:'Demos',
-      options:'Options',quit:'Quit',disconnect:'Disconnect',
-      problems:'Problems',games:'Games',start_game:'Start Game',search:'Search'};
-      var value=labels[key]||key.replace(/_/g,' ');if(typeof cb==='function')cb(value);return value;}};
-    """
 
     private static let menuBridgeScript = """
     (function(){
@@ -546,9 +747,17 @@ struct GModHomeMenuView: UIViewRepresentable {
         UpdateGamemodes({'1':{menusystem:true,maps:'^gm_',name:'sandbox',title:'Sandbox'}});
         UpdateCurrentGamemode('sandbox');
         UpdateMaps({Sandbox:['gm_construct','gm_flatgrass']});
-        UpdateLanguages(['en.png']);
-        UpdateLanguage('en');
+        var locale=window.__garrysPadLocalization||{code:'',languages:[]};
+        UpdateLanguages(locale.languages||[]);
+        UpdateLanguage(locale.code||'');
+        if(typeof SetInGame==='function'){
+          SetInGame(!!window.__garrysPadIsInGame);
+        }
         UpdateVersion("Garry's PAD",'2026.08.20','unknown');
+        var problemStatus=window.__garrysPadProblemStatus;
+        if(problemStatus&&typeof SetProblemCount==='function'){
+          SetProblemCount(problemStatus.count,problemStatus.severity);
+        }
         \(Coordinator.serverSettingsScript)
 
         document.documentElement.style.background='transparent';
@@ -571,11 +780,58 @@ struct GModHomeMenuView: UIViewRepresentable {
         body:before{content:"";position:fixed;inset:0;background:linear-gradient(90deg,rgba(6,9,12,.94),rgba(9,12,15,.3)),url(data:image/jpeg;base64,\(background)) center/cover}
         .page{position:relative;height:100%;padding:7vh 7vw;display:flex;flex-direction:column}.logo{width:min(430px,64vw)}.menu{margin-top:auto;margin-bottom:8vh;width:min(520px,82vw)}
         button{display:block;width:100%;border:0;text-align:left;color:#fff;background:rgba(28,34,39,.9);font-size:28px;font-weight:700;padding:18px 22px;margin:10px 0;border-left:5px solid #4b9ce2}.hidden{display:none}.title{font-size:36px}.map small{display:block;font-size:13px;color:#b9c4cc}
-        </style></head><body><main class="page">\(logoMarkup)<section id="home" class="menu"><button onclick="showWorlds()">START NEW GAME</button></section><section id="worlds" class="menu hidden"><div class="title">Choose a world</div><button class="map" onclick="start('gm_construct')">gm_construct<small>Sandbox</small></button><button class="map" onclick="start('gm_flatgrass')">gm_flatgrass<small>Sandbox</small></button></section></main><script>
+        </style></head><body><main class="page">\(logoMarkup)<section id="home" class="menu"><button data-garryspad-phrase="new_game" onclick="showWorlds()"></button></section><section id="worlds" class="menu hidden"><button class="map" onclick="start('gm_construct')">gm_construct</button><button class="map" onclick="start('gm_flatgrass')">gm_flatgrass</button></section></main><script>
+        document.querySelectorAll('[data-garryspad-phrase]').forEach(function(node){node.textContent=window.language.Update(node.getAttribute('data-garryspad-phrase'))})
         function showWorlds(){home.className='menu hidden';worlds.className='menu'}
         function start(map){window.webkit.messageHandlers.garrysPAD.postMessage({action:'startMap',map:map})}
         </script></body></html>
         """
+    }
+}
+
+/// WKWebView can install its double-tap recognizer after construction, so the
+/// native lock is re-applied during layout as well as at attachment time. This
+/// leaves single taps and the scroll view's pan gesture untouched.
+private final class GModZoomLockedWebView: WKWebView {
+    override init(frame: CGRect, configuration: WKWebViewConfiguration) {
+        super.init(frame: frame, configuration: configuration)
+        enforceZoomLock()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        enforceZoomLock()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        enforceZoomLock()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        enforceZoomLock()
+    }
+
+    private func enforceZoomLock() {
+        scrollView.minimumZoomScale = 1
+        scrollView.maximumZoomScale = 1
+        if scrollView.zoomScale != 1 { scrollView.zoomScale = 1 }
+        scrollView.pinchGestureRecognizer?.isEnabled = false
+        disableDoubleTapRecognizers(in: scrollView)
+    }
+
+    private func disableDoubleTapRecognizers(in view: UIView) {
+        for recognizer in view.gestureRecognizers ?? [] {
+            guard let tap = recognizer as? UITapGestureRecognizer,
+                  tap.numberOfTapsRequired > 1 else {
+                continue
+            }
+            tap.isEnabled = false
+        }
+        for subview in view.subviews {
+            disableDoubleTapRecognizers(in: subview)
+        }
     }
 }
 
@@ -682,14 +938,22 @@ struct GModStockLoadingView: UIViewRepresentable {
     let pack: GarrysPADContentPack
     let assetSource: GModContentPackAssetSource?
     let map: GModBundledMap
+    let languageCode: String
+    let gameModeTitle: String
     let status: String
+    let task: String
+    let progress: GModPlayableSessionLoadingProgress
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             pack: pack,
             assetSource: assetSource,
             map: map,
-            status: status
+            languageCode: languageCode,
+            gameModeTitle: gameModeTitle,
+            status: status,
+            task: task,
+            progress: progress
         )
     }
 
@@ -718,9 +982,18 @@ struct GModStockLoadingView: UIViewRepresentable {
             webView.load(URLRequest(url: url))
         } else {
             webView.loadHTMLString(
-                "<html><body style='margin:0;background:#111;color:#fff;" +
-                    "font:24px Helvetica;display:grid;place-items:center'>" +
-                    "Loading…</body></html>",
+                """
+                <html><body style="margin:0;background:#111;color:#fff;
+                font-family:Helvetica,Arial,sans-serif;overflow:hidden">
+                <div style="position:fixed;left:28px;top:24px">
+                <strong style="font-size:26px">Garry's PAD</strong><br>
+                <span style="font-size:15px">\(map.rawValue)</span><br>
+                <span id="garryspad-gamemode" style="font-size:13px;opacity:.72">
+                </span></div>
+                <div style="position:fixed;inset:0;display:grid;place-items:center;
+                font-size:88px;font-weight:bold;text-shadow:0 2px 18px #000">g</div>
+                </body></html>
+                """,
                 baseURL: nil
             )
         }
@@ -728,60 +1001,146 @@ struct GModStockLoadingView: UIViewRepresentable {
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
-        context.coordinator.update(map: map, status: status, in: webView)
+        context.coordinator.update(
+            map: map,
+            languageCode: languageCode,
+            gameModeTitle: gameModeTitle,
+            status: status,
+            task: task,
+            progress: progress,
+            in: webView
+        )
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate {
         fileprivate let contentHandler: ContentSchemeHandler
         private var map: GModBundledMap
+        private var languageCode: String
+        private var gameModeTitle: String
         private var status: String
+        private var task: String
+        private var progress: GModPlayableSessionLoadingProgress
 
         init(
             pack: GarrysPADContentPack,
             assetSource: GModContentPackAssetSource?,
             map: GModBundledMap,
-            status: String
+            languageCode: String,
+            gameModeTitle: String,
+            status: String,
+            task: String,
+            progress: GModPlayableSessionLoadingProgress
         ) {
             let source = assetSource
             contentHandler = ContentSchemeHandler(pack: pack, assetSource: source)
             self.map = map
+            self.languageCode = languageCode
+            self.gameModeTitle = gameModeTitle
             self.status = status
+            self.task = task
+            self.progress = progress
         }
 
-        func update(map: GModBundledMap, status: String, in webView: WKWebView) {
+        func update(
+            map: GModBundledMap,
+            languageCode: String,
+            gameModeTitle: String,
+            status: String,
+            task: String,
+            progress: GModPlayableSessionLoadingProgress,
+            in webView: WKWebView
+        ) {
             self.map = map
+            self.languageCode = languageCode
+            self.gameModeTitle = gameModeTitle
             self.status = status
-            webView.evaluateJavaScript(Self.script(map: map, status: status))
+            self.task = task
+            self.progress = progress
+            webView.evaluateJavaScript(Self.script(
+                map: map,
+                languageCode: languageCode,
+                gameModeTitle: gameModeTitle,
+                status: status,
+                task: task,
+                progress: progress
+            ))
         }
 
         func webView(
             _ webView: WKWebView,
             didFinish navigation: WKNavigation!
         ) {
-            webView.evaluateJavaScript(Self.script(map: map, status: status))
+            webView.evaluateJavaScript(Self.script(
+                map: map,
+                languageCode: languageCode,
+                gameModeTitle: gameModeTitle,
+                status: status,
+                task: task,
+                progress: progress
+            ))
         }
 
-        private static func script(map: GModBundledMap, status: String) -> String {
+        private static func script(
+            map: GModBundledMap,
+            languageCode: String,
+            gameModeTitle: String,
+            status: String,
+            task: String,
+            progress: GModPlayableSessionLoadingProgress
+        ) -> String {
             let mapName = quoted(map.rawValue)
+            let language = quoted(languageCode)
+            let gameMode = quoted(gameModeTitle)
             let statusText = quoted(status)
+            let taskText = quoted(task)
+            let percent = Swift.max(0, Swift.min(100, progress.percentComplete))
             let imageURL = quoted(
                 "\(GModStockLoadingView.scheme)://content/maps/thumb/" +
                     "\(map.rawValue).png"
             )
             return """
             (function(){
-              var map=\(mapName), image=\(imageURL), status=\(statusText);
+              var map=\(mapName), image=\(imageURL), status=\(statusText),
+                  task=\(taskText), language=\(language), gameMode=\(gameMode),
+                  percent=\(percent);
               if(typeof GameDetails==='function'){
-                GameDetails("Garry's PAD","",map,1,"","sandbox",1,"en","Sandbox");
+                GameDetails(
+                  "Garry's PAD","",map,1,"","sandbox",1,language,gameMode
+                );
               }
+              var gameModeNode=document.getElementById('garryspad-gamemode');
+              if(gameModeNode) gameModeNode.textContent=gameMode;
               var mapImage=document.querySelector('#mapimg');
               if(mapImage) mapImage.setAttribute('src',image);
               document.body.style.backgroundImage="url('"+image+"')";
               if(typeof SetStatusChanged==='function') SetStatusChanged(status);
               var statusBox=document.querySelector('#spambox');
               if(statusBox){statusBox.textContent=status;statusBox.style.cssText=
-                'position:fixed;right:24px;bottom:20px;padding:8px 12px;'+
+                'position:fixed;right:24px;bottom:82px;padding:6px 10px;'+
                 'background:rgba(0,0,0,.55);color:white;font:13px monospace;';}
+              var box=document.getElementById('garryspad-real-progress');
+              if(!box){
+                box=document.createElement('div');
+                box.id='garryspad-real-progress';
+                box.style.cssText='position:fixed;right:24px;bottom:20px;width:'+
+                  'min(420px,calc(100vw - 48px));padding:10px 12px;box-sizing:'+
+                  'border-box;background:rgba(0,0,0,.68);color:white;font:'+
+                  '13px monospace;z-index:2147483647';
+                box.innerHTML='<div style="display:flex;gap:18px">'+
+                  '<span id="garryspad-progress-task" style="flex:1"></span>'+
+                  '<span id="garryspad-progress-percent"></span></div>'+
+                  '<div style="height:7px;margin-top:7px;background:'+
+                  'rgba(255,255,255,.22);overflow:hidden">'+
+                  '<div id="garryspad-progress-fill" style="height:100%;'+
+                  'background:#fff;width:0"></div></div>';
+                document.body.appendChild(box);
+              }
+              var taskNode=document.getElementById('garryspad-progress-task');
+              var percentNode=document.getElementById('garryspad-progress-percent');
+              var fill=document.getElementById('garryspad-progress-fill');
+              if(taskNode) taskNode.textContent=task;
+              if(percentNode) percentNode.textContent=percent+'%';
+              if(fill) fill.style.width=percent+'%';
             })();
             """
         }

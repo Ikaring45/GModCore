@@ -3,6 +3,170 @@ import GModEngine
 import GModGameAssets
 import GModLua
 
+/// Value-only loading boundaries shared by the session lane, Apple host, and
+/// deterministic tests. Each case means every preceding unit has completed;
+/// no value is inferred from elapsed time.
+public enum GModPlayableSessionLoadingStage: Int, CaseIterable, Sendable,
+    Equatable
+{
+    case readingBSP
+    case parsingWorld
+    case buildingWorldGeometry
+    case preparingCollision
+    case startingServerLua
+    case loadingServerSandbox
+    case startingClientLua
+    case loadingClientSandbox
+    case preparingMaterials
+    case awaitingFirstMetalFrame
+    case complete
+
+    public static var totalUnitCount: Int { allCases.count - 1 }
+
+    public var completedUnitCount: Int { rawValue }
+
+    /// Stable diagnostic identifier. Presentation layers map this stage to a
+    /// source-backed localized phrase rather than displaying this value.
+    public var taskIdentifier: String {
+        switch self {
+        case .readingBSP:
+            return "read-bsp"
+        case .parsingWorld:
+            return "parse-world"
+        case .buildingWorldGeometry:
+            return "build-world-geometry"
+        case .preparingCollision:
+            return "prepare-collision"
+        case .startingServerLua:
+            return "start-server-lua"
+        case .loadingServerSandbox:
+            return "load-server-gamemode"
+        case .startingClientLua:
+            return "start-client-lua"
+        case .loadingClientSandbox:
+            return "load-client-gamemode"
+        case .preparingMaterials:
+            return "prepare-materials-textures"
+        case .awaitingFirstMetalFrame:
+            return "await-first-metal-frame"
+        case .complete:
+            return "complete"
+        }
+    }
+}
+
+public struct GModPlayableSessionLoadingProgress: Sendable, Equatable {
+    public let stage: GModPlayableSessionLoadingStage
+    /// Real resource completion inside the first-frame stage. Both values are
+    /// nil outside that stage; elapsed time is never converted into progress.
+    public let completedSubunitCount: Int?
+    public let totalSubunitCount: Int?
+
+    public init(
+        stage: GModPlayableSessionLoadingStage,
+        completedSubunitCount: Int? = nil,
+        totalSubunitCount: Int? = nil
+    ) {
+        self.stage = stage
+        if stage == .awaitingFirstMetalFrame,
+           let completedSubunitCount,
+           let totalSubunitCount,
+           completedSubunitCount >= 0,
+           totalSubunitCount > 0,
+           completedSubunitCount <= totalSubunitCount {
+            self.completedSubunitCount = completedSubunitCount
+            self.totalSubunitCount = totalSubunitCount
+        } else {
+            self.completedSubunitCount = nil
+            self.totalSubunitCount = nil
+        }
+    }
+
+    public static let initial = GModPlayableSessionLoadingProgress(
+        stage: .readingBSP
+    )
+
+    public var completedUnitCount: Int { stage.completedUnitCount }
+    public var totalUnitCount: Int {
+        GModPlayableSessionLoadingStage.totalUnitCount
+    }
+    public var fractionCompleted: Double {
+        let completed = Double(completedUnitCount)
+        guard stage == .awaitingFirstMetalFrame,
+              let completedSubunitCount,
+              let totalSubunitCount else {
+            return completed / Double(totalUnitCount)
+        }
+        // A fully uploaded scene still needs a successfully completed Metal
+        // command buffer. Keep the truthful pre-presentation ceiling below 1.
+        let subunitFraction = Swift.min(
+            0.99,
+            Double(completedSubunitCount) / Double(totalSubunitCount)
+        )
+        return (completed + subunitFraction) / Double(totalUnitCount)
+    }
+    public var percentComplete: Int {
+        Int((fractionCompleted * 100).rounded(.down))
+    }
+    public var taskIdentifier: String { stage.taskIdentifier }
+}
+
+public typealias GModPlayableSessionLoadingProgressHandler =
+    @Sendable (GModPlayableSessionLoadingProgress) -> Void
+
+/// Pure monotonic reducer used at the MainActor publication boundary. A
+/// failure records its description without manufacturing another completed
+/// unit, and 100% is admitted only from the real first-frame wait boundary.
+public struct GModPlayableSessionLoadingState: Sendable, Equatable {
+    public private(set) var progress: GModPlayableSessionLoadingProgress
+    public private(set) var failureDescription: String?
+
+    public init(
+        progress: GModPlayableSessionLoadingProgress = .initial,
+        failureDescription: String? = nil
+    ) {
+        self.progress = progress
+        self.failureDescription = failureDescription
+    }
+
+    @discardableResult
+    public mutating func record(
+        _ replacement: GModPlayableSessionLoadingProgress
+    ) -> Bool {
+        guard failureDescription == nil else {
+            return false
+        }
+        if replacement.stage == progress.stage {
+            guard replacement.stage == .awaitingFirstMetalFrame,
+                  replacement.fractionCompleted >= progress.fractionCompleted,
+                  replacement != progress,
+                  progress.completedSubunitCount == nil ||
+                    replacement.fractionCompleted > progress.fractionCompleted
+            else { return false }
+            progress = replacement
+            return true
+        }
+        guard replacement.completedUnitCount > progress.completedUnitCount else {
+            return false
+        }
+        if replacement.stage == .awaitingFirstMetalFrame {
+            guard progress.stage.rawValue >=
+                    GModPlayableSessionLoadingStage.preparingMaterials.rawValue
+            else { return false }
+        }
+        if replacement.stage == .complete {
+            guard progress.stage == .awaitingFirstMetalFrame else { return false }
+        }
+        progress = replacement
+        return true
+    }
+
+    public mutating func fail(_ description: String) {
+        guard failureDescription == nil else { return }
+        failureDescription = description
+    }
+}
+
 /// Host facts used to construct one local, paired SERVER/CLIENT game session.
 /// A Playgrounds content pack can supply the selected map directly from its
 /// ZIP; the audited base Lua/UI closure remains the deterministic fallback.
@@ -14,6 +178,8 @@ public struct GModPlayableSessionConfiguration: Sendable, Equatable {
     public let playerUserID: Int
     public let initialViewport: GMLuaViewportSize
     public let contentPackURL: URL?
+    public let languageCode: String
+    public let languagePhrases: [String: String]
 
     public init(
         map: GModBundledMap = .construct,
@@ -22,7 +188,9 @@ public struct GModPlayableSessionConfiguration: Sendable, Equatable {
         playerEntityIndex: Int = 1,
         playerUserID: Int = 1,
         initialViewport: GMLuaViewportSize = .logicalDesktopDefault,
-        contentPackURL: URL? = nil
+        contentPackURL: URL? = nil,
+        languageCode: String = "en",
+        languagePhrases: [String: String] = [:]
     ) {
         self.map = map
         self.gamemodeName = gamemodeName
@@ -31,6 +199,8 @@ public struct GModPlayableSessionConfiguration: Sendable, Equatable {
         self.playerUserID = playerUserID
         self.initialViewport = initialViewport
         self.contentPackURL = contentPackURL
+        self.languageCode = languageCode
+        self.languagePhrases = languagePhrases
     }
 }
 
@@ -90,8 +260,28 @@ public enum GModPlayableMovementResult: Equatable, Sendable {
     }
 }
 
+/// Evidence that one exact host button word was committed to the canonical
+/// SERVER Player and every connected CLIENT mirror. The shared-session update
+/// throws before this value is returned if either realm surface is unavailable.
+public struct GModPlayableInputButtonReport: Equatable, Sendable {
+    public let buttons: SourceInputButtons
+    public let serverMirrorUpdated: Bool
+    public let updatedClientMirrorCount: Int
+
+    public init(
+        buttons: SourceInputButtons,
+        serverMirrorUpdated: Bool,
+        updatedClientMirrorCount: Int
+    ) {
+        self.buttons = buttons
+        self.serverMirrorUpdated = serverMirrorUpdated
+        self.updatedClientMirrorCount = updatedClientMirrorCount
+    }
+}
+
 public struct GModPlayableFixedTickReport: Equatable, Sendable {
     public let movement: GModPlayableMovementResult
+    public let inputButtons: GModPlayableInputButtonReport
     public let server: GMLuaSourceRuntimeRunReport
     public let client: GMLuaSourceRuntimeRunReport
     public let deliveredMessages: Int
@@ -134,6 +324,7 @@ public struct GModPlayableSessionCloseReport: Equatable, Sendable {
 
 public enum GModPlayableSessionError: Error, CustomStringConvertible, Equatable {
     case invalidGamemodeName(String)
+    case invalidLanguageCode(String)
     case missingEntityText(String)
     case missingPlayerStart(String)
     case malformedPlayerStart(String)
@@ -146,6 +337,8 @@ public enum GModPlayableSessionError: Error, CustomStringConvertible, Equatable 
         switch self {
         case let .invalidGamemodeName(value):
             return "invalid gamemode name: \(value)"
+        case let .invalidLanguageCode(value):
+            return "invalid language code: \(value)"
         case let .missingEntityText(map):
             return "bundled map \(map) has no UTF-8 entity lump"
         case let .missingPlayerStart(map):
@@ -196,12 +389,14 @@ public final class GModPlayableSession {
         logger: @escaping @Sendable (
             _ realm: GMLuaRealm,
             _ message: String
-        ) -> Void = { _, _ in }
+        ) -> Void = { _, _ in },
+        progress: @escaping GModPlayableSessionLoadingProgressHandler = { _ in }
     ) throws {
         try self.init(
             configuration: configuration,
             textMeasurer: textMeasurer,
             logger: logger,
+            progress: progress,
             worldWalkCollisionProvider: nil
         )
     }
@@ -215,6 +410,7 @@ public final class GModPlayableSession {
             _ realm: GMLuaRealm,
             _ message: String
         ) -> Void,
+        progress: @escaping GModPlayableSessionLoadingProgressHandler = { _ in },
         worldWalkCollisionProvider:
             (any SourceWorldWalkCollisionProvider)?
     ) throws {
@@ -228,12 +424,21 @@ public final class GModPlayableSession {
                 configuration.gamemodeName
             )
         }
+        guard Self.isValidLanguageCode(configuration.languageCode) else {
+            throw GModPlayableSessionError.invalidLanguageCode(
+                configuration.languageCode
+            )
+        }
 
+        progress(.init(stage: .readingBSP))
+        let mapAllocationPolicy = GModMapAllocationPolicy.iPadValidated
         let bspData: Data
         if let contentPackURL = configuration.contentPackURL {
             let pack = try GarrysPADContentPack(url: contentPackURL)
             bspData = try pack.data(
-                for: "garrysmod/maps/\(configuration.map.rawValue).bsp"
+                for: "garrysmod/maps/\(configuration.map.rawValue).bsp",
+                maximumByteCount:
+                    mapAllocationPolicy.maximumBSPEncodedByteCount
             )
         } else {
             bspData = try GModGameAssets.data(
@@ -241,13 +446,28 @@ public final class GModPlayableSession {
                 kind: .bsp
             )
         }
+        try mapAllocationPolicy.validate(
+            .bspEncodedBytes,
+            requestedByteCount: UInt64(bspData.count)
+        )
+        progress(.init(stage: .parsingWorld))
         let loadedBSP = try SourceBSP(data: bspData)
-        let loadedWorldMesh = try GModWorldRenderMesh.build(from: loadedBSP)
+        progress(.init(stage: .buildingWorldGeometry))
+        let loadedWorldMesh = try GModWorldRenderMesh.build(
+            from: loadedBSP,
+            allocationPolicy: mapAllocationPolicy
+        )
+        progress(.init(stage: .preparingCollision))
         let loadedSpawn = try Self.firstPlayerStart(
             in: loadedBSP,
             mapName: configuration.map.rawValue
         )
         let traceProvider = GMLuaSourceBSPTraceProvider(bsp: loadedBSP)
+        let loadedWorldWalkCollisionProvider:
+            any SourceWorldWalkCollisionProvider =
+                worldWalkCollisionProvider ??
+                SourceBSPWorldWalkCollisionProvider(bsp: loadedBSP)
+        progress(.init(stage: .startingServerLua))
         let systemTime = GMLuaMonotonicSystemTimeSource()
         let session = GMLuaSharedSession()
         let serverFiles = try Self.makeMountedContentFileSystem()
@@ -271,7 +491,7 @@ public final class GModPlayableSession {
         let clientConVars = try GMLuaEngineConVarCatalog(descriptors: [
             GMLuaEngineConVarDescriptor(
                 name: "gmod_language",
-                defaultValue: "en"
+                defaultValue: configuration.languageCode
             ),
         ])
         let server = GMLuaRuntime(
@@ -301,7 +521,10 @@ public final class GModPlayableSession {
             netTransport: session.netTransport,
             traceProvider: traceProvider,
             systemTimeSource: systemTime,
-            inputConfiguration: GMLuaInputConfiguration()
+            inputConfiguration: GMLuaInputConfiguration(),
+            languageConfiguration: GMLuaLanguageConfiguration(
+                phrases: configuration.languagePhrases
+            )
         )
 
         var adapter: GMLuaSourceRuntimeAdapter?
@@ -337,12 +560,15 @@ public final class GModPlayableSession {
             )
 
             try server.loadFile("lua/includes/init.lua")
+            progress(.init(stage: .loadingServerSandbox))
             let serverStartup = try GMLuaStartupOrchestrator(
                 runtime: server,
                 fileSystem: serverFiles
             ).start(targetGamemodeNamed: trimmedGamemode)
+            progress(.init(stage: .startingClientLua))
 
             try client.loadFile("lua/includes/init.lua")
+            progress(.init(stage: .loadingClientSandbox))
             let clientStartup = try GMLuaStartupOrchestrator(
                 runtime: client,
                 fileSystem: clientFiles,
@@ -359,6 +585,7 @@ public final class GModPlayableSession {
                 session,
                 maximumDeliveries: 10_000
             )
+            progress(.init(stage: .preparingMaterials))
 
             self.configuration = configuration
             serverRuntime = server
@@ -370,8 +597,7 @@ public final class GModPlayableSession {
             worldIdentity = sourceWorldIdentity
             spawnPoint = loadedSpawn
             worldWalkSolver = SourceWorldWalkSolver(
-                collisionProvider: worldWalkCollisionProvider ??
-                    SourceBSPWorldWalkCollisionProvider(bsp: loadedBSP)
+                collisionProvider: loadedWorldWalkCollisionProvider
             )
             playerWalkState = SourceWorldWalkState(
                 origin: loadedSpawn.origin,
@@ -406,13 +632,19 @@ public final class GModPlayableSession {
 
     /// Publishes the host-selected digital button word to both realm-local
     /// Player mirrors. Analog movement is intentionally not interpreted here.
+    @discardableResult
     public func updateCurrentPlayerInputButtons(
         _ buttons: SourceInputButtons
-    ) throws {
+    ) throws -> GModPlayableInputButtonReport {
         try ensureOpen()
         try sharedSession.updatePlayerInputButtons(
             for: clientRuntime,
             buttons: buttons
+        )
+        return GModPlayableInputButtonReport(
+            buttons: buttons,
+            serverMirrorUpdated: true,
+            updatedClientMirrorCount: sharedSession.connectedClientCount
         )
     }
 
@@ -453,7 +685,9 @@ public final class GModPlayableSession {
             ))
         }
         nextCommandNumber &+= 1
-        try updateCurrentPlayerInputButtons(movementInput.buttons)
+        let inputButtons = try updateCurrentPlayerInputButtons(
+            movementInput.buttons
+        )
         let serverReport = try sourceAdapter.runServerFixedTick()
         let delivery = try Self.drainReportingForwardedConsoleFailures(
             sharedSession,
@@ -462,6 +696,7 @@ public final class GModPlayableSession {
         let clientReport = try sourceAdapter.runClientFixedTick()
         return GModPlayableFixedTickReport(
             movement: movement,
+            inputButtons: inputButtons,
             server: serverReport,
             client: clientReport,
             deliveredMessages: delivery.successfulDeliveries,
@@ -502,6 +737,22 @@ public final class GModPlayableSession {
         )
     }
 
+    /// Moves every retained CLIENT `surface.PlaySound` event into one bounded
+    /// value report. The underlying surface state advances its sequence across
+    /// drains, so a successful request can appear in exactly one host report.
+    public func drainClientSurfaceSoundRequests() throws
+        -> GMLuaSurfaceSoundRequestReport
+    {
+        try ensureOpen()
+        guard let surface = clientRuntime.surfaceCommandState else {
+            throw GModPlayableSessionError.missingRuntimeSurface(
+                .client,
+                "surface command state"
+            )
+        }
+        return surface.drainSoundRequestReport()
+    }
+
     /// Routes one value-only host pointer sample through the live CLIENT VGUI
     /// hit-test and original Lua callbacks.
     public func dispatchClientVGUIPointerEvent(
@@ -511,6 +762,34 @@ public final class GModPlayableSession {
         timestamp: TimeInterval
     ) throws -> GMLuaPointerDispatchResult {
         try ensureOpen()
+        guard let input = clientRuntime.input else {
+            throw GModPlayableSessionError.missingRuntimeSurface(
+                .client,
+                "input"
+            )
+        }
+        input.updateCursorPosition(x: x, y: y)
+        let releasesLeftMouse: Bool
+        switch phase {
+        case .began:
+            input.updateMouseButton(GMLuaInput.leftMouseButton, isDown: true)
+            releasesLeftMouse = false
+        case .ended, .cancelled:
+            releasesLeftMouse = true
+        case .moved, .scroll:
+            releasesLeftMouse = false
+        }
+        defer {
+            if releasesLeftMouse {
+                // This release must survive a throwing Lua callback; otherwise
+                // input.IsMouseDown can remain stuck across a retired pointer
+                // epoch even though VGUI capture has already been cleared.
+                input.updateMouseButton(
+                    GMLuaInput.leftMouseButton,
+                    isDown: false
+                )
+            }
+        }
         let registry = try clientVGUIRegistry()
         guard let viewport = clientRuntime.screenMetrics?.viewport else {
             throw GModPlayableSessionError.missingRuntimeSurface(
@@ -543,6 +822,23 @@ public final class GModPlayableSession {
         try clientRuntime.dispatchHostHook(
             named: isOpen ? "OnSpawnMenuOpen" : "OnSpawnMenuClose"
         )
+    }
+
+    /// Dispatches the stock CLIENT context-menu lifecycle used by GMod's
+    /// `+menu_context`/`-menu_context` commands. Sandbox Lua remains the sole
+    /// owner of `g_ContextMenu` visibility and contents.
+    public func setContextMenuOpen(_ isOpen: Bool) throws {
+        try ensureOpen()
+        try clientRuntime.dispatchHostHook(
+            named: isOpen ? "OnContextMenuOpen" : "OnContextMenuClose"
+        )
+    }
+
+    /// Mirrors the engine notification sent before the in-game Home UI is
+    /// shown. Stock Sandbox uses this hook to close both spawn-menu surfaces.
+    public func notifyPauseMenuWillShow() throws {
+        try ensureOpen()
+        try clientRuntime.dispatchHostHook(named: "OnPauseMenuShow")
     }
 
     @discardableResult
@@ -590,6 +886,24 @@ public final class GModPlayableSession {
             )
         }
         return registry
+    }
+
+    private static func isValidLanguageCode(_ value: String) -> Bool {
+        guard !value.isEmpty, value.utf8.count <= 32,
+              let first = value.unicodeScalars.first,
+              isASCIILetter(first) else {
+            return false
+        }
+        return value.unicodeScalars.allSatisfy { scalar in
+            isASCIILetter(scalar) ||
+                (scalar.value >= 48 && scalar.value <= 57) ||
+                scalar == "-" || scalar == "_"
+        }
+    }
+
+    private static func isASCIILetter(_ scalar: Unicode.Scalar) -> Bool {
+        (scalar.value >= 65 && scalar.value <= 90) ||
+            (scalar.value >= 97 && scalar.value <= 122)
     }
 
     private static func makeMountedContentFileSystem() throws

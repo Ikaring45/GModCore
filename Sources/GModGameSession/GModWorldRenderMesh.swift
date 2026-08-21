@@ -1,18 +1,23 @@
+import Foundation
 import GModEngine
+import GModGameAssets
 
 public struct GModWorldRenderVertex: Sendable, Equatable {
     public let position: SourceVector3
     public let normal: SourceVector3
     public let textureCoordinate: GModWorldTextureCoordinate
+    public let lightmapCoordinate: GModWorldTextureCoordinate?
 
     public init(
         position: SourceVector3,
         normal: SourceVector3,
-        textureCoordinate: GModWorldTextureCoordinate = .zero
+        textureCoordinate: GModWorldTextureCoordinate = .zero,
+        lightmapCoordinate: GModWorldTextureCoordinate? = nil
     ) {
         self.position = position
         self.normal = normal
         self.textureCoordinate = textureCoordinate
+        self.lightmapCoordinate = lightmapCoordinate
     }
 }
 
@@ -28,16 +33,94 @@ public struct GModWorldTextureCoordinate: Sendable, Equatable {
     public static let zero = GModWorldTextureCoordinate(u: 0, v: 0)
 }
 
+public struct GModWorldWaterSurface: Sendable, Equatable, Hashable {
+    public let surfaceZ: Float
+    public let minimumZ: Float
+    public let sourceTextureInfoIndex: Int
+
+    public init(
+        surfaceZ: Float,
+        minimumZ: Float,
+        sourceTextureInfoIndex: Int
+    ) {
+        self.surfaceZ = surfaceZ
+        self.minimumZ = minimumZ
+        self.sourceTextureInfoIndex = sourceTextureInfoIndex
+    }
+}
+
 public struct GModWorldMaterialRange: Sendable, Equatable {
     public let materialName: String?
     public let firstIndex: Int
     public let indexCount: Int
+    /// Exact BSP texdata names represented by this resolver-facing range.
+    /// Generated `maps/<map>/..._<x>_<y>_<z>` cubemap variants can share one
+    /// base material here while the original names remain diagnosable.
+    public let sourceMaterialNames: [String]
+    public let waterSurface: GModWorldWaterSurface?
 
-    public init(materialName: String?, firstIndex: Int, indexCount: Int) {
+    public init(
+        materialName: String?,
+        firstIndex: Int,
+        indexCount: Int,
+        sourceMaterialNames: [String] = [],
+        waterSurface: GModWorldWaterSurface? = nil
+    ) {
         self.materialName = materialName
         self.firstIndex = firstIndex
         self.indexCount = indexCount
+        self.sourceMaterialNames = sourceMaterialNames
+        self.waterSurface = waterSurface
     }
+}
+
+public struct GModWorldSkybox: Sendable, Equatable {
+    public let name: String
+    public let sourceSkySurfaceCount: Int
+    public let materialNames: [String]
+
+    public init(name: String, sourceSkySurfaceCount: Int, materialNames: [String]) {
+        self.name = name
+        self.sourceSkySurfaceCount = sourceSkySurfaceCount
+        self.materialNames = materialNames
+    }
+}
+
+public struct GModWorldLightmapAtlas: Sendable, Equatable {
+    public let width: Int
+    public let height: Int
+    /// Native little-endian RGBA16Float texels containing Source linear light.
+    public let linearRGBA16Float: Data
+    /// A white texel reserved for surfaces without a baked lightmap.
+    public let unlitTextureCoordinate: GModWorldTextureCoordinate
+    public let clampedChannelCount: Int
+
+    public init(
+        width: Int,
+        height: Int,
+        linearRGBA16Float: Data,
+        unlitTextureCoordinate: GModWorldTextureCoordinate,
+        clampedChannelCount: Int
+    ) {
+        self.width = width
+        self.height = height
+        self.linearRGBA16Float = linearRGBA16Float
+        self.unlitTextureCoordinate = unlitTextureCoordinate
+        self.clampedChannelCount = clampedChannelCount
+    }
+}
+
+public enum GModWorldLightmapAtlasStatus: Sendable, Equatable {
+    case unavailableNoLightmaps
+    case built(width: Int, height: Int, byteCount: Int)
+    case capacityExceeded(
+        requiredWidth: Int,
+        requiredHeight: Int,
+        requiredByteCount: Int,
+        maximumWidth: Int,
+        maximumHeight: Int,
+        maximumByteCount: Int
+    )
 }
 
 public struct GModWorldRenderMeshDiagnostics: Sendable, Equatable {
@@ -46,35 +129,105 @@ public struct GModWorldRenderMeshDiagnostics: Sendable, Equatable {
     public let degenerateFaceCount: Int
     public let displacementBaseFaceCount: Int
     public let skippedToolOrSkyFaceCount: Int
+    public let skySurfaceFaceCount: Int
+    public let skippedToolFaceCount: Int
+    public let cubemapBaseFallbackFaceCount: Int
+    /// Unique generated `maps/<map>/..._<x>_<y>_<z>` source names.
+    public let cubemapBaseFallbackMaterialCount: Int
+    /// Unique base material names actually handed to the authorized resolver.
+    public let cubemapBaseFallbackTargetMaterialCount: Int
+    public let lightmappedFaceCount: Int
+    public let unlightmappedFaceCount: Int
+    public let lightmapAtlasStatus: GModWorldLightmapAtlasStatus
+    public let ignoredAdditionalLightStyleFaceCount: Int
+    public let ignoredBumpLightFaceCount: Int
+    public let emittedDisplacementVertexCount: Int
+    public let emittedDisplacementTriangleCount: Int
+    public let removedDisplacementTriangleCount: Int
+    public let maximumDisplacementOffsetFromBase: Float
+    public let displacementCollisionIsBrushOnly: Bool
+    public let waterSurfaceFaceCount: Int
+    public let waterBelowSurfaceFaceCount: Int
 
     public init(
         sourceFaceCount: Int,
         emittedFaceCount: Int,
         degenerateFaceCount: Int,
         displacementBaseFaceCount: Int,
-        skippedToolOrSkyFaceCount: Int = 0
+        skippedToolOrSkyFaceCount: Int = 0,
+        skySurfaceFaceCount: Int = 0,
+        skippedToolFaceCount: Int = 0,
+        cubemapBaseFallbackFaceCount: Int = 0,
+        cubemapBaseFallbackMaterialCount: Int = 0,
+        cubemapBaseFallbackTargetMaterialCount: Int = 0,
+        lightmappedFaceCount: Int = 0,
+        unlightmappedFaceCount: Int = 0,
+        lightmapAtlasStatus: GModWorldLightmapAtlasStatus = .unavailableNoLightmaps,
+        ignoredAdditionalLightStyleFaceCount: Int = 0,
+        ignoredBumpLightFaceCount: Int = 0,
+        emittedDisplacementVertexCount: Int = 0,
+        emittedDisplacementTriangleCount: Int = 0,
+        removedDisplacementTriangleCount: Int = 0,
+        maximumDisplacementOffsetFromBase: Float = 0,
+        displacementCollisionIsBrushOnly: Bool = true,
+        waterSurfaceFaceCount: Int = 0,
+        waterBelowSurfaceFaceCount: Int = 0
     ) {
         self.sourceFaceCount = sourceFaceCount
         self.emittedFaceCount = emittedFaceCount
         self.degenerateFaceCount = degenerateFaceCount
         self.displacementBaseFaceCount = displacementBaseFaceCount
         self.skippedToolOrSkyFaceCount = skippedToolOrSkyFaceCount
+        self.skySurfaceFaceCount = skySurfaceFaceCount
+        self.skippedToolFaceCount = skippedToolFaceCount
+        self.cubemapBaseFallbackFaceCount = cubemapBaseFallbackFaceCount
+        self.cubemapBaseFallbackMaterialCount = cubemapBaseFallbackMaterialCount
+        self.cubemapBaseFallbackTargetMaterialCount =
+            cubemapBaseFallbackTargetMaterialCount
+        self.lightmappedFaceCount = lightmappedFaceCount
+        self.unlightmappedFaceCount = unlightmappedFaceCount
+        self.lightmapAtlasStatus = lightmapAtlasStatus
+        self.ignoredAdditionalLightStyleFaceCount =
+            ignoredAdditionalLightStyleFaceCount
+        self.ignoredBumpLightFaceCount = ignoredBumpLightFaceCount
+        self.emittedDisplacementVertexCount = emittedDisplacementVertexCount
+        self.emittedDisplacementTriangleCount = emittedDisplacementTriangleCount
+        self.removedDisplacementTriangleCount = removedDisplacementTriangleCount
+        self.maximumDisplacementOffsetFromBase = maximumDisplacementOffsetFromBase
+        self.displacementCollisionIsBrushOnly = displacementCollisionIsBrushOnly
+        self.waterSurfaceFaceCount = waterSurfaceFaceCount
+        self.waterBelowSurfaceFaceCount = waterBelowSurfaceFaceCount
     }
+}
+
+struct GModWorldRenderMeshAllocationEstimate: Sendable, Equatable {
+    let worldVertexCount: Int
+    let worldIndexCount: Int
+    let displacementVertexCount: Int
+    let displacementIndexCount: Int
+    let worldVertexWorkingByteCount: UInt64
+    let worldIndexWorkingByteCount: UInt64
+    let displacementVertexWorkingByteCount: UInt64
+    let displacementIndexWorkingByteCount: UInt64
 }
 
 /// A renderer-neutral triangulation of BSP model 0 in Source coordinates.
 ///
-/// Each face keeps its own vertices so its plane normal remains exact. The
-/// mesh deliberately emits the coarse base polygon for displacement faces.
-/// Material names and base UVs are preserved for a host resolver, while
-/// displacement vertices, lightmaps, and PVS remain separate milestones and
-/// are not fabricated here.
+/// Each ordinary face keeps its own vertices so its plane normal remains
+/// exact. Displacement faces expand Source's real oriented power grid, vector
+/// field, recursive triangle topology, base UVs, and displacement lightmap UVs.
+/// Material names, Source base UVs, bounded per-face lightmap coordinates, and
+/// a capped first-style/base-bump atlas are preserved for a host renderer.
+/// Displacement collision, additional styles/bump planes, and PVS remain
+/// separate milestones and are not fabricated here.
 public struct GModWorldRenderMesh: Sendable, Equatable {
     public let vertices: [GModWorldRenderVertex]
     public let indices: [UInt32]
     public let minimum: SourceVector3
     public let maximum: SourceVector3
     public let materialRanges: [GModWorldMaterialRange]
+    public let skybox: GModWorldSkybox?
+    public let lightmapAtlas: GModWorldLightmapAtlas?
     public let diagnostics: GModWorldRenderMeshDiagnostics
 
     public init(
@@ -83,6 +236,8 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
         minimum: SourceVector3,
         maximum: SourceVector3,
         materialRanges: [GModWorldMaterialRange] = [],
+        skybox: GModWorldSkybox? = nil,
+        lightmapAtlas: GModWorldLightmapAtlas? = nil,
         diagnostics: GModWorldRenderMeshDiagnostics
     ) {
         self.vertices = vertices
@@ -90,12 +245,17 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
         self.minimum = minimum
         self.maximum = maximum
         self.materialRanges = materialRanges
+        self.skybox = skybox
+        self.lightmapAtlas = lightmapAtlas
         self.diagnostics = diagnostics
     }
 
     public var triangleCount: Int { indices.count / 3 }
 
-    public static func build(from bsp: SourceBSP) throws -> Self {
+    public static func build(
+        from bsp: SourceBSP,
+        allocationPolicy: GModMapAllocationPolicy = .iPadValidated
+    ) throws -> Self {
         guard let world = bsp.models.first else {
             throw GModWorldRenderMeshError.missingWorldModel
         }
@@ -117,13 +277,46 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
             )
         }
 
+        let skyName = try bsp.worldspawnValue(forKey: "skyname")
+            .flatMap(Self.normalizedSkyName)
+        let allocationEstimate = try Self.allocationEstimate(
+            from: bsp,
+            firstFace: firstFace,
+            endFace: endFace,
+            includesSkybox: skyName != nil,
+            policy: allocationPolicy
+        )
+
         var vertices: [GModWorldRenderVertex] = []
+        vertices.reserveCapacity(allocationEstimate.worldVertexCount)
         var materialIndices: [String: [UInt32]] = [:]
         var materialOrder: [String] = []
+        var sourceMaterialNames: [String: Set<String>] = [:]
+        var resolverMaterialNames: [String: String] = [:]
+        var waterSurfaces: [String: GModWorldWaterSurface] = [:]
+        var pendingLightmapCoordinates: [PendingLightmapCoordinate?] = []
+        pendingLightmapCoordinates.reserveCapacity(
+            allocationEstimate.worldVertexCount
+        )
+        var lightmapLayout = LightmapAtlasLayout()
         var emittedFaces = 0
         var degenerateFaces = 0
         var displacementFaces = 0
-        var skippedToolOrSkyFaces = 0
+        var skySurfaceFaces = 0
+        var skippedToolFaces = 0
+        var cubemapBaseFallbackFaces = 0
+        var cubemapBaseFallbackMaterials = Set<String>()
+        var cubemapBaseFallbackTargetMaterials = Set<String>()
+        var lightmappedFaces = 0
+        var unlightmappedFaces = 0
+        var ignoredAdditionalLightStyleFaces = 0
+        var ignoredBumpLightFaces = 0
+        var emittedDisplacementVertices = 0
+        var emittedDisplacementTriangles = 0
+        var removedDisplacementTriangles = 0
+        var maximumDisplacementOffset: Float = 0
+        var waterSurfaceFaces = 0
+        var waterBelowSurfaceFaces = 0
         var minimum = SourceVector3(
             Float.greatestFiniteMagnitude,
             Float.greatestFiniteMagnitude,
@@ -183,23 +376,133 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
             guard Self.isFinite(normal) else {
                 throw GModWorldRenderMeshError.nonFinitePlane(face: faceIndex)
             }
-            guard vertices.count <= Int(UInt32.max) - surfaceEdgeCount else {
+            let basePoints = try Self.facePoints(
+                faceIndex: faceIndex,
+                firstSurfaceEdge: firstSurfaceEdge,
+                endSurfaceEdge: endSurfaceEdge,
+                in: bsp
+            )
+            let displacement = bsp.displacement(forFaceAt: faceIndex)
+            let requiredVertexCount = displacement?.vertexCount ?? surfaceEdgeCount
+            guard vertices.count <= Int(UInt32.max) - requiredVertexCount else {
                 throw GModWorldRenderMeshError.indexCapacityExceeded
             }
             let baseIndex = UInt32(vertices.count)
 
             let material = try Self.material(for: face, in: bsp, faceIndex: faceIndex)
-            if let info = material.info,
-               Self.isToolOrSkySurface(flags: info.flags) {
-                skippedToolOrSkyFaces += 1
+            if let info = material.info, Self.isSkySurface(flags: info.flags) {
+                skySurfaceFaces += 1
                 continue
             }
-            let materialKey = material.name?.lowercased() ?? ""
+            if let info = material.info, Self.isToolSurface(flags: info.flags) {
+                skippedToolFaces += 1
+                continue
+            }
+            let sourceMaterialName = material.name?.replacingOccurrences(
+                of: "\\",
+                with: "/"
+            )
+            let fallbackMaterialName = sourceMaterialName.flatMap(
+                Self.cubemapBaseMaterialName
+            )
+            if let fallbackMaterialName {
+                cubemapBaseFallbackFaces += 1
+                cubemapBaseFallbackTargetMaterials.insert(
+                    fallbackMaterialName.lowercased()
+                )
+                if let sourceMaterialName {
+                    cubemapBaseFallbackMaterials.insert(sourceMaterialName.lowercased())
+                }
+            }
+            let resolverMaterialKey = (fallbackMaterialName ?? sourceMaterialName)?
+                .lowercased() ?? ""
+            let matchedWaterSurface = Self.waterSurface(
+                for: basePoints,
+                textureInfoIndex: Int(face.textureInfoIndex),
+                materialInfo: material.info,
+                in: bsp
+            )
+            let materialKey: String
+            if let matchedWaterSurface {
+                materialKey = resolverMaterialKey + "\u{1F}water:" +
+                    String(matchedWaterSurface.surfaceZ.bitPattern) + ":" +
+                    String(matchedWaterSurface.minimumZ.bitPattern)
+                waterSurfaces[materialKey] = matchedWaterSurface
+                waterSurfaceFaces += 1
+                if Int(face.textureInfoIndex) !=
+                    matchedWaterSurface.sourceTextureInfoIndex {
+                    waterBelowSurfaceFaces += 1
+                }
+            } else {
+                materialKey = resolverMaterialKey
+            }
+            resolverMaterialNames[materialKey] = resolverMaterialKey
             if materialIndices[materialKey] == nil {
                 materialIndices[materialKey] = []
                 materialOrder.append(materialKey)
             }
+            if let sourceMaterialName {
+                sourceMaterialNames[materialKey, default: []].insert(sourceMaterialName)
+            }
+            let faceLightmap = bsp.lightmap(forFaceAt: faceIndex)
+            let lightmapPlacement: LightmapAtlasPlacement?
+            if let faceLightmap {
+                lightmappedFaces += 1
+                if faceLightmap.styleCount > 1 {
+                    ignoredAdditionalLightStyleFaces += 1
+                }
+                if faceLightmap.bumpSampleCount > 1 {
+                    ignoredBumpLightFaces += 1
+                }
+                lightmapPlacement = lightmapLayout.append(
+                    faceIndex: faceIndex,
+                    lightmap: faceLightmap
+                )
+            } else {
+                unlightmappedFaces += 1
+                lightmapPlacement = nil
+            }
 
+            if let displacement {
+                let geometry = try Self.generateDisplacementGeometry(
+                    faceIndex: faceIndex,
+                    basePoints: basePoints,
+                    faceNormal: normal,
+                    materialInfo: material.info,
+                    materialData: material.data,
+                    lightmap: faceLightmap,
+                    displacement: displacement,
+                    bsp: bsp
+                )
+                for vertex in geometry.vertices {
+                    if let lightmapUV = vertex.lightmapCoordinate,
+                       let lightmapPlacement {
+                        pendingLightmapCoordinates.append(PendingLightmapCoordinate(
+                            local: lightmapUV,
+                            placement: lightmapPlacement
+                        ))
+                    } else {
+                        pendingLightmapCoordinates.append(nil)
+                    }
+                    vertices.append(vertex)
+                    minimum.x = Swift.min(minimum.x, vertex.position.x)
+                    minimum.y = Swift.min(minimum.y, vertex.position.y)
+                    minimum.z = Swift.min(minimum.z, vertex.position.z)
+                    maximum.x = Swift.max(maximum.x, vertex.position.x)
+                    maximum.y = Swift.max(maximum.y, vertex.position.y)
+                    maximum.z = Swift.max(maximum.z, vertex.position.z)
+                }
+                for index in geometry.localIndices {
+                    materialIndices[materialKey, default: []].append(baseIndex + index)
+                }
+                emittedDisplacementVertices += geometry.vertices.count
+                emittedDisplacementTriangles += geometry.localIndices.count / 3
+                removedDisplacementTriangles += geometry.removedTriangleCount
+                maximumDisplacementOffset = Swift.max(
+                    maximumDisplacementOffset,
+                    geometry.maximumOffsetFromBase
+                )
+            } else {
             for offset in firstSurfaceEdge..<endSurfaceEdge {
                 let signedEdge = Int64(bsp.surfaceEdges[offset])
                 let absoluteEdge = signedEdge >= 0 ? signedEdge : -signedEdge
@@ -254,11 +557,35 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
                 } else {
                     uv = .zero
                 }
+                let lightmapUV: GModWorldTextureCoordinate?
+                if let coordinate = faceLightmap?.textureCoordinate(at: point) {
+                    guard coordinate.normalizedU.isFinite,
+                          coordinate.normalizedV.isFinite else {
+                        throw GModWorldRenderMeshError.nonFiniteLightmapCoordinate(
+                            face: faceIndex
+                        )
+                    }
+                    lightmapUV = GModWorldTextureCoordinate(
+                        u: coordinate.normalizedU,
+                        v: coordinate.normalizedV
+                    )
+                } else {
+                    lightmapUV = nil
+                }
+                if let lightmapUV, let lightmapPlacement {
+                    pendingLightmapCoordinates.append(PendingLightmapCoordinate(
+                        local: lightmapUV,
+                        placement: lightmapPlacement
+                    ))
+                } else {
+                    pendingLightmapCoordinates.append(nil)
+                }
                 vertices.append(
                     GModWorldRenderVertex(
                         position: position,
                         normal: normal,
-                        textureCoordinate: uv
+                        textureCoordinate: uv,
+                        lightmapCoordinate: lightmapUV
                     )
                 )
                 minimum.x = Swift.min(minimum.x, position.x)
@@ -278,14 +605,102 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
                     baseIndex + UInt32(corner + 1)
                 )
             }
+            }
             emittedFaces += 1
         }
 
-        if vertices.isEmpty {
+        if emittedFaces == 0 {
             minimum = .zero
             maximum = .zero
         }
+
+        let skybox: GModWorldSkybox?
+        if let skyName, skySurfaceFaces > 0 {
+            var names: [String] = []
+            names.reserveCapacity(6)
+            for face in Self.skyboxFaces(named: skyName) {
+                guard vertices.count <= Int(UInt32.max) - 4 else {
+                    throw GModWorldRenderMeshError.indexCapacityExceeded
+                }
+                let baseIndex = UInt32(vertices.count)
+                let materialKey = face.materialName.lowercased()
+                if materialIndices[materialKey] == nil {
+                    materialIndices[materialKey] = []
+                    materialOrder.append(materialKey)
+                }
+                sourceMaterialNames[materialKey, default: []].insert(face.materialName)
+                names.append(face.materialName)
+                for corner in face.corners {
+                    pendingLightmapCoordinates.append(nil)
+                    vertices.append(
+                        GModWorldRenderVertex(
+                            position: corner.position,
+                            normal: face.normal,
+                            textureCoordinate: corner.textureCoordinate
+                        )
+                    )
+                }
+                materialIndices[materialKey, default: []].append(contentsOf: [
+                    baseIndex,
+                    baseIndex + 2,
+                    baseIndex + 1,
+                    baseIndex,
+                    baseIndex + 3,
+                    baseIndex + 2,
+                ])
+            }
+            skybox = GModWorldSkybox(
+                name: skyName,
+                sourceSkySurfaceCount: skySurfaceFaces,
+                materialNames: names
+            )
+        } else {
+            skybox = nil
+        }
+
+        let lightmapResult = Self.makeLightmapAtlas(
+            from: lightmapLayout,
+            allocationPolicy: allocationPolicy
+        )
+        let lightmapAtlas = lightmapResult.atlas
+        if let lightmapAtlas {
+            precondition(pendingLightmapCoordinates.count == vertices.count)
+            vertices = zip(vertices, pendingLightmapCoordinates).map { vertex, pending in
+                let atlasCoordinate: GModWorldTextureCoordinate?
+                if let pending {
+                    atlasCoordinate = GModWorldTextureCoordinate(
+                        u: (
+                            Float(pending.placement.contentX) +
+                                pending.local.u * Float(pending.placement.width)
+                        ) / Float(lightmapAtlas.width),
+                        v: (
+                            Float(pending.placement.contentY) +
+                                pending.local.v * Float(pending.placement.height)
+                        ) / Float(lightmapAtlas.height)
+                    )
+                } else {
+                    atlasCoordinate = nil
+                }
+                return GModWorldRenderVertex(
+                    position: vertex.position,
+                    normal: vertex.normal,
+                    textureCoordinate: vertex.textureCoordinate,
+                    lightmapCoordinate: atlasCoordinate
+                )
+            }
+        } else {
+            vertices = vertices.map {
+                GModWorldRenderVertex(
+                    position: $0.position,
+                    normal: $0.normal,
+                    textureCoordinate: $0.textureCoordinate,
+                    lightmapCoordinate: nil
+                )
+            }
+        }
+
         var indices: [UInt32] = []
+        indices.reserveCapacity(allocationEstimate.worldIndexCount)
         var materialRanges: [GModWorldMaterialRange] = []
         for key in materialOrder {
             let grouped = materialIndices[key] ?? []
@@ -293,9 +708,15 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
             indices.append(contentsOf: grouped)
             materialRanges.append(
                 GModWorldMaterialRange(
-                    materialName: key.isEmpty ? nil : key,
+                    materialName: (resolverMaterialNames[key] ?? key).isEmpty
+                        ? nil
+                        : (resolverMaterialNames[key] ?? key),
                     firstIndex: firstIndex,
-                    indexCount: grouped.count
+                    indexCount: grouped.count,
+                    sourceMaterialNames: sourceMaterialNames[key, default: []].sorted {
+                        $0.lowercased() < $1.lowercased()
+                    },
+                    waterSurface: waterSurfaces[key]
                 )
             )
         }
@@ -305,13 +726,479 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
             minimum: minimum,
             maximum: maximum,
             materialRanges: materialRanges,
+            skybox: skybox,
+            lightmapAtlas: lightmapAtlas,
             diagnostics: GModWorldRenderMeshDiagnostics(
                 sourceFaceCount: faceCount,
                 emittedFaceCount: emittedFaces,
                 degenerateFaceCount: degenerateFaces,
                 displacementBaseFaceCount: displacementFaces,
-                skippedToolOrSkyFaceCount: skippedToolOrSkyFaces
+                skippedToolOrSkyFaceCount: skySurfaceFaces + skippedToolFaces,
+                skySurfaceFaceCount: skySurfaceFaces,
+                skippedToolFaceCount: skippedToolFaces,
+                cubemapBaseFallbackFaceCount: cubemapBaseFallbackFaces,
+                cubemapBaseFallbackMaterialCount: cubemapBaseFallbackMaterials.count,
+                cubemapBaseFallbackTargetMaterialCount:
+                    cubemapBaseFallbackTargetMaterials.count,
+                lightmappedFaceCount: lightmappedFaces,
+                unlightmappedFaceCount: unlightmappedFaces,
+                lightmapAtlasStatus: lightmapResult.status,
+                ignoredAdditionalLightStyleFaceCount:
+                    ignoredAdditionalLightStyleFaces,
+                ignoredBumpLightFaceCount: ignoredBumpLightFaces,
+                emittedDisplacementVertexCount: emittedDisplacementVertices,
+                emittedDisplacementTriangleCount: emittedDisplacementTriangles,
+                removedDisplacementTriangleCount: removedDisplacementTriangles,
+                maximumDisplacementOffsetFromBase: maximumDisplacementOffset,
+                displacementCollisionIsBrushOnly: true,
+                waterSurfaceFaceCount: waterSurfaceFaces,
+                waterBelowSurfaceFaceCount: waterBelowSurfaceFaces
             )
+        )
+    }
+
+    static func allocationEstimate(
+        from bsp: SourceBSP,
+        allocationPolicy: GModMapAllocationPolicy = .iPadValidated
+    ) throws -> GModWorldRenderMeshAllocationEstimate {
+        guard let world = bsp.models.first else {
+            throw GModWorldRenderMeshError.missingWorldModel
+        }
+        guard world.firstFace >= 0, world.faceCount >= 0 else {
+            throw GModWorldRenderMeshError.invalidWorldFaceRange(
+                first: Int(world.firstFace),
+                count: Int(world.faceCount),
+                available: bsp.faces.count
+            )
+        }
+        let firstFace = Int(world.firstFace)
+        let faceCount = Int(world.faceCount)
+        let (endFace, overflow) = firstFace.addingReportingOverflow(faceCount)
+        guard !overflow, endFace <= bsp.faces.count else {
+            throw GModWorldRenderMeshError.invalidWorldFaceRange(
+                first: firstFace,
+                count: faceCount,
+                available: bsp.faces.count
+            )
+        }
+        let includesSkybox = try bsp.worldspawnValue(forKey: "skyname")
+            .flatMap(Self.normalizedSkyName) != nil
+        return try allocationEstimate(
+            from: bsp,
+            firstFace: firstFace,
+            endFace: endFace,
+            includesSkybox: includesSkybox,
+            policy: allocationPolicy
+        )
+    }
+
+    private static func allocationEstimate(
+        from bsp: SourceBSP,
+        firstFace: Int,
+        endFace: Int,
+        includesSkybox: Bool,
+        policy: GModMapAllocationPolicy
+    ) throws -> GModWorldRenderMeshAllocationEstimate {
+        var worldVertexCount: UInt64 = 0
+        var worldIndexCount: UInt64 = 0
+        var displacementVertexCount: UInt64 = 0
+        var displacementIndexCount: UInt64 = 0
+
+        for faceIndex in firstFace..<endFace {
+            let face = bsp.faces[faceIndex]
+            guard face.surfaceEdgeCount >= 3 else { continue }
+            let surfaceEdgeCount = UInt64(face.surfaceEdgeCount)
+            if let displacement = bsp.displacement(forFaceAt: faceIndex) {
+                let vertices = UInt64(displacement.vertexCount)
+                let indices = try allocationProduct(
+                    UInt64(displacement.triangleCount),
+                    3,
+                    resource: .displacementIndexWorkingBytes,
+                    policy: policy
+                )
+                try allocationAdd(
+                    vertices,
+                    to: &worldVertexCount,
+                    resource: .worldVertexWorkingBytes,
+                    policy: policy
+                )
+                try allocationAdd(
+                    indices,
+                    to: &worldIndexCount,
+                    resource: .worldIndexWorkingBytes,
+                    policy: policy
+                )
+                try allocationAdd(
+                    vertices,
+                    to: &displacementVertexCount,
+                    resource: .displacementVertexWorkingBytes,
+                    policy: policy
+                )
+                try allocationAdd(
+                    indices,
+                    to: &displacementIndexCount,
+                    resource: .displacementIndexWorkingBytes,
+                    policy: policy
+                )
+            } else {
+                let triangleCount = surfaceEdgeCount - 2
+                let indices = try allocationProduct(
+                    triangleCount,
+                    3,
+                    resource: .worldIndexWorkingBytes,
+                    policy: policy
+                )
+                try allocationAdd(
+                    surfaceEdgeCount,
+                    to: &worldVertexCount,
+                    resource: .worldVertexWorkingBytes,
+                    policy: policy
+                )
+                try allocationAdd(
+                    indices,
+                    to: &worldIndexCount,
+                    resource: .worldIndexWorkingBytes,
+                    policy: policy
+                )
+            }
+        }
+
+        // A named Source sky adds six quads. Counting it even when a malformed
+        // map has no sky-marked face is conservative and keeps preflight ahead
+        // of every possible sky allocation.
+        if includesSkybox {
+            try allocationAdd(
+                24,
+                to: &worldVertexCount,
+                resource: .worldVertexWorkingBytes,
+                policy: policy
+            )
+            try allocationAdd(
+                36,
+                to: &worldIndexCount,
+                resource: .worldIndexWorkingBytes,
+                policy: policy
+            )
+        }
+
+        // Peak world construction retains the original/remapped vertex arrays
+        // plus one pending lightmap coordinate, and grouped/final index arrays.
+        let worldVertexWorkingStride =
+            MemoryLayout<GModWorldRenderVertex>.stride * 2 +
+            MemoryLayout<PendingLightmapCoordinate?>.stride
+        let worldIndexWorkingStride = MemoryLayout<UInt32>.stride * 2
+
+        // One displacement face temporarily retains generated render vertices,
+        // positions, UVs, optional lightmap UVs, accumulated normals/counts,
+        // plus generated and filtered index arrays. Total-map counts are a
+        // deliberately conservative upper bound over that per-face lifetime.
+        let displacementVertexWorkingStride =
+            MemoryLayout<GModWorldRenderVertex>.stride +
+            MemoryLayout<SourceVector3>.stride * 2 +
+            MemoryLayout<GModWorldTextureCoordinate>.stride +
+            MemoryLayout<GModWorldTextureCoordinate?>.stride +
+            MemoryLayout<Int>.stride
+        let displacementIndexWorkingStride = MemoryLayout<UInt32>.stride * 2
+
+        let worldVertexBytes = try allocationBytes(
+            count: worldVertexCount,
+            stride: worldVertexWorkingStride,
+            resource: .worldVertexWorkingBytes,
+            policy: policy
+        )
+        let worldIndexBytes = try allocationBytes(
+            count: worldIndexCount,
+            stride: worldIndexWorkingStride,
+            resource: .worldIndexWorkingBytes,
+            policy: policy
+        )
+        let displacementVertexBytes = try allocationBytes(
+            count: displacementVertexCount,
+            stride: displacementVertexWorkingStride,
+            resource: .displacementVertexWorkingBytes,
+            policy: policy
+        )
+        let displacementIndexBytes = try allocationBytes(
+            count: displacementIndexCount,
+            stride: displacementIndexWorkingStride,
+            resource: .displacementIndexWorkingBytes,
+            policy: policy
+        )
+
+        guard let worldVertices = Int(exactly: worldVertexCount),
+              let worldIndices = Int(exactly: worldIndexCount),
+              let displacementVertices = Int(exactly: displacementVertexCount),
+              let displacementIndices = Int(exactly: displacementIndexCount) else {
+            throw GModMapAllocationPolicyError(
+                resource: .worldVertexWorkingBytes,
+                requestedByteCount: UInt64.max,
+                maximumByteCount: policy.maximumWorldVertexWorkingByteCount
+            )
+        }
+        return GModWorldRenderMeshAllocationEstimate(
+            worldVertexCount: worldVertices,
+            worldIndexCount: worldIndices,
+            displacementVertexCount: displacementVertices,
+            displacementIndexCount: displacementIndices,
+            worldVertexWorkingByteCount: worldVertexBytes,
+            worldIndexWorkingByteCount: worldIndexBytes,
+            displacementVertexWorkingByteCount: displacementVertexBytes,
+            displacementIndexWorkingByteCount: displacementIndexBytes
+        )
+    }
+
+    private static func allocationAdd(
+        _ value: UInt64,
+        to total: inout UInt64,
+        resource: GModMapAllocationResource,
+        policy: GModMapAllocationPolicy
+    ) throws {
+        let addition = total.addingReportingOverflow(value)
+        guard !addition.overflow else {
+            throw GModMapAllocationPolicyError(
+                resource: resource,
+                requestedByteCount: UInt64.max,
+                maximumByteCount: policy.maximumByteCount(for: resource)
+            )
+        }
+        total = addition.partialValue
+    }
+
+    private static func allocationProduct(
+        _ lhs: UInt64,
+        _ rhs: UInt64,
+        resource: GModMapAllocationResource,
+        policy: GModMapAllocationPolicy
+    ) throws -> UInt64 {
+        let product = lhs.multipliedReportingOverflow(by: rhs)
+        guard !product.overflow else {
+            throw GModMapAllocationPolicyError(
+                resource: resource,
+                requestedByteCount: UInt64.max,
+                maximumByteCount: policy.maximumByteCount(for: resource)
+            )
+        }
+        return product.partialValue
+    }
+
+    private static func allocationBytes(
+        count: UInt64,
+        stride: Int,
+        resource: GModMapAllocationResource,
+        policy: GModMapAllocationPolicy
+    ) throws -> UInt64 {
+        let requested = try allocationProduct(
+            count,
+            UInt64(stride),
+            resource: resource,
+            policy: policy
+        )
+        try policy.validate(resource, requestedByteCount: requested)
+        return requested
+    }
+
+    private struct LightmapAtlasPlacement {
+        let contentX: Int
+        let contentY: Int
+        let width: Int
+        let height: Int
+    }
+
+    private struct PendingLightmapCoordinate {
+        let local: GModWorldTextureCoordinate
+        let placement: LightmapAtlasPlacement
+    }
+
+    private struct LightmapAtlasEntry {
+        let faceIndex: Int
+        let lightmap: SourceBSPFaceLightmap
+        let placement: LightmapAtlasPlacement
+    }
+
+    private struct LightmapAtlasLayout {
+        static let width = 2_048
+        static let maximumHeight = 4_096
+
+        // The first 3x3 block is a filtered white fallback for unlightmapped
+        // surfaces. Every real face also receives a one-texel duplicated gutter.
+        private var cursorX = 3
+        private var cursorY = 0
+        private var shelfHeight = 3
+        private(set) var requiredWidth = width
+        private(set) var requiredHeight = 3
+        private(set) var hasUnplaceableWidth = false
+        private(set) var entries: [LightmapAtlasEntry] = []
+
+        mutating func append(
+            faceIndex: Int,
+            lightmap: SourceBSPFaceLightmap
+        ) -> LightmapAtlasPlacement? {
+            let expandedWidth = lightmap.width + 2
+            let expandedHeight = lightmap.height + 2
+            guard expandedWidth <= Self.width else {
+                requiredWidth = Swift.max(requiredWidth, expandedWidth)
+                hasUnplaceableWidth = true
+                return nil
+            }
+            if cursorX + expandedWidth > Self.width {
+                cursorY += shelfHeight
+                cursorX = 0
+                shelfHeight = 0
+            }
+            let placement = LightmapAtlasPlacement(
+                contentX: cursorX + 1,
+                contentY: cursorY + 1,
+                width: lightmap.width,
+                height: lightmap.height
+            )
+            entries.append(LightmapAtlasEntry(
+                faceIndex: faceIndex,
+                lightmap: lightmap,
+                placement: placement
+            ))
+            cursorX += expandedWidth
+            shelfHeight = Swift.max(shelfHeight, expandedHeight)
+            requiredHeight = Swift.max(requiredHeight, cursorY + shelfHeight)
+            return placement
+        }
+    }
+
+    private struct LightmapAtlasResult {
+        let atlas: GModWorldLightmapAtlas?
+        let status: GModWorldLightmapAtlasStatus
+    }
+
+    private static func makeLightmapAtlas(
+        from layout: LightmapAtlasLayout,
+        allocationPolicy: GModMapAllocationPolicy
+    ) -> LightmapAtlasResult {
+        guard !layout.entries.isEmpty else {
+            return LightmapAtlasResult(
+                atlas: nil,
+                status: .unavailableNoLightmaps
+            )
+        }
+        let requiredWidth = layout.requiredWidth
+        let requiredHeight = layout.requiredHeight
+        let pixelCount = requiredWidth.multipliedReportingOverflow(
+            by: requiredHeight
+        )
+        let requiredBytes = pixelCount.partialValue.multipliedReportingOverflow(by: 8)
+        let byteCount = pixelCount.overflow || requiredBytes.overflow
+            ? Int.max
+            : requiredBytes.partialValue
+        let maximumByteCount = Int(
+            Swift.min(
+                UInt64(Int.max),
+                allocationPolicy.maximumLightmapAtlasByteCount
+            )
+        )
+        let isWithinAllocationPolicy = (try? allocationPolicy.validate(
+            .lightmapAtlasBytes,
+            requestedByteCount: UInt64(byteCount)
+        )) != nil
+        guard !layout.hasUnplaceableWidth,
+              requiredWidth <= LightmapAtlasLayout.width,
+              requiredHeight <= LightmapAtlasLayout.maximumHeight,
+              isWithinAllocationPolicy else {
+            return LightmapAtlasResult(
+                atlas: nil,
+                status: .capacityExceeded(
+                    requiredWidth: requiredWidth,
+                    requiredHeight: requiredHeight,
+                    requiredByteCount: byteCount,
+                    maximumWidth: LightmapAtlasLayout.width,
+                    maximumHeight: LightmapAtlasLayout.maximumHeight,
+                    maximumByteCount: maximumByteCount
+                )
+            )
+        }
+
+        let width = LightmapAtlasLayout.width
+        let height = requiredHeight
+        var bytes = Data(count: width * height * 8)
+        var clampedChannelCount = 0
+        bytes.withUnsafeMutableBytes { rawBytes in
+            let texels = rawBytes.bindMemory(to: UInt16.self)
+            let one = Float16(1).bitPattern.littleEndian
+
+            func halfBits(_ value: Float) -> UInt16 {
+                let bounded: Float
+                if !value.isFinite {
+                    bounded = value.sign == .minus ? 0 : 65_504
+                    clampedChannelCount += 1
+                } else if value < 0 {
+                    bounded = 0
+                    clampedChannelCount += 1
+                } else if value > 65_504 {
+                    bounded = 65_504
+                    clampedChannelCount += 1
+                } else {
+                    bounded = value
+                }
+                return Float16(bounded).bitPattern.littleEndian
+            }
+
+            func write(
+                x: Int,
+                y: Int,
+                red: Float,
+                green: Float,
+                blue: Float
+            ) {
+                let component = (y * width + x) * 4
+                texels[component] = halfBits(red)
+                texels[component + 1] = halfBits(green)
+                texels[component + 2] = halfBits(blue)
+                texels[component + 3] = one
+            }
+
+            for y in 0..<3 {
+                for x in 0..<3 {
+                    write(x: x, y: y, red: 1, green: 1, blue: 1)
+                }
+            }
+            for entry in layout.entries {
+                let placement = entry.placement
+                for expandedY in 0..<(placement.height + 2) {
+                    let sampleY = Swift.min(
+                        placement.height - 1,
+                        Swift.max(0, expandedY - 1)
+                    )
+                    for expandedX in 0..<(placement.width + 2) {
+                        let sampleX = Swift.min(
+                            placement.width - 1,
+                            Swift.max(0, expandedX - 1)
+                        )
+                        guard let sample = entry.lightmap.sample(
+                            x: sampleX,
+                            y: sampleY
+                        ) else { continue }
+                        let color = sample.linearColor
+                        write(
+                            x: placement.contentX + expandedX - 1,
+                            y: placement.contentY + expandedY - 1,
+                            red: color.x,
+                            green: color.y,
+                            blue: color.z
+                        )
+                    }
+                }
+            }
+        }
+        let atlas = GModWorldLightmapAtlas(
+            width: width,
+            height: height,
+            linearRGBA16Float: bytes,
+            unlitTextureCoordinate: GModWorldTextureCoordinate(
+                u: 1.5 / Float(width),
+                v: 1.5 / Float(height)
+            ),
+            clampedChannelCount: clampedChannelCount
+        )
+        return LightmapAtlasResult(
+            atlas: atlas,
+            status: .built(width: width, height: height, byteCount: bytes.count)
         )
     }
 
@@ -319,17 +1206,469 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
         value.x.isFinite && value.y.isFinite && value.z.isFinite
     }
 
-    private static func isToolOrSkySurface(flags: Int32) -> Bool {
-        // Public Source SDK SURF_* flags. These faces participate in BSP
-        // visibility/collision but are not ordinary world polygons.
+    private static func isSkySurface(flags: Int32) -> Bool {
         let sky2D: UInt32 = 0x0002
         let sky: UInt32 = 0x0004
+        return UInt32(bitPattern: flags) & (sky2D | sky) != 0
+    }
+
+    private static func isToolSurface(flags: Int32) -> Bool {
+        // Public Source SDK SURF_* flags. These faces participate in BSP
+        // visibility/collision but are not ordinary world polygons.
         let trigger: UInt32 = 0x0040
         let noDraw: UInt32 = 0x0080
         let hint: UInt32 = 0x0100
         let skip: UInt32 = 0x0200
-        let excluded = sky2D | sky | trigger | noDraw | hint | skip
+        let excluded = trigger | noDraw | hint | skip
         return UInt32(bitPattern: flags) & excluded != 0
+    }
+
+    private static func normalizedSkyName(_ value: String) -> String? {
+        var normalized = value
+            .replacingOccurrences(of: "\\", with: "/")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if normalized.hasPrefix("skybox/") {
+            normalized.removeFirst("skybox/".count)
+        }
+        if normalized.hasSuffix(".vmt") {
+            normalized.removeLast(".vmt".count)
+        }
+        let components = normalized.split(separator: "/", omittingEmptySubsequences: false)
+        guard !normalized.isEmpty,
+              !normalized.hasPrefix("/"),
+              !normalized.contains(":"),
+              components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
+            return nil
+        }
+        return normalized
+    }
+
+    /// Source's generated cubemap material path is
+    /// `maps/<map>/<base>_<x>_<y>_<z>`. The current authorized ZIP/VPK resolver
+    /// cannot mount LUMP_PAKFILE, but it can resolve every stock base material;
+    /// retaining the exact source names in diagnostics makes this fallback
+    /// explicit instead of silently drawing a blue solid range.
+    private static func cubemapBaseMaterialName(_ value: String) -> String? {
+        let normalized = value.replacingOccurrences(of: "\\", with: "/")
+        var components = normalized.split(separator: "/").map(String.init)
+        guard components.count >= 3,
+              components[0].caseInsensitiveCompare("maps") == .orderedSame else {
+            return nil
+        }
+        var fileName = components.removeLast()
+        for _ in 0..<3 {
+            guard let separator = fileName.lastIndex(of: "_") else { return nil }
+            let coordinate = fileName[fileName.index(after: separator)...]
+            guard Int32(coordinate) != nil else { return nil }
+            fileName.removeSubrange(separator...)
+        }
+        guard !fileName.isEmpty else { return nil }
+        // Remove `maps/<map>` and preserve any base-material subdirectories.
+        components.removeFirst(2)
+        components.append(fileName)
+        return components.joined(separator: "/")
+    }
+
+    private struct SkyboxCorner {
+        let position: SourceVector3
+        let textureCoordinate: GModWorldTextureCoordinate
+    }
+
+    private struct SkyboxFace {
+        let materialName: String
+        let normal: SourceVector3
+        let corners: [SkyboxCorner]
+    }
+
+    private static func skyboxFaces(named skyName: String) -> [SkyboxFace] {
+        let extent: Float = 1_024
+        let specifications: [(
+            suffix: String,
+            direction: SourceVector3,
+            right: SourceVector3,
+            down: SourceVector3
+        )] = [
+            ("rt", SourceVector3(0, -1, 0), SourceVector3(-1, 0, 0), SourceVector3(0, 0, -1)),
+            ("bk", SourceVector3(-1, 0, 0), SourceVector3(0, 1, 0), SourceVector3(0, 0, -1)),
+            ("lf", SourceVector3(0, 1, 0), SourceVector3(1, 0, 0), SourceVector3(0, 0, -1)),
+            ("ft", SourceVector3(1, 0, 0), SourceVector3(0, -1, 0), SourceVector3(0, 0, -1)),
+            ("up", SourceVector3(0, 0, 1), SourceVector3(0, -1, 0), SourceVector3(1, 0, 0)),
+            ("dn", SourceVector3(0, 0, -1), SourceVector3(0, -1, 0), SourceVector3(-1, 0, 0)),
+        ]
+        let textureCorners: [GModWorldTextureCoordinate] = [
+            GModWorldTextureCoordinate(u: 0, v: 0),
+            GModWorldTextureCoordinate(u: 1, v: 0),
+            GModWorldTextureCoordinate(u: 1, v: 1),
+            GModWorldTextureCoordinate(u: 0, v: 1),
+        ]
+        return specifications.map { specification in
+            let corners = textureCorners.map { coordinate -> SkyboxCorner in
+                let horizontal = coordinate.u * 2 - 1
+                let vertical = coordinate.v * 2 - 1
+                return SkyboxCorner(
+                    position: SourceVector3(
+                        (specification.direction.x + specification.right.x * horizontal +
+                            specification.down.x * vertical) * extent,
+                        (specification.direction.y + specification.right.y * horizontal +
+                            specification.down.y * vertical) * extent,
+                        (specification.direction.z + specification.right.z * horizontal +
+                            specification.down.z * vertical) * extent
+                    ),
+                    textureCoordinate: coordinate
+                )
+            }
+            return SkyboxFace(
+                materialName: "skybox/\(skyName)\(specification.suffix)",
+                normal: SourceVector3(
+                    -specification.direction.x,
+                    -specification.direction.y,
+                    -specification.direction.z
+                ),
+                corners: corners
+            )
+        }
+    }
+
+    private struct GeneratedDisplacementGeometry {
+        let vertices: [GModWorldRenderVertex]
+        let localIndices: [UInt32]
+        let maximumOffsetFromBase: Float
+        let removedTriangleCount: Int
+    }
+
+    private static func waterSurface(
+        for points: [SourceBSPVector3],
+        textureInfoIndex: Int,
+        materialInfo: SourceBSPTextureInfo?,
+        in bsp: SourceBSP
+    ) -> GModWorldWaterSurface? {
+        guard let materialInfo,
+              UInt32(bitPattern: materialInfo.flags) & 0x0008 != 0,
+              !points.isEmpty else { return nil }
+        let averageZ = points.reduce(Float(0)) { $0 + $1.z } / Float(points.count)
+        guard let nearest = bsp.leafWaterData.min(by: {
+            abs($0.surfaceZ - averageZ) < abs($1.surfaceZ - averageZ)
+        }), abs(nearest.surfaceZ - averageZ) <= 0.25 else { return nil }
+        let water = bsp.leafWaterData.first {
+            $0.surfaceTextureInfoIndex == Int16(textureInfoIndex) &&
+                abs($0.surfaceZ - averageZ) <= 0.25
+        } ?? nearest
+        return GModWorldWaterSurface(
+            surfaceZ: water.surfaceZ,
+            minimumZ: water.minimumZ,
+            sourceTextureInfoIndex: Int(water.surfaceTextureInfoIndex)
+        )
+    }
+
+    private static func facePoints(
+        faceIndex: Int,
+        firstSurfaceEdge: Int,
+        endSurfaceEdge: Int,
+        in bsp: SourceBSP
+    ) throws -> [SourceBSPVector3] {
+        var result: [SourceBSPVector3] = []
+        result.reserveCapacity(endSurfaceEdge - firstSurfaceEdge)
+        for offset in firstSurfaceEdge..<endSurfaceEdge {
+            let signedEdge = Int64(bsp.surfaceEdges[offset])
+            let absoluteEdge = signedEdge >= 0 ? signedEdge : -signedEdge
+            guard absoluteEdge < Int64(bsp.edges.count) else {
+                throw GModWorldRenderMeshError.invalidEdgeIndex(
+                    face: faceIndex,
+                    index: absoluteEdge,
+                    available: bsp.edges.count
+                )
+            }
+            let edge = bsp.edges[Int(absoluteEdge)]
+            let vertexIndex = signedEdge >= 0
+                ? Int(edge.firstVertex)
+                : Int(edge.secondVertex)
+            guard bsp.vertices.indices.contains(vertexIndex) else {
+                throw GModWorldRenderMeshError.invalidVertexIndex(
+                    face: faceIndex,
+                    index: vertexIndex,
+                    available: bsp.vertices.count
+                )
+            }
+            let point = bsp.vertices[vertexIndex].point
+            guard point.x.isFinite, point.y.isFinite, point.z.isFinite else {
+                throw GModWorldRenderMeshError.nonFiniteVertex(
+                    face: faceIndex,
+                    index: vertexIndex
+                )
+            }
+            result.append(point)
+        }
+        return result
+    }
+
+    private static func generateDisplacementGeometry(
+        faceIndex: Int,
+        basePoints: [SourceBSPVector3],
+        faceNormal: SourceVector3,
+        materialInfo: SourceBSPTextureInfo?,
+        materialData: SourceBSPTextureData?,
+        lightmap: SourceBSPFaceLightmap?,
+        displacement: SourceBSPDisplacementInfo,
+        bsp: SourceBSP
+    ) throws -> GeneratedDisplacementGeometry {
+        guard basePoints.count == 4 else {
+            throw GModWorldRenderMeshError.invalidDisplacementBaseFace(
+                face: faceIndex,
+                vertexCount: basePoints.count
+            )
+        }
+        let start = SourceVector3(
+            displacement.startPosition.x,
+            displacement.startPosition.y,
+            displacement.startPosition.z
+        )
+        let startCorner = basePoints.indices.min { lhs, rhs in
+            let lhsPoint = SourceVector3(
+                basePoints[lhs].x,
+                basePoints[lhs].y,
+                basePoints[lhs].z
+            )
+            let rhsPoint = SourceVector3(
+                basePoints[rhs].x,
+                basePoints[rhs].y,
+                basePoints[rhs].z
+            )
+            return (lhsPoint - start).lengthSquared <
+                (rhsPoint - start).lengthSquared
+        } ?? 0
+        let corners = (0..<4).map { offset -> SourceVector3 in
+            let point = basePoints[(startCorner + offset) & 3]
+            return SourceVector3(point.x, point.y, point.z)
+        }
+
+        let sideLength = displacement.sideLength
+        let denominator = Float(sideLength - 1)
+        let firstVertex = Int(displacement.firstVertex)
+        var positions: [SourceVector3] = []
+        var textureCoordinates: [GModWorldTextureCoordinate] = []
+        var lightmapCoordinates: [GModWorldTextureCoordinate?] = []
+        positions.reserveCapacity(displacement.vertexCount)
+        textureCoordinates.reserveCapacity(displacement.vertexCount)
+        lightmapCoordinates.reserveCapacity(displacement.vertexCount)
+        var maximumOffset: Float = 0
+
+        for y in 0..<sideLength {
+            let vertical = Float(y) / denominator
+            let left = lerp(corners[0], corners[1], vertical)
+            let right = lerp(corners[3], corners[2], vertical)
+            for x in 0..<sideLength {
+                let horizontal = Float(x) / denominator
+                let flatPoint = lerp(left, right, horizontal)
+                let localIndex = y * sideLength + x
+                let sourceVertex = bsp.displacementVertices[firstVertex + localIndex]
+                let field = SourceVector3(
+                    sourceVertex.vector.x,
+                    sourceVertex.vector.y,
+                    sourceVertex.vector.z
+                )
+                // Never normalize this field. VBSP's SnapRemainingVertsToSurface
+                // stores direct offsets here with distance one.
+                let offset = field * sourceVertex.distance
+                let position = flatPoint + offset
+                guard isFinite(position) else {
+                    throw GModWorldRenderMeshError.nonFiniteDisplacementVertex(
+                        face: faceIndex,
+                        index: localIndex
+                    )
+                }
+                positions.append(position)
+                maximumOffset = Swift.max(maximumOffset, offset.length)
+
+                let uv = try textureCoordinate(
+                    at: flatPoint,
+                    faceIndex: faceIndex,
+                    info: materialInfo,
+                    data: materialData
+                )
+                textureCoordinates.append(uv)
+
+                if let lightmap {
+                    // SDK CalcLuxelCoords interpolates the oriented surface
+                    // corners (0.5 .. size+0.5); it does not project displaced
+                    // positions through texinfo lightmap vectors.
+                    let luxelS = 0.5 + horizontal * Float(lightmap.width - 1)
+                    let luxelT = 0.5 + vertical * Float(lightmap.height - 1)
+                    lightmapCoordinates.append(GModWorldTextureCoordinate(
+                        u: luxelS / Float(lightmap.width),
+                        v: luxelT / Float(lightmap.height)
+                    ))
+                } else {
+                    lightmapCoordinates.append(nil)
+                }
+            }
+        }
+
+        let generatedIndices = displacementTriangleIndices(
+            power: Int(displacement.power)
+        )
+        let firstTriangle = Int(displacement.firstTriangle)
+        var localIndices: [UInt32] = []
+        localIndices.reserveCapacity(generatedIndices.count)
+        var removedTriangleCount = 0
+        for triangle in 0..<displacement.triangleCount {
+            if bsp.displacementTriangles[firstTriangle + triangle]
+                .tags.contains(.remove) {
+                removedTriangleCount += 1
+                continue
+            }
+            let first = triangle * 3
+            localIndices.append(contentsOf: generatedIndices[first..<(first + 3)])
+        }
+
+        var normalSums = Array(repeating: SourceVector3.zero, count: positions.count)
+        var normalCounts = Array(repeating: 0, count: positions.count)
+        for triangle in stride(from: 0, to: localIndices.count, by: 3) {
+            let i0 = Int(localIndices[triangle])
+            let i1 = Int(localIndices[triangle + 1])
+            let i2 = Int(localIndices[triangle + 2])
+            let cross = cross(positions[i1] - positions[i0], positions[i2] - positions[i0])
+            let length = cross.length
+            guard length.isFinite, length > Float.ulpOfOne else { continue }
+            let normal = cross / length
+            normalSums[i0] += normal
+            normalSums[i1] += normal
+            normalSums[i2] += normal
+            normalCounts[i0] += 1
+            normalCounts[i1] += 1
+            normalCounts[i2] += 1
+        }
+
+        let vertices = positions.indices.map { index -> GModWorldRenderVertex in
+            let normal = normalCounts[index] == 0
+                ? faceNormal
+                : normalSums[index] / Float(normalCounts[index])
+            return GModWorldRenderVertex(
+                position: positions[index],
+                normal: normal,
+                textureCoordinate: textureCoordinates[index],
+                lightmapCoordinate: lightmapCoordinates[index]
+            )
+        }
+        return GeneratedDisplacementGeometry(
+            vertices: vertices,
+            localIndices: localIndices,
+            maximumOffsetFromBase: maximumOffset,
+            removedTriangleCount: removedTriangleCount
+        )
+    }
+
+    /// Exact `DispCommon_GenerateTriIndices` recursion from Source SDK 2013.
+    /// Children are lower-left, lower-right, upper-left, upper-right; each
+    /// power-one leaf fans eight triangles around its center.
+    static func displacementTriangleIndices(power: Int) -> [UInt32] {
+        precondition((2...4).contains(power))
+        let sideLength = (1 << power) + 1
+        let winding = [
+            (0, 1), (0, 0), (1, 0), (2, 0), (2, 1),
+            (2, 2), (1, 2), (0, 2), (0, 1),
+        ]
+        let children = [
+            ((0, 0), (1, 1)),
+            ((1, 0), (2, 1)),
+            ((0, 1), (1, 2)),
+            ((1, 1), (2, 2)),
+        ]
+        func coordinate(
+            _ lower: (Int, Int),
+            _ upper: (Int, Int),
+            _ selector: (Int, Int)
+        ) -> (Int, Int) {
+            func component(_ lower: Int, _ upper: Int, _ selector: Int) -> Int {
+                switch selector {
+                case 0: return lower
+                case 1: return (lower + upper) >> 1
+                default: return upper
+                }
+            }
+            return (
+                component(lower.0, upper.0, selector.0),
+                component(lower.1, upper.1, selector.1)
+            )
+        }
+        var indices: [UInt32] = []
+        indices.reserveCapacity((1 << power) * (1 << power) * 6)
+        func generate(
+            lower: (Int, Int),
+            upper: (Int, Int),
+            remainingPower: Int
+        ) {
+            if remainingPower == 1 {
+                let center = coordinate(lower, upper, (1, 1))
+                var previous = coordinate(lower, upper, winding[0])
+                for selector in winding.dropFirst() {
+                    let current = coordinate(lower, upper, selector)
+                    for vertex in [current, previous, center] {
+                        indices.append(UInt32(vertex.1 * sideLength + vertex.0))
+                    }
+                    previous = current
+                }
+                return
+            }
+            for child in children {
+                generate(
+                    lower: coordinate(lower, upper, child.0),
+                    upper: coordinate(lower, upper, child.1),
+                    remainingPower: remainingPower - 1
+                )
+            }
+        }
+        let extent = 1 << power
+        generate(lower: (0, 0), upper: (extent, extent), remainingPower: power)
+        return indices
+    }
+
+    private static func lerp(
+        _ start: SourceVector3,
+        _ end: SourceVector3,
+        _ fraction: Float
+    ) -> SourceVector3 {
+        start + (end - start) * fraction
+    }
+
+    private static func cross(
+        _ lhs: SourceVector3,
+        _ rhs: SourceVector3
+    ) -> SourceVector3 {
+        SourceVector3(
+            lhs.y * rhs.z - lhs.z * rhs.y,
+            lhs.z * rhs.x - lhs.x * rhs.z,
+            lhs.x * rhs.y - lhs.y * rhs.x
+        )
+    }
+
+    private static func textureCoordinate(
+        at position: SourceVector3,
+        faceIndex: Int,
+        info: SourceBSPTextureInfo?,
+        data: SourceBSPTextureData?
+    ) throws -> GModWorldTextureCoordinate {
+        guard let info, let data, data.width > 0, data.height > 0 else {
+            return .zero
+        }
+        let s = position.x * info.textureVectors[0].x +
+            position.y * info.textureVectors[0].y +
+            position.z * info.textureVectors[0].z +
+            info.textureVectors[0].offset
+        let t = position.x * info.textureVectors[1].x +
+            position.y * info.textureVectors[1].y +
+            position.z * info.textureVectors[1].z +
+            info.textureVectors[1].offset
+        let result = GModWorldTextureCoordinate(
+            u: s / Float(data.width),
+            v: t / Float(data.height)
+        )
+        guard result.u.isFinite, result.v.isFinite else {
+            throw GModWorldRenderMeshError.nonFiniteTextureCoordinate(
+                face: faceIndex
+            )
+        }
+        return result
     }
 
     private static func material(
@@ -376,9 +1715,12 @@ public enum GModWorldRenderMeshError: Error, Sendable, Equatable,
     case invalidPlaneIndex(face: Int, index: Int, available: Int)
     case invalidEdgeIndex(face: Int, index: Int64, available: Int)
     case invalidVertexIndex(face: Int, index: Int, available: Int)
+    case invalidDisplacementBaseFace(face: Int, vertexCount: Int)
     case nonFinitePlane(face: Int)
     case nonFiniteVertex(face: Int, index: Int)
+    case nonFiniteDisplacementVertex(face: Int, index: Int)
     case nonFiniteTextureCoordinate(face: Int)
+    case nonFiniteLightmapCoordinate(face: Int)
     case invalidTextureInfoIndex(face: Int, index: Int, available: Int)
     case invalidTextureDataIndex(face: Int, index: Int, available: Int)
     case invalidTextureDimensions(face: Int, width: Int, height: Int)
@@ -398,12 +1740,18 @@ public enum GModWorldRenderMeshError: Error, Sendable, Equatable,
             return "face \(face) edge \(index) is outside 0..<\(available)"
         case let .invalidVertexIndex(face, index, available):
             return "face \(face) vertex \(index) is outside 0..<\(available)"
+        case let .invalidDisplacementBaseFace(face, vertexCount):
+            return "face \(face) displacement base has \(vertexCount) vertices; expected 4"
         case let .nonFinitePlane(face):
             return "face \(face) has a non-finite plane normal"
         case let .nonFiniteVertex(face, index):
             return "face \(face) vertex \(index) is non-finite"
+        case let .nonFiniteDisplacementVertex(face, index):
+            return "face \(face) displacement vertex \(index) is non-finite"
         case let .nonFiniteTextureCoordinate(face):
             return "face \(face) has a non-finite texture coordinate"
+        case let .nonFiniteLightmapCoordinate(face):
+            return "face \(face) has a non-finite lightmap coordinate"
         case let .invalidTextureInfoIndex(face, index, available):
             return "face \(face) texinfo \(index) is outside 0..<\(available)"
         case let .invalidTextureDataIndex(face, index, available):

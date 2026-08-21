@@ -3,7 +3,7 @@ import Foundation
 import Metal
 
 /// Compiles the exact shader extracted from `GModMetalView` and creates the
-/// four production render-pipeline shapes. Exit 78 means the CI host exposes
+/// all production render-pipeline shapes. Exit 78 means the CI host exposes
 /// no Metal device; all other Metal failures are hard validation failures.
 @main
 enum MetalPipelineSmoke {
@@ -33,6 +33,30 @@ enum MetalPipelineSmoke {
                 named: "worldTexturedFragmentMain",
                 in: library
             )
+            let worldLightmapped = try function(
+                named: "worldLightmappedFragmentMain",
+                in: library
+            )
+            let worldTexturedLightmapped = try function(
+                named: "worldTexturedLightmappedFragmentMain",
+                in: library
+            )
+            let worldMissingMaterial = try function(
+                named: "worldMissingMaterialFragmentMain",
+                in: library
+            )
+            let worldSkybox = try function(
+                named: "worldSkyboxFragmentMain",
+                in: library
+            )
+            let worldWaterSolid = try function(
+                named: "worldWaterSolidFragmentMain",
+                in: library
+            )
+            let worldWaterNormal = try function(
+                named: "worldWaterNormalFragmentMain",
+                in: library
+            )
             let surfaceVertex = try function(named: "surfaceVertexMain", in: library)
             let surfaceSolid = try function(
                 named: "surfaceSolidFragmentMain",
@@ -57,6 +81,42 @@ enum MetalPipelineSmoke {
             )
             try makePipeline(
                 device: device,
+                vertex: worldVertex,
+                fragment: worldLightmapped,
+                blending: false
+            )
+            try makePipeline(
+                device: device,
+                vertex: worldVertex,
+                fragment: worldTexturedLightmapped,
+                blending: false
+            )
+            try makePipeline(
+                device: device,
+                vertex: worldVertex,
+                fragment: worldMissingMaterial,
+                blending: false
+            )
+            try makePipeline(
+                device: device,
+                vertex: worldVertex,
+                fragment: worldSkybox,
+                blending: false
+            )
+            try makePipeline(
+                device: device,
+                vertex: worldVertex,
+                fragment: worldWaterSolid,
+                blending: true
+            )
+            try makePipeline(
+                device: device,
+                vertex: worldVertex,
+                fragment: worldWaterNormal,
+                blending: true
+            )
+            try makePipeline(
+                device: device,
                 vertex: surfaceVertex,
                 fragment: surfaceSolid,
                 blending: true
@@ -69,7 +129,7 @@ enum MetalPipelineSmoke {
             )
 
             print(
-                "Runtime Metal library and four render pipelines passed on "
+                "Runtime Metal library and ten render pipelines passed on "
                     + device.name
             )
         } catch {

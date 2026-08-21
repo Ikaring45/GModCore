@@ -53,6 +53,8 @@ public enum SourceBSPError: Error, Sendable, Equatable, CustomStringConvertible 
         availableCount: Int
     )
     case invalidValue(context: String, value: Int64)
+    case nonFiniteValue(context: String)
+    case malformedEntityText(context: String)
     case cyclicNodeGraph(nodeIndex: Int)
     case missingWorldTree
     case unexpectedEnd(context: String)
@@ -84,6 +86,10 @@ public enum SourceBSPError: Error, Sendable, Equatable, CustomStringConvertible 
             return "BSP \(context) range \(first)..<\(first + count) is outside 0..<\(availableCount)"
         case let .invalidValue(context, value):
             return "BSP \(context) has invalid value \(value)"
+        case let .nonFiniteValue(context):
+            return "BSP \(context) is non-finite"
+        case let .malformedEntityText(context):
+            return "malformed BSP entity text while reading \(context)"
         case let .cyclicNodeGraph(nodeIndex):
             return "BSP node graph contains a cycle through node \(nodeIndex)"
         case .missingWorldTree:
@@ -102,6 +108,7 @@ public enum SourceBSPLumpKind: Int, CaseIterable, Sendable {
     case nodes = 5
     case textureInfo = 6
     case faces = 7
+    case lighting = 8
     case leaves = 10
     case edges = 12
     case surfaceEdges = 13
@@ -110,8 +117,15 @@ public enum SourceBSPLumpKind: Int, CaseIterable, Sendable {
     case leafBrushes = 17
     case brushes = 18
     case brushSides = 19
+    case displacementInfo = 26
+    case displacementVertices = 33
+    case leafWaterData = 36
+    case pakFile = 40
     case textureStringData = 43
     case textureStringTable = 44
+    case displacementTriangles = 48
+    case lightingHDR = 53
+    case facesHDR = 58
 }
 
 public struct SourceBSPLumpDescriptor: Sendable, Equatable {
@@ -215,6 +229,18 @@ public struct SourceBSPRGBExponent: Sendable, Equatable {
     public let green: UInt8
     public let blue: UInt8
     public let exponent: Int8
+
+    /// Exact Source `TexLightToLinear`: Valve's `power2_n` lookup table stores
+    /// `2^exponent / 255`, so each byte mantissa becomes linear light while
+    /// HDR samples can truthfully remain above one.
+    public var linearColor: SourceBSPVector3 {
+        let scale = Float(pow(2.0, Double(exponent))) / 255
+        return SourceBSPVector3(
+            x: Float(red) * scale,
+            y: Float(green) * scale,
+            z: Float(blue) * scale
+        )
+    }
 }
 
 public struct SourceBSPLeaf: Sendable, Equatable {
@@ -303,6 +329,112 @@ public struct SourceBSPFace: Sendable, Equatable {
     public var dynamicShadowsEnabled: Bool { primitiveCountAndShadowFlag & 0x8000 == 0 }
 }
 
+public struct SourceBSPEntityKeyValue: Sendable, Equatable {
+    public let key: String
+    public let value: String
+}
+
+/// One half-edge neighbor entry from Source SDK 2013's
+/// `CDispSubNeighbor`. The UInt16 sentinel `0xFFFF` means no neighbor.
+public struct SourceBSPDisplacementSubNeighbor: Sendable, Equatable {
+    public let neighborIndex: UInt16
+    public let neighborOrientation: UInt8
+    public let span: UInt8
+    public let neighborSpan: UInt8
+
+    public var isValid: Bool { neighborIndex != UInt16.max }
+}
+
+public struct SourceBSPDisplacementEdgeNeighbor: Sendable, Equatable {
+    public let subNeighbors: [SourceBSPDisplacementSubNeighbor]
+}
+
+public struct SourceBSPDisplacementCornerNeighbor: Sendable, Equatable {
+    public let neighborIndices: [UInt16]
+    public let neighborCount: UInt8
+}
+
+/// Typed `ddispinfo_t` data. Counts are derived exactly from Source's
+/// `(2^power + 1)^2` vertex grid and `2 * (2^power)^2` triangle grid.
+public struct SourceBSPDisplacementInfo: Sendable, Equatable {
+    public static let allowedVertexWordCount = 10
+
+    public let startPosition: SourceBSPVector3
+    public let firstVertex: Int32
+    public let firstTriangle: Int32
+    public let power: Int32
+    public let minimumTessellation: Int32
+    public let smoothingAngle: Float
+    public let contents: Int32
+    public let mapFaceIndex: UInt16
+    public let lightmapAlphaStart: Int32
+    public let lightmapSamplePositionStart: Int32
+    public let edgeNeighbors: [SourceBSPDisplacementEdgeNeighbor]
+    public let cornerNeighbors: [SourceBSPDisplacementCornerNeighbor]
+    public let allowedVertexWords: [UInt32]
+
+    public var sideLength: Int { (1 << Int(power)) + 1 }
+    public var vertexCount: Int { sideLength * sideLength }
+    public var triangleCount: Int {
+        let cells = 1 << Int(power)
+        return cells * cells * 2
+    }
+
+    /// Source keeps a full maximum-power bit field. A false bit affects
+    /// crack-free LOD activation; it does not remove the full-resolution
+    /// renderer vertex or create a hole.
+    public func isVertexAllowed(_ index: Int) -> Bool {
+        guard index >= 0, index < vertexCount else { return false }
+        let word = index / 32
+        let bit = UInt32(index % 32)
+        guard allowedVertexWords.indices.contains(word) else { return false }
+        return allowedVertexWords[word] & (UInt32(1) << bit) != 0
+    }
+}
+
+public struct SourceBSPDisplacementVertex: Sendable, Equatable {
+    /// Vector field as stored by VBSP. It is deliberately not normalized:
+    /// VBSP can store a direct offset vector with `distance == 1` when
+    /// snapping otherwise-unused vertices to the allowed triangulation.
+    public let vector: SourceBSPVector3
+    public let distance: Float
+    public let alpha: Float
+}
+
+public struct SourceBSPDisplacementTriangleTags: OptionSet, Sendable, Equatable {
+    public let rawValue: UInt16
+
+    public init(rawValue: UInt16) { self.rawValue = rawValue }
+
+    public static let surface = Self(rawValue: 1 << 0)
+    public static let walkable = Self(rawValue: 1 << 1)
+    public static let buildable = Self(rawValue: 1 << 2)
+    public static let surfaceProperty1 = Self(rawValue: 1 << 3)
+    public static let surfaceProperty2 = Self(rawValue: 1 << 4)
+    public static let remove = Self(rawValue: 1 << 5)
+}
+
+public struct SourceBSPDisplacementTriangle: Sendable, Equatable {
+    public let tags: SourceBSPDisplacementTriangleTags
+}
+
+/// Source fog-volume water metadata (`dleafwaterdata_t`).
+public struct SourceBSPLeafWaterData: Sendable, Equatable {
+    public let surfaceZ: Float
+    public let minimumZ: Float
+    public let surfaceTextureInfoIndex: Int16
+}
+
+public struct SourceBSPParsedEntity: Sendable, Equatable {
+    public let keyValues: [SourceBSPEntityKeyValue]
+
+    public func value(forKey requestedKey: String) -> String? {
+        keyValues.last {
+            $0.key.caseInsensitiveCompare(requestedKey) == .orderedSame
+        }?.value
+    }
+}
+
 public struct SourceBSPEntityText: Sendable, Equatable {
     public let rawBytes: Data
 
@@ -314,6 +446,140 @@ public struct SourceBSPEntityText: Sendable, Equatable {
             bytes.removeLast()
         }
         return String(data: bytes, encoding: .utf8)
+    }
+
+    /// Parses the quoted key/value blocks used by Source's entity lump. The
+    /// result stays ordered because duplicate output keys are legal entities.
+    public func parsedEntities() throws -> [SourceBSPParsedEntity] {
+        guard let text else {
+            throw SourceBSPError.malformedEntityText(context: "UTF-8 entity lump")
+        }
+        var parser = SourceBSPEntityTextParser(text)
+        return try parser.parse()
+    }
+
+    public func worldspawnValue(forKey key: String) throws -> String? {
+        try parsedEntities().first {
+            $0.value(forKey: "classname")?.caseInsensitiveCompare("worldspawn") ==
+                .orderedSame
+        }?.value(forKey: key)
+    }
+}
+
+/// A zero-copy typed view of one ColorRGBExp32 BSP lighting lump.
+public struct SourceBSPLighting: Sendable, Equatable {
+    private let encodedSamples: Data
+
+    fileprivate init(encodedSamples: Data) {
+        self.encodedSamples = encodedSamples
+    }
+
+    public var byteCount: Int { encodedSamples.count }
+    public var sampleCount: Int { encodedSamples.count / 4 }
+    public var isEmpty: Bool { encodedSamples.isEmpty }
+
+    public func sample(at index: Int) -> SourceBSPRGBExponent? {
+        guard index >= 0, index < sampleCount else { return nil }
+        let offset = index * 4
+        return SourceBSPRGBExponent(
+            red: encodedSamples[encodedSamples.index(encodedSamples.startIndex, offsetBy: offset)],
+            green: encodedSamples[
+                encodedSamples.index(encodedSamples.startIndex, offsetBy: offset + 1)
+            ],
+            blue: encodedSamples[
+                encodedSamples.index(encodedSamples.startIndex, offsetBy: offset + 2)
+            ],
+            exponent: Int8(bitPattern: encodedSamples[
+                encodedSamples.index(encodedSamples.startIndex, offsetBy: offset + 3)
+            ])
+        )
+    }
+}
+
+public enum SourceBSPLightingKind: Sendable, Equatable {
+    case standardDynamicRange
+    case highDynamicRange
+}
+
+public struct SourceBSPLightmapCoordinate: Sendable, Equatable {
+    public let luxelS: Float
+    public let luxelT: Float
+    public let normalizedU: Float
+    public let normalizedV: Float
+}
+
+/// The first static light style and non-bump sample plane for one BSP face.
+/// Additional styles/bump planes remain addressable through `sample`.
+public struct SourceBSPFaceLightmap: Sendable, Equatable {
+    public let faceIndex: Int
+    public let kind: SourceBSPLightingKind
+    public let width: Int
+    public let height: Int
+    public let styleCount: Int
+    public let bumpSampleCount: Int
+    public let encodedByteOffset: Int
+
+    private let lightmapVectors: [SourceBSPTextureVector]
+    private let minsInLuxels: [Int32]
+    private let lighting: SourceBSPLighting
+
+    fileprivate init(
+        faceIndex: Int,
+        kind: SourceBSPLightingKind,
+        width: Int,
+        height: Int,
+        styleCount: Int,
+        bumpSampleCount: Int,
+        encodedByteOffset: Int,
+        lightmapVectors: [SourceBSPTextureVector],
+        minsInLuxels: [Int32],
+        lighting: SourceBSPLighting
+    ) {
+        self.faceIndex = faceIndex
+        self.kind = kind
+        self.width = width
+        self.height = height
+        self.styleCount = styleCount
+        self.bumpSampleCount = bumpSampleCount
+        self.encodedByteOffset = encodedByteOffset
+        self.lightmapVectors = lightmapVectors
+        self.minsInLuxels = minsInLuxels
+        self.lighting = lighting
+    }
+
+    public func textureCoordinate(
+        at point: SourceBSPVector3
+    ) -> SourceBSPLightmapCoordinate {
+        let s = point.x * lightmapVectors[0].x +
+            point.y * lightmapVectors[0].y +
+            point.z * lightmapVectors[0].z +
+            lightmapVectors[0].offset - Float(minsInLuxels[0])
+        let t = point.x * lightmapVectors[1].x +
+            point.y * lightmapVectors[1].y +
+            point.z * lightmapVectors[1].z +
+            lightmapVectors[1].offset - Float(minsInLuxels[1])
+        return SourceBSPLightmapCoordinate(
+            luxelS: s,
+            luxelT: t,
+            normalizedU: (s + 0.5) / Float(width),
+            normalizedV: (t + 0.5) / Float(height)
+        )
+    }
+
+    public func sample(
+        style: Int = 0,
+        bumpSample: Int = 0,
+        x: Int,
+        y: Int
+    ) -> SourceBSPRGBExponent? {
+        guard style >= 0, style < styleCount,
+              bumpSample >= 0, bumpSample < bumpSampleCount,
+              x >= 0, x < width,
+              y >= 0, y < height else { return nil }
+        let samplesPerPlane = width * height
+        let relative = ((style * bumpSampleCount + bumpSample) * samplesPerPlane) +
+            y * width + x
+        return lighting.sample(at: encodedByteOffset / 4 + relative)
     }
 }
 
@@ -332,6 +598,9 @@ public struct SourceBSP: Sendable, Equatable {
     public let nodes: [SourceBSPNode]
     public let textureInfo: [SourceBSPTextureInfo]
     public let faces: [SourceBSPFace]
+    public let facesHDR: [SourceBSPFace]
+    public let lighting: SourceBSPLighting
+    public let lightingHDR: SourceBSPLighting
     public let leaves: [SourceBSPLeaf]
     public let edges: [SourceBSPEdge]
     public let surfaceEdges: [Int32]
@@ -340,6 +609,10 @@ public struct SourceBSP: Sendable, Equatable {
     public let leafBrushes: [UInt16]
     public let brushes: [SourceBSPBrush]
     public let brushSides: [SourceBSPBrushSide]
+    public let displacementInfo: [SourceBSPDisplacementInfo]
+    public let displacementVertices: [SourceBSPDisplacementVertex]
+    public let displacementTriangles: [SourceBSPDisplacementTriangle]
+    public let leafWaterData: [SourceBSPLeafWaterData]
     /// Material names from LUMP_TEXDATA_STRING_DATA/TABLE, indexed by
     /// `SourceBSPTextureData.nameStringTableID`.
     public let textureNames: [String]
@@ -511,54 +784,20 @@ public struct SourceBSP: Sendable, Equatable {
             )
         }
 
-        faces = try Self.parseRecords(
+        faces = try Self.parseFaces(
             parsedLumps[SourceBSPLumpKind.faces.rawValue],
-            recordByteCount: 56,
-            supportedVersions: [1]
-        ) { cursor in
-            var styles: [UInt8] = []
-            styles.reserveCapacity(4)
-
-            let planeIndex = try cursor.readUInt16(context: "face plane index")
-            let side = try cursor.readUInt8(context: "face side")
-            let isOnNode = try cursor.readUInt8(context: "face on-node flag")
-            let firstSurfaceEdge = try cursor.readInt32(context: "face first surface edge")
-            let surfaceEdgeCount = try cursor.readInt16(context: "face surface edge count")
-            let textureInfoIndex = try cursor.readInt16(context: "face texinfo index")
-            let displacementInfoIndex = try cursor.readInt16(context: "face dispinfo index")
-            let surfaceFogVolumeID = try cursor.readInt16(context: "face fog volume ID")
-            for styleIndex in 0..<4 {
-                styles.append(try cursor.readUInt8(context: "face light style \(styleIndex)"))
-            }
-
-            return SourceBSPFace(
-                planeIndex: planeIndex,
-                side: side,
-                isOnNode: isOnNode,
-                firstSurfaceEdge: firstSurfaceEdge,
-                surfaceEdgeCount: surfaceEdgeCount,
-                textureInfoIndex: textureInfoIndex,
-                displacementInfoIndex: displacementInfoIndex,
-                surfaceFogVolumeID: surfaceFogVolumeID,
-                lightStyles: styles,
-                lightOffset: try cursor.readInt32(context: "face light offset"),
-                area: try cursor.readFloat32(context: "face area"),
-                lightmapTextureMinsInLuxels: [
-                    try cursor.readInt32(context: "face lightmap minimum S"),
-                    try cursor.readInt32(context: "face lightmap minimum T")
-                ],
-                lightmapTextureSizeInLuxels: [
-                    try cursor.readInt32(context: "face lightmap size S"),
-                    try cursor.readInt32(context: "face lightmap size T")
-                ],
-                originalFace: try cursor.readInt32(context: "face original face"),
-                primitiveCountAndShadowFlag: try cursor.readUInt16(
-                    context: "face primitive count and shadow flag"
-                ),
-                firstPrimitiveID: try cursor.readUInt16(context: "face first primitive ID"),
-                smoothingGroups: try cursor.readUInt32(context: "face smoothing groups")
-            )
-        }
+            contextPrefix: "face"
+        )
+        facesHDR = try Self.parseFaces(
+            parsedLumps[SourceBSPLumpKind.facesHDR.rawValue],
+            contextPrefix: "HDR face"
+        )
+        lighting = try Self.parseLighting(
+            parsedLumps[SourceBSPLumpKind.lighting.rawValue]
+        )
+        lightingHDR = try Self.parseLighting(
+            parsedLumps[SourceBSPLumpKind.lightingHDR.rawValue]
+        )
 
         leaves = try Self.parseLeaves(parsedLumps[SourceBSPLumpKind.leaves.rawValue])
 
@@ -637,6 +876,170 @@ public struct SourceBSP: Sendable, Equatable {
             )
         }
 
+        displacementInfo = try Self.parseRecords(
+            parsedLumps[SourceBSPLumpKind.displacementInfo.rawValue],
+            recordByteCount: 176,
+            supportedVersions: [0]
+        ) { cursor in
+            let startPosition = try Self.readVector3(
+                &cursor,
+                context: "displacement start position"
+            )
+            let firstVertex = try cursor.readInt32(
+                context: "displacement first vertex"
+            )
+            let firstTriangle = try cursor.readInt32(
+                context: "displacement first triangle"
+            )
+            let power = try cursor.readInt32(context: "displacement power")
+            let minimumTessellation = try cursor.readInt32(
+                context: "displacement minimum tessellation"
+            )
+            let smoothingAngle = try cursor.readFloat32(
+                context: "displacement smoothing angle"
+            )
+            let contents = try cursor.readInt32(
+                context: "displacement contents"
+            )
+            let mapFaceIndex = try cursor.readUInt16(
+                context: "displacement map face"
+            )
+            try cursor.skip(2, context: "displacement map face alignment")
+            let lightmapAlphaStart = try cursor.readInt32(
+                context: "displacement lightmap alpha start"
+            )
+            let lightmapSamplePositionStart = try cursor.readInt32(
+                context: "displacement lightmap sample-position start"
+            )
+
+            var edgeNeighbors: [SourceBSPDisplacementEdgeNeighbor] = []
+            edgeNeighbors.reserveCapacity(4)
+            for edge in 0..<4 {
+                var subNeighbors: [SourceBSPDisplacementSubNeighbor] = []
+                subNeighbors.reserveCapacity(2)
+                for subNeighbor in 0..<2 {
+                    let prefix = "displacement edge \(edge) subneighbor \(subNeighbor)"
+                    subNeighbors.append(SourceBSPDisplacementSubNeighbor(
+                        neighborIndex: try cursor.readUInt16(
+                            context: "\(prefix) index"
+                        ),
+                        neighborOrientation: try cursor.readUInt8(
+                            context: "\(prefix) orientation"
+                        ),
+                        span: try cursor.readUInt8(context: "\(prefix) span"),
+                        neighborSpan: try cursor.readUInt8(
+                            context: "\(prefix) neighbor span"
+                        )
+                    ))
+                    try cursor.skip(1, context: "\(prefix) alignment")
+                }
+                edgeNeighbors.append(SourceBSPDisplacementEdgeNeighbor(
+                    subNeighbors: subNeighbors
+                ))
+            }
+
+            var cornerNeighbors: [SourceBSPDisplacementCornerNeighbor] = []
+            cornerNeighbors.reserveCapacity(4)
+            for corner in 0..<4 {
+                var neighborIndices: [UInt16] = []
+                neighborIndices.reserveCapacity(4)
+                for neighbor in 0..<4 {
+                    neighborIndices.append(try cursor.readUInt16(
+                        context: "displacement corner \(corner) neighbor \(neighbor)"
+                    ))
+                }
+                let neighborCount = try cursor.readUInt8(
+                    context: "displacement corner \(corner) neighbor count"
+                )
+                try cursor.skip(
+                    1,
+                    context: "displacement corner \(corner) alignment"
+                )
+                cornerNeighbors.append(SourceBSPDisplacementCornerNeighbor(
+                    neighborIndices: neighborIndices,
+                    neighborCount: neighborCount
+                ))
+            }
+
+            var allowedVertexWords: [UInt32] = []
+            allowedVertexWords.reserveCapacity(
+                SourceBSPDisplacementInfo.allowedVertexWordCount
+            )
+            for word in 0..<SourceBSPDisplacementInfo.allowedVertexWordCount {
+                allowedVertexWords.append(try cursor.readUInt32(
+                    context: "displacement allowed-vertex word \(word)"
+                ))
+            }
+            return SourceBSPDisplacementInfo(
+                startPosition: startPosition,
+                firstVertex: firstVertex,
+                firstTriangle: firstTriangle,
+                power: power,
+                minimumTessellation: minimumTessellation,
+                smoothingAngle: smoothingAngle,
+                contents: contents,
+                mapFaceIndex: mapFaceIndex,
+                lightmapAlphaStart: lightmapAlphaStart,
+                lightmapSamplePositionStart: lightmapSamplePositionStart,
+                edgeNeighbors: edgeNeighbors,
+                cornerNeighbors: cornerNeighbors,
+                allowedVertexWords: allowedVertexWords
+            )
+        }
+
+        displacementVertices = try Self.parseRecords(
+            parsedLumps[SourceBSPLumpKind.displacementVertices.rawValue],
+            recordByteCount: 20,
+            supportedVersions: [0]
+        ) { cursor in
+            SourceBSPDisplacementVertex(
+                vector: try Self.readVector3(
+                    &cursor,
+                    context: "displacement vertex vector"
+                ),
+                distance: try cursor.readFloat32(
+                    context: "displacement vertex distance"
+                ),
+                alpha: try cursor.readFloat32(
+                    context: "displacement vertex alpha"
+                )
+            )
+        }
+
+        displacementTriangles = try Self.parseRecords(
+            parsedLumps[SourceBSPLumpKind.displacementTriangles.rawValue],
+            recordByteCount: 2,
+            supportedVersions: [0]
+        ) { cursor in
+            SourceBSPDisplacementTriangle(
+                tags: SourceBSPDisplacementTriangleTags(
+                    rawValue: try cursor.readUInt16(
+                        context: "displacement triangle tags"
+                    )
+                )
+            )
+        }
+
+        leafWaterData = try Self.parseRecords(
+            parsedLumps[SourceBSPLumpKind.leafWaterData.rawValue],
+            recordByteCount: 12,
+            supportedVersions: [0]
+        ) { cursor in
+            let result = SourceBSPLeafWaterData(
+                surfaceZ: try cursor.readFloat32(
+                    context: "leaf-water surface Z"
+                ),
+                minimumZ: try cursor.readFloat32(
+                    context: "leaf-water minimum Z"
+                ),
+                surfaceTextureInfoIndex: try cursor.readInt16(
+                    context: "leaf-water surface texinfo"
+                )
+            )
+            try cursor.skip(2, context: "leaf-water alignment")
+            return result
+        }
+
         let textureStringDataLump =
             parsedLumps[SourceBSPLumpKind.textureStringData.rawValue]
         try Self.requireVersion(textureStringDataLump, supported: [0])
@@ -697,8 +1100,42 @@ public struct SourceBSP: Sendable, Equatable {
             leafFaces: leafFaces,
             leafBrushes: leafBrushes,
             brushes: brushes,
-            brushSides: brushSides
+            brushSides: brushSides,
+            displacementInfo: displacementInfo,
+            displacementVertices: displacementVertices,
+            displacementTriangles: displacementTriangles,
+            leafWaterData: leafWaterData
         )
+
+        if !facesHDR.isEmpty {
+            guard facesHDR.count == faces.count else {
+                throw SourceBSPError.invalidValue(
+                    context: "HDR face count (expected \(faces.count))",
+                    value: Int64(facesHDR.count)
+                )
+            }
+            try Self.validateFaceReferences(
+                facesHDR,
+                contextPrefix: "HDR face",
+                planes: planes,
+                textureInfo: textureInfo,
+                surfaceEdges: surfaceEdges
+            )
+        }
+        try Self.validateLightmapReferences(
+            faces: faces,
+            contextPrefix: "face",
+            textureInfo: textureInfo,
+            lighting: lighting
+        )
+        if !facesHDR.isEmpty || !lightingHDR.isEmpty {
+            try Self.validateLightmapReferences(
+                faces: facesHDR.isEmpty ? faces : facesHDR,
+                contextPrefix: "HDR face",
+                textureInfo: textureInfo,
+                lighting: lightingHDR
+            )
+        }
 
         if !textureNames.isEmpty {
             for (index, data) in textureData.enumerated() {
@@ -719,6 +1156,61 @@ public struct SourceBSP: Sendable, Equatable {
         let tableIndex = Int(textureData[index].nameStringTableID)
         guard textureNames.indices.contains(tableIndex) else { return nil }
         return textureNames[tableIndex]
+    }
+
+    public func worldspawnValue(forKey key: String) throws -> String? {
+        try entities.worldspawnValue(forKey: key)
+    }
+
+    public func displacement(
+        forFaceAt faceIndex: Int
+    ) -> SourceBSPDisplacementInfo? {
+        guard faces.indices.contains(faceIndex) else { return nil }
+        let index = faces[faceIndex].displacementInfoIndex
+        guard index >= 0, displacementInfo.indices.contains(Int(index)) else {
+            return nil
+        }
+        return displacementInfo[Int(index)]
+    }
+
+    /// Returns the face's statically baked lightmap contract without copying
+    /// the global lighting lump. HDR is preferred only when both the HDR face
+    /// and lighting lumps are present; otherwise the ordinary pair is used.
+    public func lightmap(
+        forFaceAt faceIndex: Int,
+        preferHighDynamicRange: Bool = true
+    ) -> SourceBSPFaceLightmap? {
+        let useHDR = preferHighDynamicRange &&
+            !facesHDR.isEmpty &&
+            !lightingHDR.isEmpty
+        let selectedFaces = useHDR ? facesHDR : faces
+        let selectedLighting = useHDR ? lightingHDR : lighting
+        guard selectedFaces.indices.contains(faceIndex),
+              !selectedLighting.isEmpty else { return nil }
+        let face = selectedFaces[faceIndex]
+        guard face.lightOffset >= 0,
+              face.textureInfoIndex >= 0,
+              face.lightmapTextureSizeInLuxels.count == 2,
+              face.lightmapTextureMinsInLuxels.count == 2 else { return nil }
+        let info = textureInfo[Int(face.textureInfoIndex)]
+        let styleCount = face.lightStyles.prefix { $0 != 255 }.count
+        guard styleCount > 0 else { return nil }
+        let width = Int(face.lightmapTextureSizeInLuxels[0]) + 1
+        let height = Int(face.lightmapTextureSizeInLuxels[1]) + 1
+        guard width > 0, height > 0 else { return nil }
+        let bumpSampleCount = UInt32(bitPattern: info.flags) & 0x0800 == 0 ? 1 : 4
+        return SourceBSPFaceLightmap(
+            faceIndex: faceIndex,
+            kind: useHDR ? .highDynamicRange : .standardDynamicRange,
+            width: width,
+            height: height,
+            styleCount: styleCount,
+            bumpSampleCount: bumpSampleCount,
+            encodedByteOffset: Int(face.lightOffset),
+            lightmapVectors: info.lightmapVectors,
+            minsInLuxels: face.lightmapTextureMinsInLuxels,
+            lighting: selectedLighting
+        )
     }
 
     public func lump(at index: Int) throws -> SourceBSPLump {
@@ -958,7 +1450,11 @@ public struct SourceBSP: Sendable, Equatable {
         leafFaces: [UInt16],
         leafBrushes: [UInt16],
         brushes: [SourceBSPBrush],
-        brushSides: [SourceBSPBrushSide]
+        brushSides: [SourceBSPBrushSide],
+        displacementInfo: [SourceBSPDisplacementInfo],
+        displacementVertices: [SourceBSPDisplacementVertex],
+        displacementTriangles: [SourceBSPDisplacementTriangle],
+        leafWaterData: [SourceBSPLeafWaterData]
     ) throws {
         func requireIndex(_ index: Int64, count: Int, context: String) throws {
             guard index >= 0, index < Int64(count) else {
@@ -1051,6 +1547,27 @@ public struct SourceBSP: Sendable, Equatable {
                 availableCount: surfaceEdges.count,
                 context: "face \(index) surface edges"
             )
+            try requireOptionalIndex(
+                Int64(face.displacementInfoIndex),
+                count: displacementInfo.count,
+                context: "face \(index) displacement"
+            )
+            if face.displacementInfoIndex >= 0 {
+                let displacement = displacementInfo[Int(face.displacementInfoIndex)]
+                guard Int(displacement.mapFaceIndex) == index else {
+                    throw SourceBSPError.invalidReference(
+                        context: "face \(index) reciprocal displacement map face",
+                        index: Int64(displacement.mapFaceIndex),
+                        availableCount: faces.count
+                    )
+                }
+                guard face.surfaceEdgeCount == 4 else {
+                    throw SourceBSPError.invalidValue(
+                        context: "face \(index) displacement base edge count",
+                        value: Int64(face.surfaceEdgeCount)
+                    )
+                }
+            }
         }
 
         for (index, node) in nodes.enumerated() {
@@ -1092,6 +1609,11 @@ public struct SourceBSP: Sendable, Equatable {
                 count: Int64(leaf.leafBrushCount),
                 availableCount: leafBrushes.count,
                 context: "leaf \(index) brush table"
+            )
+            try requireOptionalIndex(
+                Int64(leaf.leafWaterDataID),
+                count: leafWaterData.count,
+                context: "leaf \(index) water data"
             )
         }
 
@@ -1139,6 +1661,112 @@ public struct SourceBSP: Sendable, Equatable {
             )
         }
 
+        for (index, info) in displacementInfo.enumerated() {
+            guard (2...4).contains(info.power) else {
+                throw SourceBSPError.invalidValue(
+                    context: "displacement \(index) power",
+                    value: Int64(info.power)
+                )
+            }
+            guard info.startPosition.x.isFinite,
+                  info.startPosition.y.isFinite,
+                  info.startPosition.z.isFinite,
+                  info.smoothingAngle.isFinite else {
+                throw SourceBSPError.nonFiniteValue(
+                    context: "displacement \(index) geometry"
+                )
+            }
+            try requireRange(
+                first: Int64(info.firstVertex),
+                count: Int64(info.vertexCount),
+                availableCount: displacementVertices.count,
+                context: "displacement \(index) vertices"
+            )
+            try requireRange(
+                first: Int64(info.firstTriangle),
+                count: Int64(info.triangleCount),
+                availableCount: displacementTriangles.count,
+                context: "displacement \(index) triangles"
+            )
+            try requireIndex(
+                Int64(info.mapFaceIndex),
+                count: faces.count,
+                context: "displacement \(index) map face"
+            )
+            let mapFace = faces[Int(info.mapFaceIndex)]
+            guard mapFace.displacementInfoIndex == Int16(index) else {
+                throw SourceBSPError.invalidReference(
+                    context: "displacement \(index) reciprocal face displacement",
+                    index: Int64(mapFace.displacementInfoIndex),
+                    availableCount: displacementInfo.count
+                )
+            }
+            for (edge, neighbor) in info.edgeNeighbors.enumerated() {
+                for (subIndex, subNeighbor) in neighbor.subNeighbors.enumerated()
+                    where subNeighbor.isValid {
+                    try requireIndex(
+                        Int64(subNeighbor.neighborIndex),
+                        count: displacementInfo.count,
+                        context: "displacement \(index) edge \(edge) subneighbor \(subIndex)"
+                    )
+                    guard subNeighbor.neighborOrientation <= 3,
+                          subNeighbor.span <= 2,
+                          subNeighbor.neighborSpan <= 2 else {
+                        throw SourceBSPError.invalidValue(
+                            context: "displacement \(index) edge-neighbor orientation/span",
+                            value: Int64(subNeighbor.neighborOrientation)
+                        )
+                    }
+                }
+            }
+            for (corner, neighbor) in info.cornerNeighbors.enumerated() {
+                guard neighbor.neighborCount <= 4 else {
+                    throw SourceBSPError.invalidValue(
+                        context: "displacement \(index) corner \(corner) neighbor count",
+                        value: Int64(neighbor.neighborCount)
+                    )
+                }
+                for slot in 0..<Int(neighbor.neighborCount) {
+                    try requireIndex(
+                        Int64(neighbor.neighborIndices[slot]),
+                        count: displacementInfo.count,
+                        context: "displacement \(index) corner \(corner) neighbor \(slot)"
+                    )
+                }
+            }
+        }
+
+        for (index, vertex) in displacementVertices.enumerated() {
+            guard vertex.vector.x.isFinite,
+                  vertex.vector.y.isFinite,
+                  vertex.vector.z.isFinite,
+                  vertex.distance.isFinite,
+                  vertex.alpha.isFinite else {
+                throw SourceBSPError.nonFiniteValue(
+                    context: "displacement vertex \(index)"
+                )
+            }
+        }
+
+        for (index, water) in leafWaterData.enumerated() {
+            guard water.surfaceZ.isFinite, water.minimumZ.isFinite else {
+                throw SourceBSPError.nonFiniteValue(
+                    context: "leaf-water data \(index)"
+                )
+            }
+            guard water.minimumZ <= water.surfaceZ else {
+                throw SourceBSPError.invalidValue(
+                    context: "leaf-water data \(index) minimum Z exceeds surface Z",
+                    value: 1
+                )
+            }
+            try requireIndex(
+                Int64(water.surfaceTextureInfoIndex),
+                count: textureInfo.count,
+                context: "leaf-water data \(index) surface texinfo"
+            )
+        }
+
         // Malicious or corrupt node cycles would otherwise make point lookup
         // and recursive hull traversal non-terminating. Validate all nodes,
         // including disconnected submodel trees, with an iterative tri-color
@@ -1180,6 +1808,215 @@ public struct SourceBSP: Sendable, Equatable {
                 actual: lump.descriptor.version,
                 supported: supported
             )
+        }
+    }
+
+    private static func parseFaces(
+        _ lump: SourceBSPLump,
+        contextPrefix: String
+    ) throws -> [SourceBSPFace] {
+        return try parseRecords(
+            lump,
+            recordByteCount: 56,
+            supportedVersions: [1]
+        ) { cursor in
+            var styles: [UInt8] = []
+            styles.reserveCapacity(4)
+            let planeIndex = try cursor.readUInt16(
+                context: "\(contextPrefix) plane index"
+            )
+            let side = try cursor.readUInt8(context: "\(contextPrefix) side")
+            let isOnNode = try cursor.readUInt8(
+                context: "\(contextPrefix) on-node flag"
+            )
+            let firstSurfaceEdge = try cursor.readInt32(
+                context: "\(contextPrefix) first surface edge"
+            )
+            let surfaceEdgeCount = try cursor.readInt16(
+                context: "\(contextPrefix) surface edge count"
+            )
+            let textureInfoIndex = try cursor.readInt16(
+                context: "\(contextPrefix) texinfo index"
+            )
+            let displacementInfoIndex = try cursor.readInt16(
+                context: "\(contextPrefix) dispinfo index"
+            )
+            let surfaceFogVolumeID = try cursor.readInt16(
+                context: "\(contextPrefix) fog volume ID"
+            )
+            for styleIndex in 0..<4 {
+                styles.append(
+                    try cursor.readUInt8(
+                        context: "\(contextPrefix) light style \(styleIndex)"
+                    )
+                )
+            }
+            return SourceBSPFace(
+                planeIndex: planeIndex,
+                side: side,
+                isOnNode: isOnNode,
+                firstSurfaceEdge: firstSurfaceEdge,
+                surfaceEdgeCount: surfaceEdgeCount,
+                textureInfoIndex: textureInfoIndex,
+                displacementInfoIndex: displacementInfoIndex,
+                surfaceFogVolumeID: surfaceFogVolumeID,
+                lightStyles: styles,
+                lightOffset: try cursor.readInt32(
+                    context: "\(contextPrefix) light offset"
+                ),
+                area: try cursor.readFloat32(context: "\(contextPrefix) area"),
+                lightmapTextureMinsInLuxels: [
+                    try cursor.readInt32(
+                        context: "\(contextPrefix) lightmap minimum S"
+                    ),
+                    try cursor.readInt32(
+                        context: "\(contextPrefix) lightmap minimum T"
+                    )
+                ],
+                lightmapTextureSizeInLuxels: [
+                    try cursor.readInt32(
+                        context: "\(contextPrefix) lightmap size S"
+                    ),
+                    try cursor.readInt32(
+                        context: "\(contextPrefix) lightmap size T"
+                    )
+                ],
+                originalFace: try cursor.readInt32(
+                    context: "\(contextPrefix) original face"
+                ),
+                primitiveCountAndShadowFlag: try cursor.readUInt16(
+                    context: "\(contextPrefix) primitive count and shadow flag"
+                ),
+                firstPrimitiveID: try cursor.readUInt16(
+                    context: "\(contextPrefix) first primitive ID"
+                ),
+                smoothingGroups: try cursor.readUInt32(
+                    context: "\(contextPrefix) smoothing groups"
+                )
+            )
+        }
+    }
+
+    private static func parseLighting(
+        _ lump: SourceBSPLump
+    ) throws -> SourceBSPLighting {
+        try requireVersion(lump, supported: [1])
+        guard lump.data.count.isMultiple(of: 4) else {
+            throw SourceBSPError.invalidRecordByteCount(
+                index: lump.descriptor.index,
+                byteCount: lump.data.count,
+                recordByteCount: 4
+            )
+        }
+        return SourceBSPLighting(encodedSamples: lump.data)
+    }
+
+    private static func validateFaceReferences(
+        _ faces: [SourceBSPFace],
+        contextPrefix: String,
+        planes: [SourceBSPPlane],
+        textureInfo: [SourceBSPTextureInfo],
+        surfaceEdges: [Int32]
+    ) throws {
+        for (index, face) in faces.enumerated() {
+            guard Int(face.planeIndex) < planes.count else {
+                throw SourceBSPError.invalidReference(
+                    context: "\(contextPrefix) \(index) plane",
+                    index: Int64(face.planeIndex),
+                    availableCount: planes.count
+                )
+            }
+            if face.textureInfoIndex != -1 {
+                guard face.textureInfoIndex >= 0,
+                      Int(face.textureInfoIndex) < textureInfo.count else {
+                    throw SourceBSPError.invalidReference(
+                        context: "\(contextPrefix) \(index) texinfo",
+                        index: Int64(face.textureInfoIndex),
+                        availableCount: textureInfo.count
+                    )
+                }
+            }
+            let first = Int64(face.firstSurfaceEdge)
+            let count = Int64(face.surfaceEdgeCount)
+            let (end, overflow) = first.addingReportingOverflow(count)
+            guard first >= 0,
+                  count >= 0,
+                  !overflow,
+                  end <= Int64(surfaceEdges.count) else {
+                throw SourceBSPError.invalidReferenceRange(
+                    context: "\(contextPrefix) \(index) surface edges",
+                    first: first,
+                    count: count,
+                    availableCount: surfaceEdges.count
+                )
+            }
+        }
+    }
+
+    private static func validateLightmapReferences(
+        faces: [SourceBSPFace],
+        contextPrefix: String,
+        textureInfo: [SourceBSPTextureInfo],
+        lighting: SourceBSPLighting
+    ) throws {
+        for (index, face) in faces.enumerated() where face.lightOffset != -1 {
+            guard face.lightOffset >= 0,
+                  face.lightOffset.isMultiple(of: 4) else {
+                throw SourceBSPError.invalidValue(
+                    context: "\(contextPrefix) \(index) light offset",
+                    value: Int64(face.lightOffset)
+                )
+            }
+            guard face.textureInfoIndex >= 0,
+                  Int(face.textureInfoIndex) < textureInfo.count else {
+                throw SourceBSPError.invalidReference(
+                    context: "\(contextPrefix) \(index) lightmap texinfo",
+                    index: Int64(face.textureInfoIndex),
+                    availableCount: textureInfo.count
+                )
+            }
+            guard face.lightmapTextureSizeInLuxels.count == 2,
+                  face.lightmapTextureSizeInLuxels[0] >= 0,
+                  face.lightmapTextureSizeInLuxels[1] >= 0 else {
+                throw SourceBSPError.invalidValue(
+                    context: "\(contextPrefix) \(index) lightmap size",
+                    value: Int64(face.lightmapTextureSizeInLuxels.first ?? -1)
+                )
+            }
+            let styleCount = Int64(face.lightStyles.prefix { $0 != 255 }.count)
+            guard styleCount > 0 else {
+                throw SourceBSPError.invalidValue(
+                    context: "\(contextPrefix) \(index) light style count",
+                    value: styleCount
+                )
+            }
+            let width = Int64(face.lightmapTextureSizeInLuxels[0]) + 1
+            let height = Int64(face.lightmapTextureSizeInLuxels[1]) + 1
+            let info = textureInfo[Int(face.textureInfoIndex)]
+            let bumpCount: Int64 = UInt32(bitPattern: info.flags) & 0x0800 == 0 ? 1 : 4
+            let samples = width.multipliedReportingOverflow(by: height)
+            let styledSamples = samples.partialValue.multipliedReportingOverflow(
+                by: styleCount
+            )
+            let allSamples = styledSamples.partialValue.multipliedReportingOverflow(
+                by: bumpCount
+            )
+            let bytes = allSamples.partialValue.multipliedReportingOverflow(by: 4)
+            let first = Int64(face.lightOffset)
+            let end = first.addingReportingOverflow(bytes.partialValue)
+            guard !samples.overflow,
+                  !styledSamples.overflow,
+                  !allSamples.overflow,
+                  !bytes.overflow,
+                  !end.overflow,
+                  end.partialValue <= Int64(lighting.byteCount) else {
+                throw SourceBSPError.invalidReferenceRange(
+                    context: "\(contextPrefix) \(index) lightmap bytes",
+                    first: first,
+                    count: bytes.partialValue,
+                    availableCount: lighting.byteCount
+                )
+            }
         }
     }
 
@@ -1373,5 +2210,114 @@ private struct SourceBSPByteReader {
             throw SourceBSPError.unexpectedEnd(context: context)
         }
         offset += byteCount
+    }
+}
+
+private struct SourceBSPEntityTextParser {
+    private enum Token: Equatable {
+        case open
+        case close
+        case string(String)
+    }
+
+    private let source: String
+    private var index: String.Index
+
+    init(_ source: String) {
+        self.source = source
+        index = source.startIndex
+    }
+
+    mutating func parse() throws -> [SourceBSPParsedEntity] {
+        var result: [SourceBSPParsedEntity] = []
+        while let token = try nextToken() {
+            guard token == .open else {
+                throw SourceBSPError.malformedEntityText(
+                    context: "entity opening brace"
+                )
+            }
+            var pairs: [SourceBSPEntityKeyValue] = []
+            while true {
+                guard let keyToken = try nextToken() else {
+                    throw SourceBSPError.malformedEntityText(
+                        context: "entity closing brace"
+                    )
+                }
+                if keyToken == .close { break }
+                guard case let .string(key) = keyToken,
+                      case let .string(value)? = try nextToken() else {
+                    throw SourceBSPError.malformedEntityText(
+                        context: "entity key/value pair"
+                    )
+                }
+                pairs.append(SourceBSPEntityKeyValue(key: key, value: value))
+            }
+            result.append(SourceBSPParsedEntity(keyValues: pairs))
+        }
+        return result
+    }
+
+    private mutating func nextToken() throws -> Token? {
+        skipTrivia()
+        guard index < source.endIndex else { return nil }
+        let character = source[index]
+        if character == "{" {
+            source.formIndex(after: &index)
+            return .open
+        }
+        if character == "}" {
+            source.formIndex(after: &index)
+            return .close
+        }
+        guard character == "\"" else {
+            throw SourceBSPError.malformedEntityText(context: "quoted token")
+        }
+        source.formIndex(after: &index)
+        var value = ""
+        while index < source.endIndex {
+            let current = source[index]
+            source.formIndex(after: &index)
+            if current == "\"" { return .string(value) }
+            if current == "\\" {
+                guard index < source.endIndex else {
+                    throw SourceBSPError.malformedEntityText(
+                        context: "quoted escape"
+                    )
+                }
+                let escaped = source[index]
+                source.formIndex(after: &index)
+                switch escaped {
+                case "n": value.append("\n")
+                case "r": value.append("\r")
+                case "t": value.append("\t")
+                default: value.append(escaped)
+                }
+            } else {
+                value.append(current)
+            }
+        }
+        throw SourceBSPError.malformedEntityText(context: "quoted token terminator")
+    }
+
+    private mutating func skipTrivia() {
+        while index < source.endIndex {
+            if source[index].isWhitespace || source[index] == "\0" {
+                source.formIndex(after: &index)
+                continue
+            }
+            let next = source.index(after: index)
+            if source[index] == "/",
+               next < source.endIndex,
+               source[next] == "/" {
+                index = source.index(after: next)
+                while index < source.endIndex,
+                      source[index] != "\n",
+                      source[index] != "\r" {
+                    source.formIndex(after: &index)
+                }
+                continue
+            }
+            break
+        }
     }
 }

@@ -239,6 +239,7 @@ public final class GMLuaRuntime {
             // it installs the public GLua type/TypeID/predicate wrappers.
             let installedTypeSystem = try typeSystemInstaller(state)
             typeSystem = installedTypeSystem
+            GMLuaColorConversion.install(into: state)
             try GMLuaVectorAngle.install(
                 into: state,
                 typeSystem: installedTypeSystem
@@ -316,9 +317,10 @@ public final class GMLuaRuntime {
                 state: state,
                 realm: realm,
                 conVars: installedConVarRegistry,
-                entityRegistry: installedEntityRegistry
+                entityRegistry: installedEntityRegistry,
+                logger: logger
             )
-            installedConsoleDispatcher.installBindings()
+            try installedConsoleDispatcher.installBindings()
             consoleCommandDispatcher = installedConsoleDispatcher
             netEndpoint?.connectConsoleCommandDispatcher(installedConsoleDispatcher)
             try GMLuaSQL.install(into: state)

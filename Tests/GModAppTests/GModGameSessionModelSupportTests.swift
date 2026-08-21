@@ -3,6 +3,351 @@ import XCTest
 import GModEngine
 
 final class GModGameSessionModelSupportTests: XCTestCase {
+    func testPauseAndResumePreserveTheExactLiveSessionSnapshot() {
+        let snapshot = GModGameSessionContinuitySnapshot(
+            map: .construct,
+            playerOrigin: SourceVector3(128, -64, 32),
+            viewAngles: SourceQAngle(pitch: 12, yaw: 235, roll: 0),
+            fixedTickCount: 4_096
+        )
+        var state = GModGamePresentationState()
+
+        XCTAssertEqual(
+            state.reduce(.pauseRequested(snapshot)),
+            [.suspendForPauseMenu]
+        )
+        XCTAssertTrue(state.showsHomeMenu)
+        XCTAssertEqual(state.pausedSession, snapshot)
+
+        XCTAssertEqual(
+            state.reduce(.homeMenuAction(.hideGameUI)),
+            [.resumeExistingSession]
+        )
+        XCTAssertFalse(state.showsHomeMenu)
+        XCTAssertEqual(state.pausedSession, snapshot)
+    }
+
+    func testDisconnectClearsContinuityAndReturnsToSafeHomeState() {
+        let snapshot = GModGameSessionContinuitySnapshot(
+            map: .flatgrass,
+            playerOrigin: SourceVector3(1, 2, 3),
+            viewAngles: SourceQAngle(pitch: 4, yaw: 5, roll: 0),
+            fixedTickCount: 99
+        )
+        var state = GModGamePresentationState()
+        _ = state.reduce(.pauseRequested(snapshot))
+
+        XCTAssertEqual(
+            state.reduce(.homeMenuAction(.disconnect)),
+            [.disconnectSession]
+        )
+        XCTAssertTrue(state.showsHomeMenu)
+        XCTAssertNil(state.pausedSession)
+
+        // Disconnect is intentionally idempotent from an already-safe Home.
+        XCTAssertEqual(
+            state.reduce(.homeMenuAction(.disconnect)),
+            [.disconnectSession]
+        )
+        XCTAssertTrue(state.showsHomeMenu)
+        XCTAssertNil(state.pausedSession)
+    }
+
+    func testHomeMenuActionReducerUsesOnlyValidatedMapSelections() {
+        var state = GModGamePresentationState()
+
+        XCTAssertEqual(
+            state.reduce(.homeMenuAction(.startMap("gm_construct"))),
+            [.awaitValidatedMapSelection("gm_construct")]
+        )
+        XCTAssertTrue(state.showsHomeMenu)
+        XCTAssertEqual(
+            state.reduce(.homeMenuAction(.setLanguage("ja"))),
+            []
+        )
+        XCTAssertEqual(
+            state.reduce(.homeMenuAction(.openOptions)),
+            []
+        )
+        XCTAssertEqual(
+            state.reduce(.homeMenuAction(.openProblems)),
+            []
+        )
+        XCTAssertEqual(
+            state.reduce(.homeMenuAction(.quit)),
+            [.presentQuitUnavailable]
+        )
+
+        XCTAssertEqual(
+            state.reduce(.validatedMapSelected(.construct)),
+            [.startMap(.construct)]
+        )
+        XCTAssertFalse(state.showsHomeMenu)
+    }
+
+    func testValidatedNewMapSelectionReplacesPausedContinuity() {
+        let prior = GModGameSessionContinuitySnapshot(
+            map: .construct,
+            playerOrigin: SourceVector3(10, 20, 30),
+            viewAngles: SourceQAngle(pitch: 1, yaw: 2, roll: 0),
+            fixedTickCount: 300
+        )
+        var state = GModGamePresentationState()
+        _ = state.reduce(.pauseRequested(prior))
+
+        XCTAssertEqual(
+            state.reduce(.validatedMapSelected(.flatgrass)),
+            [.startMap(.flatgrass)]
+        )
+        XCTAssertFalse(state.showsHomeMenu)
+        XCTAssertNil(state.pausedSession)
+    }
+
+    func testCPUStartFailureRequiresExplicitReturnAndPreservesProblemEvidence() {
+        let failure = GModGameStartFailure(
+            map: .construct,
+            origin: .cpu,
+            detail: "BSP allocation rejected: requested 200 / cap 100"
+        )
+        var state = GModGamePresentationState()
+        _ = state.reduce(.validatedMapSelected(.construct))
+
+        XCTAssertEqual(state.reduce(.startFailed(failure)), [])
+        XCTAssertFalse(state.showsHomeMenu)
+        XCTAssertEqual(state.startFailure, failure)
+        XCTAssertEqual(
+            state.reduce(.returnHomeAfterStartFailure),
+            [.abandonFailedStart]
+        )
+        XCTAssertTrue(state.showsHomeMenu)
+        XCTAssertEqual(state.startFailure, failure)
+
+        let problems = GModAppProblemSnapshotBuilder.build(
+            retained: [],
+            gameLogs: [],
+            consoleLogs: [],
+            worldScene: nil,
+            surfaceDiagnostics: nil,
+            contentError: nil,
+            startFailure: failure
+        )
+        XCTAssertTrue(problems.problems.contains {
+            $0.id.hasPrefix("session-start-failure|") &&
+                $0.detail == failure.detail &&
+                $0.severity == .error
+        })
+    }
+
+    func testRendererStartFailureUsesTheSameNoTimeoutRecoveryEvent() {
+        let failure = GModGameStartFailure(
+            map: .flatgrass,
+            origin: .renderer(meshIdentifier: "session-9:gm_flatgrass"),
+            detail: "texture allocation failed: concrete"
+        )
+        var state = GModGamePresentationState()
+        _ = state.reduce(.validatedMapSelected(.flatgrass))
+
+        XCTAssertEqual(state.reduce(.startFailed(failure)), [])
+        XCTAssertFalse(state.showsHomeMenu)
+        XCTAssertEqual(state.startFailure, failure)
+        XCTAssertEqual(
+            state.reduce(.returnHomeAfterStartFailure),
+            [.abandonFailedStart]
+        )
+        XCTAssertTrue(state.showsHomeMenu)
+        XCTAssertEqual(state.startFailure, failure)
+    }
+
+    func testOrdinaryPlayHidesDeveloperChrome() {
+        let ordinary = GModMainViewChromePolicy()
+        XCTAssertFalse(ordinary.showsDeveloperChrome)
+        XCTAssertFalse(ordinary.showsRendererHeader)
+        XCTAssertFalse(ordinary.showsDebugMapControls)
+        XCTAssertFalse(ordinary.showsRuntimeStatistics)
+        XCTAssertFalse(ordinary.showsConsole)
+        XCTAssertFalse(ordinary.showsPlayfieldDebugBorder)
+        XCTAssertTrue(ordinary.hidesWorldUntilFirstFrame)
+
+        let developer = GModMainViewChromePolicy(
+            developerDiagnosticsEnabled: true
+        )
+        XCTAssertTrue(developer.showsDeveloperChrome)
+        XCTAssertTrue(developer.showsRendererHeader)
+        XCTAssertTrue(developer.showsDebugMapControls)
+        XCTAssertTrue(developer.showsRuntimeStatistics)
+        XCTAssertTrue(developer.showsConsole)
+        XCTAssertTrue(developer.showsPlayfieldDebugBorder)
+        XCTAssertTrue(developer.hidesWorldUntilFirstFrame)
+    }
+
+    func testInGameOverlayUsesUnobtrusiveLandscapeIPadMetrics() {
+        let layout = GModInGameOverlayLayout(
+            width: 1_366,
+            height: 1_024,
+            safeTop: 24,
+            safeBottom: 20
+        )
+
+        XCTAssertFalse(layout.isPortrait)
+        XCTAssertEqual(layout.leadingInset, 20.48, accuracy: 0.001)
+        XCTAssertEqual(layout.trailingInset, 20.48, accuracy: 0.001)
+        XCTAssertEqual(layout.topInset, 44.48, accuracy: 0.001)
+        XCTAssertEqual(layout.bottomInset, 40.48, accuracy: 0.001)
+        XCTAssertEqual(layout.joystickDiameter, 107.52, accuracy: 0.001)
+        XCTAssertEqual(layout.joystickKnobDiameter, 33.3312, accuracy: 0.001)
+        XCTAssertEqual(layout.lookPadWidth, 204.9, accuracy: 0.001)
+        XCTAssertEqual(layout.lookPadHeight, 110.646, accuracy: 0.001)
+        XCTAssertEqual(layout.jumpDiameter, 65.536, accuracy: 0.001)
+        XCTAssertEqual(layout.heldActionDiameter, 51.2, accuracy: 0.001)
+        XCTAssertEqual(layout.utilityButtonSize, 48.128, accuracy: 0.001)
+        XCTAssertGreaterThanOrEqual(layout.utilityButtonSize, 44)
+    }
+
+    func testInGameOverlayAdaptsToPortraitAndSafeAreas() {
+        let layout = GModInGameOverlayLayout(
+            width: 810,
+            height: 1_080,
+            safeTop: 24,
+            safeLeading: 7,
+            safeBottom: 20,
+            safeTrailing: 9
+        )
+
+        XCTAssertTrue(layout.isPortrait)
+        XCTAssertEqual(layout.leadingInset, 23.2, accuracy: 0.001)
+        XCTAssertEqual(layout.trailingInset, 25.2, accuracy: 0.001)
+        XCTAssertEqual(layout.topInset, 40.2, accuracy: 0.001)
+        XCTAssertEqual(layout.bottomInset, 36.2, accuracy: 0.001)
+        XCTAssertEqual(layout.joystickDiameter, 101.25, accuracy: 0.001)
+        XCTAssertEqual(layout.joystickKnobDiameter, 32, accuracy: 0.001)
+        XCTAssertEqual(layout.lookPadWidth, 194.4, accuracy: 0.001)
+        XCTAssertEqual(layout.lookPadHeight, 104.976, accuracy: 0.001)
+        XCTAssertEqual(layout.jumpDiameter, 60, accuracy: 0.001)
+        XCTAssertEqual(layout.heldActionDiameter, 44, accuracy: 0.001)
+        XCTAssertEqual(layout.utilityButtonSize, 46, accuracy: 0.001)
+
+        // Every explicit action remains above Apple's minimum touch target,
+        // while the large drag surfaces remain well below a quarter-screen
+        // obstruction in either iPad orientation.
+        XCTAssertGreaterThanOrEqual(layout.utilityButtonSize, 44)
+        XCTAssertGreaterThanOrEqual(layout.jumpDiameter, 44)
+        XCTAssertGreaterThanOrEqual(layout.heldActionDiameter, 44)
+        XCTAssertLessThan(layout.lookPadWidth, 810 * 0.30)
+        XCTAssertLessThan(layout.joystickDiameter, 810 * 0.15)
+    }
+
+    func testFirstWorldFrameGateRejectsStaleAndDuplicateCompletions() {
+        var gate = GModGameFirstWorldFrameGate()
+        gate.arm(meshIdentifier: "session-7:gm_construct")
+        XCTAssertTrue(gate.matches(meshIdentifier: "session-7:gm_construct"))
+        XCTAssertFalse(gate.matches(meshIdentifier: "session-6:gm_construct"))
+
+        XCTAssertFalse(gate.acknowledge(
+            meshIdentifier: "session-6:gm_construct"
+        ))
+        XCTAssertEqual(
+            gate.expectedMeshIdentifier,
+            "session-7:gm_construct"
+        )
+        XCTAssertTrue(gate.acknowledge(
+            meshIdentifier: "session-7:gm_construct"
+        ))
+        XCTAssertNil(gate.expectedMeshIdentifier)
+        XCTAssertFalse(gate.matches(meshIdentifier: "session-7:gm_construct"))
+        XCTAssertFalse(gate.acknowledge(
+            meshIdentifier: "session-7:gm_construct"
+        ))
+
+        gate.arm(meshIdentifier: "session-8:gm_construct")
+        gate.reset()
+        XCTAssertFalse(gate.acknowledge(
+            meshIdentifier: "session-8:gm_construct"
+        ))
+    }
+
+    func testWorldInputOwnershipSanitizesDelayedSamplesDuringMenusAndTransitions() {
+        let positive = (
+            viewAngles: SourceQAngle(pitch: 10, yaw: 20, roll: 0),
+            forward: Float(1),
+            side: Float(-0.5),
+            jump: true
+        )
+        let rejectedStates: [(
+            suspended: Bool,
+            active: GModGameClientMenu?,
+            transitioning: GModGameClientMenu?
+        )] = [
+            (false, .spawn, nil),
+            (false, nil, .context),
+            (true, nil, nil),
+        ]
+        for state in rejectedStates {
+            let accepts = GModGameWorldInputPolicy.accepts(
+                isReady: true,
+                isInputSuspended: state.suspended,
+                activeMenu: state.active,
+                transitioningMenu: state.transitioning
+            )
+            XCTAssertFalse(accepts)
+            XCTAssertEqual(
+                GModGameWorldInputPolicy.movementInput(
+                    acceptsWorldInput: accepts,
+                    viewAngles: positive.viewAngles,
+                    forwardAxis: positive.forward,
+                    sideAxis: positive.side,
+                    jumpPressed: positive.jump,
+                    heldActionButtons: [.attack, .attack2, .use]
+                ),
+                .idle
+            )
+        }
+
+        let accepts = GModGameWorldInputPolicy.accepts(
+            isReady: true,
+            isInputSuspended: false,
+            activeMenu: nil,
+            transitioningMenu: nil
+        )
+        let admitted = GModGameWorldInputPolicy.movementInput(
+            acceptsWorldInput: accepts,
+            viewAngles: positive.viewAngles,
+            forwardAxis: positive.forward,
+            sideAxis: positive.side,
+            jumpPressed: positive.jump,
+            heldActionButtons: [.attack, .attack2, .use, .reload]
+        )
+        XCTAssertTrue(accepts)
+        XCTAssertEqual(admitted.forwardMove, 250)
+        XCTAssertEqual(admitted.sideMove, -125)
+        XCTAssertTrue(admitted.buttons.contains(.forward))
+        XCTAssertTrue(admitted.buttons.contains(.moveLeft))
+        XCTAssertTrue(admitted.buttons.contains(.jump))
+        XCTAssertTrue(admitted.buttons.contains(.attack))
+        XCTAssertTrue(admitted.buttons.contains(.attack2))
+        XCTAssertTrue(admitted.buttons.contains(.use))
+        XCTAssertFalse(admitted.buttons.contains(.reload))
+
+        let popupAccepts = GModGameWorldInputPolicy.accepts(
+            isReady: true,
+            isInputSuspended: false,
+            activeMenu: nil,
+            transitioningMenu: nil,
+            isHostPopupPresented: true
+        )
+        XCTAssertFalse(popupAccepts)
+        XCTAssertEqual(
+            GModGameWorldInputPolicy.movementInput(
+                acceptsWorldInput: popupAccepts,
+                viewAngles: positive.viewAngles,
+                forwardAxis: positive.forward,
+                sideAxis: positive.side,
+                jumpPressed: true,
+                heldActionButtons: [.attack, .attack2, .use]
+            ),
+            .idle
+        )
+    }
+
     func testUnsupportedMovementDiagnosticNeverClaimsSuccess() {
         let water = GModGameMovementDiagnostic(
             commandNumber: 12,
@@ -93,32 +438,32 @@ final class GModGameSessionModelSupportTests: XCTestCase {
                 lane: 11
             ),
             requestRevision: 19,
-            spawnMenuOpen: true
+            activeMenu: .spawn
         )
 
         XCTAssertTrue(token.matches(
             application: 7,
             lane: 11,
             requestRevision: 19,
-            spawnMenuOpen: true
+            activeMenu: .spawn
         ))
         XCTAssertFalse(token.matches(
             application: 7,
             lane: 11,
             requestRevision: 20,
-            spawnMenuOpen: true
+            activeMenu: .spawn
         ))
         XCTAssertFalse(token.matches(
             application: 7,
             lane: 11,
             requestRevision: 19,
-            spawnMenuOpen: false
+            activeMenu: .context
         ))
         XCTAssertFalse(token.matches(
             application: 8,
             lane: 11,
             requestRevision: 19,
-            spawnMenuOpen: true
+            activeMenu: .spawn
         ))
     }
 

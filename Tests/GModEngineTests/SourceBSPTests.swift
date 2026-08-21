@@ -180,6 +180,110 @@ final class SourceBSPTests: XCTestCase {
         XCTAssertNil(bsp.entities.text)
     }
 
+    func testEntityParserFindsWorldspawnSkynameWithoutFlatteningEntityOrder() throws {
+        let entityText = """
+        // leading comment is legal entity-lump trivia
+        {
+        "classname" "worldspawn"
+        "skyname" "Painted"
+        "skyname" "painted"
+        }
+        {
+        "classname" "info_player_start"
+        "targetname" "spawn\\\"one"
+        }
+        \0
+        """
+        let bsp = try SourceBSP(data: makeBSP(lumps: [
+            SourceBSPLumpKind.entities.rawValue: SyntheticLump(
+                data: Data(entityText.utf8),
+                version: 0
+            )
+        ]))
+
+        let entities = try bsp.entities.parsedEntities()
+        XCTAssertEqual(entities.count, 2)
+        XCTAssertEqual(entities[0].keyValues.map(\.key), ["classname", "skyname", "skyname"])
+        XCTAssertEqual(try bsp.worldspawnValue(forKey: "SKYNAME"), "painted")
+        XCTAssertEqual(entities[1].value(forKey: "targetname"), "spawn\"one")
+    }
+
+    func testLightingLumpUsesFaceLightmapVectorsDimensionsStylesAndByteOffset() throws {
+        var lighting = Data(repeating: 0, count: 16 * 16 * 4)
+        lighting.replaceSubrange(0..<4, with: [128, 64, 32, 1])
+        let sampleIndex = 2 * 16 + 1
+        lighting.replaceSubrange(
+            (sampleIndex * 4)..<(sampleIndex * 4 + 4),
+            with: [9, 8, 7, UInt8(bitPattern: -2)]
+        )
+        let bsp = try SourceBSP(
+            data: makeCompleteBSP(
+                version: 20,
+                entityText: "{\n\"classname\" \"worldspawn\"\n\"skyname\" \"painted\"\n}\n\0",
+                lightOffset: 0,
+                lighting: lighting
+            )
+        )
+
+        XCTAssertEqual(bsp.lighting.byteCount, 1_024)
+        XCTAssertEqual(bsp.lighting.sampleCount, 256)
+        XCTAssertEqual(try bsp.worldspawnValue(forKey: "skyname"), "painted")
+        let lightmap = try XCTUnwrap(
+            bsp.lightmap(forFaceAt: 0, preferHighDynamicRange: false)
+        )
+        XCTAssertEqual(lightmap.kind, .standardDynamicRange)
+        XCTAssertEqual(lightmap.width, 16)
+        XCTAssertEqual(lightmap.height, 16)
+        XCTAssertEqual(lightmap.styleCount, 1)
+        XCTAssertEqual(lightmap.bumpSampleCount, 1)
+        XCTAssertEqual(lightmap.encodedByteOffset, 0)
+        XCTAssertEqual(lightmap.sample(x: 0, y: 0), SourceBSPRGBExponent(
+            red: 128,
+            green: 64,
+            blue: 32,
+            exponent: 1
+        ))
+        XCTAssertEqual(lightmap.sample(x: 1, y: 2), SourceBSPRGBExponent(
+            red: 9,
+            green: 8,
+            blue: 7,
+            exponent: -2
+        ))
+        XCTAssertNil(lightmap.sample(x: 16, y: 0))
+
+        let coordinate = lightmap.textureCoordinate(at: SourceBSPVector3(x: 1, y: 2, z: 3))
+        XCTAssertEqual(coordinate.luxelS, 74)
+        XCTAssertEqual(coordinate.luxelT, 102)
+        XCTAssertEqual(coordinate.normalizedU, 74.5 / 16, accuracy: 0.0001)
+        XCTAssertEqual(coordinate.normalizedV, 102.5 / 16, accuracy: 0.0001)
+        let color = try XCTUnwrap(lightmap.sample(x: 0, y: 0)).linearColor
+        XCTAssertEqual(color.x, 256.0 / 255.0, accuracy: 0.0001)
+        XCTAssertEqual(color.y, 128.0 / 255.0, accuracy: 0.0001)
+        XCTAssertEqual(color.z, 64.0 / 255.0, accuracy: 0.0001)
+    }
+
+    func testTexLightToLinearUsesValvePowerTableNormalizationWithoutHDRClamp() {
+        let ordinary = SourceBSPRGBExponent(
+            red: 255,
+            green: 128,
+            blue: 0,
+            exponent: 0
+        ).linearColor
+        XCTAssertEqual(ordinary.x, 1, accuracy: 0.000001)
+        XCTAssertEqual(ordinary.y, 128.0 / 255.0, accuracy: 0.000001)
+        XCTAssertEqual(ordinary.z, 0, accuracy: 0.000001)
+
+        let highDynamicRange = SourceBSPRGBExponent(
+            red: 255,
+            green: 128,
+            blue: 64,
+            exponent: 2
+        ).linearColor
+        XCTAssertEqual(highDynamicRange.x, 4, accuracy: 0.000001)
+        XCTAssertEqual(highDynamicRange.y, 512.0 / 255.0, accuracy: 0.000001)
+        XCTAssertEqual(highDynamicRange.z, 256.0 / 255.0, accuracy: 0.000001)
+    }
+
     func testRejectsTruncatedHeaderBadMagicAndUnsupportedOuterVersion() throws {
         XCTAssertThrowsError(try SourceBSP(data: Data(repeating: 0, count: 20))) { error in
             XCTAssertEqual(
@@ -740,7 +844,12 @@ private func makeSharedPlaneDifferentSurfaceBrushWorldBSP() -> Data {
     ])
 }
 
-private func makeCompleteBSP(version: Int32) -> Data {
+private func makeCompleteBSP(
+    version: Int32,
+    entityText: String = "{\n\"classname\" \"worldspawn\"\n}\n\0",
+    lightOffset: Int32 = -1,
+    lighting: Data = Data()
+) -> Data {
     var plane = Data()
     plane.appendVector3(1, 0, 0)
     plane.appendFloat32(64)
@@ -787,7 +896,7 @@ private func makeCompleteBSP(version: Int32) -> Data {
     face.appendInt16(-1)
     face.appendInt16(-1)
     face.append(contentsOf: [0, 255, 255, 255])
-    face.appendInt32(-1)
+    face.appendInt32(lightOffset)
     face.appendFloat32(128.5)
     face.appendInt32(0)
     face.appendInt32(0)
@@ -859,16 +968,14 @@ private func makeCompleteBSP(version: Int32) -> Data {
         version: version,
         revision: 73,
         lumps: [
-            0: SyntheticLump(
-                data: Data("{\n\"classname\" \"worldspawn\"\n}\n\0".utf8),
-                version: 0
-            ),
+            0: SyntheticLump(data: Data(entityText.utf8), version: 0),
             1: SyntheticLump(data: plane, version: 0),
             2: SyntheticLump(data: textureData, version: 0),
             3: SyntheticLump(data: vertex, version: 0),
             5: SyntheticLump(data: node, version: 0),
             6: SyntheticLump(data: textureInfo, version: 0),
             7: SyntheticLump(data: face, version: 1),
+            8: SyntheticLump(data: lighting, version: 1),
             10: SyntheticLump(data: leaf, version: 1),
             12: SyntheticLump(data: edge, version: 0),
             13: SyntheticLump(data: surfaceEdge, version: 0),

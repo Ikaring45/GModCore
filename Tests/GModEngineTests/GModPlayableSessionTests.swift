@@ -24,6 +24,54 @@ private struct UnsupportedContentsPlayableWalkProvider:
 }
 
 final class GModPlayableSessionTests: XCTestCase {
+    func testTouchActionWordIsReportedAndVisibleToBothRealmPlayers() throws {
+        let session = try GModPlayableSession(
+            configuration: GModPlayableSessionConfiguration(map: .construct)
+        )
+        defer { _ = try? session.close() }
+
+        let heldActions: SourceInputButtons = [.attack, .attack2, .use]
+        let report = try session.runFixedTick(
+            movementInput: GModPlayableMovementInput(buttons: heldActions)
+        )
+        XCTAssertEqual(report.inputButtons.buttons, heldActions)
+        XCTAssertTrue(report.inputButtons.serverMirrorUpdated)
+        XCTAssertEqual(report.inputButtons.updatedClientMirrorCount, 1)
+        try session.serverRuntime.execute(
+            """
+            assert(Player(1):KeyDown(IN_ATTACK))
+            assert(Player(1):KeyDown(IN_ATTACK2))
+            assert(Player(1):KeyDown(IN_USE))
+            """,
+            sourceName: "=(touch actions server mirror)"
+        )
+        try session.clientRuntime.execute(
+            """
+            assert(LocalPlayer():KeyDown(IN_ATTACK))
+            assert(LocalPlayer():KeyDown(IN_ATTACK2))
+            assert(LocalPlayer():KeyDown(IN_USE))
+            """,
+            sourceName: "=(touch actions client mirror)"
+        )
+
+        let cleared = try session.updateCurrentPlayerInputButtons([])
+        XCTAssertEqual(cleared.buttons, [])
+        XCTAssertTrue(cleared.serverMirrorUpdated)
+        XCTAssertEqual(cleared.updatedClientMirrorCount, 1)
+        try session.serverRuntime.execute(
+            "assert(not Player(1):KeyDown(IN_ATTACK) and " +
+                "not Player(1):KeyDown(IN_ATTACK2) and " +
+                "not Player(1):KeyDown(IN_USE))",
+            sourceName: "=(touch actions server clear)"
+        )
+        try session.clientRuntime.execute(
+            "assert(not LocalPlayer():KeyDown(IN_ATTACK) and " +
+                "not LocalPlayer():KeyDown(IN_ATTACK2) and " +
+                "not LocalPlayer():KeyDown(IN_USE))",
+            sourceName: "=(touch actions client clear)"
+        )
+    }
+
     func testWaterMovesAndLadderRejectsWhileBothRealmClocksAdvance() throws {
         let cases: [(SourceContents, SourceWorldWalkUnsupportedFeature)] = [
             (.water, .water),
@@ -153,7 +201,10 @@ final class GModPlayableSessionTests: XCTestCase {
             session.spawnPoint.angles,
             SourceQAngle(pitch: 0, yaw: 180, roll: 0)
         )
-        XCTAssertEqual(session.worldMesh.triangleCount, 20_560)
+        // The rendered world now replaces coarse displacement base faces with
+        // their real recursive displacement triangles. The displacement-only
+        // contribution is asserted separately by GModWorldRenderMeshTests.
+        XCTAssertEqual(session.worldMesh.triangleCount, 41_344)
         XCTAssertEqual(session.worldIdentity.index, 0)
         XCTAssertTrue(session.startupReport.clientStartup.playerConnectionModeled)
         XCTAssertEqual(session.sharedSession.connectedClientCount, 1)
@@ -207,7 +258,9 @@ final class GModPlayableSessionTests: XCTestCase {
             SourceVector3(-512, 576, -12_287)
         )
         XCTAssertEqual(session.spawnPoint.angles, .zero)
-        XCTAssertEqual(session.worldMesh.triangleCount, 3_872)
+        // The renderer expands gm_flatgrass' displacement faces into their
+        // recursive mesh instead of retaining the old coarse base quads.
+        XCTAssertEqual(session.worldMesh.triangleCount, 12_044)
         XCTAssertEqual(session.bsp.header.mapRevision, 146)
         try assertWorldTrace(in: session, expectedFloorZ: -12_287.968_75)
 
@@ -273,6 +326,114 @@ final class GModPlayableSessionTests: XCTestCase {
         try session.clientRuntime.execute(
             "assert(IsValid(g_SpawnMenu) and not g_SpawnMenu:IsVisible())",
             sourceName: "=(playable stock spawn menu closed state)"
+        )
+    }
+
+    func testStrictSandboxContextMenuUsesLiveClientLifecycle() throws {
+        let session = try GModPlayableSession(
+            configuration: GModPlayableSessionConfiguration(map: .construct)
+        )
+        defer { _ = try? session.close() }
+
+        try session.clientRuntime.execute(
+            "assert(type(g_ContextMenu) == 'Panel' and " +
+                "IsValid(g_ContextMenu) and not g_ContextMenu:IsVisible())",
+            sourceName: "=(playable stock context menu initial state)"
+        )
+
+        try session.setContextMenuOpen(true)
+        try session.clientRuntime.execute(
+            "assert(IsValid(g_ContextMenu) and g_ContextMenu:IsVisible())",
+            sourceName: "=(playable stock context menu open state)"
+        )
+        let rendered = try session.renderClientVGUIFrame()
+        XCTAssertGreaterThan(rendered.drawCallCount, 0)
+
+        try session.setContextMenuOpen(false)
+        try session.clientRuntime.execute(
+            "assert(IsValid(g_ContextMenu) and not g_ContextMenu:IsVisible())",
+            sourceName: "=(playable stock context menu closed state)"
+        )
+    }
+
+    func testVGUIPointerFeedsInputCursorAndReleasesMouseAfterThrow() throws {
+        let session = try GModPlayableSession(
+            configuration: GModPlayableSessionConfiguration(map: .construct)
+        )
+        defer { _ = try? session.close() }
+        try session.setSpawnMenuOpen(true)
+        defer { try? session.setSpawnMenuOpen(false) }
+        try session.clientRuntime.execute(
+            """
+            INPUT_THROW_PANEL = vgui.Create("Panel")
+            INPUT_THROW_PANEL:SetPos(0, 0)
+            INPUT_THROW_PANEL:SetSize(ScrW(), ScrH())
+            INPUT_THROW_PANEL:SetMouseInputEnabled(true)
+            INPUT_THROW_PANEL:SetZPos(32767)
+            INPUT_THROW_PANEL:SetDrawOnTop(true)
+            INPUT_THROW_PANEL:MakePopup()
+            function INPUT_THROW_PANEL:OnMousePressed()
+                local x, y = input.GetCursorPos()
+                assert(x == 17 and y == 29)
+                assert(input.IsMouseDown(MOUSE_LEFT))
+            end
+            function INPUT_THROW_PANEL:OnMouseReleased()
+                assert(input.IsMouseDown(MOUSE_LEFT))
+                error("intentional pointer release failure")
+            end
+            """,
+            sourceName: "=(input pointer bridge fixture)"
+        )
+
+        _ = try session.dispatchClientVGUIPointerEvent(
+            x: 17,
+            y: 29,
+            phase: .began,
+            timestamp: 1
+        )
+        try session.clientRuntime.execute(
+            """
+            local x, y = input.GetCursorPos()
+            assert(x == 17 and y == 29)
+            assert(input.IsMouseDown(MOUSE_LEFT))
+            """,
+            sourceName: "=(input pointer down assertion)"
+        )
+
+        XCTAssertThrowsError(try session.dispatchClientVGUIPointerEvent(
+            x: 19,
+            y: 31,
+            phase: .ended,
+            timestamp: 2
+        )) { error in
+            XCTAssertTrue(
+                GMLuaRuntime.describe(error).contains(
+                    "intentional pointer release failure"
+                )
+            )
+        }
+        try session.clientRuntime.execute(
+            """
+            local x, y = input.GetCursorPos()
+            assert(x == 19 and y == 31)
+            assert(not input.IsMouseDown(MOUSE_LEFT))
+            """,
+            sourceName: "=(input pointer throw release assertion)"
+        )
+    }
+
+    func testPauseMenuNotificationClosesStockClientMenus() throws {
+        let session = try GModPlayableSession(
+            configuration: GModPlayableSessionConfiguration(map: .construct)
+        )
+        defer { _ = try? session.close() }
+
+        try session.setContextMenuOpen(true)
+        try session.notifyPauseMenuWillShow()
+        try session.clientRuntime.execute(
+            "assert(not g_SpawnMenu:IsVisible() and " +
+                "not g_ContextMenu:IsVisible())",
+            sourceName: "=(playable pause menu closes client menus)"
         )
     }
 

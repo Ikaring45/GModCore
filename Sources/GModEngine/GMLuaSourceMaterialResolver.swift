@@ -85,6 +85,45 @@ public struct GMLuaResolvedSourceMaterial: Sendable, Equatable {
     }
 }
 
+public enum GMLuaSourceTextureDecodeStatus: Sendable, Equatable {
+    case decoded
+    case missing
+    case unsupportedImageFormat(SourceVTFImageFormat)
+}
+
+public struct GMLuaResolvedSourceTexture: Sendable, Equatable {
+    public let logicalPath: String
+    public let width: Int?
+    public let height: Int?
+    public let rgbaBytes: Data?
+    public let imageFormat: SourceVTFImageFormat?
+    public let flags: SourceVTFTextureFlags?
+    public let status: GMLuaSourceTextureDecodeStatus
+}
+
+public struct GMLuaSourceTextureScroll: Sendable, Equatable {
+    public let targetVariable: String
+    public let rate: Float
+    public let angleDegrees: Float
+}
+
+/// Shader-specific Water inputs parsed from the real resolved VMT. Optional
+/// values remain absent rather than being replaced with invented defaults.
+public struct GMLuaResolvedSourceWaterMaterial: Sendable, Equatable {
+    public let materialPath: String
+    public let isAboveWater: Bool?
+    public let fogEnabled: Bool?
+    /// Raw Source 0...255 VMT color components.
+    public let fogColor: [Float]?
+    public let fogStart: Float?
+    public let fogEnd: Float?
+    public let reflectionAmount: Float?
+    public let refractionAmount: Float?
+    public let normalTexture: GMLuaResolvedSourceTexture?
+    public let bumpTexture: GMLuaResolvedSourceTexture?
+    public let textureScroll: GMLuaSourceTextureScroll?
+}
+
 /// Bounded Source VMT/VTF material resolver. It resolves only the explicit
 /// VMT `$basetexture` binding (or an explicitly imported PNG); proxies,
 /// animation frames, cubemap faces, environment maps, and wrap behavior are
@@ -243,26 +282,73 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
         return resolved
     }
 
+    public func resolveWater(
+        named materialName: String
+    ) throws -> GMLuaResolvedSourceWaterMaterial? {
+        guard let logicalPath = try Self.normalizedMaterialPath(materialName),
+              let document = try loadVMTDocument(logicalPath: logicalPath),
+              document.shader.caseInsensitiveCompare("Water") == .orderedSame else {
+            return nil
+        }
+
+        func float(_ name: String) throws -> Float? {
+            guard let number = try document.number(named: name) else { return nil }
+            let converted = Float(number)
+            guard converted.isFinite else {
+                throw SourceVMTError.invalidNumber(name, String(number))
+            }
+            return converted
+        }
+        let fogColor = try document.vector(named: "$fogcolor", componentCount: 3...3)?
+            .map { Float($0) }
+        let normalTexture = try document.string(named: "$normalmap")
+            .flatMap { try resolveSourceTexture(named: $0) }
+        let bumpTexture = try document.string(named: "$bumpmap")
+            .flatMap { try resolveSourceTexture(named: $0) }
+
+        let textureScroll = document.proxies.first(where: {
+            $0.name.caseInsensitiveCompare("TextureScroll") == .orderedSame
+        }).flatMap { proxy -> GMLuaSourceTextureScroll? in
+            func value(_ name: String) -> String? {
+                for entry in proxy.parameters where
+                    entry.key.caseInsensitiveCompare(name) == .orderedSame {
+                    guard case let .string(value) = entry.value else { return nil }
+                    return value
+                }
+                return nil
+            }
+            guard let target = value("texturescrollvar"),
+                  let rawRate = value("texturescrollrate"),
+                  let rawAngle = value("texturescrollangle"),
+                  let rate = Float(rawRate), rate.isFinite,
+                  let angle = Float(rawAngle), angle.isFinite else { return nil }
+            return GMLuaSourceTextureScroll(
+                targetVariable: target,
+                rate: rate,
+                angleDegrees: angle
+            )
+        }
+        return GMLuaResolvedSourceWaterMaterial(
+            materialPath: logicalPath,
+            isAboveWater: try document.boolean(named: "$abovewater"),
+            fogEnabled: try document.boolean(named: "$fogenable"),
+            fogColor: fogColor,
+            fogStart: try float("$fogstart"),
+            fogEnd: try float("$fogend"),
+            reflectionAmount: try float("$reflectamount"),
+            refractionAmount: try float("$refractamount"),
+            normalTexture: normalTexture,
+            bumpTexture: bumpTexture,
+            textureScroll: textureScroll
+        )
+    }
+
     private func resolveVMT(
         logicalPath: String
     ) throws -> GMLuaResolvedSourceMaterial {
-        guard let encodedVMT = try load(logicalPath) else {
+        guard let document = try loadVMTDocument(logicalPath: logicalPath) else {
             return missingMaterial(logicalPath)
         }
-        let source = try vmtSource(encodedVMT, logicalPath: logicalPath)
-        let includeResolver = SourceVMTIncludeResolver { [self] includeName in
-            guard let includePath = try Self.normalizedVMTPath(includeName) else {
-                throw GMLuaSourceMaterialError.unsafeLogicalPath(includeName)
-            }
-            guard let includeData = try load(includePath) else { return nil }
-            return try vmtSource(includeData, logicalPath: includePath)
-        }
-        let document = try SourceVMTDocument.parse(
-            source: source,
-            sourceName: logicalPath,
-            resolver: includeResolver,
-            maximumPatchDepth: maximumPatchDepth
-        )
         let shader = LuaString(document.shader)
         guard let baseTextureValue = try document.string(named: "$basetexture"),
               !baseTextureValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -315,6 +401,78 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
             sourceTextureFormat: vtf.imageFormat,
             sourceTextureFlags: vtf.flags
         )
+    }
+
+    private func loadVMTDocument(
+        logicalPath: String
+    ) throws -> SourceVMTDocument? {
+        guard let encodedVMT = try load(logicalPath) else { return nil }
+        let source = try vmtSource(encodedVMT, logicalPath: logicalPath)
+        let includeResolver = SourceVMTIncludeResolver { [self] includeName in
+            guard let includePath = try Self.normalizedVMTPath(includeName) else {
+                throw GMLuaSourceMaterialError.unsafeLogicalPath(includeName)
+            }
+            guard let includeData = try load(includePath) else { return nil }
+            return try vmtSource(includeData, logicalPath: includePath)
+        }
+        return try SourceVMTDocument.parse(
+            source: source,
+            sourceName: logicalPath,
+            resolver: includeResolver,
+            maximumPatchDepth: maximumPatchDepth
+        )
+    }
+
+    private func resolveSourceTexture(
+        named textureName: String
+    ) throws -> GMLuaResolvedSourceTexture? {
+        guard let logicalPath = try Self.normalizedVTFPath(textureName) else {
+            throw GMLuaSourceMaterialError.unsafeLogicalPath(textureName)
+        }
+        guard let encoded = try load(logicalPath) else {
+            return GMLuaResolvedSourceTexture(
+                logicalPath: logicalPath,
+                width: nil,
+                height: nil,
+                rgbaBytes: nil,
+                imageFormat: nil,
+                flags: nil,
+                status: .missing
+            )
+        }
+        let vtf = try SourceVTFFile(data: encoded, allocationLimits: vtfLimits)
+        try validateDimensions(
+            width: vtf.width,
+            height: vtf.height,
+            logicalPath: logicalPath
+        )
+        do {
+            let image = try vtf.decodeRGBA8(
+                mipLevel: 0,
+                frame: 0,
+                face: 0,
+                slice: 0
+            )
+            return GMLuaResolvedSourceTexture(
+                logicalPath: logicalPath,
+                width: image.width,
+                height: image.height,
+                rgbaBytes: image.rgbaBytes,
+                imageFormat: vtf.imageFormat,
+                flags: vtf.flags,
+                status: .decoded
+            )
+        } catch let SourceVTFError.unsupportedImageFormat(format) {
+            return GMLuaResolvedSourceTexture(
+                logicalPath: logicalPath,
+                width: vtf.width,
+                height: vtf.height,
+                rgbaBytes: nil,
+                imageFormat: vtf.imageFormat,
+                flags: vtf.flags,
+                status: .unsupportedImageFormat(format)
+            )
+        }
     }
 
     private func resolveImportedPNG(

@@ -471,6 +471,20 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
         return payload.index
     }
 
+    /// Installs a native Player method before the bundled Lua extensions load
+    /// and capture it. Keeping this on the canonical metatable preserves the
+    /// ordinary Player/Entity lookup chain and stale-generation validation.
+    func installPlayerMethod(named name: String, function: LuaValue) throws {
+        guard let playerMetatable = typeSystem.metatable(named: "Player") else {
+            throw LuaError.runtime("GLua Player metatable was not installed")
+        }
+        try state.setRawTableValue(
+            function,
+            for: .string(LuaString(name)),
+            in: playerMetatable
+        )
+    }
+
     public var registeredCount: Int {
         lock.lock()
         defer { lock.unlock() }

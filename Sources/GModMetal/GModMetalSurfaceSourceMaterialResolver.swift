@@ -87,6 +87,90 @@ public final class GModMetalSurfaceSourceMaterialResolver:
             store(.missing, for: key)
             return nil
         }
+        let bitmap = try makePremultipliedBitmap(
+            resourceIdentifier: resolved.metadata.materialPath.utf8String,
+            width: dimensions.width,
+            height: dimensions.height,
+            rgbaBytes: rgbaBytes
+        )
+        store(.bitmap(bitmap), for: key)
+        return bitmap
+    }
+
+    /// Resolves only values present in a real Source `Water` VMT. Missing
+    /// shader inputs remain unresolved; in particular, this adapter does not
+    /// replace an unsupported DuDv texture with a fabricated normal map.
+    public func resolveWaterMaterial(
+        named logicalName: String
+    ) throws -> GModMetalWorldWaterMaterial? {
+        guard let material = try sourceMaterialResolver.resolveWater(
+            named: logicalName
+        ), let isAboveWater = material.isAboveWater,
+           let rawFogColor = material.fogColor,
+           rawFogColor.count == 3,
+           rawFogColor.allSatisfy(\.isFinite),
+           material.reflectionAmount?.isFinite ?? true,
+           material.refractionAmount?.isFinite ?? true,
+           material.reflectionAmount != nil ||
+            material.refractionAmount != nil else {
+            return nil
+        }
+
+        let normalBitmap: GModMetalSurfaceBitmap?
+        if let normalTexture = material.normalTexture,
+           normalTexture.status == .decoded,
+           let width = normalTexture.width,
+           let height = normalTexture.height,
+           let rgbaBytes = normalTexture.rgbaBytes {
+            normalBitmap = try makePremultipliedBitmap(
+                resourceIdentifier: normalTexture.logicalPath,
+                width: width,
+                height: height,
+                rgbaBytes: rgbaBytes
+            )
+        } else {
+            normalBitmap = nil
+        }
+
+        let unsupportedBumpTextureFormat: String?
+        if case let .unsupportedImageFormat(format)? = material.bumpTexture?.status {
+            unsupportedBumpTextureFormat = String(describing: format)
+        } else {
+            unsupportedBumpTextureFormat = nil
+        }
+
+        let textureScroll = material.textureScroll.flatMap { scroll in
+            scroll.targetVariable
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .caseInsensitiveCompare("$bumptransform") == .orderedSame
+                ? scroll
+                : nil
+        }
+        return GModMetalWorldWaterMaterial(
+            resourceIdentifier: material.materialPath,
+            isAboveWater: isAboveWater,
+            fogColor: SIMD3<Float>(
+                rawFogColor[0] / 255,
+                rawFogColor[1] / 255,
+                rawFogColor[2] / 255
+            ),
+            fogStart: material.fogStart,
+            fogEnd: material.fogEnd,
+            reflectionAmount: material.reflectionAmount,
+            refractionAmount: material.refractionAmount,
+            normalBitmap: normalBitmap,
+            textureScrollRate: textureScroll?.rate,
+            textureScrollAngleDegrees: textureScroll?.angleDegrees,
+            unsupportedBumpTextureFormat: unsupportedBumpTextureFormat
+        )
+    }
+
+    private func makePremultipliedBitmap(
+        resourceIdentifier: String,
+        width: Int,
+        height: Int,
+        rgbaBytes: Data
+    ) throws -> GModMetalSurfaceBitmap {
         var premultiplied = rgbaBytes
         premultiplied.withUnsafeMutableBytes { rawBytes in
             let bytes = rawBytes.bindMemory(to: UInt8.self)
@@ -103,14 +187,12 @@ public final class GModMetalSurfaceSourceMaterialResolver:
                 offset += 4
             }
         }
-        let bitmap = try GModMetalSurfaceBitmap(
-            resourceIdentifier: resolved.metadata.materialPath.utf8String,
-            width: dimensions.width,
-            height: dimensions.height,
+        return try GModMetalSurfaceBitmap(
+            resourceIdentifier: resourceIdentifier,
+            width: width,
+            height: height,
             premultipliedRGBA8: premultiplied
         )
-        store(.bitmap(bitmap), for: key)
-        return bitmap
     }
 
     private func cachedValue(for key: String) -> CachedResult? {

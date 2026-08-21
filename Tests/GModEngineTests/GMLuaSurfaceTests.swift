@@ -4,6 +4,66 @@ import GModEngine
 import GModLua
 
 final class GMLuaSurfaceTests: XCTestCase {
+    func testPlaySoundCapturesOrderedBoundedRequestsForAppAudioHandoff() throws {
+        let state = LuaState(output: { _ in })
+        let surface = try GMLuaSurface.install(
+            into: state,
+            maximumSoundRequestCount: 2,
+            maximumEstimatedSoundRequestByteCount: 1_024
+        )
+
+        try state.execute(
+            """
+            assert(select("#", surface.PlaySound("ui/buttonclickrelease.wav")) == 0)
+            surface.PlaySound("ui/buttonclickrelease.wav")
+            surface.PlaySound("ui/overflow.wav")
+
+            assert(not pcall(surface.PlaySound, ""))
+            assert(not pcall(surface.PlaySound, "../outside.wav"))
+            assert(not pcall(surface.PlaySound, "/absolute.wav"))
+            assert(not pcall(surface.PlaySound, "C:\\absolute.wav"))
+            assert(not pcall(surface.PlaySound, "ui/" .. string.char(0) .. ".wav"))
+            assert(not pcall(surface.PlaySound, {}))
+            """,
+            sourceName: "@GMLuaSurfacePlaySoundBoundedCapture.lua"
+        )
+
+        var report = surface.pendingSoundRequestReport
+        XCTAssertEqual(report.requests.count, 2)
+        XCTAssertEqual(
+            report.requests.map(\.soundPath),
+            ["ui/buttonclickrelease.wav", "ui/buttonclickrelease.wav"]
+        )
+        XCTAssertEqual(report.requests.map(\.sequenceNumber), [0, 1])
+        XCTAssertEqual(report.requests.map(\.frameNumber), [0, 0])
+        XCTAssertEqual(report.requests.map(\.eventIndex), [0, 1])
+        XCTAssertTrue(report.requests.allSatisfy { !$0.hasAudioBacking })
+        XCTAssertEqual(report.diagnostics.attemptedRequestCount, 3)
+        XCTAssertEqual(report.diagnostics.retainedRequestCount, 2)
+        XCTAssertEqual(report.diagnostics.droppedRequestCount, 1)
+        XCTAssertEqual(report.diagnostics.maximumRequestCount, 2)
+        XCTAssertTrue(report.diagnostics.overflowed)
+
+        XCTAssertEqual(surface.drainSoundRequestReport(), report)
+        report = surface.pendingSoundRequestReport
+        XCTAssertTrue(report.requests.isEmpty)
+        XCTAssertEqual(report.diagnostics.attemptedRequestCount, 0)
+        XCTAssertFalse(report.diagnostics.overflowed)
+
+        surface.beginFrame(viewportWidth: 320, viewportHeight: 180)
+        try state.execute(
+            "surface.PlaySound('ui/nextframe.wav')",
+            sourceName: "@GMLuaSurfacePlaySoundNextFrame.lua"
+        )
+        report = surface.drainSoundRequestReport()
+        let nextFrame = try XCTUnwrap(report.requests.first)
+        XCTAssertEqual(nextFrame.soundPath, "ui/nextframe.wav")
+        XCTAssertEqual(nextFrame.sequenceNumber, 3)
+        XCTAssertEqual(nextFrame.frameNumber, 1)
+        XCTAssertEqual(nextFrame.eventIndex, 0)
+        XCTAssertFalse(nextFrame.hasAudioBacking)
+    }
+
     func testStableTextureHandlesAndSelectedTextureState() throws {
         let fixtureURL = try XCTUnwrap(
             Bundle.module.url(
@@ -502,6 +562,73 @@ final class GMLuaSurfaceTests: XCTestCase {
         XCTAssertFalse(registry.hasPlatformViewBacking)
     }
 
+    func testStockContentIconTextureFilterScopesAreCapturedPerDraw() throws {
+        let runtime = GMLuaRuntime(
+            realm: .client,
+            logger: { _ in },
+            bootstrapMode: .strict
+        )
+        try runtime.execute(
+            """
+            assert(TEXFILTER.NONE == 0)
+            assert(TEXFILTER.POINT == 1)
+            assert(TEXFILTER.LINEAR == 2)
+            assert(TEXFILTER.ANISOTROPIC == 3)
+
+            local ok, message = pcall(render.PopFilterMin)
+            assert(ok == false and string.find(message, "matching", 1, true))
+            ok, message = pcall(render.PopFilterMag)
+            assert(ok == false and string.find(message, "matching", 1, true))
+            assert(pcall(render.PushFilterMin, -1) == false)
+            assert(pcall(render.PushFilterMin, 3.5) == false)
+            assert(pcall(render.PushFilterMag, 4) == false)
+            assert(pcall(render.PushFilterMag, "3") == false)
+
+            FILTER_ICON = assert(vgui.Create("Panel"))
+            FILTER_ICON:SetSize(128, 128)
+            function FILTER_ICON:Paint(w, h)
+                surface.SetTexture(surface.GetTextureID("spawnicons/filter_probe.png"))
+                surface.SetDrawColor(255, 255, 255, 255)
+
+                -- Exact scope used by stock ContentIcon:Paint.
+                render.PushFilterMag(TEXFILTER.ANISOTROPIC)
+                render.PushFilterMin(TEXFILTER.ANISOTROPIC)
+                surface.DrawTexturedRect(3, 3, w - 8, h - 8)
+                render.PopFilterMin()
+
+                -- Min/mag are independent stacks; mag remains active here.
+                surface.DrawTexturedRect(4, 4, 16, 16)
+                render.PopFilterMag()
+                return true
+            end
+            """,
+            sourceName: "@GMLuaStockContentIconTextureFilterScope.lua"
+        )
+
+        let registry = try XCTUnwrap(runtime.vguiRegistry)
+        let surface = try XCTUnwrap(runtime.surfaceCommandState)
+        let frame = try registry.renderFrame(
+            surface: surface,
+            viewportWidth: 128,
+            viewportHeight: 128
+        )
+        XCTAssertEqual(frame.commands.count, 2)
+        XCTAssertEqual(frame.textureFilters, [
+            GMLuaSurfaceTextureFilterSnapshot(
+                commandIndex: 0,
+                minification: .anisotropic,
+                magnification: .anisotropic
+            ),
+            GMLuaSurfaceTextureFilterSnapshot(
+                commandIndex: 1,
+                minification: nil,
+                magnification: .anisotropic
+            )
+        ])
+        XCTAssertEqual(frame.captureDiagnostics.attemptedCommandCount, 2)
+        XCTAssertEqual(frame.captureDiagnostics.droppedCommandCount, 0)
+    }
+
     func testNumericThreeComponentColorsAndGlobalDisableClippingMatchGModSurfaceAPI() throws {
         let runtime = GMLuaRuntime(
             realm: .client,
@@ -547,6 +674,65 @@ final class GMLuaSurfaceTests: XCTestCase {
         }
         XCTAssertEqual(textColor, GMLuaSurfaceColor(red: 44, green: 55, blue: 66, alpha: 255))
         XCTAssertEqual(textClip, GMLuaPanelRect(x: 10, y: 20, width: 30, height: 40))
+    }
+
+    func testRenderScissorRectUsesScreenCoordinatesAndRestoresPanelClip() throws {
+        let runtime = GMLuaRuntime(
+            realm: .client,
+            logger: { _ in },
+            bootstrapMode: .strict
+        )
+        try runtime.execute(
+            """
+            assert(type(render.SetScissorRect) == "function")
+            assert(pcall(render.SetScissorRect, 0, 0, 10, 10) == false)
+            assert(pcall(render.SetScissorRect, 0, 0, 10, 10, 1) == false)
+            assert(pcall(render.SetScissorRect, 0 / 0, 0, 10, 10, true) == false)
+
+            ROOT = vgui.Create("Panel")
+            ROOT:SetPos(10, 20)
+            ROOT:SetSize(80, 60)
+
+            CHILD = vgui.Create("Panel", ROOT)
+            CHILD:SetPos(30, 10)
+            CHILD:SetSize(50, 50)
+            function CHILD:Paint()
+                surface.SetDrawColor(255, 255, 255, 255)
+                surface.DrawRect(-100, -100, 300, 300)
+
+                -- Stock ContentIcon supplies screen-space start/end points.
+                render.SetScissorRect(45, 35, 70, 60, true)
+                surface.DrawRect(-100, -100, 300, 300)
+
+                render.SetScissorRect(0, 0, 0, 0, false)
+                surface.DrawRect(-100, -100, 300, 300)
+                return true
+            end
+            """,
+            sourceName: "@GMLuaRenderScissorRectRegression.lua"
+        )
+
+        let registry = try XCTUnwrap(runtime.vguiRegistry)
+        let surface = try XCTUnwrap(runtime.surfaceCommandState)
+        let frame = try registry.renderFrame(
+            surface: surface,
+            viewportWidth: 200,
+            viewportHeight: 120
+        )
+        XCTAssertEqual(frame.commands.count, 3)
+        var clips: [GMLuaPanelRect] = []
+        for command in frame.commands {
+            guard case let .rectangle(_, _, clip) = command else {
+                XCTFail("expected rectangle command")
+                continue
+            }
+            clips.append(clip)
+        }
+        XCTAssertEqual(clips, [
+            GMLuaPanelRect(x: 40, y: 30, width: 50, height: 50),
+            GMLuaPanelRect(x: 45, y: 35, width: 25, height: 25),
+            GMLuaPanelRect(x: 40, y: 30, width: 50, height: 50)
+        ])
     }
 
     func testAncestorAlphaIsCumulativeAndPaintTrueSuppressesDefaultLabelAndImage() throws {

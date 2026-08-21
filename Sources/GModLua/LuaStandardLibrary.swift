@@ -1081,8 +1081,10 @@ extension LuaState {
             guard let first = args.first, case let .table(table) = first else {
                 throw LuaError.runtime("bad argument #1 to 'insert' (table expected)")
             }
+            let insertedIndex: Int
             if args.count == 2 {
-                table.rawSetValue(args[1], forNumber: Double(table.rawLength() + 1))
+                insertedIndex = table.rawLength() + 1
+                table.rawSetValue(args[1], forNumber: Double(insertedIndex))
             } else if args.count >= 3 {
                 let position = Int(try self.numberFromValue(args[1]))
                 let length = table.rawLength()
@@ -1093,8 +1095,11 @@ extension LuaState {
                     }
                 }
                 table.rawSetValue(args[2], forNumber: Double(position))
+                insertedIndex = position
             } else { throw LuaError.runtime("wrong number of arguments to 'insert'") }
-            return []
+            // GLua extends Lua 5.1's table.insert by returning the actual
+            // 1-based position. Stock DComboBox uses this value as its data key.
+            return [.number(Double(insertedIndex))]
         }
 
         native("remove") { args in

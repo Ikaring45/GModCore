@@ -17,6 +17,28 @@ private struct GModSurfaceBuildResult: Sendable {
     let failure: String?
 }
 
+struct GModGameFirstWorldFrameGate: Equatable, Sendable {
+    private(set) var expectedMeshIdentifier: String?
+
+    mutating func arm(meshIdentifier: String) {
+        expectedMeshIdentifier = meshIdentifier
+    }
+
+    mutating func reset() {
+        expectedMeshIdentifier = nil
+    }
+
+    func matches(meshIdentifier: String) -> Bool {
+        expectedMeshIdentifier == meshIdentifier
+    }
+
+    mutating func acknowledge(meshIdentifier: String) -> Bool {
+        guard meshIdentifier == expectedMeshIdentifier else { return false }
+        expectedMeshIdentifier = nil
+        return true
+    }
+}
+
 struct GModGameMovementDiagnostic: Equatable, Sendable {
     let status: String
     let logMessage: String
@@ -195,7 +217,11 @@ final class GModGameSessionModel: ObservableObject {
     @Published private(set) var status = "Choose a bundled map to start Sandbox"
     @Published private(set) var activeMap: GModBundledMap?
     @Published private(set) var loadingMap: GModBundledMap?
+    @Published private(set) var loadingState =
+        GModPlayableSessionLoadingState()
+    @Published private(set) var startFailure: GModGameStartFailure?
     @Published private(set) var isStarting = false
+    @Published private(set) var isDisconnecting = false
     @Published private(set) var isReady = false
     @Published private(set) var fixedTickCount: UInt64 = 0
     @Published private(set) var lastDeliveredMessages = 0
@@ -204,11 +230,13 @@ final class GModGameSessionModel: ObservableObject {
     @Published private(set) var movementStatus = "Movement idle"
     @Published private(set) var viewAngles = SourceQAngle.zero
     @Published private(set) var worldScene: GModMetalWorldScene?
+    @Published private(set) var lastRendererFailure:
+        GModMetalWorldRendererFailure?
     @Published private(set) var surfaceScene: GModMetalSurfaceScene?
     @Published private(set) var surfaceDiagnostics: GModMetalSurfaceDiagnostics?
     @Published private(set) var surfaceStatus = "VGUI surface idle"
-    @Published private(set) var isSpawnMenuOpen = false
-    @Published private(set) var isSpawnMenuTransitioning = false
+    @Published private(set) var activeClientMenu: GModGameClientMenu?
+    @Published private(set) var transitioningClientMenu: GModGameClientMenu?
     @Published private(set) var pointerStatus = "VGUI pointer idle"
     @Published private(set) var pointerQueueDropCount = 0
     @Published private(set) var pointerMoveCoalescedCount = 0
@@ -220,6 +248,9 @@ final class GModGameSessionModel: ObservableObject {
 
     private let lane: GModPlayableSessionLane
     private let logSink: (String) -> Void
+    private let diagnosticsStore: GModAppDiagnosticsStore
+    private let inputVideoSettings: GModInputVideoSettingsStore
+    let audioController: GModMenuAudioController
     private nonisolated let frameMailbox = GModGameFrameMailbox()
     private nonisolated let pointerMailbox = GModGamePointerMailbox()
     private nonisolated let surfaceTextureResolver:
@@ -229,24 +260,89 @@ final class GModGameSessionModel: ObservableObject {
     private var forwardAxis: Float = 0
     private var sideAxis: Float = 0
     private var jumpPressed = false
+    private var heldActionButtons: SourceInputButtons = []
+    private var isHostPopupPresented = false
     private var sessionGeneration: UInt64 = 0
     private var laneGeneration: UInt64?
     private var pointerEpoch: UInt64?
     private var inputEpoch: UInt64?
     private var surfaceRequestRevision: UInt64 = 0
     private var inputSuspensionInFlight = false
+    private var pauseMenuNotificationPending = false
     private var lastSurfaceFailure: String?
     private var lastPointerFailure: String?
     private var lastMovementRejectionReason:
         SourceWorldWalkUnsupportedReason?
+    private var firstWorldFrameGate = GModGameFirstWorldFrameGate()
+
+    var loadingProgress: GModPlayableSessionLoadingProgress {
+        loadingState.progress
+    }
+
+    var hasActiveSession: Bool {
+        isReady && activeMap != nil
+    }
+
+    var isSpawnMenuOpen: Bool { activeClientMenu == .spawn }
+    var isContextMenuOpen: Bool { activeClientMenu == .context }
+    var isClientMenuOpen: Bool { activeClientMenu != nil }
+    var isClientMenuTransitioning: Bool { transitioningClientMenu != nil }
+    var isSpawnMenuTransitioning: Bool {
+        transitioningClientMenu == .spawn
+    }
+    var isContextMenuTransitioning: Bool {
+        transitioningClientMenu == .context
+    }
+    var acceptsWorldInput: Bool {
+        GModGameWorldInputPolicy.accepts(
+            isReady: isReady,
+            isInputSuspended: isInputSuspended,
+            activeMenu: activeClientMenu,
+            transitioningMenu: transitioningClientMenu,
+            isHostPopupPresented: isHostPopupPresented
+        )
+    }
+
+    var continuitySnapshot: GModGameSessionContinuitySnapshot? {
+        guard isReady, let activeMap else { return nil }
+        return GModGameSessionContinuitySnapshot(
+            map: activeMap,
+            playerOrigin: playerOrigin,
+            viewAngles: viewAngles,
+            fixedTickCount: fixedTickCount
+        )
+    }
 
     init(
         runtimeFactory: GModAppRuntimeFactory,
+        audioSettingsStore: GModMenuAudioSettingsStore = .shared,
+        inputVideoSettings: GModInputVideoSettingsStore = .shared,
+        diagnosticsStore: GModAppDiagnosticsStore = .shared,
         logSink: @escaping (String) -> Void = { _ in }
     ) {
         lane = runtimeFactory.makePlayableSessionLane()
+        self.diagnosticsStore = diagnosticsStore
+        self.inputVideoSettings = inputVideoSettings
         surfaceTextureResolver = runtimeFactory.surfaceTextureResolver
         surfaceTextRasterizer = runtimeFactory.surfaceTextRasterizer
+        audioController = GModMenuAudioController(
+            resolver: { logicalPath, maximumByteCount in
+                try runtimeFactory.mountedContentData(
+                    for: logicalPath,
+                    maximumByteCount: maximumByteCount
+                )
+            },
+            settingsStore: audioSettingsStore,
+            diagnostic: { diagnostic in
+                guard let record = GModAudioProblemMapper.record(
+                    for: diagnostic
+                ) else { return }
+                diagnosticsStore.record(record)
+                logSink(
+                    "[AUDIO][\(diagnostic.code.rawValue)] " + record.detail
+                )
+            }
+        )
         self.logSink = logSink
     }
 
@@ -257,19 +353,28 @@ final class GModGameSessionModel: ObservableObject {
         }
     }
 
-    func start(map: GModBundledMap, contentPackURL: URL? = nil) {
-        guard !isStarting else { return }
+    func start(
+        map: GModBundledMap,
+        contentPackURL: URL? = nil,
+        languageCode: String = "en",
+        languagePhrases: [String: String] = [:]
+    ) {
+        guard !isStarting, !isDisconnecting else { return }
+        audioController.stop(bus: .gameplay)
         invalidateSurfaceRequests()
         isStarting = true
+        loadingState = GModPlayableSessionLoadingState()
+        startFailure = nil
         isReady = false
         activeMap = nil
         loadingMap = map
         worldScene = nil
+        lastRendererFailure = nil
         surfaceScene = nil
         surfaceDiagnostics = nil
         surfaceStatus = "VGUI surface loading…"
-        isSpawnMenuOpen = false
-        isSpawnMenuTransitioning = false
+        activeClientMenu = nil
+        transitioningClientMenu = nil
         pointerStatus = "VGUI pointer idle"
         pointerQueueDropCount = 0
         pointerMoveCoalescedCount = 0
@@ -277,7 +382,10 @@ final class GModGameSessionModel: ObservableObject {
         lastSurfaceFailure = nil
         lastPointerFailure = nil
         lastMovementRejectionReason = nil
-        jumpPressed = false
+        firstWorldFrameGate.reset()
+        pauseMenuNotificationPending = false
+        clearHeldWorldInput()
+        isHostPopupPresented = false
         sessionGeneration &+= 1
         let requestedGeneration = sessionGeneration
         laneGeneration = nil
@@ -285,7 +393,8 @@ final class GModGameSessionModel: ObservableObject {
         inputEpoch = nil
         frameMailbox.disable()
         pointerMailbox.setEnabled(false)
-        status = "Loading \(map.rawValue) / Sandbox…"
+        status = "loading.\(loadingProgress.taskIdentifier) — " +
+            "\(loadingProgress.percentComplete)%"
 
         Task { [weak self] in
             guard let self else { return }
@@ -293,7 +402,9 @@ final class GModGameSessionModel: ObservableObject {
                 let snapshot = try await lane.start(
                     configuration: GModPlayableSessionConfiguration(
                         map: map,
-                        contentPackURL: contentPackURL
+                        contentPackURL: contentPackURL,
+                        languageCode: languageCode,
+                        languagePhrases: languagePhrases
                     ),
                     logger: { [weak self] realm, message in
                         Task { @MainActor [weak self] in
@@ -303,9 +414,26 @@ final class GModGameSessionModel: ObservableObject {
                             }
                             self.appendLog("[\(realm.rawValue)] \(message)")
                         }
+                    },
+                    progress: { [weak self] progress in
+                        Task { @MainActor [weak self] in
+                            self?.recordLoadingProgress(
+                                progress,
+                                requestedGeneration: requestedGeneration
+                            )
+                        }
                     }
                 )
-                guard requestedGeneration == sessionGeneration else { return }
+                guard requestedGeneration == sessionGeneration else {
+                    _ = try? await lane.close(
+                        expectedGeneration: snapshot.generation
+                    )
+                    return
+                }
+                recordLoadingProgress(
+                    .init(stage: .preparingMaterials),
+                    requestedGeneration: requestedGeneration
+                )
                 activeMap = map
                 laneGeneration = snapshot.generation
                 pointerEpoch = snapshot.pointerEpoch
@@ -316,9 +444,7 @@ final class GModGameSessionModel: ObservableObject {
                 playerOrigin = snapshot.playerWalkState.origin
                 movementStatus = "Movement ready"
                 viewAngles = snapshot.playerWalkState.viewAngles
-                forwardAxis = 0
-                sideAxis = 0
-                jumpPressed = false
+                clearHeldWorldInput()
                 publishMovementInput()
                 let textureResolver = surfaceTextureResolver
                 let preparedWorldScene = try await Task.detached(
@@ -327,6 +453,7 @@ final class GModGameSessionModel: ObservableObject {
                     defer { textureResolver.removeAllCachedTextures() }
                     return try Self.makeWorldScene(
                         map: map,
+                        sessionGeneration: requestedGeneration,
                         mesh: snapshot.worldMesh,
                         playerOrigin: snapshot.playerWalkState.origin,
                         viewAngles: snapshot.playerWalkState.viewAngles,
@@ -334,10 +461,15 @@ final class GModGameSessionModel: ObservableObject {
                     )
                 }.value
                 guard requestedGeneration == sessionGeneration else { return }
+                firstWorldFrameGate.arm(
+                    meshIdentifier: preparedWorldScene.meshIdentifier
+                )
+                recordLoadingProgress(
+                    .init(stage: .awaitingFirstMetalFrame),
+                    requestedGeneration: requestedGeneration
+                )
                 worldScene = preparedWorldScene
                 surfaceStatus = "VGUI surface awaiting first client frame"
-                let spawn = snapshot.startup.spawnPoint.origin
-                status = "READY \(map.rawValue) spawn=(\(spawn.x), \(spawn.y), \(spawn.z))"
                 if isInputSuspended {
                     beginInputSuspensionIfPossible()
                 } else {
@@ -345,20 +477,46 @@ final class GModGameSessionModel: ObservableObject {
                 }
             } catch {
                 guard requestedGeneration == sessionGeneration else { return }
+                let description = GMLuaRuntime.describe(error)
+                var failedLoadingState = loadingState
+                failedLoadingState.fail(description)
+                loadingState = failedLoadingState
                 activeMap = nil
                 isReady = false
+                isInputSuspended = true
+                frameMailbox.disable()
+                pointerMailbox.setEnabled(false)
+                firstWorldFrameGate.reset()
                 movementStatus = "Movement unavailable"
-                status = "START FAILED: \(GMLuaRuntime.describe(error))"
+                status = "START FAILED: \(description)"
                 appendLog(status)
+                startFailure = GModGameStartFailure(
+                    map: map,
+                    origin: .cpu,
+                    detail: description
+                )
             }
-            loadingMap = nil
-            isStarting = false
         }
     }
 
     nonisolated func submitFrame(_ request: GModMetalFrameRequest) {
         frameMailbox.submit(request) { [weak self] batch in
             await self?.consumeFrame(batch)
+        }
+    }
+
+    /// Metal calls this only after a command buffer containing the selected
+    /// world scene completes. The mesh identifier embeds the app generation,
+    /// so a delayed completion from an older start cannot dismiss the overlay.
+    nonisolated func submitPresentedWorldFrame(meshIdentifier: String) {
+        submitWorldFrameEvent(.presented(meshIdentifier: meshIdentifier))
+    }
+
+    nonisolated func submitWorldFrameEvent(
+        _ event: GModMetalWorldFrameEvent
+    ) {
+        Task { @MainActor [weak self] in
+            self?.handleWorldFrameEvent(event)
         }
     }
 
@@ -390,30 +548,51 @@ final class GModGameSessionModel: ObservableObject {
     }
 
     func setMovementAxes(forward: Float, side: Float) {
-        guard !isInputSuspended else { return }
+        guard acceptsWorldInput else {
+            rejectLateWorldInput()
+            return
+        }
         forwardAxis = Swift.max(-1, Swift.min(1, forward))
         sideAxis = Swift.max(-1, Swift.min(1, side))
         publishMovementInput()
     }
 
     func setJumpPressed(_ pressed: Bool) {
-        guard !isInputSuspended else { return }
+        guard acceptsWorldInput else {
+            rejectLateWorldInput()
+            return
+        }
         jumpPressed = pressed
         publishMovementInput()
     }
 
+    func setWorldActionButton(
+        _ action: GModGameWorldActionButton,
+        pressed: Bool
+    ) {
+        guard acceptsWorldInput else {
+            rejectLateWorldInput()
+            return
+        }
+        if pressed {
+            heldActionButtons.insert(action.sourceButton)
+        } else {
+            heldActionButtons.remove(action.sourceButton)
+        }
+        publishMovementInput()
+    }
+
     func adjustLook(deltaX: Float, deltaY: Float) {
-        guard !isInputSuspended else { return }
-        let sensitivity: Float = 0.34
-        var yaw = viewAngles.yaw + deltaX * sensitivity
-        yaw.formTruncatingRemainder(dividingBy: 360)
-        viewAngles = SourceQAngle(
-            pitch: Swift.max(
-                -89,
-                Swift.min(89, viewAngles.pitch + deltaY * sensitivity)
-            ),
-            yaw: yaw,
-            roll: 0
+        guard acceptsWorldInput else {
+            rejectLateWorldInput()
+            return
+        }
+        viewAngles = GModTouchLookPolicy.adjustedAngles(
+            current: viewAngles,
+            deltaX: deltaX,
+            deltaY: deltaY,
+            sensitivity: inputVideoSettings.touchLookSensitivity,
+            invertY: inputVideoSettings.invertTouchLookY
         )
         publishMovementInput()
         publishCameraScene()
@@ -423,11 +602,44 @@ final class GModGameSessionModel: ObservableObject {
     /// execution. The lane boundary clears the realm-visible button word and
     /// advances its pointer and frame epochs after cancelling a gesture once.
     func suspendInput() {
-        guard !isInputSuspended else { return }
-        isInputSuspended = true
-        forwardAxis = 0
-        sideAxis = 0
-        jumpPressed = false
+        requestInputSuspension(notifyPauseMenuWillShow: false)
+    }
+
+    /// Presents the in-game Home boundary without replacing the playable
+    /// session. In addition to suspending every host input path, this sends the
+    /// stock CLIENT pause notification so Sandbox closes Q/C-owned panels.
+    func presentPauseMenu() {
+        activeClientMenu = nil
+        surfaceScene = nil
+        surfaceDiagnostics = nil
+        requestInputSuspension(notifyPauseMenuWillShow: true)
+    }
+
+    /// Native Options/Problems windows own touch while visible. Home normally
+    /// already has the session paused, but this gate also sanitizes a popup
+    /// presented directly over a live world and rejects late UIKit callbacks.
+    func setHostPopupPresented(_ presented: Bool) {
+        guard presented != isHostPopupPresented else { return }
+        isHostPopupPresented = presented
+        if presented {
+            clearHeldWorldInput()
+            publishMovementInput()
+        }
+    }
+
+    private func requestInputSuspension(
+        notifyPauseMenuWillShow: Bool
+    ) {
+        if notifyPauseMenuWillShow {
+            pauseMenuNotificationPending = true
+        }
+        if !isInputSuspended {
+            isInputSuspended = true
+        } else if !notifyPauseMenuWillShow {
+            return
+        }
+        clearHeldWorldInput()
+        audioController.stop(bus: .gameplay)
         publishMovementInput()
         invalidateSurfaceRequests()
         frameMailbox.disable()
@@ -442,42 +654,201 @@ final class GModGameSessionModel: ObservableObject {
     func resumeInput() {
         guard isInputSuspended else { return }
         isInputSuspended = false
+        pauseMenuNotificationPending = false
         activateInputIfPossible()
+    }
+
+    /// Leaves a failed CPU/renderer startup without waiting for a timeout. The
+    /// failed loading state and typed failure remain available to Problems;
+    /// only the unusable lane and its render/input references are retired.
+    func returnToHomeAfterStartFailure() {
+        guard isStarting, startFailure != nil, !isDisconnecting else { return }
+        isDisconnecting = true
+        audioController.stop(bus: .gameplay)
+        sessionGeneration &+= 1
+        let requestedGeneration = sessionGeneration
+        let requestedLaneGeneration = laneGeneration
+
+        isStarting = false
+        isReady = false
+        isInputSuspended = true
+        pauseMenuNotificationPending = false
+        clearHeldWorldInput()
+        publishMovementInput()
+        invalidateSurfaceRequests()
+        frameMailbox.disable()
+        pointerMailbox.setEnabled(false)
+        firstWorldFrameGate.reset()
+
+        activeMap = nil
+        loadingMap = nil
+        fixedTickCount = 0
+        lastDeliveredMessages = 0
+        playerOrigin = .zero
+        viewAngles = .zero
+        worldScene = nil
+        surfaceScene = nil
+        surfaceDiagnostics = nil
+        surfaceStatus = "VGUI surface idle"
+        activeClientMenu = nil
+        transitioningClientMenu = nil
+        pointerStatus = "VGUI pointer idle"
+        pointerQueueDropCount = 0
+        pointerMoveCoalescedCount = 0
+        movementStatus = "Movement unavailable"
+        lastSurfaceFailure = nil
+        lastPointerFailure = nil
+        lastMovementRejectionReason = nil
+        laneGeneration = nil
+        pointerEpoch = nil
+        inputEpoch = nil
+        status = "Returning to Home…"
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let report = try await lane.close(
+                    expectedGeneration: requestedLaneGeneration
+                )
+                guard requestedGeneration == sessionGeneration else { return }
+                for failure in report.clientFinalizerErrors {
+                    appendLog("[CLIENT][failed-start] \(failure)")
+                }
+                for failure in report.serverFinalizerErrors {
+                    appendLog("[SERVER][failed-start] \(failure)")
+                }
+            } catch {
+                guard requestedGeneration == sessionGeneration else { return }
+                appendLog(
+                    "[GAME][failed-start] " + GMLuaRuntime.describe(error)
+                )
+            }
+            guard requestedGeneration == sessionGeneration else { return }
+            isDisconnecting = false
+            status = "Choose a bundled map to start Sandbox"
+        }
+    }
+
+    /// Closes the playable lane and returns the model to a value-safe Home
+    /// state. A new map is not admitted until teardown completes, preventing a
+    /// delayed close from destroying the replacement session.
+    func disconnect() {
+        guard !isStarting, !isDisconnecting else { return }
+        isDisconnecting = true
+        audioController.stop(bus: .gameplay)
+        sessionGeneration &+= 1
+        let requestedGeneration = sessionGeneration
+        let requestedLaneGeneration = laneGeneration
+
+        isInputSuspended = true
+        pauseMenuNotificationPending = false
+        clearHeldWorldInput()
+        publishMovementInput()
+        invalidateSurfaceRequests()
+        frameMailbox.disable()
+        pointerMailbox.setEnabled(false)
+        firstWorldFrameGate.reset()
+
+        isReady = false
+        activeMap = nil
+        loadingMap = nil
+        loadingState = GModPlayableSessionLoadingState()
+        fixedTickCount = 0
+        lastDeliveredMessages = 0
+        playerOrigin = .zero
+        viewAngles = .zero
+        worldScene = nil
+        surfaceScene = nil
+        surfaceDiagnostics = nil
+        surfaceStatus = "VGUI surface idle"
+        activeClientMenu = nil
+        transitioningClientMenu = nil
+        pointerStatus = "VGUI pointer idle"
+        pointerQueueDropCount = 0
+        pointerMoveCoalescedCount = 0
+        movementStatus = "Movement idle"
+        lastSurfaceFailure = nil
+        lastPointerFailure = nil
+        lastMovementRejectionReason = nil
+        laneGeneration = nil
+        pointerEpoch = nil
+        inputEpoch = nil
+        status = "Disconnecting…"
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let report = try await lane.close(
+                    expectedGeneration: requestedLaneGeneration
+                )
+                guard requestedGeneration == sessionGeneration else { return }
+                for failure in report.clientFinalizerErrors {
+                    appendLog("[CLIENT][disconnect] \(failure)")
+                }
+                for failure in report.serverFinalizerErrors {
+                    appendLog("[SERVER][disconnect] \(failure)")
+                }
+            } catch {
+                guard requestedGeneration == sessionGeneration else { return }
+                appendLog(
+                    "[GAME][disconnect] " + GMLuaRuntime.describe(error)
+                )
+            }
+            guard requestedGeneration == sessionGeneration else { return }
+            isDisconnecting = false
+            status = "Choose a bundled map to start Sandbox"
+        }
     }
 
     func toggleSpawnMenu() {
         setSpawnMenuOpen(!isSpawnMenuOpen)
     }
 
+    func toggleContextMenu() {
+        setContextMenuOpen(!isContextMenuOpen)
+    }
+
     func setSpawnMenuOpen(_ replacement: Bool) {
+        setClientMenu(.spawn, open: replacement)
+    }
+
+    func setContextMenuOpen(_ replacement: Bool) {
+        setClientMenu(.context, open: replacement)
+    }
+
+    private func setClientMenu(
+        _ menu: GModGameClientMenu,
+        open replacement: Bool
+    ) {
         guard isReady,
               !isInputSuspended,
-              !isSpawnMenuTransitioning,
-              replacement != isSpawnMenuOpen,
+              !isClientMenuTransitioning,
+              replacement
+                ? activeClientMenu != menu
+                : activeClientMenu == menu,
               let requestedLaneGeneration = laneGeneration,
               let requestedPointerEpoch = pointerEpoch,
               let requestedInputEpoch = inputEpoch else {
             return
         }
         let requestedGeneration = sessionGeneration
+        let priorMenu = activeClientMenu
         invalidateSurfaceRequests()
-        isSpawnMenuTransitioning = true
+        transitioningClientMenu = menu
         frameMailbox.disable()
+        pointerMailbox.setEnabled(false)
         if replacement {
-            forwardAxis = 0
-            sideAxis = 0
-            jumpPressed = false
+            clearHeldWorldInput()
             publishMovementInput()
-        } else {
-            pointerMailbox.setEnabled(false)
         }
 
         Task { [weak self] in
             guard let self else { return }
             do {
-                let boundary = try await lane.setSpawnMenuOpen(
-                    replacement,
-                    cancelActivePointer: !replacement,
+                let transition = try await lane.transitionClientMenu(
+                    from: priorMenu?.playableMenu,
+                    to: replacement ? menu.playableMenu : nil,
+                    cancelActivePointer: priorMenu != nil,
                     cancellationTimestamp: Date().timeIntervalSinceReferenceDate,
                     expectedGeneration: requestedLaneGeneration,
                     expectedPointerEpoch: requestedPointerEpoch,
@@ -486,45 +857,60 @@ final class GModGameSessionModel: ObservableObject {
                 guard requestedGeneration == sessionGeneration, isReady else {
                     return
                 }
-                pointerEpoch = boundary.pointerEpoch
-                inputEpoch = boundary.inputEpoch
-                reportPointerCancellationFailure(boundary.cancellationFailure)
-                if let lifecycleFailure = boundary.lifecycleFailure {
+                pointerEpoch = transition.pointerEpoch
+                inputEpoch = transition.inputEpoch
+                reportPointerCancellationFailure(transition.cancellationFailure)
+                activeClientMenu = transition.committedMenu.map(
+                    GModGameClientMenu.init
+                )
+                pointerMailbox.setEnabled(
+                    activeClientMenu != nil && !isInputSuspended
+                )
+                if let lifecycleFailure = transition.lifecycleFailure {
                     appendLog(
-                        "[CLIENT][VGUI] Spawn Menu transition failed: " +
+                        "[CLIENT][VGUI] \(menu.statusName) transition failed: " +
                             lifecycleFailure
                     )
+                    if let rollbackFailure = transition.rollbackFailure {
+                        appendLog(
+                            "[CLIENT][VGUI] menu rollback failed: " +
+                                rollbackFailure
+                        )
+                        surfaceScene = nil
+                        surfaceDiagnostics = nil
+                        surfaceStatus = "VGUI menu ownership uncertain"
+                    } else {
+                        surfaceStatus = activeClientMenu.map {
+                            "\($0.statusName) restored after failed transition"
+                        } ?? "VGUI menu transition rolled back"
+                    }
                 } else {
-                    isSpawnMenuOpen = replacement
-                    pointerMailbox.setEnabled(
-                        replacement && !isInputSuspended
-                    )
                     pointerStatus = isInputSuspended
                         ? "VGUI input suspended"
-                        : replacement
+                        : activeClientMenu != nil
                         ? "Single-touch VGUI; native cancel active; " +
                             "hover/wheel/keyboard pending"
                         : "VGUI pointer idle"
-                    surfaceStatus = replacement
-                        ? "Spawn Menu open; awaiting VGUI frame"
-                        : "Spawn Menu closed; awaiting VGUI frame"
-                    if !replacement {
+                    surfaceStatus = activeClientMenu.map {
+                        "\($0.statusName) open; awaiting VGUI frame"
+                    } ?? "\(menu.statusName) closed; awaiting VGUI frame"
+                    if activeClientMenu == nil {
                         surfaceScene = nil
                         surfaceDiagnostics = nil
                     }
                 }
             } catch {
                 guard requestedGeneration == sessionGeneration else { return }
-                if isSpawnMenuOpen && !isInputSuspended {
+                if priorMenu != nil && !isInputSuspended {
                     pointerMailbox.setEnabled(true)
                 }
                 appendLog(
-                    "[CLIENT][VGUI] Spawn Menu transition failed: " +
+                    "[CLIENT][VGUI] \(menu.statusName) transition failed: " +
                         GMLuaRuntime.describe(error)
                 )
             }
             if requestedGeneration == sessionGeneration {
-                isSpawnMenuTransitioning = false
+                transitioningClientMenu = nil
                 if isInputSuspended {
                     beginInputSuspensionIfPossible()
                 } else {
@@ -537,7 +923,7 @@ final class GModGameSessionModel: ObservableObject {
     /// Maps a value-only host touch location into the last rendered VGUI
     /// viewport. The bounded mailbox preserves press/release ordering and
     /// coalesces move samples before crossing the session actor boundary.
-    func submitSpawnMenuPointer(
+    func submitClientMenuPointer(
         x: Double,
         y: Double,
         viewWidth: Double,
@@ -546,7 +932,7 @@ final class GModGameSessionModel: ObservableObject {
         timestamp: TimeInterval
     ) {
         guard isReady, !isInputSuspended,
-              isSpawnMenuOpen, !isSpawnMenuTransitioning,
+              isClientMenuOpen, !isClientMenuTransitioning,
               let laneGeneration,
               let pointerEpoch,
               let surfaceScene,
@@ -583,7 +969,7 @@ final class GModGameSessionModel: ObservableObject {
 
     private func consumeFrame(_ batch: GModGameFrameBatch) async {
         guard isReady, !isInputSuspended,
-              !inputSuspensionInFlight, !isSpawnMenuTransitioning,
+              !inputSuspensionInFlight, !isClientMenuTransitioning,
               batch.token.matches(
                   application: sessionGeneration,
                   lane: laneGeneration,
@@ -606,7 +992,7 @@ final class GModGameSessionModel: ObservableObject {
                 expectedInputEpoch: activeToken.inputEpoch
             )
             guard isReady, !isInputSuspended,
-                  !inputSuspensionInFlight, !isSpawnMenuTransitioning,
+                  !inputSuspensionInFlight, !isClientMenuTransitioning,
                   activeToken.matches(
                       application: sessionGeneration,
                       lane: laneGeneration,
@@ -632,7 +1018,8 @@ final class GModGameSessionModel: ObservableObject {
             if let clientFrame = report.clientFrame {
                 reportFailures(clientFrame)
             }
-            guard !isSpawnMenuTransitioning else { return }
+            playClientSurfaceSounds(report.clientSurfaceSounds)
+            guard !isClientMenuTransitioning else { return }
             let surfaceToken = beginSurfaceRequest(
                 applicationGeneration: activeToken.generation.application,
                 laneGeneration: activeToken.generation.lane
@@ -650,7 +1037,7 @@ final class GModGameSessionModel: ObservableObject {
                     application: sessionGeneration,
                     lane: laneGeneration,
                     requestRevision: surfaceRequestRevision,
-                    spawnMenuOpen: isSpawnMenuOpen
+                    activeMenu: activeClientMenu
                 ) else {
                     return
                 }
@@ -660,7 +1047,7 @@ final class GModGameSessionModel: ObservableObject {
             }
         } catch {
             if isReady, !isInputSuspended,
-               !inputSuspensionInFlight, !isSpawnMenuTransitioning,
+               !inputSuspensionInFlight, !isClientMenuTransitioning,
                activeToken.matches(
                    application: sessionGeneration,
                    lane: laneGeneration,
@@ -700,7 +1087,7 @@ final class GModGameSessionModel: ObservableObject {
                 application: sessionGeneration,
                 lane: laneGeneration,
                 requestRevision: surfaceRequestRevision,
-                spawnMenuOpen: isSpawnMenuOpen
+                activeMenu: activeClientMenu
               ) else {
             return
         }
@@ -742,7 +1129,7 @@ final class GModGameSessionModel: ObservableObject {
                 lane: laneGeneration
             ),
             requestRevision: surfaceRequestRevision,
-            spawnMenuOpen: isSpawnMenuOpen
+            activeMenu: activeClientMenu
         )
     }
 
@@ -752,7 +1139,7 @@ final class GModGameSessionModel: ObservableObject {
 
     private func consumePointer(_ sample: GModGamePointerSample) async {
         guard isReady, !isInputSuspended,
-              isSpawnMenuOpen, !isSpawnMenuTransitioning,
+              isClientMenuOpen, !isClientMenuTransitioning,
               sample.pointerEpoch == pointerEpoch,
               sample.generation.matches(
                 application: sessionGeneration,
@@ -770,7 +1157,7 @@ final class GModGameSessionModel: ObservableObject {
                 expectedPointerEpoch: sample.pointerEpoch
             )
             guard isReady, !isInputSuspended,
-                  isSpawnMenuOpen, !isSpawnMenuTransitioning,
+                  isClientMenuOpen, !isClientMenuTransitioning,
                   sample.pointerEpoch == pointerEpoch,
                   sample.generation.matches(
                     application: sessionGeneration,
@@ -840,7 +1227,94 @@ final class GModGameSessionModel: ObservableObject {
         }
     }
 
+    private func recordLoadingProgress(
+        _ progress: GModPlayableSessionLoadingProgress,
+        requestedGeneration: UInt64
+    ) {
+        guard requestedGeneration == sessionGeneration, isStarting else { return }
+        var replacement = loadingState
+        guard replacement.record(progress) else { return }
+        loadingState = replacement
+        status = "loading.\(progress.taskIdentifier) — " +
+            "\(progress.percentComplete)%"
+    }
+
+    private func handleWorldFrameEvent(_ event: GModMetalWorldFrameEvent) {
+        switch event {
+        case let .textureUploadProgress(progress):
+            guard isStarting, isReady,
+                  firstWorldFrameGate.matches(
+                      meshIdentifier: progress.meshIdentifier
+                  ) else { return }
+            recordLoadingProgress(
+                .init(
+                    stage: .awaitingFirstMetalFrame,
+                    completedSubunitCount: progress.uploadedTextureCount,
+                    totalSubunitCount: progress.requiredTextureCount
+                ),
+                requestedGeneration: sessionGeneration
+            )
+
+        case let .presented(meshIdentifier):
+            acknowledgePresentedWorldFrame(meshIdentifier: meshIdentifier)
+
+        case let .failed(failure):
+            guard isStarting, isReady,
+                  firstWorldFrameGate.matches(
+                      meshIdentifier: failure.meshIdentifier
+                  ), let map = loadingMap else { return }
+            var failedLoadingState = loadingState
+            failedLoadingState.fail(failure.reason.diagnosticDescription)
+            loadingState = failedLoadingState
+            lastRendererFailure = failure
+            startFailure = GModGameStartFailure(
+                map: map,
+                origin: .renderer(meshIdentifier: failure.meshIdentifier),
+                detail: failure.reason.diagnosticDescription
+            )
+            firstWorldFrameGate.reset()
+            suspendInput()
+            status = "RENDERER START FAILED: " +
+                failure.reason.diagnosticDescription
+            appendLog("[RENDERER][ERROR] \(failure.meshIdentifier) " +
+                failure.reason.diagnosticDescription)
+        }
+    }
+
+    private func acknowledgePresentedWorldFrame(meshIdentifier: String) {
+        guard isStarting, isReady,
+              loadingState.progress.stage == .awaitingFirstMetalFrame,
+              let map = loadingMap else {
+            return
+        }
+        guard firstWorldFrameGate.acknowledge(
+            meshIdentifier: meshIdentifier
+        ) else { return }
+        var replacement = loadingState
+        guard replacement.record(.init(stage: .complete)) else { return }
+        loadingState = replacement
+        loadingMap = nil
+        isStarting = false
+        status = "READY \(map.rawValue) spawn=(" +
+            "\(playerOrigin.x), \(playerOrigin.y), \(playerOrigin.z))"
+    }
+
     private func failRuntime(_ error: Error) {
+        let description = GMLuaRuntime.describe(error)
+        audioController.stop(bus: .gameplay)
+        if isStarting {
+            var failedLoadingState = loadingState
+            failedLoadingState.fail(description)
+            loadingState = failedLoadingState
+            firstWorldFrameGate.reset()
+            if startFailure == nil, let map = loadingMap {
+                startFailure = GModGameStartFailure(
+                    map: map,
+                    origin: .cpu,
+                    detail: description
+                )
+            }
+        }
         isReady = false
         invalidateSurfaceRequests()
         frameMailbox.disable()
@@ -850,32 +1324,90 @@ final class GModGameSessionModel: ObservableObject {
         worldScene = nil
         surfaceScene = nil
         surfaceDiagnostics = nil
-        isSpawnMenuOpen = false
-        isSpawnMenuTransitioning = false
+        activeClientMenu = nil
+        transitioningClientMenu = nil
+        pauseMenuNotificationPending = false
         lastPointerFailure = nil
         lastMovementRejectionReason = nil
         movementStatus = "Movement stopped"
-        status = "RUNTIME FAILED: \(GMLuaRuntime.describe(error))"
+        status = "RUNTIME FAILED: \(description)"
         appendLog(status)
+    }
+
+    /// Preserves the surface queue's total order and repeated paths. The lane
+    /// already drained this report exactly once; this method never retries a
+    /// rejected or failed playback event.
+    private func playClientSurfaceSounds(
+        _ report: GMLuaSurfaceSoundRequestReport
+    ) {
+        if report.diagnostics.overflowed {
+            let detail = "CLIENT surface.PlaySound queue retained " +
+                "\(report.diagnostics.retainedRequestCount)/" +
+                "\(report.diagnostics.attemptedRequestCount); dropped " +
+                "\(report.diagnostics.droppedRequestCount)"
+            recordAudioDiagnostic(GModAudioDiagnostic(
+                code: .requestQueueOverflow,
+                severity: .error,
+                bus: .gameplay,
+                message: detail,
+                logicalPath: nil
+            ))
+        }
+
+        for request in report.requests {
+            guard let path = String(
+                bytes: request.soundPath.bytes,
+                encoding: .utf8
+            ) else {
+                recordAudioDiagnostic(GModAudioDiagnostic(
+                    code: .invalidRequestEncoding,
+                    severity: .error,
+                    bus: .gameplay,
+                    message: "CLIENT surface.PlaySound path is not UTF-8",
+                    logicalPath: nil
+                ))
+                continue
+            }
+            audioController.play(
+                path,
+                origin: .lua,
+                bus: .gameplay
+            )
+        }
+    }
+
+    private func recordAudioDiagnostic(
+        _ diagnostic: GModAudioDiagnostic
+    ) {
+        guard let record = GModAudioProblemMapper.record(
+            for: diagnostic
+        ) else { return }
+        diagnosticsStore.record(record)
+        appendLog(
+            "[CLIENT][AUDIO][\(diagnostic.code.rawValue)] " + record.detail
+        )
     }
 
     private func beginInputSuspensionIfPossible() {
         guard isInputSuspended,
               !inputSuspensionInFlight,
               isReady,
-              !isSpawnMenuTransitioning,
+              !isClientMenuTransitioning,
               let requestedLaneGeneration = laneGeneration,
               let requestedPointerEpoch = pointerEpoch,
               let requestedInputEpoch = inputEpoch else {
             return
         }
         inputSuspensionInFlight = true
+        let notifyPauseMenuWillShow = pauseMenuNotificationPending
+        pauseMenuNotificationPending = false
         let requestedGeneration = sessionGeneration
         Task { [weak self] in
             guard let self else { return }
             do {
                 let boundary = try await lane.suspendInput(
                     cancellationTimestamp: Date().timeIntervalSinceReferenceDate,
+                    notifyPauseMenuWillShow: notifyPauseMenuWillShow,
                     expectedGeneration: requestedLaneGeneration,
                     expectedPointerEpoch: requestedPointerEpoch,
                     expectedInputEpoch: requestedInputEpoch
@@ -887,6 +1419,12 @@ final class GModGameSessionModel: ObservableObject {
                     reportPointerCancellationFailure(
                         boundary.cancellationFailure
                     )
+                    if let lifecycleFailure = boundary.lifecycleFailure {
+                        appendLog(
+                            "[CLIENT][VGUI] Pause Menu notification failed: " +
+                                lifecycleFailure
+                        )
+                    }
                 }
             } catch {
                 if requestedGeneration == sessionGeneration {
@@ -900,6 +1438,9 @@ final class GModGameSessionModel: ObservableObject {
             if isInputSuspended {
                 pointerMailbox.setEnabled(false)
                 frameMailbox.disable()
+                if pauseMenuNotificationPending {
+                    beginInputSuspensionIfPossible()
+                }
             } else {
                 activateInputIfPossible()
             }
@@ -910,7 +1451,7 @@ final class GModGameSessionModel: ObservableObject {
         guard isReady,
               !isInputSuspended,
               !inputSuspensionInFlight,
-              !isSpawnMenuTransitioning,
+              !isClientMenuTransitioning,
               let laneGeneration,
               let inputEpoch else {
             return
@@ -924,8 +1465,8 @@ final class GModGameSessionModel: ObservableObject {
                 inputEpoch: inputEpoch
             )
         )
-        pointerMailbox.setEnabled(isSpawnMenuOpen)
-        pointerStatus = isSpawnMenuOpen
+        pointerMailbox.setEnabled(isClientMenuOpen)
+        pointerStatus = isClientMenuOpen
             ? "Single-touch VGUI; native cancel active; " +
                 "hover/wheel/keyboard pending"
             : "VGUI pointer idle"
@@ -936,20 +1477,30 @@ final class GModGameSessionModel: ObservableObject {
         appendLog("[CLIENT][INPUT] Pointer cancellation callback failed: \(failure)")
     }
 
+    /// UIKit gesture closures may arrive after a menu/pause ownership boundary.
+    /// Stored axes are cleared and the mailbox receives only an idle snapshot;
+    /// a delayed positive sample is never relabelled into the new epoch.
+    private func rejectLateWorldInput() {
+        clearHeldWorldInput()
+        publishMovementInput()
+    }
+
+    private func clearHeldWorldInput() {
+        forwardAxis = 0
+        sideAxis = 0
+        jumpPressed = false
+        heldActionButtons = []
+    }
+
     private func publishMovementInput() {
-        let speed: Float = 250
-        var buttons: SourceInputButtons = []
-        if forwardAxis > 0 { buttons.insert(.forward) }
-        if forwardAxis < 0 { buttons.insert(.back) }
-        if sideAxis > 0 { buttons.insert(.moveRight) }
-        if sideAxis < 0 { buttons.insert(.moveLeft) }
-        if jumpPressed { buttons.insert(.jump) }
         frameMailbox.setMovementInput(
-            GModPlayableMovementInput(
+            GModGameWorldInputPolicy.movementInput(
+                acceptsWorldInput: acceptsWorldInput,
                 viewAngles: viewAngles,
-                forwardMove: forwardAxis * speed,
-                sideMove: sideAxis * speed,
-                buttons: buttons
+                forwardAxis: forwardAxis,
+                sideAxis: sideAxis,
+                jumpPressed: jumpPressed,
+                heldActionButtons: heldActionButtons
             )
         )
     }
@@ -958,12 +1509,15 @@ final class GModGameSessionModel: ObservableObject {
         guard let worldScene else { return }
         self.worldScene = worldScene.updatingCamera(
             eye: Self.cameraEye(for: playerOrigin),
-            forward: Self.cameraForward(for: viewAngles)
+            forward: Self.cameraForward(for: viewAngles),
+            sourceFixedTime: Float(fixedTickCount) *
+                SourceGlobalVars.intervalPerTick
         )
     }
 
     nonisolated private static func makeWorldScene(
         map: GModBundledMap,
+        sessionGeneration: UInt64,
         mesh: GModWorldRenderMesh,
         playerOrigin: SourceVector3,
         viewAngles: SourceQAngle,
@@ -971,28 +1525,101 @@ final class GModGameSessionModel: ObservableObject {
     ) throws -> GModMetalWorldScene {
         let maximumRetainedTextureBytes = 128 * 1_024 * 1_024
         var retainedTextureBytes = 0
+        let meshIdentifier =
+            "session-\(sessionGeneration):\(map.rawValue):" +
+            "\(mesh.vertices.count):\(mesh.indices.count)"
         let ranges: [GModMetalWorldMaterialRange] = mesh.materialRanges.map { range in
-            let bitmap: GModMetalSurfaceBitmap?
-            if let name = range.materialName,
-               let resolved = try? textureResolver.resolveSurfaceTexture(
-                   named: name
-               ),
-               resolved.premultipliedRGBA8.count <=
-                    maximumRetainedTextureBytes - retainedTextureBytes {
-                bitmap = resolved
-                retainedTextureBytes += resolved.premultipliedRGBA8.count
+            let waterSurface = range.waterSurface.map {
+                GModMetalWorldWaterSurface(
+                    surfaceZ: $0.surfaceZ,
+                    minimumZ: $0.minimumZ
+                )
+            }
+            let waterMaterial = waterSurface.flatMap { _ in
+                range.materialName.flatMap {
+                    try? textureResolver.resolveWaterMaterial(named: $0)
+                }
+            }
+            let materialResolution: GModMetalWorldMaterialResolution
+            if waterSurface != nil || range.materialName == nil {
+                materialResolution = .notApplicable
+            } else if let name = range.materialName {
+                do {
+                    if let resolved = try textureResolver.resolveSurfaceTexture(
+                        named: name
+                    ) {
+                        let requiredByteCount =
+                            resolved.premultipliedRGBA8.count
+                        if requiredByteCount <= maximumRetainedTextureBytes,
+                           retainedTextureBytes <=
+                            maximumRetainedTextureBytes - requiredByteCount {
+                            materialResolution = .resolved(resolved)
+                            retainedTextureBytes += requiredByteCount
+                        } else {
+                            materialResolution = .retentionCapacityExceeded(
+                                requiredByteCount: requiredByteCount,
+                                retainedByteCount: retainedTextureBytes,
+                                maximumByteCount: maximumRetainedTextureBytes
+                            )
+                        }
+                    } else {
+                        materialResolution = .sourceMissing
+                    }
+                } catch {
+                    materialResolution = .decodeFailed(
+                        GMLuaRuntime.describe(error)
+                    )
+                }
             } else {
-                bitmap = nil
+                materialResolution = .notApplicable
             }
             return GModMetalWorldMaterialRange(
                 materialName: range.materialName,
                 firstIndex: range.firstIndex,
                 indexCount: range.indexCount,
-                bitmap: bitmap
+                materialResolution: materialResolution,
+                waterSurface: waterSurface,
+                waterMaterial: waterMaterial
             )
         }
+        let lightmapAtlas = mesh.lightmapAtlas.map {
+            GModMetalWorldLightmapAtlas(
+                identifier: "\(meshIdentifier):lightmap",
+                width: $0.width,
+                height: $0.height,
+                linearRGBA16Float: $0.linearRGBA16Float
+            )
+        }
+        let lightmapAtlasStatus: GModMetalWorldLightmapAtlasStatus
+        switch mesh.diagnostics.lightmapAtlasStatus {
+        case .unavailableNoLightmaps:
+            lightmapAtlasStatus = .unavailableNoLightmaps
+        case let .built(width, height, byteCount):
+            lightmapAtlasStatus = .built(
+                width: width,
+                height: height,
+                byteCount: byteCount
+            )
+        case let .capacityExceeded(
+            requiredWidth,
+            requiredHeight,
+            requiredByteCount,
+            maximumWidth,
+            maximumHeight,
+            maximumByteCount
+        ):
+            lightmapAtlasStatus = .capacityExceeded(
+                requiredWidth: requiredWidth,
+                requiredHeight: requiredHeight,
+                requiredByteCount: requiredByteCount,
+                maximumWidth: maximumWidth,
+                maximumHeight: maximumHeight,
+                maximumByteCount: maximumByteCount
+            )
+        }
+        let unlitLightmapCoordinate = mesh.lightmapAtlas?.unlitTextureCoordinate
         return GModMetalWorldScene(
-            meshIdentifier: "\(map.rawValue):\(mesh.vertices.count):\(mesh.indices.count)",
+            meshIdentifier: meshIdentifier,
             sourcePositions: mesh.vertices.map {
                 SIMD3<Float>($0.position.x, $0.position.y, $0.position.z)
             },
@@ -1002,8 +1629,21 @@ final class GModGameSessionModel: ObservableObject {
             sourceTextureCoordinates: mesh.vertices.map {
                 SIMD2<Float>($0.textureCoordinate.u, $0.textureCoordinate.v)
             },
+            sourceLightmapTextureCoordinates: mesh.vertices.map {
+                let coordinate = $0.lightmapCoordinate ?? unlitLightmapCoordinate ?? .zero
+                return SIMD2<Float>(coordinate.u, coordinate.v)
+            },
             indices: mesh.indices,
             materialRanges: ranges,
+            lightmapAtlas: lightmapAtlas,
+            lightmapDiagnostics: GModMetalWorldLightmapDiagnostics(
+                atlasStatus: lightmapAtlasStatus,
+                ignoredAdditionalLightStyleFaceCount:
+                    mesh.diagnostics.ignoredAdditionalLightStyleFaceCount,
+                ignoredBumpLightFaceCount:
+                    mesh.diagnostics.ignoredBumpLightFaceCount,
+                clampedChannelCount: mesh.lightmapAtlas?.clampedChannelCount ?? 0
+            ),
             cameraEye: cameraEye(for: playerOrigin),
             cameraForward: cameraForward(for: viewAngles)
         )
