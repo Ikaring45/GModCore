@@ -1295,7 +1295,7 @@ public struct GModMetalView:
                         cachedWorldLightmap = nil
                         worldLightmapIssue = GModMetalWorldLightmapRenderContract
                             .fallbackReason(
-                            scene.lightmapDiagnostics.atlasStatus
+                                for: scene.lightmapDiagnostics.atlasStatus
                         )
                     }
                     if let worldLightmapIssue,

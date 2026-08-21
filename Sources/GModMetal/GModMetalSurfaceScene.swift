@@ -222,7 +222,11 @@ public struct GModMetalSurfaceSamplerConfiguration: Sendable, Equatable, Hashabl
 
     static let allSourceConfigurations: [Self] = {
         let values: [GMLuaTextureFilter?] = [
-            nil, .none, .point, .linear, .anisotropic,
+            nil,
+            .some(.none),
+            .some(.point),
+            .some(.linear),
+            .some(.anisotropic),
         ]
         return Array(Set(values.flatMap { minification in
             values.map { magnification in
@@ -246,7 +250,7 @@ public struct GModMetalSurfaceSamplerConfiguration: Sendable, Equatable, Hashabl
         switch filter {
         case .some(.point):
             return .point
-        case .none, .some(.none), .some(.linear), .some(.anisotropic):
+        case nil, .some(.none), .some(.linear), .some(.anisotropic):
             return .linear
         }
     }
