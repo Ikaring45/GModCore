@@ -75,9 +75,13 @@ final class GMLuaNetTransportEntityReplicationTests: XCTestCase {
         try pair.server.execute(
             """
             util.AddNetworkString("entity_transport_fifo_net")
-            concommand.Add("entity_transport_fifo_console", function()
-                __record_entity_transport_event("console")
-            end)
+            concommand = {}
+            function concommand.Run(sender, command)
+                if command == "entity_transport_fifo_console" then
+                    __record_entity_transport_event("console")
+                end
+            end
+            AddConsoleCommand("entity_transport_fifo_console")
             """
         )
         try pair.client.execute(
@@ -126,7 +130,9 @@ final class GMLuaNetTransportEntityReplicationTests: XCTestCase {
         let sink = LockedEntityReplicationSink(generation: generation1)
         let serverEndpoint = try XCTUnwrap(pair.server.netEndpoint)
         let clientEndpoint = try XCTUnwrap(pair.client.netEndpoint)
-        try clientEndpoint.connectEntityReplicationHandler(sink.apply)
+        try clientEndpoint.connectEntityReplicationHandler { packet in
+            sink.apply(packet)
+        }
 
         XCTAssertThrowsError(
             try pair.session.netTransport.enqueueEntityReplication(
@@ -167,7 +173,9 @@ final class GMLuaNetTransportEntityReplicationTests: XCTestCase {
         let sink = LockedEntityReplicationSink(generation: generation1)
         let serverEndpoint = try XCTUnwrap(pair.server.netEndpoint)
         let clientEndpoint = try XCTUnwrap(pair.client.netEndpoint)
-        try clientEndpoint.connectEntityReplicationHandler(sink.apply)
+        try clientEndpoint.connectEntityReplicationHandler { packet in
+            sink.apply(packet)
+        }
 
         try pair.session.netTransport.enqueueEntityReplication(
             packet(sequence: 1, payload: .snapshot([])),
@@ -255,6 +263,21 @@ final class GMLuaNetTransportEntityReplicationTests: XCTestCase {
             realm: .client,
             logger: { _ in },
             netTransport: session.netTransport
+        )
+        try client.execute(
+            """
+            net.Receivers = {}
+            function net.Receive(name, callback)
+                net.Receivers[string.lower(name)] = callback
+            end
+            function net.Incoming(length, sender)
+                local messageID = net.ReadHeader()
+                local messageName = assert(util.NetworkIDToString(messageID))
+                local callback = net.Receivers[string.lower(messageName)]
+                if callback ~= nil then callback(length - 16, sender) end
+            end
+            """,
+            sourceName: "=(entity replication FIFO net dispatch)"
         )
         try server.execute("return true")
         try client.execute("return true")

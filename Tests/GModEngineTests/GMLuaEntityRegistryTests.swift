@@ -353,4 +353,233 @@ final class GMLuaEntityRegistryTests: XCTestCase {
         )
         try runtime.execute("assert(Player(92) == REPLACEMENT_PLAYER and Entity(18) == NULL)")
     }
+
+    func testAuthoritativeCanonicalUpdatePreservesUserdataAndGenerationReuseInvalidatesOnlyOldValue() throws {
+        let runtime = GMLuaRuntime(realm: .server, logger: { _ in })
+        defer { _ = runtime.close() }
+        let registry = try XCTUnwrap(runtime.entityRegistry)
+        let firstSnapshot = canonicalProp(
+            entryIndex: 20,
+            serialNumber: 3,
+            revision: 0,
+            lifecycle: .created,
+            originX: 8
+        )
+        let first = try registry.applyAuthoritativeSnapshot(firstSnapshot)
+        runtime.state.setGlobal("CANONICAL_PROP", value: first)
+        try runtime.execute("CANONICAL_PROP.marker = { value = 17 }")
+        let firstTable = try XCTUnwrap(registry.canonicalSnapshot(for: first)).identity
+        XCTAssertEqual(firstTable, firstSnapshot.identity)
+
+        let updatedSnapshot = canonicalProp(
+            entryIndex: 20,
+            serialNumber: 3,
+            revision: 1,
+            lifecycle: .active,
+            originX: 64
+        )
+        let updated = try registry.applyAuthoritativeSnapshot(updatedSnapshot)
+        guard case let .userdata(firstUserdata) = first,
+              case let .userdata(updatedUserdata) = updated else {
+            return XCTFail("canonical Entity projection did not create userdata")
+        }
+        XCTAssertTrue(firstUserdata === updatedUserdata)
+        XCTAssertEqual(registry.canonicalSnapshot(at: 20), updatedSnapshot)
+        try runtime.execute(
+            "assert(CANONICAL_PROP == Entity(20) and CANONICAL_PROP.marker.value == 17)"
+        )
+
+        let replacementSnapshot = canonicalProp(
+            entryIndex: 20,
+            serialNumber: 4,
+            revision: 0,
+            lifecycle: .created,
+            originX: 96
+        )
+        let replacement = try registry.applyAuthoritativeSnapshot(replacementSnapshot)
+        runtime.state.setGlobal("REPLACEMENT_PROP", value: replacement)
+        XCTAssertFalse(try XCTUnwrap(GMLuaTypeSystem.typedObject(from: first)).isValid)
+        XCTAssertTrue(try XCTUnwrap(GMLuaTypeSystem.typedObject(from: replacement)).isValid)
+        XCTAssertNil(registry.canonicalIdentity(for: first))
+        XCTAssertEqual(registry.canonicalIdentity(for: replacement), replacementSnapshot.identity)
+        try runtime.execute(
+            "assert(CANONICAL_PROP == NULL and REPLACEMENT_PROP == Entity(20))"
+        )
+
+        let staleRemoval = canonicalProp(
+            entryIndex: 20,
+            serialNumber: 3,
+            revision: 2,
+            lifecycle: .removed,
+            originX: 64
+        )
+        XCTAssertFalse(try registry.applyAuthoritativeRemoval(staleRemoval))
+        XCTAssertTrue(try XCTUnwrap(GMLuaTypeSystem.typedObject(from: replacement)).isValid)
+
+        let currentRemoval = canonicalProp(
+            entryIndex: 20,
+            serialNumber: 4,
+            revision: 1,
+            lifecycle: .removed,
+            originX: 96
+        )
+        XCTAssertTrue(try registry.applyAuthoritativeRemoval(currentRemoval))
+        XCTAssertFalse(try XCTUnwrap(GMLuaTypeSystem.typedObject(from: replacement)).isValid)
+        XCTAssertNil(registry.canonicalSnapshot(at: 20))
+    }
+
+    func testClientPacketProjectionIsTransactionalAndPreservesSidecarUntilEHANDLEChanges() throws {
+        let runtime = GMLuaRuntime(realm: .client, logger: { _ in })
+        defer { _ = runtime.close() }
+        let registry = try XCTUnwrap(runtime.entityRegistry)
+        let generation = SourceEntityReplicationConnectionGeneration(rawValue: 1)
+        XCTAssertTrue(try registry.beginEntityReplication(generation: generation))
+
+        let firstSnapshot = canonicalProp(
+            entryIndex: 21,
+            serialNumber: 2,
+            revision: 0,
+            lifecycle: .active,
+            originX: 1
+        )
+        XCTAssertEqual(
+            try registry.applyEntityReplicationPacket(
+                SourceEntityReplicationPacket(
+                    connectionGeneration: generation,
+                    sequence: 1,
+                    payload: .snapshot([firstSnapshot])
+                )
+            ),
+            .applied(
+                SourceEntityReplicationClientSnapshot(
+                    connectionGeneration: generation,
+                    sequence: 1,
+                    entities: [firstSnapshot]
+                )
+            )
+        )
+        let first = registry.entity(at: 21)
+        runtime.state.setGlobal("REPLICATED_PROP", value: first)
+        try runtime.execute("REPLICATED_PROP.sidecar = 'kept'")
+
+        let updatedSnapshot = canonicalProp(
+            entryIndex: 21,
+            serialNumber: 2,
+            revision: 1,
+            lifecycle: .active,
+            originX: 2
+        )
+        _ = try registry.applyEntityReplicationPacket(
+            SourceEntityReplicationPacket(
+                connectionGeneration: generation,
+                sequence: 2,
+                payload: .delta([.update(updatedSnapshot)])
+            )
+        )
+        guard case let .userdata(firstUserdata) = first,
+              case let .userdata(updatedUserdata) = registry.entity(at: 21) else {
+            return XCTFail("replicated Entity projection did not create userdata")
+        }
+        XCTAssertTrue(firstUserdata === updatedUserdata)
+        try runtime.execute("assert(REPLICATED_PROP.sidecar == 'kept')")
+
+        let occupied = try registry.register(index: 22, className: "legacy_prop")
+        let blockedSnapshot = canonicalProp(
+            entryIndex: 22,
+            serialNumber: 1,
+            revision: 0,
+            lifecycle: .active,
+            originX: 3
+        )
+        XCTAssertThrowsError(
+            try registry.applyEntityReplicationPacket(
+                SourceEntityReplicationPacket(
+                    connectionGeneration: generation,
+                    sequence: 3,
+                    payload: .delta([.create(blockedSnapshot)])
+                )
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? GMLuaCanonicalEntityRegistryError,
+                .occupiedLegacyEntityIndex(22)
+            )
+        }
+        XCTAssertTrue(try XCTUnwrap(GMLuaTypeSystem.typedObject(from: occupied)).isValid)
+        XCTAssertEqual(registry.canonicalSnapshot(at: 21), updatedSnapshot)
+        XCTAssertNil(registry.canonicalSnapshot(at: 22))
+
+        // The throw above must not advance the CLIENT sequence. Removing the
+        // unrelated legacy value makes the exact same packet acceptable.
+        registry.unregister(index: 22)
+        _ = try registry.applyEntityReplicationPacket(
+            SourceEntityReplicationPacket(
+                connectionGeneration: generation,
+                sequence: 3,
+                payload: .delta([.create(blockedSnapshot)])
+            )
+        )
+        XCTAssertEqual(registry.canonicalSnapshot(at: 22), blockedSnapshot)
+
+        let removedSnapshot = canonicalProp(
+            entryIndex: 21,
+            serialNumber: 2,
+            revision: 2,
+            lifecycle: .removed,
+            originX: 2
+        )
+        let replacementSnapshot = canonicalProp(
+            entryIndex: 21,
+            serialNumber: 3,
+            revision: 0,
+            lifecycle: .active,
+            originX: 4
+        )
+        _ = try registry.applyEntityReplicationPacket(
+            SourceEntityReplicationPacket(
+                connectionGeneration: generation,
+                sequence: 4,
+                payload: .delta([.remove(removedSnapshot), .create(replacementSnapshot)])
+            )
+        )
+        XCTAssertFalse(try XCTUnwrap(GMLuaTypeSystem.typedObject(from: first)).isValid)
+        XCTAssertEqual(registry.canonicalSnapshot(at: 21), replacementSnapshot)
+
+        try registry.disconnectEntityReplication()
+        XCTAssertNil(registry.canonicalSnapshot(at: 21))
+        XCTAssertNil(registry.canonicalSnapshot(at: 22))
+        XCTAssertFalse(
+            try registry.beginEntityReplication(generation: generation),
+            "a disconnected generation must not be reusable"
+        )
+    }
+
+    private func canonicalProp(
+        entryIndex: Int,
+        serialNumber: Int,
+        revision: UInt64,
+        lifecycle: SourceCanonicalEntityLifecycle,
+        originX: Float
+    ) -> SourceCanonicalEntitySnapshot {
+        SourceCanonicalEntitySnapshot(
+            identity: SourceCanonicalEntityIdentity(
+                handle: SourceBaseHandle(
+                    entryIndex: entryIndex,
+                    serialNumber: serialNumber
+                )
+            ),
+            kind: .propPhysics,
+            className: SourceCanonicalEntityKind.propPhysics.className,
+            transform: SourceEntityTransform(
+                origin: SourceVector3(originX, 0, 0)
+            ),
+            motion: SourceEntityMotionState(),
+            model: SourceEntityModelReference("models/props_c17/oildrum001.mdl"),
+            solidType: .vPhysics,
+            moveType: .vPhysics,
+            lifecycle: lifecycle,
+            isNetworkable: true,
+            revision: revision
+        )
+    }
 }

@@ -136,7 +136,7 @@ public enum GMLuaEntityReplicationTransportError: Error, Equatable, Sendable {
 
 public typealias GMLuaEntityReplicationHandler = @Sendable (
     SourceEntityReplicationPacket
-) -> SourceEntityReplicationApplyResult
+) throws -> SourceEntityReplicationApplyResult
 
 /// One CLIENT-originated console command that reached the SERVER command
 /// surface but had an expected user-action failure: a Lua concommand body
@@ -715,7 +715,7 @@ public final class GMLuaNetEndpoint: @unchecked Sendable {
         guard let handler else {
             throw GMLuaEntityReplicationTransportError.clientHandlerUnavailable
         }
-        switch handler(delivery.packet) {
+        switch try handler(delivery.packet) {
         case .applied:
             return
         case let .rejected(rejection):

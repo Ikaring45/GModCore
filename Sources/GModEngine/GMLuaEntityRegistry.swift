@@ -13,6 +13,30 @@ public enum GMLuaEntityKind: String, Sendable {
     case vehicle = "Vehicle"
 }
 
+public enum GMLuaCanonicalEntityRegistryError: Error, Equatable, Sendable {
+    case serverRealmRequired
+    case clientRealmRequired
+    case invalidEntityIndex(kind: SourceCanonicalEntityKind, index: Int)
+    case nonNetworkableEntity(SourceBaseHandle)
+    case classNameKindMismatch(
+        handle: SourceBaseHandle,
+        expected: String,
+        received: String
+    )
+    case authoritativeSnapshotIsRemoved(SourceBaseHandle)
+    case authoritativeRemovalIsNotRemoved(
+        handle: SourceBaseHandle,
+        lifecycle: SourceCanonicalEntityLifecycle
+    )
+    case occupiedLegacyEntityIndex(Int)
+    case identityKindMismatch(
+        handle: SourceBaseHandle,
+        existing: GMLuaEntityKind,
+        incoming: GMLuaEntityKind
+    )
+    case playerUserIDConflict(Int)
+}
+
 private final class GMLuaEntityValue: @unchecked Sendable {
     let index: Int
     let kind: GMLuaEntityKind
@@ -23,6 +47,7 @@ private final class GMLuaEntityValue: @unchecked Sendable {
     var className: String
     var inputButtons: SourceInputButtons = []
     var luaTable: LuaTable? = LuaTable()
+    var canonicalSnapshot: SourceCanonicalEntitySnapshot?
 
     init(
         index: Int,
@@ -31,7 +56,8 @@ private final class GMLuaEntityValue: @unchecked Sendable {
         userID: Int?,
         semanticValidity: Bool,
         sourceOwner: GMLuaSourceMirrorOwner?,
-        className: String
+        className: String,
+        canonicalSnapshot: SourceCanonicalEntitySnapshot? = nil
     ) {
         self.index = index
         self.kind = kind
@@ -40,6 +66,7 @@ private final class GMLuaEntityValue: @unchecked Sendable {
         self.semanticValidity = semanticValidity
         self.sourceOwner = sourceOwner
         self.className = className
+        self.canonicalSnapshot = canonicalSnapshot
     }
 }
 
@@ -51,21 +78,25 @@ private final class GMLuaEntityValue: @unchecked Sendable {
 public final class GMLuaEntityRegistry: @unchecked Sendable {
     private let state: LuaState
     private let typeSystem: GMLuaTypeSystem
+    private let realm: GMLuaRealm
     private let nullValue: LuaValue
     private let semanticIndex: LuaValue
     private let lock = NSLock()
     private var values: [Int: LuaValue] = [:]
     private var playerIdentityByUserID: [Int: (index: Int, generation: UInt64)] = [:]
     private var localPlayerIdentity: (index: Int, generation: UInt64)?
+    private var entityReplicationState = SourceEntityReplicationClientState()
 
     private init(
         state: LuaState,
         typeSystem: GMLuaTypeSystem,
+        realm: GMLuaRealm,
         nullValue: LuaValue,
         semanticIndex: LuaValue
     ) {
         self.state = state
         self.typeSystem = typeSystem
+        self.realm = realm
         self.nullValue = nullValue
         self.semanticIndex = semanticIndex
     }
@@ -298,6 +329,401 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
         lock.unlock()
         guard let value else { return nil }
         return sourceMirrorIdentity(for: value)
+    }
+
+    /// Projects one engine-owned SERVER snapshot into this realm. Updating the
+    /// same complete EHANDLE mutates only the snapshot payload, preserving the
+    /// userdata and its Lua sidecar table. Reusing an entry with a new serial
+    /// invalidates the old userdata before publishing the replacement.
+    @discardableResult
+    public func applyAuthoritativeSnapshot(
+        _ snapshot: SourceCanonicalEntitySnapshot,
+        userID: Int? = nil
+    ) throws -> LuaValue {
+        guard realm == .server else {
+            throw GMLuaCanonicalEntityRegistryError.serverRealmRequired
+        }
+        try Self.validateCanonicalSnapshot(snapshot, isRemoval: false)
+
+        lock.lock()
+        do {
+            var target = canonicalSnapshotsByIndexLocked()
+            target[snapshot.identity.entryIndex] = snapshot
+            let projection = try prepareCanonicalProjectionLocked(
+                target: target,
+                preferredPlayerUserIDs: userID.map {
+                    [snapshot.identity.entryIndex: $0]
+                } ?? [:]
+            )
+            commitCanonicalProjectionLocked(projection)
+            guard let value = values[snapshot.identity.entryIndex] else {
+                preconditionFailure("canonical projection omitted its target entity")
+            }
+            lock.unlock()
+            state.refreshGarbageCollectionRootProviders()
+            return value
+        } catch {
+            lock.unlock()
+            throw error
+        }
+    }
+
+    /// Applies the final SERVER removal snapshot only to its exact EHANDLE.
+    /// A delayed removal for an older serial is harmless to a replacement slot.
+    @discardableResult
+    public func applyAuthoritativeRemoval(
+        _ snapshot: SourceCanonicalEntitySnapshot
+    ) throws -> Bool {
+        guard realm == .server else {
+            throw GMLuaCanonicalEntityRegistryError.serverRealmRequired
+        }
+        try Self.validateCanonicalSnapshot(snapshot, isRemoval: true)
+
+        lock.lock()
+        guard let current = values[snapshot.identity.entryIndex],
+              let object = GMLuaTypeSystem.typedObject(from: current),
+              object.isValid,
+              let payload = object.payload as? GMLuaEntityValue,
+              payload.generation == snapshot.identity.generation else {
+            lock.unlock()
+            return false
+        }
+        values.removeValue(forKey: snapshot.identity.entryIndex)
+        removePlayerUserIDMapping(for: payload)
+        if localPlayerIdentity?.index == snapshot.identity.entryIndex,
+           localPlayerIdentity?.generation == snapshot.identity.generation {
+            localPlayerIdentity = nil
+        }
+        object.isValid = false
+        payload.canonicalSnapshot = nil
+        payload.luaTable = nil
+        lock.unlock()
+        state.refreshGarbageCollectionRootProviders()
+        return true
+    }
+
+    /// Starts a fresh CLIENT entity stream. A newer connection atomically
+    /// drops every userdata owned by the previous replicated snapshot.
+    @discardableResult
+    public func beginEntityReplication(
+        generation: SourceEntityReplicationConnectionGeneration
+    ) throws -> Bool {
+        guard realm == .client else {
+            throw GMLuaCanonicalEntityRegistryError.clientRealmRequired
+        }
+
+        lock.lock()
+        do {
+            var candidateState = entityReplicationState
+            guard candidateState.connect(generation: generation) else {
+                lock.unlock()
+                return false
+            }
+            let projection = try prepareCanonicalProjectionLocked(target: [:])
+            commitCanonicalProjectionLocked(projection)
+            entityReplicationState = candidateState
+            lock.unlock()
+            state.refreshGarbageCollectionRootProviders()
+            return true
+        } catch {
+            lock.unlock()
+            throw error
+        }
+    }
+
+    /// Validates a CLIENT packet and prepares every required userdata against
+    /// copies first. Registry storage, sidecar lifetime, and replication
+    /// sequence advance together only after the complete projection succeeds.
+    @discardableResult
+    public func applyEntityReplicationPacket(
+        _ packet: SourceEntityReplicationPacket
+    ) throws -> SourceEntityReplicationApplyResult {
+        guard realm == .client else {
+            throw GMLuaCanonicalEntityRegistryError.clientRealmRequired
+        }
+
+        lock.lock()
+        do {
+            var candidateState = entityReplicationState
+            let result = candidateState.apply(packet)
+            guard case let .applied(clientSnapshot) = result else {
+                lock.unlock()
+                return result
+            }
+
+            var target: [Int: SourceCanonicalEntitySnapshot] = [:]
+            for snapshot in clientSnapshot.entities {
+                try Self.validateCanonicalSnapshot(snapshot, isRemoval: false)
+                target[snapshot.identity.entryIndex] = snapshot
+            }
+            let projection = try prepareCanonicalProjectionLocked(target: target)
+            commitCanonicalProjectionLocked(projection)
+            entityReplicationState = candidateState
+            lock.unlock()
+            state.refreshGarbageCollectionRootProviders()
+            return result
+        } catch {
+            lock.unlock()
+            throw error
+        }
+    }
+
+    /// Ends CLIENT replication while retaining the highest connection
+    /// generation in the replication state, so delayed packets cannot revive
+    /// stale userdata.
+    public func disconnectEntityReplication() throws {
+        guard realm == .client else {
+            throw GMLuaCanonicalEntityRegistryError.clientRealmRequired
+        }
+
+        lock.lock()
+        do {
+            var candidateState = entityReplicationState
+            candidateState.disconnect()
+            let projection = try prepareCanonicalProjectionLocked(target: [:])
+            commitCanonicalProjectionLocked(projection)
+            entityReplicationState = candidateState
+            lock.unlock()
+            state.refreshGarbageCollectionRootProviders()
+        } catch {
+            lock.unlock()
+            throw error
+        }
+    }
+
+    public func canonicalIdentity(
+        for value: LuaValue
+    ) -> SourceCanonicalEntityIdentity? {
+        canonicalSnapshot(for: value)?.identity
+    }
+
+    public func canonicalIdentity(at index: Int) -> SourceCanonicalEntityIdentity? {
+        canonicalSnapshot(at: index)?.identity
+    }
+
+    public func canonicalSnapshot(
+        for value: LuaValue
+    ) -> SourceCanonicalEntitySnapshot? {
+        guard case let .userdata(userdata) = value,
+              let object = GMLuaTypeSystem.typedObject(from: value),
+              let payload = object.payload as? GMLuaEntityValue else { return nil }
+        lock.lock()
+        defer { lock.unlock() }
+        guard object.isValid,
+              case let .userdata(canonical)? = values[payload.index],
+              canonical === userdata else { return nil }
+        return payload.canonicalSnapshot
+    }
+
+    public func canonicalSnapshot(at index: Int) -> SourceCanonicalEntitySnapshot? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let value = values[index],
+              let object = GMLuaTypeSystem.typedObject(from: value),
+              object.isValid,
+              let payload = object.payload as? GMLuaEntityValue else { return nil }
+        return payload.canonicalSnapshot
+    }
+
+    private struct CanonicalProjection {
+        var values: [Int: LuaValue]
+        var playerIdentityByUserID: [Int: (index: Int, generation: UInt64)]
+        var localPlayerIdentity: (index: Int, generation: UInt64)?
+        var invalidations: [(GMLuaTypedObject, GMLuaEntityValue)]
+        var snapshotUpdates: [(GMLuaEntityValue, SourceCanonicalEntitySnapshot)]
+    }
+
+    /// Requires `lock` to be held. This method creates detached userdata but
+    /// never mutates registry-visible values or existing payloads.
+    private func prepareCanonicalProjectionLocked(
+        target: [Int: SourceCanonicalEntitySnapshot],
+        preferredPlayerUserIDs: [Int: Int] = [:]
+    ) throws -> CanonicalProjection {
+        var candidateValues = values
+        var candidatePlayerIDs = playerIdentityByUserID
+        var candidateLocalPlayer = localPlayerIdentity
+        var invalidations: [(GMLuaTypedObject, GMLuaEntityValue)] = []
+        var snapshotUpdates: [(GMLuaEntityValue, SourceCanonicalEntitySnapshot)] = []
+
+        func removeCandidate(at index: Int) {
+            guard let removed = candidateValues.removeValue(forKey: index),
+                  let object = GMLuaTypeSystem.typedObject(from: removed),
+                  let payload = object.payload as? GMLuaEntityValue else { return }
+            if let userID = payload.userID,
+               let mapped = candidatePlayerIDs[userID],
+               mapped.index == payload.index,
+               mapped.generation == payload.generation {
+                candidatePlayerIDs.removeValue(forKey: userID)
+            }
+            if candidateLocalPlayer?.index == payload.index,
+               candidateLocalPlayer?.generation == payload.generation {
+                candidateLocalPlayer = nil
+            }
+            invalidations.append((object, payload))
+        }
+
+        // A full target projection owns only values that have previously been
+        // attached to canonical snapshots. Legacy/direct mirrors remain until
+        // a matching canonical identity adopts or replaces their slot.
+        for (index, value) in Array(candidateValues) {
+            guard let payload = GMLuaTypeSystem.typedObject(from: value)?.payload
+                    as? GMLuaEntityValue,
+                  let current = payload.canonicalSnapshot else { continue }
+            guard let incoming = target[index],
+                  incoming.identity == current.identity else {
+                removeCandidate(at: index)
+                continue
+            }
+        }
+
+        for index in target.keys.sorted() {
+            guard let snapshot = target[index] else { continue }
+            let incomingKind = Self.luaKind(for: snapshot.kind)
+
+            if let existing = candidateValues[index],
+               let object = GMLuaTypeSystem.typedObject(from: existing),
+               object.isValid,
+               let payload = object.payload as? GMLuaEntityValue {
+                if payload.generation == snapshot.identity.generation {
+                    guard payload.kind == incomingKind else {
+                        throw GMLuaCanonicalEntityRegistryError.identityKindMismatch(
+                            handle: snapshot.identity.handle,
+                            existing: payload.kind,
+                            incoming: incomingKind
+                        )
+                    }
+                    snapshotUpdates.append((payload, snapshot))
+                    continue
+                }
+
+                // Generation 0 denotes the public legacy register API. It has
+                // no Source EHANDLE ownership and cannot be silently replaced.
+                guard payload.generation != 0 ||
+                        payload.sourceOwner != nil ||
+                        payload.canonicalSnapshot != nil else {
+                    throw GMLuaCanonicalEntityRegistryError.occupiedLegacyEntityIndex(index)
+                }
+                removeCandidate(at: index)
+            } else if candidateValues[index] != nil {
+                throw GMLuaCanonicalEntityRegistryError.occupiedLegacyEntityIndex(index)
+            }
+
+            let userID: Int?
+            if incomingKind == .player {
+                userID = preferredPlayerUserIDs[index] ?? index
+                guard let userID, userID > 0 else {
+                    throw GMLuaCanonicalEntityRegistryError.playerUserIDConflict(userID ?? 0)
+                }
+                if let mapped = candidatePlayerIDs[userID], mapped.index != index {
+                    throw GMLuaCanonicalEntityRegistryError.playerUserIDConflict(userID)
+                }
+            } else {
+                userID = nil
+            }
+
+            let payload = GMLuaEntityValue(
+                index: index,
+                kind: incomingKind,
+                generation: snapshot.identity.generation,
+                userID: userID,
+                semanticValidity: snapshot.kind != .world,
+                sourceOwner: nil,
+                className: snapshot.className,
+                canonicalSnapshot: snapshot
+            )
+            let value = try typeSystem.makeObject(
+                metaName: incomingKind.rawValue,
+                payload: payload
+            )
+            candidateValues[index] = value
+            if let userID {
+                candidatePlayerIDs[userID] = (index, snapshot.identity.generation)
+            }
+        }
+
+        return CanonicalProjection(
+            values: candidateValues,
+            playerIdentityByUserID: candidatePlayerIDs,
+            localPlayerIdentity: candidateLocalPlayer,
+            invalidations: invalidations,
+            snapshotUpdates: snapshotUpdates
+        )
+    }
+
+    /// Requires `lock` to be held and a completely prepared projection.
+    private func commitCanonicalProjectionLocked(_ projection: CanonicalProjection) {
+        for (object, payload) in projection.invalidations {
+            object.isValid = false
+            payload.canonicalSnapshot = nil
+            payload.luaTable = nil
+        }
+        for (payload, snapshot) in projection.snapshotUpdates {
+            payload.className = snapshot.className
+            payload.canonicalSnapshot = snapshot
+        }
+        values = projection.values
+        playerIdentityByUserID = projection.playerIdentityByUserID
+        localPlayerIdentity = projection.localPlayerIdentity
+    }
+
+    private func canonicalSnapshotsByIndexLocked() -> [Int: SourceCanonicalEntitySnapshot] {
+        var snapshots: [Int: SourceCanonicalEntitySnapshot] = [:]
+        for (index, value) in values {
+            guard let payload = GMLuaTypeSystem.typedObject(from: value)?.payload
+                    as? GMLuaEntityValue,
+                  let snapshot = payload.canonicalSnapshot else { continue }
+            snapshots[index] = snapshot
+        }
+        return snapshots
+    }
+
+    private static func luaKind(
+        for kind: SourceCanonicalEntityKind
+    ) -> GMLuaEntityKind {
+        switch kind {
+        case .world, .propPhysics:
+            return .entity
+        case .player:
+            return .player
+        }
+    }
+
+    private static func validateCanonicalSnapshot(
+        _ snapshot: SourceCanonicalEntitySnapshot,
+        isRemoval: Bool
+    ) throws {
+        let index = snapshot.identity.entryIndex
+        let indexMatchesKind = snapshot.kind == .world ? index == 0 : index > 0
+        guard indexMatchesKind, index < SourceEntityConstants.maxEdicts else {
+            throw GMLuaCanonicalEntityRegistryError.invalidEntityIndex(
+                kind: snapshot.kind,
+                index: index
+            )
+        }
+        guard snapshot.isNetworkable else {
+            throw GMLuaCanonicalEntityRegistryError.nonNetworkableEntity(
+                snapshot.identity.handle
+            )
+        }
+        guard snapshot.className == snapshot.kind.className else {
+            throw GMLuaCanonicalEntityRegistryError.classNameKindMismatch(
+                handle: snapshot.identity.handle,
+                expected: snapshot.kind.className,
+                received: snapshot.className
+            )
+        }
+        if isRemoval {
+            guard snapshot.lifecycle == .removed else {
+                throw GMLuaCanonicalEntityRegistryError.authoritativeRemovalIsNotRemoved(
+                    handle: snapshot.identity.handle,
+                    lifecycle: snapshot.lifecycle
+                )
+            }
+        } else if snapshot.lifecycle == .removed {
+            throw GMLuaCanonicalEntityRegistryError.authoritativeSnapshotIsRemoved(
+                snapshot.identity.handle
+            )
+        }
     }
 
     public func entity(at index: Int) -> LuaValue {
@@ -587,6 +1013,7 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
         let registry = GMLuaEntityRegistry(
             state: state,
             typeSystem: typeSystem,
+            realm: realm,
             nullValue: nullValue,
             semanticIndex: semanticIndex
         )
