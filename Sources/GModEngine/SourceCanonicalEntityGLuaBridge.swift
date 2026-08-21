@@ -234,6 +234,18 @@ public enum SourceCanonicalEntityGLuaBridge {
             )
         }
 
+        func requiredCollisionProperty(
+            _ snapshot: SourceCanonicalEntitySnapshot,
+            function: String
+        ) throws -> SourceCollisionProperty {
+            guard let property = snapshot.collisionProperty else {
+                throw LuaError.runtime(
+                    "\(function) canonical collision property is unavailable"
+                )
+            }
+            return property
+        }
+
         try setMethod("Entity:GetPos", on: entityMetatable) { arguments in
             let snapshot = try requiredSnapshot(arguments.first, function: "Entity:GetPos")
             return [try vector(snapshot.transform.origin)]
@@ -279,6 +291,67 @@ public enum SourceCanonicalEntityGLuaBridge {
                 Float(components.2)
             )
             return [try vector(snapshot.transform.inverseTransformPointToLocal(world))]
+        }
+        try setMethod("Entity:OBBMins", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Entity:OBBMins"
+            )
+            let property = try requiredCollisionProperty(
+                snapshot,
+                function: "Entity:OBBMins"
+            )
+            return [try vector(property.mins)]
+        }
+        try setMethod("Entity:OBBMaxs", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Entity:OBBMaxs"
+            )
+            let property = try requiredCollisionProperty(
+                snapshot,
+                function: "Entity:OBBMaxs"
+            )
+            return [try vector(property.maxs)]
+        }
+        try setMethod("Entity:GetCollisionBounds", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Entity:GetCollisionBounds"
+            )
+            let property = try requiredCollisionProperty(
+                snapshot,
+                function: "Entity:GetCollisionBounds"
+            )
+            return [try vector(property.mins), try vector(property.maxs)]
+        }
+        try setMethod("Entity:NearestPoint", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Entity:NearestPoint"
+            )
+            let property = try requiredCollisionProperty(
+                snapshot,
+                function: "Entity:NearestPoint"
+            )
+            guard arguments.indices.contains(1) else {
+                throw LuaError.runtime(
+                    "bad argument #1 to 'Entity:NearestPoint' (Vector expected, got no value)"
+                )
+            }
+            let components = try GMLuaVectorAngle.networkVectorComponents(
+                from: arguments[1],
+                function: "Entity:NearestPoint"
+            )
+            let worldPoint = SourceVector3(
+                Float(components.0),
+                Float(components.1),
+                Float(components.2)
+            )
+            return [try vector(property.nearestPoint(
+                to: worldPoint,
+                transform: snapshot.transform
+            ))]
         }
         try setMethod("Entity:GetVelocity", on: entityMetatable) { arguments in
             let snapshot = try requiredSnapshot(

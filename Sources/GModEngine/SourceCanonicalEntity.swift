@@ -126,6 +126,10 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
     public var transform: SourceEntityTransform
     public var motion: SourceEntityMotionState
     public var model: SourceEntityModelReference?
+    /// Entity-local collision bounds supplied by an authoritative solid or
+    /// physics asset. A missing property is preserved as unavailable instead
+    /// of falling back to Studio render bounds.
+    public var collisionProperty: SourceCollisionProperty?
     public var solidType: SourceEntitySolidType
     public var moveType: SourceMoveType
     /// Studio skin-family selection. Range validation against the loaded MDL
@@ -147,6 +151,7 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
         transform: SourceEntityTransform = .identity,
         motion: SourceEntityMotionState = SourceEntityMotionState(),
         model: SourceEntityModelReference? = nil,
+        collisionProperty: SourceCollisionProperty? = nil,
         solidType: SourceEntitySolidType = .none,
         moveType: SourceMoveType = .none,
         skin: Int = 0,
@@ -158,6 +163,7 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
         self.transform = transform
         self.motion = motion
         self.model = model
+        self.collisionProperty = collisionProperty
         self.solidType = solidType
         self.moveType = moveType
         self.skin = skin
@@ -258,6 +264,7 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
     public let transform: SourceEntityTransform
     public let motion: SourceEntityMotionState
     public let model: SourceEntityModelReference?
+    public let collisionProperty: SourceCollisionProperty?
     public let solidType: SourceEntitySolidType
     public let moveType: SourceMoveType
     public let skin: Int
@@ -276,6 +283,7 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         transform: SourceEntityTransform,
         motion: SourceEntityMotionState,
         model: SourceEntityModelReference?,
+        collisionProperty: SourceCollisionProperty? = nil,
         solidType: SourceEntitySolidType,
         moveType: SourceMoveType,
         lifecycle: SourceCanonicalEntityLifecycle,
@@ -293,6 +301,7 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         self.transform = transform
         self.motion = motion
         self.model = model
+        self.collisionProperty = collisionProperty
         self.solidType = solidType
         self.moveType = moveType
         self.skin = skin
@@ -433,6 +442,7 @@ public final class SourceCanonicalEntity: SourceEntity {
             transform: state.transform,
             motion: state.motion,
             model: state.model,
+            collisionProperty: state.collisionProperty,
             solidType: state.solidType,
             moveType: state.moveType,
             lifecycle: overrideLifecycle ?? lifecycle,

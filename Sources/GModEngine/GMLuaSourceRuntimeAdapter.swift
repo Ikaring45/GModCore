@@ -406,6 +406,33 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
         }
     }
 
+    /// Installs or clears one already validated collision property through the
+    /// same copy/validate/publish transaction as every canonical state change.
+    /// The caller remains responsible for sourcing non-nil values from an
+    /// authoritative collision/physics asset.
+    @discardableResult
+    public func setCanonicalCollisionProperty(
+        _ property: SourceCollisionProperty?,
+        for identity: SourceCanonicalEntityIdentity
+    ) throws -> SourceCanonicalEntitySnapshot {
+        try updateCanonicalEntity(identity) { candidate in
+            candidate.collisionProperty = property
+        }
+    }
+
+    /// Validates raw local collision bounds before entering the adapter
+    /// mutation boundary. Rejected bounds therefore consume no revision,
+    /// registry publication, or SERVER replication-journal entry.
+    @discardableResult
+    public func setCanonicalCollisionBounds(
+        mins: SourceVector3,
+        maxs: SourceVector3,
+        for identity: SourceCanonicalEntityIdentity
+    ) throws -> SourceCanonicalEntitySnapshot {
+        let property = try SourceCollisionProperty(mins: mins, maxs: maxs)
+        return try setCanonicalCollisionProperty(property, for: identity)
+    }
+
     /// Resolves and commits `m_nBody` as one canonical copy/validate/publish
     /// transaction. Any missing model/provider, malformed selection, decode
     /// failure, or rejected publication leaves state, revision, and journal
