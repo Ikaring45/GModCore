@@ -349,19 +349,72 @@ function Read-SourceOracleVPhysicsGuestFailure {
         [Parameter(Mandatory)] [string]$RequestID
     )
     $failure = Read-SourceOracleVPhysicsBoundedJSON `
-        -Path $Path -MaximumBytes 4096 -Field 'sandbox guest failure'
+        -Path $Path -MaximumBytes 16384 -Field 'sandbox guest failure'
     Assert-SourceOracleVPhysicsObjectShape -InputObject $failure `
         -Field 'sandbox guest failure' `
-        -Names @('schema', 'kind', 'run_id', 'request_id', 'error')
+        -Names @(
+            'schema', 'kind', 'run_id', 'request_id', 'error',
+            'srcds_exit_code', 'srcds_timed_out', 'stdout_tail', 'stderr_tail'
+        )
     if ([int64]$failure.schema -ne 1 -or
         [string]$failure.kind -cne 'source-oracle-vphysics-sandbox-guest-failure' -or
         [string]$failure.run_id -cne $RunID -or
         [string]$failure.request_id -cne $RequestID) {
         throw 'Sandbox guest failure authentication differs'
     }
-    $message = Get-SourceOracleVPhysicsString `
+    [void](Get-SourceOracleVPhysicsString `
         -InputObject $failure -Name 'error' -MaximumLength 512
-    throw "Windows Sandbox guest rejected the run: $message"
+    )
+    $exitProperty = $failure.PSObject.Properties['srcds_exit_code']
+    if ($null -ne $exitProperty.Value) {
+        $exitValue = $exitProperty.Value
+        if ($exitValue -is [bool] -or $exitValue -isnot [ValueType] -or
+            [double]$exitValue % 1 -ne 0 -or
+            [double]$exitValue -lt [int]::MinValue -or
+            [double]$exitValue -gt [int]::MaxValue) {
+            throw 'Sandbox guest failure srcds_exit_code is not null or int32'
+        }
+    }
+    [void](Get-SourceOracleVPhysicsBoolean `
+        -InputObject $failure -Name 'srcds_timed_out')
+    [void](Get-SourceOracleVPhysicsString `
+        -InputObject $failure -Name 'stdout_tail' -MaximumLength 4096 -AllowEmpty)
+    [void](Get-SourceOracleVPhysicsString `
+        -InputObject $failure -Name 'stderr_tail' -MaximumLength 4096 -AllowEmpty)
+    return $failure
+}
+
+function Assert-SourceOracleVPhysicsFinalOutput {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$OutputPath,
+        [Parameter(Mandatory)] [ValidateSet('result.json', 'failure.json')] [string]$Name
+    )
+    $entries = @(Get-ChildItem -LiteralPath $OutputPath -Force)
+    if ($entries.Count -ne 1 -or $entries[0].PSIsContainer -or
+        [string]$entries[0].Name -cne $Name) {
+        throw "Sandbox final output is not exactly $Name"
+    }
+}
+
+function Wait-SourceOracleWindowsSandboxGuestShutdown {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [int]$TimeoutSeconds)
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $existing = @()
+        try {
+            $existing = @(
+                [Diagnostics.Process]::GetProcessesByName('WindowsSandboxServer') +
+                [Diagnostics.Process]::GetProcessesByName('WindowsSandboxClient')
+            )
+            if ($existing.Count -eq 0) { return $true }
+        } finally {
+            foreach ($process in $existing) { $process.Dispose() }
+        }
+        Start-Sleep -Milliseconds 200
+    } while ([DateTime]::UtcNow -lt $deadline)
+    return $false
 }
 
 function Assert-SourceOracleNoRunningWindowsSandbox {
@@ -371,7 +424,8 @@ function Assert-SourceOracleNoRunningWindowsSandbox {
     try {
         $existing = @(
             [Diagnostics.Process]::GetProcessesByName('WindowsSandbox') +
-            [Diagnostics.Process]::GetProcessesByName('WindowsSandboxClient')
+            [Diagnostics.Process]::GetProcessesByName('WindowsSandboxClient') +
+            [Diagnostics.Process]::GetProcessesByName('WindowsSandboxServer')
         )
         if ($existing.Count -ne 0) {
             $ids = ($existing | ForEach-Object { $_.Id } | Sort-Object -Unique) -join ', '
@@ -402,6 +456,8 @@ function Invoke-SourceOracleVPhysicsPreparedSandboxSingleRun {
     $mutex = Enter-SourceOracleLaunchMutex -GModRoot ([string]$bundle.input_path)
     $owned = $null
     $validated = $null
+    $guestFailure = $null
+    $brokerExitCode = $null
     try {
         $owned = [SourceOracleOwnedProcessJob]::Start(
             $sandboxExecutable,
@@ -418,6 +474,9 @@ function Invoke-SourceOracleVPhysicsPreparedSandboxSingleRun {
                 if ([IO.File]::Exists($failurePath)) {
                     throw 'Sandbox returned both success and failure handoffs'
                 }
+                Assert-SourceOracleVPhysicsFinalOutput `
+                    -OutputPath ([string]$bundle.output_path) `
+                    -Name 'result.json'
                 $validated = Read-SourceOracleVPhysicsResult `
                     -Path $resultPath `
                     -RunID ([string]$bundle.state.run_id) `
@@ -425,22 +484,32 @@ function Invoke-SourceOracleVPhysicsPreparedSandboxSingleRun {
                 break
             }
             if ([IO.File]::Exists($failurePath)) {
-                Read-SourceOracleVPhysicsGuestFailure `
+                Assert-SourceOracleVPhysicsFinalOutput `
+                    -OutputPath ([string]$bundle.output_path) `
+                    -Name 'failure.json'
+                $guestFailure = Read-SourceOracleVPhysicsGuestFailure `
                     -Path $failurePath `
                     -RunID ([string]$bundle.state.run_id) `
                     -RequestID ([string]$bundle.state.request_id)
+                break
             }
-            if ($owned.HasExited) { break }
+            if ($null -eq $brokerExitCode -and $owned.HasExited) {
+                $brokerExitCode = [int]$owned.ExitCode
+            }
             Start-Sleep -Milliseconds 200
         }
-        if ($null -eq $validated) {
+        if ($null -eq $validated -and $null -eq $guestFailure) {
             if (-not $owned.HasExited) {
                 if (-not $owned.TerminateAndWait(10000, [uint32]0xE0560001)) {
                     throw 'Timed-out Windows Sandbox owned Job did not terminate'
                 }
                 throw 'Windows Sandbox run exceeded the fixed 90-second host timeout'
             }
-            throw "Windows Sandbox exited with code $($owned.ExitCode) without a result"
+            if ($null -eq $brokerExitCode) { $brokerExitCode = [int]$owned.ExitCode }
+            throw (
+                "Windows Sandbox broker exited with code $brokerExitCode, but no " +
+                'authenticated guest result/failure arrived before the fixed timeout'
+            )
         }
 
         $exitDeadline = [DateTime]::UtcNow.AddSeconds(15)
@@ -450,6 +519,22 @@ function Invoke-SourceOracleVPhysicsPreparedSandboxSingleRun {
         if (-not $owned.HasExited -and
             -not $owned.TerminateAndWait(10000, [uint32]0xE0560002)) {
             throw 'Validated Windows Sandbox owned Job did not terminate'
+        }
+        if (-not (Wait-SourceOracleWindowsSandboxGuestShutdown -TimeoutSeconds 15)) {
+            throw 'Authenticated guest handoff arrived but Windows Sandbox did not shut down'
+        }
+        if ($null -ne $guestFailure) {
+            $exitText = if ($null -eq $guestFailure.srcds_exit_code) {
+                'unavailable'
+            } else {
+                [string]$guestFailure.srcds_exit_code
+            }
+            throw (
+                "Windows Sandbox guest rejected the run: $($guestFailure.error); " +
+                "srcds_exit_code=$exitText; timed_out=$($guestFailure.srcds_timed_out); " +
+                "stdout_tail=$($guestFailure.stdout_tail); " +
+                "stderr_tail=$($guestFailure.stderr_tail)"
+            )
         }
         return [pscustomobject][ordered]@{
             schema = [int64]1

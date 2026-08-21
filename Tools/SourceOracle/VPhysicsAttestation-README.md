@@ -44,6 +44,9 @@ the runner requires all of the following:
 
 The guest copies individual manifest entries only; it does not copy a broad
 installed tree. It exports only `result.json` or one bounded authenticated
-`failure.json`, removes the spawned entity, and shuts down the disposable VM.
+`failure.json`; failure diagnostics retain the srcds exit code plus separately
+capped stdout/stderr tails. The host waits for this guest handoff even after
+the Windows Sandbox broker exits, then requires the disposable VM to shut down.
+The probe removes the spawned entity before either successful handoff.
 Do not promote synthetic data or a structurally decoded Swift snapshot to a
 `util.IsValidProp` golden; only the validated real result can close that gate.

@@ -905,8 +905,8 @@
       "role": "sandbox_bootstrap",
       "source_path": "tool/Run-SourceOracleVPhysicsSandboxGuest.ps1",
       "input_path": "sandbox/Run-SourceOracleVPhysicsSandboxGuest.ps1",
-      "sha256": "7cf7431eea66d9faf7dfc1bcd4a210af29c11a5f42e9dee7119078ef1ee6d1d0",
-      "maximum_bytes": 14100
+      "sha256": "1011924a8438156233c6c65f09c0db6679c0ea8770659fe02a3745608902e5e5",
+      "maximum_bytes": 18504
     }
   ]
 }

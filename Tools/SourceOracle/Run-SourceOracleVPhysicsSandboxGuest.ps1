@@ -26,6 +26,102 @@ $fixedOwnership =
 $guestProcessTimeoutSeconds = 60
 $runID = $null
 $requestID = $null
+$srcdsExitCode = $null
+$srcdsTimedOut = $false
+$srcdsStdoutTail = ''
+$srcdsStderrTail = ''
+
+if ($null -eq ('SourceOracleGuestProcessRunner' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Diagnostics;
+using System.Text;
+
+public sealed class SourceOracleGuestProcessResult
+{
+    public int ExitCode;
+    public bool HasExitCode;
+    public bool TimedOut;
+    public string StdoutTail;
+    public string StderrTail;
+}
+
+public static class SourceOracleGuestProcessRunner
+{
+    private const int TailCharacters = 4096;
+
+    private static void AppendTail(StringBuilder output, object gate, string value)
+    {
+        lock (gate)
+        {
+            output.Append(value);
+            output.Append('\n');
+            if (output.Length > TailCharacters)
+            {
+                output.Remove(0, output.Length - TailCharacters);
+            }
+        }
+    }
+
+    public static SourceOracleGuestProcessResult Run(
+        string executable,
+        string arguments,
+        string workingDirectory,
+        int timeoutMilliseconds)
+    {
+        ProcessStartInfo start = new ProcessStartInfo();
+        start.FileName = executable;
+        start.Arguments = arguments;
+        start.WorkingDirectory = workingDirectory;
+        start.UseShellExecute = false;
+        start.CreateNoWindow = true;
+        start.RedirectStandardOutput = true;
+        start.RedirectStandardError = true;
+        start.EnvironmentVariables["SteamAppId"] = "4000";
+
+        StringBuilder stdout = new StringBuilder();
+        StringBuilder stderr = new StringBuilder();
+        object stdoutGate = new object();
+        object stderrGate = new object();
+        SourceOracleGuestProcessResult result = new SourceOracleGuestProcessResult();
+
+        using (Process process = new Process())
+        {
+            process.StartInfo = start;
+            process.OutputDataReceived += delegate(object sender, DataReceivedEventArgs e)
+            {
+                if (e.Data != null) AppendTail(stdout, stdoutGate, e.Data);
+            };
+            process.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs e)
+            {
+                if (e.Data != null) AppendTail(stderr, stderrGate, e.Data);
+            };
+            if (!process.Start())
+            {
+                throw new InvalidOperationException("srcds process creation returned false");
+            }
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+            if (!process.WaitForExit(timeoutMilliseconds))
+            {
+                result.TimedOut = true;
+                process.Kill();
+                if (!process.WaitForExit(5000))
+                {
+                    throw new InvalidOperationException("timed-out srcds did not terminate");
+                }
+            }
+            process.WaitForExit();
+            result.ExitCode = process.ExitCode;
+            result.HasExitCode = true;
+        }
+        lock (stdoutGate) result.StdoutTail = stdout.ToString();
+        lock (stderrGate) result.StderrTail = stderr.ToString();
+        return result;
+    }
+}
+'@
+}
 
 function Assert-GuestRelativePath {
     param([Parameter(Mandatory)] [string]$Value)
@@ -147,6 +243,28 @@ function Assert-GuestFixedRequest {
     }
 }
 
+function Write-GuestAtomicUTF8 {
+    param(
+        [Parameter(Mandatory)] [string]$FinalPath,
+        [Parameter(Mandatory)] [string]$Text
+    )
+    $pending = $FinalPath + '.pending-' + [Guid]::NewGuid().ToString('N')
+    $stream = [IO.File]::Open(
+        $pending,
+        [IO.FileMode]::CreateNew,
+        [IO.FileAccess]::Write,
+        [IO.FileShare]::None
+    )
+    try {
+        $bytes = [Text.UTF8Encoding]::new($false).GetBytes($Text)
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+    } finally {
+        $stream.Dispose()
+    }
+    [IO.File]::Move($pending, $FinalPath)
+}
+
 function Write-GuestFailure {
     param([Parameter(Mandatory)] [string]$Message)
     if ($runID -cnotmatch '^[0-9a-f]{32}$' -or
@@ -160,14 +278,30 @@ function Write-GuestFailure {
         run_id = $runID
         request_id = $requestID
         error = $bounded
+        srcds_exit_code = $srcdsExitCode
+        srcds_timed_out = [bool]$srcdsTimedOut
+        stdout_tail = $srcdsStdoutTail
+        stderr_tail = $srcdsStderrTail
     }
     $path = Join-Path $outputRoot 'failure.json'
     if (-not [IO.File]::Exists($path)) {
-        [IO.File]::WriteAllText(
-            $path,
-            (($failure | ConvertTo-Json -Depth 4 -Compress) + "`n"),
-            [Text.UTF8Encoding]::new($false)
-        )
+        $encoded = ($failure | ConvertTo-Json -Depth 4 -Compress) + "`n"
+        $utf8 = [Text.UTF8Encoding]::new($false)
+        if ($utf8.GetByteCount($encoded) -gt 16384) {
+            $failure.stdout_tail = if ($srcdsStdoutTail.Length -gt 512) {
+                $srcdsStdoutTail.Substring($srcdsStdoutTail.Length - 512)
+            } else { $srcdsStdoutTail }
+            $failure.stderr_tail = if ($srcdsStderrTail.Length -gt 512) {
+                $srcdsStderrTail.Substring($srcdsStderrTail.Length - 512)
+            } else { $srcdsStderrTail }
+            $encoded = ($failure | ConvertTo-Json -Depth 4 -Compress) + "`n"
+        }
+        if ($utf8.GetByteCount($encoded) -gt 16384) {
+            throw 'Bounded guest failure JSON still exceeds 16384 bytes'
+        }
+        Write-GuestAtomicUTF8 `
+            -FinalPath $path `
+            -Text $encoded
     }
 }
 
@@ -289,27 +423,19 @@ try {
             throw 'Fixed srcds argument is not safely tokenizable'
         }
     }
-    $start = [Diagnostics.ProcessStartInfo]::new()
-    $start.FileName = $executable
-    $start.WorkingDirectory = [IO.Path]::GetDirectoryName($executable)
-    $start.Arguments = $arguments -join ' '
-    $start.UseShellExecute = $false
-    $start.CreateNoWindow = $true
-    $start.EnvironmentVariables['SteamAppId'] = '4000'
-    $process = [Diagnostics.Process]::Start($start)
-    if ($null -eq $process) { throw 'srcds process creation returned no handle' }
-    try {
-        $deadline = [DateTime]::UtcNow.AddSeconds($guestProcessTimeoutSeconds)
-        while (-not $process.WaitForExit(250)) {
-            if ([DateTime]::UtcNow -ge $deadline) {
-                $process.Kill()
-                [void]$process.WaitForExit(5000)
-                throw 'Fixed srcds guest timeout elapsed'
-            }
-        }
-    } finally {
-        $process.Dispose()
+    $processResult = [SourceOracleGuestProcessRunner]::Run(
+        $executable,
+        ($arguments -join ' '),
+        [IO.Path]::GetDirectoryName($executable),
+        $guestProcessTimeoutSeconds * 1000
+    )
+    if ($processResult.HasExitCode) {
+        $srcdsExitCode = [int]$processResult.ExitCode
     }
+    $srcdsTimedOut = [bool]$processResult.TimedOut
+    $srcdsStdoutTail = [string]$processResult.StdoutTail
+    $srcdsStderrTail = [string]$processResult.StderrTail
+    if ($srcdsTimedOut) { throw 'Fixed srcds guest timeout elapsed' }
 
     $localResult = Join-Path $gameRoot 'data\garryspad_vphysics_attestation\latest.json'
     if (-not [IO.File]::Exists($localResult)) {
@@ -329,10 +455,11 @@ try {
         throw 'Probe result authentication IDs differ'
     }
     $outputResult = Join-Path $outputRoot 'result.json'
+    $pendingResult = $outputResult + '.pending-' + [Guid]::NewGuid().ToString('N')
     $sourceStream = [IO.File]::OpenRead($localResult)
     try {
         $destinationStream = [IO.File]::Open(
-            $outputResult,
+            $pendingResult,
             [IO.FileMode]::CreateNew,
             [IO.FileAccess]::Write,
             [IO.FileShare]::None
@@ -346,6 +473,7 @@ try {
     } finally {
         $sourceStream.Dispose()
     }
+    [IO.File]::Move($pendingResult, $outputResult)
 } catch {
     Write-GuestFailure -Message $_.Exception.Message
 } finally {

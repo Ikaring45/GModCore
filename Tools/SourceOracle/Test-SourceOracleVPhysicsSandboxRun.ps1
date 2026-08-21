@@ -64,6 +64,40 @@ try {
     }
 }
 
+$failureRoot = Join-Path ([IO.Path]::GetTempPath()) (
+    'garryspad-vphysics-failure-static-' + [Guid]::NewGuid().ToString('N')
+)
+try {
+    [void][IO.Directory]::CreateDirectory($failureRoot)
+    $failurePath = Join-Path $failureRoot 'failure.json'
+    $failure = [pscustomobject][ordered]@{
+        schema = [int64]1
+        kind = 'source-oracle-vphysics-sandbox-guest-failure'
+        run_id = '11111111111111111111111111111111'
+        request_id = '22222222222222222222222222222222'
+        error = 'synthetic bounded failure'
+        srcds_exit_code = [int64]7
+        srcds_timed_out = $false
+        stdout_tail = 'stdout tail'
+        stderr_tail = 'stderr tail'
+    }
+    [IO.File]::WriteAllText(
+        $failurePath,
+        (($failure | ConvertTo-Json -Compress) + "`n"),
+        [Text.UTF8Encoding]::new($false)
+    )
+    $validatedFailure = Read-SourceOracleVPhysicsGuestFailure `
+        -Path $failurePath `
+        -RunID '11111111111111111111111111111111' `
+        -RequestID '22222222222222222222222222222222'
+    Assert-RunStatic ([int64]$validatedFailure.srcds_exit_code -eq 7) `
+        'Authenticated bounded failure diagnostics were rejected'
+} finally {
+    if ([IO.Directory]::Exists($failureRoot)) {
+        [IO.Directory]::Delete($failureRoot, $true)
+    }
+}
+
 $spec = Read-SourceOracleVPhysicsSandboxInputSpec -Path (
     Join-Path $toolRoot 'VPhysicsSandbox-AppID4020-x86-64-build24721267-InputSpec.json'
 )
@@ -116,11 +150,32 @@ foreach ($required in @(
     "'+map'",
     "'+garryspad_source_vphysics_attestation_run'",
     "'C:\GarrysPAD\Output'",
-    "'C:\Windows\System32\shutdown.exe'"
+    "'C:\Windows\System32\shutdown.exe'",
+    'RedirectStandardOutput = true',
+    'RedirectStandardError = true',
+    'TailCharacters = 4096',
+    "'.pending-'"
 )) {
     Assert-RunStatic ($guestText.Contains($required)) `
         "Guest bootstrap is missing fixed token $required"
 }
+
+$hostText = Get-Content -LiteralPath (
+    Join-Path $toolRoot 'SourceOracleVPhysicsSandboxRun.ps1'
+) -Raw -Encoding UTF8
+foreach ($required in @(
+    '$brokerExitCode',
+    'Assert-SourceOracleVPhysicsFinalOutput',
+    'Wait-SourceOracleWindowsSandboxGuestShutdown',
+    'stdout_tail',
+    'stderr_tail'
+)) {
+    Assert-RunStatic ($hostText.Contains($required)) `
+        "Host runner is missing broker/result contract token $required"
+}
+Assert-RunStatic `
+    ($hostText -notmatch 'if\s*\(\$owned\.HasExited\)\s*\{\s*break\s*\}') `
+    'Host runner still mistakes broker exit for guest completion'
 foreach ($forbidden in @(
     '(?i)Copy-Item[^\r\n]*-Recurse',
     '(?i)Start-Process',
