@@ -22,8 +22,9 @@ shows GMod's original HTML/CSS/JS home, then presents `gm_construct` and
 reads that BSP directly from the ZIP, resolves its VMT/VTF materials from the
 nested VPKs, and starts the paired Sandbox SERVER/CLIENT session. Home UI
 sounds also come from the nested GMod VPK. The on-screen left joystick moves,
-the right pad looks, **JUMP** jumps, and **Open Spawn Menu** opens the live
-Sandbox VGUI.
+the right pad looks, **JUMP** jumps, **Q** opens the live Sandbox Spawnmenu,
+**C** opens the context-menu lifecycle, and Pause retains the current map and
+view for Resume Game.
 
 If the ZIP is missing, invalid, duplicated, or lacks either stock BSP, startup
 stays on a diagnostic screen instead of silently falling back to unrelated
