@@ -91,6 +91,7 @@ private struct FractionZeroGroundProvider: SourceWorldWalkCollisionProvider {
 
 private enum WorldWalkInjectedTraceError: Error, Equatable {
     case ladderContact
+    case stepUp
 }
 
 private struct LadderContactThrowingProvider: SourceWorldWalkCollisionProvider {
@@ -109,6 +110,29 @@ private struct LadderContactThrowingProvider: SourceWorldWalkCollisionProvider {
         mask _: SourceContents
     ) throws -> SourceContents {
         .empty
+    }
+}
+
+private struct StepUpThrowingProvider: SourceWorldWalkCollisionProvider {
+    let world: SourceCollisionWorld
+
+    func traceWorldWalk(
+        _ ray: SourceRay,
+        mask: SourceContents
+    ) throws -> SourceGameTrace {
+        if ray.delta.x == 0,
+           ray.delta.y == 0,
+           ray.delta.z > SourceWorldWalkConfiguration.sourceSDKDefaultStepSize {
+            throw WorldWalkInjectedTraceError.stepUp
+        }
+        return world.trace(ray, mask: mask)
+    }
+
+    func worldWalkPointContents(
+        at point: SourceVector3,
+        mask: SourceContents
+    ) throws -> SourceContents {
+        world.pointContents(at: point, mask: mask)
     }
 }
 
@@ -279,6 +303,149 @@ final class SourceWorldWalkTests: XCTestCase {
         XCTAssertTrue(tick.state.isOnGround)
     }
 
+    func testGroundedPlayerStepsOntoLowWorldBrush() throws {
+        let solver = makeSolver(world: stairWorld(height: 12), maximumSpeed: 200)
+        let initial = SourceWorldWalkState(
+            origin: SourceVector3(-16, 0, SourceCollisionConstants.distanceEpsilon),
+            velocity: SourceVector3(200, 0, 0),
+            isOnGround: true
+        )
+
+        let tick = try solver.simulate(
+            state: initial,
+            command: SourceUserCommand(
+                commandNumber: 1,
+                forwardMove: 200,
+                buttons: [.forward]
+            )
+        )
+
+        XCTAssertGreaterThan(tick.state.origin.x, -14)
+        XCTAssertEqual(
+            tick.state.origin.z,
+            12 + SourceCollisionConstants.distanceEpsilon,
+            accuracy: 0.000_1
+        )
+        XCTAssertEqual(tick.state.velocity.z, 0, accuracy: 0.000_1)
+        XCTAssertEqual(tick.stepHeight, 12, accuracy: 0.000_1)
+        XCTAssertTrue(tick.state.isOnGround)
+    }
+
+    func testObstacleAboveSourceStepSizeDoesNotStep() throws {
+        let solver = makeSolver(world: stairWorld(height: 24), maximumSpeed: 200)
+        let initial = SourceWorldWalkState(
+            origin: SourceVector3(-16, 0, SourceCollisionConstants.distanceEpsilon),
+            velocity: SourceVector3(200, 0, 0),
+            isOnGround: true
+        )
+
+        let tick = try solver.simulate(
+            state: initial,
+            command: SourceUserCommand(
+                commandNumber: 1,
+                forwardMove: 200,
+                buttons: [.forward]
+            )
+        )
+
+        XCTAssertLessThan(tick.state.origin.x, -13)
+        XCTAssertEqual(
+            tick.state.origin.z,
+            SourceCollisionConstants.distanceEpsilon,
+            accuracy: 0.000_1
+        )
+        XCTAssertEqual(tick.stepHeight, 0)
+    }
+
+    func testLowStepRequiresStandingHullHeadClearance() throws {
+        let solver = makeSolver(
+            world: stairWorld(height: 12, ceilingBottom: 80),
+            maximumSpeed: 200
+        )
+        let initial = SourceWorldWalkState(
+            origin: SourceVector3(-16, 0, SourceCollisionConstants.distanceEpsilon),
+            velocity: SourceVector3(200, 0, 0),
+            isOnGround: true
+        )
+
+        let tick = try solver.simulate(
+            state: initial,
+            command: SourceUserCommand(
+                commandNumber: 1,
+                forwardMove: 200,
+                buttons: [.forward]
+            )
+        )
+
+        XCTAssertLessThan(tick.state.origin.x, -13)
+        XCTAssertEqual(
+            tick.state.origin.z,
+            SourceCollisionConstants.distanceEpsilon,
+            accuracy: 0.000_1
+        )
+        XCTAssertEqual(tick.stepHeight, 0)
+    }
+
+    func testAirMoveCannotAcquireWorldBrushStep() throws {
+        let solver = makeSolver(world: stairWorld(height: 12), maximumSpeed: 200)
+        let initial = SourceWorldWalkState(
+            origin: SourceVector3(-16, 0, 5),
+            velocity: SourceVector3(200, 0, 0),
+            isOnGround: false
+        )
+
+        let tick = try solver.simulate(
+            state: initial,
+            command: SourceUserCommand(
+                commandNumber: 1,
+                forwardMove: 200,
+                buttons: [.forward]
+            )
+        )
+
+        XCTAssertLessThan(tick.state.origin.x, -13)
+        XCTAssertLessThan(tick.state.origin.z, initial.origin.z)
+        XCTAssertEqual(tick.stepHeight, 0)
+    }
+
+    func testStepBranchTraceFailureIsTransactional() throws {
+        let world = stairWorld(height: 12)
+        let solver = SourceWorldWalkSolver(
+            collisionProvider: StepUpThrowingProvider(world: world),
+            configuration: SourceWorldWalkConfiguration(maximumSpeed: 200)
+        )
+        let input = SourceWorldWalkState(
+            origin: SourceVector3(-16, 0, SourceCollisionConstants.distanceEpsilon),
+            velocity: SourceVector3(200, 0, 0),
+            isOnGround: true
+        )
+
+        XCTAssertThrowsError(
+            try solver.simulate(
+                state: input,
+                command: SourceUserCommand(
+                    commandNumber: 1,
+                    forwardMove: 200,
+                    buttons: [.forward]
+                )
+            )
+        ) {
+            XCTAssertEqual($0 as? WorldWalkInjectedTraceError, .stepUp)
+        }
+        XCTAssertEqual(
+            input,
+            SourceWorldWalkState(
+                origin: SourceVector3(
+                    -16,
+                    0,
+                    SourceCollisionConstants.distanceEpsilon
+                ),
+                velocity: SourceVector3(200, 0, 0),
+                isOnGround: true
+            )
+        )
+    }
+
     func testAirGravityLandsWithoutPenetratingWorld() throws {
         let solver = makeSolver(world: floorWorld(), maximumSpeed: 200)
         var state = SourceWorldWalkState(origin: SourceVector3(0, 0, 100))
@@ -328,7 +495,7 @@ final class SourceWorldWalkTests: XCTestCase {
             XCTAssertEqual(state.origin, SourceVector3(0, 0, 1))
         }
 
-        XCTAssertTrue(SourceWorldWalkSolver.unsupportedFeatures.contains(.stepUp))
+        XCTAssertFalse(SourceWorldWalkSolver.unsupportedFeatures.contains(.stepUp))
         XCTAssertFalse(SourceWorldWalkSolver.unsupportedFeatures.contains(.jump))
         XCTAssertTrue(SourceWorldWalkSolver.unsupportedFeatures.contains(.duck))
         XCTAssertTrue(SourceWorldWalkSolver.unsupportedFeatures.contains(.water))
@@ -497,6 +664,52 @@ final class SourceWorldWalkTests: XCTestCase {
         ).state
         XCTAssertEqual(detached.moveType, .walk)
         XCTAssertEqual(detached.origin.y, lostContact.origin.y)
+    }
+
+    func testConstructAuthoredBrush137StepsUpSixteenUnits() throws {
+        let bsp = try SourceBSP(
+            data: GModGameAssets.data(for: .construct, kind: .bsp)
+        )
+
+        // Authored gm_construct world brush 137 has a west face at x -3200
+        // and a walkable top at z 256. The adjacent authored floor is z 240,
+        // so the standing hull must climb the real 16-unit map step.
+        let origin = SourceVector3(-3217, -2816, 240.031_25)
+        let destination = origin + SourceVector3(3, 0, 0)
+        let blocked = try bsp.traceWorld(
+            SourceRay(
+                start: origin,
+                end: destination,
+                mins: SourceWorldWalkSolver.standingHullMins,
+                maxs: SourceWorldWalkSolver.standingHullMaxs
+            ),
+            mask: SourceWorldWalkSolver.playerMask
+        )
+        XCTAssertTrue(blocked.didHitWorld)
+        XCTAssertEqual(blocked.plane.normal, SourceVector3(-1, 0, 0))
+        XCTAssertLessThan(blocked.fraction, 1)
+
+        let solver = SourceWorldWalkSolver(
+            collisionProvider: SourceBSPWorldWalkCollisionProvider(bsp: bsp),
+            configuration: SourceWorldWalkConfiguration(maximumSpeed: 200)
+        )
+        let tick = try solver.simulate(
+            state: SourceWorldWalkState(
+                origin: origin,
+                velocity: SourceVector3(200, 0, 0),
+                isOnGround: true
+            ),
+            command: SourceUserCommand(
+                commandNumber: 1,
+                forwardMove: 200,
+                buttons: [.forward]
+            )
+        )
+
+        XCTAssertEqual(tick.state.origin, SourceVector3(-3214, -2816, 256.031_25))
+        XCTAssertEqual(tick.state.velocity, SourceVector3(200, 0, 0))
+        XCTAssertEqual(tick.stepHeight, 16)
+        XCTAssertTrue(tick.state.isOnGround)
     }
 
     func testLadderTraceAndMalformedLadderStateFailTransactionally() throws {
@@ -726,6 +939,32 @@ final class SourceWorldWalkTests: XCTestCase {
                 ),
             ]
         )
+    }
+
+    private func stairWorld(
+        height: Float,
+        ceilingBottom: Float? = nil
+    ) -> SourceCollisionWorld {
+        var world = floorWorld()
+        world.addAxisAlignedBox(
+            SourceAABBCollider(
+                mins: SourceVector3(2, -100, 0),
+                maxs: SourceVector3(30, 100, height),
+                contents: .solid,
+                entityHandle: worldHandle
+            )
+        )
+        if let ceilingBottom {
+            world.addAxisAlignedBox(
+                SourceAABBCollider(
+                    mins: SourceVector3(-100, -100, ceilingBottom),
+                    maxs: SourceVector3(100, 100, ceilingBottom + 20),
+                    contents: .solid,
+                    entityHandle: worldHandle
+                )
+            )
+        }
+        return world
     }
 
     private func makeSolver(

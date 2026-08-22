@@ -146,18 +146,26 @@ public enum SourceWorldWalkError: Error, Equatable, Sendable,
 /// Tunables already represented by the equation-compatible movement core plus
 /// the per-player maximum speed supplied by the host/gamemode.
 public struct SourceWorldWalkConfiguration: Equatable, Sendable {
+    /// Source SDK 2013 `movevars_shared.cpp` declares `sv_stepsize` with the
+    /// replicated default `18`; `CBasePlayer::SharedSpawn` copies it into the
+    /// canonical per-player step size used by `StepMove` and `StayOnGround`.
+    public static let sourceSDKDefaultStepSize: Float = 18
+
     public var movement: SourceMovementParameters
     public var maximumSpeed: Float
     public var jumpHeight: Float
+    public var stepSize: Float
 
     public init(
         movement: SourceMovementParameters = SourceMovementParameters(),
         maximumSpeed: Float = 320,
-        jumpHeight: Float = 21
+        jumpHeight: Float = 21,
+        stepSize: Float = 18
     ) {
         self.movement = movement
         self.maximumSpeed = maximumSpeed
         self.jumpHeight = jumpHeight
+        self.stepSize = stepSize
     }
 }
 
@@ -224,19 +232,23 @@ public struct SourceWorldWalkTick: Equatable, Sendable {
     public let bumpCount: Int
     public let collisionCount: Int
     public let didSnapToGround: Bool
+    /// Positive `m_outStepHeight` equivalent accumulated by `StepMove`.
+    public let stepHeight: Float
 
     public init(
         commandNumber: Int32,
         state: SourceWorldWalkState,
         bumpCount: Int,
         collisionCount: Int,
-        didSnapToGround: Bool
+        didSnapToGround: Bool,
+        stepHeight: Float = 0
     ) {
         self.commandNumber = commandNumber
         self.state = state
         self.bumpCount = bumpCount
         self.collisionCount = collisionCount
         self.didSnapToGround = didSnapToGround
+        self.stepHeight = stepHeight
     }
 }
 
@@ -254,7 +266,8 @@ public struct SourceWorldWalkSolver: Sendable {
     public static let ladderMask = SourceMasks.playerSolid
     public static let groundProbeDistance: Float = 2
     public static let groundSnapUpDistance: Float = 2
-    public static let groundSnapDownDistance: Float = 18
+    public static let groundSnapDownDistance =
+        SourceWorldWalkConfiguration.sourceSDKDefaultStepSize
     public static let walkableNormalZ: Float = 0.7
     public static let maximumBumps = 4
     public static let maximumClipPlanes = 5
@@ -264,7 +277,6 @@ public struct SourceWorldWalkSolver: Sendable {
     public static let ladderJumpOffSpeed: Float = 270
 
     public static let unsupportedFeatures: [SourceWorldWalkUnsupportedFeature] = [
-        .stepUp,
         .duck,
         .verticalMove,
         .water,
@@ -414,7 +426,8 @@ public struct SourceWorldWalkSolver: Sendable {
             state: next,
             bumpCount: diagnostics.bumpCount,
             collisionCount: diagnostics.collisionCount,
-            didSnapToGround: diagnostics.didSnapToGround
+            didSnapToGround: diagnostics.didSnapToGround,
+            stepHeight: diagnostics.stepHeight
         )
     }
 
@@ -546,8 +559,98 @@ public struct SourceWorldWalkSolver: Sendable {
             return
         }
 
-        try slideMove(move: &move, diagnostics: &diagnostics)
+        let destination = move.origin +
+            move.velocity * configuration.movement.frameTime
+        let directTrace = try traceHull(start: move.origin, end: destination)
+        if directTrace.fraction == 1 {
+            move.origin = directTrace.endPosition
+            diagnostics.bumpCount += 1
+            try stayOnGround(move: &move, diagnostics: &diagnostics)
+            return
+        }
+
+        try stepMove(
+            move: &move,
+            destination: destination,
+            directTrace: directTrace,
+            diagnostics: &diagnostics
+        )
         try stayOnGround(move: &move, diagnostics: &diagnostics)
+    }
+
+    /// Source SDK 2013 `CGameMovement::StepMove`: evaluate the ordinary and
+    /// raised slides as value transactions, then commit the branch that moved
+    /// farther horizontally. Equal distances select the raised branch.
+    private func stepMove(
+        move: inout SourceMoveData,
+        destination: SourceVector3,
+        directTrace: SourceGameTrace,
+        diagnostics: inout MovementDiagnostics
+    ) throws {
+        let original = move
+
+        var downMove = original
+        var downDiagnostics = MovementDiagnostics()
+        try slideMove(
+            move: &downMove,
+            diagnostics: &downDiagnostics,
+            firstDestination: destination,
+            firstTrace: directTrace
+        )
+
+        var upMove = original
+        var upDiagnostics = MovementDiagnostics()
+        let stepDistance = configuration.stepSize +
+            SourceCollisionConstants.distanceEpsilon
+        let upwardTrace = try traceHull(
+            start: upMove.origin,
+            end: upMove.origin + SourceVector3(0, 0, stepDistance),
+            allowEmbedded: true
+        )
+        if !upwardTrace.startSolid, !upwardTrace.allSolid {
+            upMove.origin = upwardTrace.endPosition
+        }
+
+        try slideMove(move: &upMove, diagnostics: &upDiagnostics)
+
+        let downwardTrace = try traceHull(
+            start: upMove.origin,
+            end: upMove.origin - SourceVector3(0, 0, stepDistance),
+            allowEmbedded: true
+        )
+        if downwardTrace.plane.normal.z < Self.walkableNormalZ {
+            let height = downMove.origin.z - original.origin.z
+            if height > 0 { downDiagnostics.stepHeight += height }
+            move = downMove
+            diagnostics.absorb(downDiagnostics)
+            return
+        }
+
+        if !downwardTrace.startSolid, !downwardTrace.allSolid {
+            upMove.origin = downwardTrace.endPosition
+        }
+
+        let downDelta = downMove.origin - original.origin
+        let upDelta = upMove.origin - original.origin
+        let downDistanceSquared = downDelta.x * downDelta.x +
+            downDelta.y * downDelta.y
+        let upDistanceSquared = upDelta.x * upDelta.x +
+            upDelta.y * upDelta.y
+
+        if downDistanceSquared > upDistanceSquared {
+            let height = downMove.origin.z - original.origin.z
+            if height > 0 { downDiagnostics.stepHeight += height }
+            move = downMove
+            diagnostics.absorb(downDiagnostics)
+        } else {
+            // Source retains the ordinary slide's vertical velocity even
+            // when the raised transaction wins.
+            upMove.velocity.z = downMove.velocity.z
+            let height = upMove.origin.z - original.origin.z
+            if height > 0 { upDiagnostics.stepHeight += height }
+            move = upMove
+            diagnostics.absorb(upDiagnostics)
+        }
     }
 
     private func airMove(
@@ -614,7 +717,9 @@ public struct SourceWorldWalkSolver: Sendable {
 
     private func slideMove(
         move: inout SourceMoveData,
-        diagnostics: inout MovementDiagnostics
+        diagnostics: inout MovementDiagnostics,
+        firstDestination: SourceVector3? = nil,
+        firstTrace: SourceGameTrace? = nil
     ) throws {
         var timeLeft = configuration.movement.frameTime
         var planes: [SourceVector3] = []
@@ -622,12 +727,20 @@ public struct SourceWorldWalkSolver: Sendable {
         let primalVelocity = move.velocity
         var allFraction: Float = 0
 
-        for _ in 0 ..< Self.maximumBumps {
+        for bumpIndex in 0 ..< Self.maximumBumps {
             guard move.velocity.length != 0 else { break }
             diagnostics.bumpCount += 1
 
             let end = move.origin + move.velocity * timeLeft
-            let trace = try traceHull(start: move.origin, end: end)
+            let trace: SourceGameTrace
+            if bumpIndex == 0,
+               let firstDestination,
+               let firstTrace,
+               end == firstDestination {
+                trace = firstTrace
+            } else {
+                trace = try traceHull(start: move.origin, end: end)
+            }
             allFraction += trace.fraction
 
             if trace.fraction > 0 {
@@ -704,7 +817,7 @@ public struct SourceWorldWalkSolver: Sendable {
         )
         let downward = try traceHull(
             start: upward.endPosition,
-            end: originalOrigin - SourceVector3(0, 0, Self.groundSnapDownDistance)
+            end: originalOrigin - SourceVector3(0, 0, configuration.stepSize)
         )
 
         guard downward.fraction > 0,
@@ -747,7 +860,8 @@ public struct SourceWorldWalkSolver: Sendable {
     private func traceHull(
         start: SourceVector3,
         end: SourceVector3,
-        mask: SourceContents = Self.playerMask
+        mask: SourceContents = Self.playerMask,
+        allowEmbedded: Bool = false
     ) throws -> SourceGameTrace {
         let delta = end - start
         let centerOffset = (Self.standingHullMins + Self.standingHullMaxs) * Float(0.5)
@@ -774,11 +888,15 @@ public struct SourceWorldWalkSolver: Sendable {
             ray,
             mask: mask
         )
-        try validate(trace: trace, ray: ray)
+        try validate(trace: trace, ray: ray, allowEmbedded: allowEmbedded)
         return trace
     }
 
-    private func validate(trace: SourceGameTrace, ray: SourceRay) throws {
+    private func validate(
+        trace: SourceGameTrace,
+        ray: SourceRay,
+        allowEmbedded: Bool = false
+    ) throws {
         for (name, value) in [
             ("trace StartPos.x", trace.startPosition.x),
             ("trace StartPos.y", trace.startPosition.y),
@@ -802,7 +920,7 @@ public struct SourceWorldWalkSolver: Sendable {
         guard trace.fractionLeftSolid >= 0, trace.fractionLeftSolid <= 1 else {
             throw SourceWorldWalkError.inconsistentTrace("FractionLeftSolid")
         }
-        if trace.startSolid || trace.allSolid {
+        if !allowEmbedded, trace.startSolid || trace.allSolid {
             throw SourceWorldWalkError.embeddedInWorld(allSolid: trace.allSolid)
         }
 
@@ -836,7 +954,8 @@ public struct SourceWorldWalkSolver: Sendable {
             throw SourceWorldWalkError.inconsistentTrace("miss Entity identity")
         }
 
-        if trace.didHit {
+        if trace.didHit,
+           !(allowEmbedded && (trace.startSolid || trace.allSolid)) {
             let normalLengthSquared = trace.plane.normal.lengthSquared
             guard normalLengthSquared.isFinite else {
                 throw SourceWorldWalkError.nonFinite("trace HitNormal lengthSquared")
@@ -974,6 +1093,7 @@ public struct SourceWorldWalkSolver: Sendable {
             ("airSpeedCap", parameters.airSpeedCap),
             ("maximumSpeed", configuration.maximumSpeed),
             ("jumpHeight", configuration.jumpHeight),
+            ("stepSize", configuration.stepSize),
         ] {
             guard value.isFinite else {
                 throw SourceWorldWalkError.nonFinite("configuration \(name)")
@@ -999,6 +1119,10 @@ public struct SourceWorldWalkSolver: Sendable {
             ),
             ("maximum displacement per tick", parameters.maximumVelocity * parameters.frameTime),
             ("jump impulse squared", 2 * parameters.gravity * configuration.jumpHeight),
+            (
+                "step trace distance",
+                configuration.stepSize + SourceCollisionConstants.distanceEpsilon
+            ),
         ] where !value.isFinite {
             throw SourceWorldWalkError.nonFinite("configuration \(name)")
         }
@@ -1133,5 +1257,13 @@ public struct SourceWorldWalkSolver: Sendable {
         var bumpCount = 0
         var collisionCount = 0
         var didSnapToGround = false
+        var stepHeight: Float = 0
+
+        mutating func absorb(_ other: Self) {
+            bumpCount += other.bumpCount
+            collisionCount += other.collisionCount
+            didSnapToGround = didSnapToGround || other.didSnapToGround
+            stepHeight += other.stepHeight
+        }
     }
 }
