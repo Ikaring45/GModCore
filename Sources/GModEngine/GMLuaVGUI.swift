@@ -1955,6 +1955,12 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
                 "VGUI dependent layout/docking fixed-point exceeded 64 iterations"
             )
         }
+        // Native VGUI invokes both callbacks once per visible panel per frame.
+        // The bundled Panel animation extension installs AnimationThink only
+        // while SetTerm/NewAnimation work is active; executing that live Lua
+        // callback is what makes DNotify expiry, AlphaTo and LerpPositions
+        // real state transitions instead of inert compatibility methods.
+        try dispatchVisiblePanelFrameCallbacks()
         let tree = renderTree(
             viewportWidth: viewportWidth,
             viewportHeight: viewportHeight,
@@ -2015,6 +2021,32 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
             for root in byParent[Self.overlayPanelIdentifier] ?? [] { try paint(root) }
         }
         return surface.frameSnapshot
+    }
+
+    /// Runs a stable start-of-boundary set. Panels created by a callback begin
+    /// thinking on the following VGUI frame, while a panel removed by
+    /// AnimationThink is invalid before its ordinary Think callback. This also
+    /// retains Panel:Remove's deferred-storage interval until the next frame's
+    /// existing deletion pass.
+    private func dispatchVisiblePanelFrameCallbacks() throws {
+        lock.lock()
+        let identifiers = panels.compactMap { identifier, value -> Int? in
+            guard let descriptor = panelDescriptor(from: value),
+                  descriptor.isVisible,
+                  GMLuaTypeSystem.typedObject(from: value)?.isValid == true else {
+                return nil
+            }
+            return identifier
+        }.sorted()
+        lock.unlock()
+
+        for identifier in identifiers {
+            _ = try callPanelMethod(
+                identifier: identifier,
+                name: "AnimationThink"
+            )
+            _ = try callPanelMethod(identifier: identifier, name: "Think")
+        }
     }
 
     /// Minimal UITextInput boundary for engine TextEntry. It updates the same
