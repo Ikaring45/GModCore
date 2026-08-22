@@ -120,6 +120,7 @@ public enum GMLuaPermissions {
         into state: LuaState,
         realm: GMLuaRealm,
         host: GMLuaPermissionsHost,
+        sessionTransport: GMLuaPermissionSessionTransport? = nil,
         onPermissionsChanged: @escaping () -> Void = {},
         onLocalSessionConnect: @escaping () throws -> Void = {}
     ) throws -> Bool {
@@ -151,7 +152,15 @@ public enum GMLuaPermissions {
                     sessionOnly: sessionOnly
                 )
             }
-            if changed { onPermissionsChanged() }
+            if changed {
+                onPermissionsChanged()
+                if let sessionTransport {
+                    let snapshot = try onMainActor { try host.getAll() }
+                    _ = try sessionTransport.permissionsDidChange(
+                        to: snapshot
+                    )
+                }
+            }
             return []
         }
 
@@ -169,7 +178,15 @@ public enum GMLuaPermissions {
             let changed = try onMainActor {
                 try host.revoke(permission, serverIdentifier: server)
             }
-            if changed { onPermissionsChanged() }
+            if changed {
+                onPermissionsChanged()
+                if let sessionTransport {
+                    let snapshot = try onMainActor { try host.getAll() }
+                    _ = try sessionTransport.permissionsDidChange(
+                        to: snapshot
+                    )
+                }
+            }
             return []
         }
 
@@ -200,9 +217,28 @@ public enum GMLuaPermissions {
                 index: 0,
                 function: "permissions.Connect"
             )
+            let connectGranted = try onMainActor {
+                let server = try host.currentServerIdentifier()
+                return try host.isGranted(
+                    "connect",
+                    serverIdentifier: server
+                )
+            }
+            guard connectGranted else {
+                throw LuaError.runtime(
+                    "permissions.Connect denied: connect permission is not granted"
+                )
+            }
             let result = try onMainActor { try host.connect(to: target) }
             switch result {
             case .localSession:
+                if let sessionTransport {
+                    let snapshot = try onMainActor { try host.getAll() }
+                    _ = try sessionTransport.connect(
+                        to: target,
+                        permissions: snapshot
+                    )
+                }
                 try onLocalSessionConnect()
             }
             return []
