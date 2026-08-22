@@ -1160,10 +1160,18 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
             ))
         })
 
+        var childrenByParent: [Int?: [GMLuaPanelValue]] = [:]
+        childrenByParent.reserveCapacity(descriptors.count)
+        for descriptor in descriptors.values where descriptor.isVisible {
+            childrenByParent[descriptor.parentIdentifier, default: []]
+                .append(descriptor)
+        }
+        for parent in Array(childrenByParent.keys) {
+            childrenByParent[parent]!.sort(by: panelComesBefore)
+        }
+
         func childrenForDocking(of parent: Int?) -> [GMLuaPanelValue] {
-            descriptors.values
-                .filter { $0.parentIdentifier == parent && $0.isVisible }
-                .sorted(by: panelComesBefore)
+            childrenByParent[parent] ?? []
         }
 
         func dock(_ panel: GMLuaPanelValue, into available: inout GMLuaPanelRect) {
@@ -1294,10 +1302,21 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         )
         applyNativeDockingLocked(descriptors: descriptors, viewport: viewport)
 
+        var drawableChildrenByParent: [Int?: [GMLuaPanelValue]] = [:]
+        drawableChildrenByParent.reserveCapacity(descriptors.count)
+        for descriptor in descriptors.values
+        where descriptor.isVisible && descriptor.alpha > 0 {
+            drawableChildrenByParent[
+                descriptor.parentIdentifier,
+                default: []
+            ].append(descriptor)
+        }
+        for parent in Array(drawableChildrenByParent.keys) {
+            drawableChildrenByParent[parent]!.sort(by: panelComesBefore)
+        }
+
         func childrenForDrawing(of parent: Int?) -> [GMLuaPanelValue] {
-            descriptors.values
-                .filter { $0.parentIdentifier == parent && $0.isVisible && $0.alpha > 0 }
-                .sorted(by: panelComesBefore)
+            drawableChildrenByParent[parent] ?? []
         }
         var result: [GMLuaPanelRenderSnapshot] = []
         func append(
