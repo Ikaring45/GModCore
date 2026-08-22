@@ -152,6 +152,7 @@ public final class GMLuaMenuSession: @unchecked Sendable {
     private let lifecycleLock = NSLock()
     private let hostState = GMLuaMenuHostState()
     private let runtime: GMLuaRuntime
+    private let permissionsHost: GMLuaPermissionsHost?
     private var started = false
     private var closed = false
 
@@ -160,8 +161,10 @@ public final class GMLuaMenuSession: @unchecked Sendable {
         initialViewport: GMLuaViewportSize = .logicalDesktopDefault,
         textMeasurer: (any GMLuaTextMeasurer)? = nil,
         languageConfiguration: GMLuaLanguageConfiguration = .empty,
+        permissionsHost: GMLuaPermissionsHost? = nil,
         logger: @escaping (String) -> Void
     ) {
+        self.permissionsHost = permissionsHost
         runtime = GMLuaRuntime(
             realm: .menu,
             logger: logger,
@@ -311,6 +314,22 @@ public final class GMLuaMenuSession: @unchecked Sendable {
     private func installHostBoundary() throws {
         let state = runtime.state
         let hostState = self.hostState
+        if let permissionsHost {
+            let runtime = self.runtime
+            try GMLuaPermissions.install(
+                into: state,
+                realm: .menu,
+                host: permissionsHost,
+                onPermissionsChanged: { [weak runtime] in
+                    _ = runtime?.dispatchContainedHostHook(
+                        named: "OnPermissionsChanged"
+                    )
+                },
+                onLocalSessionConnect: {
+                    try hostState.append(.resumeGame)
+                }
+            )
+        }
         state.register("__garryspad_menu_action") { arguments in
             guard case let .string(rawName)? = arguments.first else {
                 throw LuaError.runtime(

@@ -159,6 +159,7 @@ public final class GModAppRuntimeFactory: @unchecked Sendable {
         fileSystem: any LuaVirtualFileSystem & Sendable,
         initialViewport: GMLuaViewportSize = .logicalDesktopDefault,
         languageConfiguration: GMLuaLanguageConfiguration = .empty,
+        permissionsHost: GMLuaPermissionsHost? = nil,
         logger: @escaping (String) -> Void
     ) -> GMLuaMenuSession {
         GMLuaMenuSession(
@@ -166,6 +167,7 @@ public final class GModAppRuntimeFactory: @unchecked Sendable {
             initialViewport: initialViewport,
             textMeasurer: textMeasurer,
             languageConfiguration: languageConfiguration,
+            permissionsHost: permissionsHost,
             logger: logger
         )
     }

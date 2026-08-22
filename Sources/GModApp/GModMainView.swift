@@ -235,7 +235,10 @@ public struct GModMainView: View {
             )
         )
         _dermaMenu = StateObject(
-            wrappedValue: GModDermaMenuModel(runtimeFactory: factory)
+            wrappedValue: GModDermaMenuModel(
+                runtimeFactory: factory,
+                permissionStore: permissionStore
+            )
         )
         _developerDiagnostics = StateObject(
             wrappedValue: GModDeveloperDiagnosticsSettingsStore.shared

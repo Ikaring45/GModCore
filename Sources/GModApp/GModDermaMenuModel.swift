@@ -16,6 +16,7 @@ final class GModDermaMenuModel: ObservableObject {
     @Published private(set) var wantsTextInput = false
 
     private let runtimeFactory: GModAppRuntimeFactory
+    private let permissionStore: GModPermissionStore
     private var session: GMLuaMenuSession?
     private var mountGeneration: UInt64?
     private var languageConfiguration: GMLuaLanguageConfiguration?
@@ -26,8 +27,12 @@ final class GModDermaMenuModel: ObservableObject {
     private var lastAdvanceTimestamp: TimeInterval?
     private var problemLines: [String] = []
 
-    init(runtimeFactory: GModAppRuntimeFactory) {
+    init(
+        runtimeFactory: GModAppRuntimeFactory,
+        permissionStore: GModPermissionStore
+    ) {
         self.runtimeFactory = runtimeFactory
+        self.permissionStore = permissionStore
     }
 
     deinit {
@@ -65,6 +70,7 @@ final class GModDermaMenuModel: ObservableObject {
                     fileSystem: files,
                     initialViewport: viewport,
                     languageConfiguration: configuration,
+                    permissionsHost: permissionStore.makeLuaPermissionsHost(),
                     logger: { _ in }
                 )
                 _ = try replacement.start()

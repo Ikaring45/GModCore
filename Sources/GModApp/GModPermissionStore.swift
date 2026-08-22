@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import GModEngine
 
 enum GModPermissionLifetime: String, Codable, CaseIterable, Sendable {
     case temporary
@@ -54,6 +55,10 @@ enum GModPermissionStoreError: Error, Equatable, Sendable {
     case multiplayerTransportUnavailable
 }
 
+enum GModPermissionConnectionResult: Equatable, Sendable {
+    case localSession
+}
+
 extension GModPermissionStoreError: LocalizedError {
     var errorDescription: String? {
         switch self {
@@ -71,10 +76,9 @@ extension GModPermissionStoreError: LocalizedError {
     }
 }
 
-/// Native ownership and persistence for the permission decisions shown by the
-/// iPad Options/Problems windows. This deliberately does not register a MENU
-/// Lua global: the MENU realm and multiplayer transport are separate missing
-/// compatibility boundaries and remain reported as unavailable.
+/// Native ownership and persistence shared by the MENU Lua permissions
+/// library and the iPad Problems view. Remote multiplayer remains an explicit
+/// unavailable boundary, while the real local single-player host is routable.
 @MainActor
 final class GModPermissionStore: ObservableObject {
     static let shared = GModPermissionStore()
@@ -201,12 +205,61 @@ final class GModPermissionStore: ObservableObject {
         return true
     }
 
-    /// A native rejection boundary for the future `permissions.Connect` API.
-    /// Validation happens first and no grant or active-session state is ever
-    /// mutated by this unavailable operation.
-    func connect(to rawTarget: String) throws {
-        _ = try Self.validatedConnectTarget(rawTarget)
-        throw GModPermissionStoreError.multiplayerTransportUnavailable
+    /// Resolves Connect against the host paths which actually exist. The
+    /// local identifier resumes the current single-player host through the
+    /// MENU action queue; arbitrary addresses still require multiplayer
+    /// transport and are rejected without changing permission state.
+    func connect(
+        to rawTarget: String
+    ) throws -> GModPermissionConnectionResult {
+        let target = try Self.validatedConnectTarget(rawTarget)
+        guard target == Self.localServerIdentifier else {
+            throw GModPermissionStoreError.multiplayerTransportUnavailable
+        }
+        return .localSession
+    }
+
+    /// Builds the native MENU bridge over this exact store. The bridge keeps
+    /// the shipped implicit-current-server signatures while GetAll retains
+    /// every server group for the stock PermissionViewer.
+    func makeLuaPermissionsHost() -> GMLuaPermissionsHost {
+        GMLuaPermissionsHost(
+            currentServerIdentifier: {
+                Self.localServerIdentifier
+            },
+            grant: { [weak self] permission, server, sessionOnly in
+                guard let self else { return false }
+                return try self.grant(
+                    permission,
+                    for: server,
+                    lifetime: sessionOnly ? .temporary : .permanent
+                )
+            },
+            revoke: { [weak self] permission, server in
+                guard let self else { return false }
+                return try self.revoke(permission, for: server)
+            },
+            isGranted: { [weak self] permission, server in
+                guard let self else { return false }
+                return try self.isGranted(permission, for: server)
+            },
+            getAll: { [weak self] in
+                let collection = self?.getAll() ?? .empty
+                return GMLuaPermissionSnapshot(
+                    temporary: collection.temporary,
+                    permanent: collection.permanent
+                )
+            },
+            connect: { [weak self] target in
+                guard let self else {
+                    throw GModPermissionStoreError.multiplayerTransportUnavailable
+                }
+                switch try self.connect(to: target) {
+                case .localSession:
+                    return .localSession
+                }
+            }
+        )
     }
 
     private func publishChange() {
