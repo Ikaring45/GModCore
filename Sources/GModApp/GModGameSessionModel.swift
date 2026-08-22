@@ -1978,7 +1978,7 @@ final class GModGameSessionModel: ObservableObject {
         )
     }
 
-    nonisolated private static func makeWorldScene(
+    nonisolated static func makeWorldScene(
         map: GModBundledMap,
         sessionGeneration: UInt64,
         mesh: GModWorldRenderMesh,
@@ -1989,6 +1989,28 @@ final class GModGameSessionModel: ObservableObject {
         var retentionBudget = GModMetalWorldBitmapRetentionBudget(
             maximumByteCount: 128 * 1_024 * 1_024
         )
+        func resolveWorldMaterial(
+            named name: String
+        ) -> GModMetalWorldMaterialResolution {
+            do {
+                if let resolved = try textureResolver.resolveWorldTexture(
+                    named: name
+                ) {
+                    let requiredByteCount = resolved.totalByteCount
+                    if retentionBudget.retain(resolved) {
+                        return .resolved(resolved)
+                    }
+                    return .retentionCapacityExceeded(
+                        requiredByteCount: requiredByteCount,
+                        retainedByteCount: retentionBudget.retainedByteCount,
+                        maximumByteCount: retentionBudget.maximumByteCount
+                    )
+                }
+                return .sourceMissing
+            } catch {
+                return .decodeFailed(GMLuaRuntime.describe(error))
+            }
+        }
         let meshIdentifier =
             "session-\(sessionGeneration):\(map.rawValue):" +
             "\(mesh.vertices.count):\(mesh.indices.count)"
@@ -2008,28 +2030,7 @@ final class GModGameSessionModel: ObservableObject {
             if waterSurface != nil || range.materialName == nil {
                 materialResolution = .notApplicable
             } else if let name = range.materialName {
-                do {
-                    if let resolved = try textureResolver.resolveWorldTexture(
-                        named: name
-                    ) {
-                        let requiredByteCount = resolved.totalByteCount
-                        if retentionBudget.retain(resolved) {
-                            materialResolution = .resolved(resolved)
-                        } else {
-                            materialResolution = .retentionCapacityExceeded(
-                                requiredByteCount: requiredByteCount,
-                                retainedByteCount: retentionBudget.retainedByteCount,
-                                maximumByteCount: retentionBudget.maximumByteCount
-                            )
-                        }
-                    } else {
-                        materialResolution = .sourceMissing
-                    }
-                } catch {
-                    materialResolution = .decodeFailed(
-                        GMLuaRuntime.describe(error)
-                    )
-                }
+                materialResolution = resolveWorldMaterial(named: name)
             } else {
                 materialResolution = .notApplicable
             }
@@ -2049,31 +2050,29 @@ final class GModGameSessionModel: ObservableObject {
                 renderLayer: renderLayer
             )
         }
-        func sunLayer(
+        let environmentLighting = mesh.environmentLighting.map {
+            GModMetalWorldEnvironmentLighting(
+                sourceDirectionFromLight: SIMD3<Float>(
+                    $0.sourceDirectionFromLight.x,
+                    $0.sourceDirectionFromLight.y,
+                    $0.sourceDirectionFromLight.z
+                ),
+                directLinearRGB: SIMD3<Float>(
+                    $0.directLinearRGB.x,
+                    $0.directLinearRGB.y,
+                    $0.directLinearRGB.z
+                ),
+                ambientLinearRGB: SIMD3<Float>(
+                    $0.ambientLinearRGB.x,
+                    $0.ambientLinearRGB.y,
+                    $0.ambientLinearRGB.z
+                )
+            )
+        }
+        func makeSunLayer(
             _ layer: GModWorldSunSpriteLayer
         ) -> GModMetalWorldSunSpriteLayer {
-            let materialResolution: GModMetalWorldMaterialResolution
-            do {
-                if let resolved = try textureResolver.resolveWorldTexture(
-                    named: layer.materialName
-                ) {
-                    let requiredByteCount = resolved.totalByteCount
-                    if retentionBudget.retain(resolved) {
-                        materialResolution = .resolved(resolved)
-                    } else {
-                        materialResolution = .retentionCapacityExceeded(
-                            requiredByteCount: requiredByteCount,
-                            retainedByteCount: retentionBudget.retainedByteCount,
-                            maximumByteCount: retentionBudget.maximumByteCount
-                        )
-                    }
-                } else {
-                    materialResolution = .sourceMissing
-                }
-            } catch {
-                materialResolution = .decodeFailed(GMLuaRuntime.describe(error))
-            }
-            return GModMetalWorldSunSpriteLayer(
+            GModMetalWorldSunSpriteLayer(
                 materialName: layer.materialName,
                 displayRGB: SIMD3<Float>(
                     layer.displayRGB.x,
@@ -2081,19 +2080,21 @@ final class GModGameSessionModel: ObservableObject {
                     layer.displayRGB.z
                 ),
                 size: layer.size,
-                materialResolution: materialResolution
+                materialResolution: resolveWorldMaterial(
+                    named: layer.materialName
+                )
             )
         }
-        let sunSprites = mesh.sunSprites.map { sun in
+        let sunSprites = mesh.sunSprites.map {
             GModMetalWorldSunSprite(
                 sourceDirectionToSun: SIMD3<Float>(
-                    sun.sourceDirectionToSun.x,
-                    sun.sourceDirectionToSun.y,
-                    sun.sourceDirectionToSun.z
+                    $0.sourceDirectionToSun.x,
+                    $0.sourceDirectionToSun.y,
+                    $0.sourceDirectionToSun.z
                 ),
-                hdrColorScale: sun.hdrColorScale,
-                core: sunLayer(sun.core),
-                overlay: sunLayer(sun.overlay)
+                hdrColorScale: $0.hdrColorScale,
+                core: makeSunLayer($0.core),
+                overlay: makeSunLayer($0.overlay)
             )
         }
         let lightmapAtlas = mesh.lightmapAtlas.map {
@@ -2158,25 +2159,7 @@ final class GModGameSessionModel: ObservableObject {
                     mesh.diagnostics.ignoredBumpLightFaceCount,
                 clampedChannelCount: mesh.lightmapAtlas?.clampedChannelCount ?? 0
             ),
-            environmentLighting: mesh.environmentLighting.map {
-                GModMetalWorldEnvironmentLighting(
-                    sourceDirectionFromLight: SIMD3<Float>(
-                        $0.sourceDirectionFromLight.x,
-                        $0.sourceDirectionFromLight.y,
-                        $0.sourceDirectionFromLight.z
-                    ),
-                    directLinearRGB: SIMD3<Float>(
-                        $0.directLinearRGB.x,
-                        $0.directLinearRGB.y,
-                        $0.directLinearRGB.z
-                    ),
-                    ambientLinearRGB: SIMD3<Float>(
-                        $0.ambientLinearRGB.x,
-                        $0.ambientLinearRGB.y,
-                        $0.ambientLinearRGB.z
-                    )
-                )
-            },
+            environmentLighting: environmentLighting,
             sunSprites: sunSprites,
             sky3D: mesh.sky3D.map {
                 GModMetalWorldSky3D(
