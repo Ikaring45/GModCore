@@ -315,22 +315,46 @@ public struct GModPlayableMovementInput: Equatable, Sendable {
     public let sideMove: Float
     public let upMove: Float
     public let buttons: SourceInputButtons
+    /// One host-owned delta sample. ``GModPlayableSessionLane`` consumes it on
+    /// only the first fixed tick in a catch-up batch; physical input/mailbox
+    /// ownership remains outside this renderer-neutral session boundary.
+    public let physgunManipulation:
+        SourceCanonicalPhysgunManipulationInput
 
     public init(
         viewAngles: SourceQAngle? = nil,
         forwardMove: Float = 0,
         sideMove: Float = 0,
         upMove: Float = 0,
-        buttons: SourceInputButtons = []
+        buttons: SourceInputButtons = [],
+        physgunManipulation:
+            SourceCanonicalPhysgunManipulationInput = .idle
     ) {
         self.viewAngles = viewAngles
         self.forwardMove = forwardMove
         self.sideMove = sideMove
         self.upMove = upMove
         self.buttons = buttons
+        self.physgunManipulation = physgunManipulation
     }
 
     public static let idle = GModPlayableMovementInput()
+
+    /// A manipulation delta is a one-shot host sample, unlike movement axes
+    /// and held buttons. Catch-up ticks after the first retain continuous input
+    /// while consuming the physgun delta exactly once.
+    func fixedTickInput(at index: Int) -> Self {
+        precondition(index >= 0)
+        guard index > 0, physgunManipulation != .idle else { return self }
+        return GModPlayableMovementInput(
+            viewAngles: viewAngles,
+            forwardMove: forwardMove,
+            sideMove: sideMove,
+            upMove: upMove,
+            buttons: buttons,
+            physgunManipulation: .idle
+        )
+    }
 }
 
 public struct GModPlayableSessionCloseReport: Equatable, Sendable {
@@ -476,6 +500,8 @@ public final class GModPlayableSession {
         SourceCanonicalRopePhysicsCommandQueue
     private var nextCommandNumber: Int32 = 1
     private var closedStorage = false
+    public private(set) var latestClientPhysgunDisplay =
+        SourceCanonicalPhysgunClientDisplaySnapshot.empty
 
     /// The host reads movement from the engine-owned canonical Player. There
     /// is no second mutable session copy that can diverge from Entity/Player.
@@ -1521,6 +1547,34 @@ public final class GModPlayableSession {
         return projector.snapshot(ifChangedFrom: revision)
     }
 
+    /// Current authoritative local-player hold, if the full Player/Weapon/
+    /// Entity/PhysObj identity set is still owned by the physgun controller.
+    public var currentPlayerPhysgunHold:
+        SourceCanonicalPhysgunHeldSnapshot?
+    {
+        guard !closedStorage else { return nil }
+        return physgunGameplayController.heldSnapshot(for: playerIdentity)
+    }
+
+    /// Resolves the latest generation-bound physgun presentation events
+    /// against the canonical CLIENT entity projection and dispatches the
+    /// original `GM:DrawPhysgunBeam` hook with its PhysObj-local hit position.
+    public func clientPhysgunDisplaySnapshot()
+        throws -> SourceCanonicalPhysgunClientDisplaySnapshot
+    {
+        try ensureOpen()
+        guard let clientEventState = clientToolActionBridge.clientEventState else {
+            latestClientPhysgunDisplay = .empty
+            return .empty
+        }
+        let snapshot = clientEventState.physgunDisplayState.renderSnapshot(
+            in: clientRuntime,
+            canonicalEntities: clientCanonicalEntitySnapshots
+        )
+        latestClientPhysgunDisplay = snapshot
+        return snapshot
+    }
+
     /// Publishes the host-selected digital button word to both realm-local
     /// Player mirrors. Analog movement is intentionally not interpreted here.
     @discardableResult
@@ -1616,7 +1670,8 @@ public final class GModPlayableSession {
             commandNumber: command.commandNumber
         )
         let physgunGameplay = physgunGameplayController.runServerTick(
-            playerIdentity: playerIdentity
+            playerIdentity: playerIdentity,
+            manipulationInput: movementInput.physgunManipulation
         )
         let serverReport = try sourceAdapter.runServerFixedTick()
         let physicsInputs = try sourceAdapter.prepareCanonicalPropPhysicsStep()
@@ -1650,7 +1705,9 @@ public final class GModPlayableSession {
     @discardableResult
     public func runClientFrame() throws -> GMLuaSourceRuntimeRunReport {
         try ensureOpen()
-        return try sourceAdapter.runClientFrame()
+        let report = try sourceAdapter.runClientFrame()
+        _ = try clientPhysgunDisplaySnapshot()
+        return report
     }
 
     /// Paints the live CLIENT VGUI tree into renderer-neutral surface

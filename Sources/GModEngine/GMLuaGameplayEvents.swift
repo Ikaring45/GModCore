@@ -195,6 +195,7 @@ public enum GMLuaGameplayEventPayload: Equatable, Sendable {
     case playerMuzzleFlash(GMLuaPlayerMuzzleFlashEvent)
     case playerViewPunch(GMLuaPlayerViewPunchEvent)
     case fireBullets(GMLuaFireBulletsEvent)
+    case physgunDisplay(SourceCanonicalPhysgunDisplayEvent)
 }
 
 public struct GMLuaGameplayEventDelivery: Equatable, Sendable {
@@ -223,6 +224,8 @@ public final class GMLuaGameplayEventClientState: @unchecked Sendable {
     private let lock = NSLock()
     private var deliveries: [GMLuaGameplayEventDelivery] = []
     private var droppedDeliveryCountStorage: UInt64 = 0
+    public let physgunDisplayState =
+        SourceCanonicalPhysgunClientDisplayState()
 
     public init() {}
 
@@ -248,6 +251,12 @@ public final class GMLuaGameplayEventClientState: @unchecked Sendable {
     }
 
     func capture(_ delivery: GMLuaGameplayEventDelivery) {
+        if case let .physgunDisplay(event) = delivery.payload {
+            physgunDisplayState.receive(
+                event,
+                transportSequence: delivery.transportSequence
+            )
+        }
         lock.lock()
         if deliveries.count < Self.maximumCapturedDeliveries {
             deliveries.append(delivery)

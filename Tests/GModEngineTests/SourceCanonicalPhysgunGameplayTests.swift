@@ -131,6 +131,24 @@ final class SourceCanonicalPhysgunGameplayTests: XCTestCase {
             """,
             sourceName: "=(native physgun definition and hook fixture)"
         )
+        try session.clientRuntime.execute(
+            """
+            PHYSGUN_CLIENT_DRAW_CALLS = 0
+            hook.Add("DrawPhysgunBeam", "physgun_vertical_client", function(
+                ply, weapon, enabled, target, physicsBone, localHitPosition
+            )
+                assert(ply == LocalPlayer())
+                assert(weapon:GetClass() == "weapon_physgun")
+                assert(enabled == true)
+                assert(target:GetClass() == "prop_physics")
+                assert(physicsBone == 0)
+                assert(isvector(localHitPosition))
+                PHYSGUN_CLIENT_DRAW_CALLS = PHYSGUN_CLIENT_DRAW_CALLS + 1
+                return false
+            end)
+            """,
+            sourceName: "=(native physgun CLIENT display hook)"
+        )
 
         let initialized = try session.runFixedTick()
         XCTAssertEqual(initialized.weaponGameplay.failures, [])
@@ -178,6 +196,39 @@ final class SourceCanonicalPhysgunGameplayTests: XCTestCase {
         XCTAssertEqual(pickupEvent.weapon, weapon.identity)
         XCTAssertEqual(pickupEvent.entity, first.entity.identity)
         XCTAssertEqual(pickupEvent.bodyID, first.body.bodyID)
+        let pickupHold = try XCTUnwrap(
+            session.currentPlayerPhysgunHold
+        )
+        try session.clientRuntime.execute(
+            "assert(PHYSGUN_CLIENT_DRAW_CALLS == 0)",
+            sourceName: "=(physgun display stays on render boundary)"
+        )
+        _ = try session.runClientFrame()
+        let pickupDisplaySnapshot = session.latestClientPhysgunDisplay
+        let pickupDisplay = try XCTUnwrap(
+            pickupDisplaySnapshot.items.first
+        )
+        let pickupDisplaySequence = try XCTUnwrap(
+            pickupDisplaySnapshot.transportSequence
+        )
+        XCTAssertEqual(pickupDisplaySnapshot.failures, [])
+        XCTAssertEqual(pickupDisplaySnapshot.items.count, 1)
+        XCTAssertEqual(pickupDisplay.player, player.identity)
+        XCTAssertEqual(pickupDisplay.weapon, weapon.identity)
+        XCTAssertEqual(pickupDisplay.entity, first.entity.identity)
+        XCTAssertEqual(pickupDisplay.bodyID, first.body.bodyID)
+        XCTAssertEqual(pickupDisplay.localHitPosition, pickupHold.localGrabPoint)
+        XCTAssertFalse(pickupDisplay.drawsDefaultEffects)
+        _ = try session.runClientFrame()
+        XCTAssertEqual(
+            session.latestClientPhysgunDisplay.transportSequence,
+            pickupDisplaySequence,
+            "rendering again must not invent a transport delivery"
+        )
+        try session.clientRuntime.execute(
+            "assert(PHYSGUN_CLIENT_DRAW_CALLS == 2)",
+            sourceName: "=(physgun display repeats per render frame)"
+        )
         XCTAssertEqual(
             dynamic.lastRequest?.mask,
             SourceMasks.shot.union(.grate)
@@ -190,21 +241,52 @@ final class SourceCanonicalPhysgunGameplayTests: XCTestCase {
         let beforeMove = try XCTUnwrap(
             session.sourceAdapter.canonicalPhysicsObject(for: first.body.bodyID)
         )
+        let heldBeforeManipulation = pickupHold
+        let rotationDelta = SourceQAngle(pitch: 5, yaw: 15, roll: -2)
         let moved = try session.runFixedTick(
             movementInput: .init(
                 viewAngles: SourceQAngle(pitch: 0, yaw: 20, roll: 0),
-                buttons: [.attack]
+                buttons: [.attack],
+                physgunManipulation: .init(
+                    distanceDeltaSourceUnits: 32,
+                    rotationDelta: rotationDelta
+                )
             )
         )
         XCTAssertEqual(moved.physgunGameplay.failures, [])
-        XCTAssertEqual(moved.physgunGameplay.events.map(\.kind), [.move])
+        XCTAssertEqual(
+            moved.physgunGameplay.events.map(\.kind),
+            [.distanceChanged, .rotated, .move]
+        )
+        let heldAfterManipulation = try XCTUnwrap(
+            session.currentPlayerPhysgunHold
+        )
+        XCTAssertEqual(
+            heldAfterManipulation.grabDistance,
+            heldBeforeManipulation.grabDistance + 32,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            heldAfterManipulation.targetAngles,
+            rotationDelta
+        )
+        _ = try session.runClientFrame()
+        let movedDisplay = session.latestClientPhysgunDisplay
+        XCTAssertEqual(movedDisplay.items.count, 1)
+        XCTAssertEqual(movedDisplay.failures, [])
+        XCTAssertGreaterThan(
+            try XCTUnwrap(movedDisplay.transportSequence),
+            pickupDisplaySequence
+        )
         let afterMove = try XCTUnwrap(
             session.sourceAdapter.canonicalPhysicsObject(for: first.body.bodyID)
         )
         XCTAssertNotEqual(afterMove.transform.origin, beforeMove.transform.origin)
         XCTAssertLessThanOrEqual(
             afterMove.linearVelocity.length,
-            SourceCanonicalPhysgunGameplayController.maximumLinearSpeed + 0.001
+            SourceCanonicalPhysgunGameplayController.maximumLinearSpeed +
+                SourceDeterministicPhysicsEnvironment.sourceDefaultGravity.length *
+                SourcePhysicsContract.fixedTimeStepSeconds + 0.001
         )
 
         try session.serverRuntime.execute(
@@ -422,18 +504,40 @@ final class SourceCanonicalPhysgunGameplayTests: XCTestCase {
             session.sourceAdapter.canonicalPhysicsObject(for: first.body.bodyID)
         ).isMotionEnabled)
 
+        let throwView = SourceQAngle(pitch: 0, yaw: 35, roll: 0)
+        let shadowThrow = try session.runFixedTick(
+            movementInput: .init(
+                viewAngles: throwView,
+                buttons: [.attack]
+            )
+        )
+        XCTAssertEqual(shadowThrow.physgunGameplay.failures, [])
+        XCTAssertEqual(shadowThrow.physgunGameplay.events.map(\.kind), [.move])
+        let heldBeforeThrowRelease = try XCTUnwrap(
+            session.sourceAdapter.canonicalPhysicsObject(for: first.body.bodyID)
+        )
+        XCTAssertGreaterThan(heldBeforeThrowRelease.linearVelocity.length, 1)
+
         let drop = try session.runFixedTick(
             movementInput: .init(
-                viewAngles: yawTwenty
+                viewAngles: throwView
             )
         )
         XCTAssertEqual(drop.physgunGameplay.failures, [])
         XCTAssertEqual(drop.physgunGameplay.events.map(\.kind), [.drop])
+        _ = try session.runClientFrame()
+        XCTAssertEqual(session.latestClientPhysgunDisplay.items, [])
+        XCTAssertEqual(session.latestClientPhysgunDisplay.failures, [])
         let droppedBody = try XCTUnwrap(
             session.sourceAdapter.canonicalPhysicsObject(for: first.body.bodyID)
         )
         XCTAssertEqual(droppedBody.motionType, .dynamicBody)
         XCTAssertTrue(droppedBody.isMotionEnabled)
+        XCTAssertGreaterThan(
+            droppedBody.linearVelocity.length,
+            heldBeforeThrowRelease.linearVelocity.length * 0.5,
+            "release must preserve shadow velocity instead of zeroing the throw"
+        )
 
         // The next test prop is spawned on the same deterministic sight-line
         // fixture. Remove the completed first prop before creating it so this
@@ -508,9 +612,37 @@ final class SourceCanonicalPhysgunGameplayTests: XCTestCase {
         )
         XCTAssertEqual(reacquired.physgunGameplay.events.map(\.kind), [.pickup])
 
-        _ = try session.sourceAdapter.markCanonicalEntityForRemoval(
-            second.entity.identity
+        try session.serverRuntime.execute(
+            """
+            undo.Create("physgun-lifecycle")
+            undo.AddEntity(Entity(\(second.entity.identity.entryIndex)))
+            undo.SetPlayer(Player(\(session.configuration.playerUserID)))
+            assert(undo.Finish("Physgun lifecycle"))
+            """,
+            sourceName: "=(physgun lifecycle stock undo record)"
         )
+        try session.clientRuntime.execute(
+            "RunConsoleCommand('undo')",
+            sourceName: "=(physgun lifecycle original CLIENT undo command)"
+        )
+        let undoAction = try session.runFixedTick(
+            movementInput: .init(
+                viewAngles: secondPlayer.transform.angles,
+                buttons: [.attack]
+            )
+        )
+        XCTAssertEqual(undoAction.actionFailures, [])
+        XCTAssertEqual(undoAction.physgunGameplay.failures, [])
+        XCTAssertEqual(undoAction.physgunGameplay.events.map(\.kind), [.move])
+        XCTAssertEqual(
+            session.sourceAdapter.canonicalSnapshot(
+                for: second.entity.identity
+            )?.lifecycle,
+            .pendingRemoval
+        )
+        _ = try session.runClientFrame()
+        XCTAssertEqual(session.latestClientPhysgunDisplay.items, [])
+        XCTAssertEqual(session.latestClientPhysgunDisplay.failures, [])
         let stale = try session.runFixedTick(
             movementInput: .init(
                 viewAngles: secondPlayer.transform.angles,
@@ -525,6 +657,13 @@ final class SourceCanonicalPhysgunGameplayTests: XCTestCase {
         XCTAssertNil(
             session.sourceAdapter.canonicalPhysicsObject(for: second.body.bodyID)
         )
+        _ = try session.runClientFrame()
+        XCTAssertEqual(session.latestClientPhysgunDisplay.items, [])
+        XCTAssertEqual(session.latestClientPhysgunDisplay.failures, [])
+        XCTAssertTrue(
+            try XCTUnwrap(session.clientToolActionBridge.clientEventState)
+                .physgunDisplayState.activeHolds.isEmpty
+        )
 
         try session.serverRuntime.execute(
             """
@@ -534,6 +673,34 @@ final class SourceCanonicalPhysgunGameplayTests: XCTestCase {
             assert(PHYSGUN_UNFREEZES == 1, "unfreeze hook count " .. tostring(PHYSGUN_UNFREEZES))
             """,
             sourceName: "=(physgun hook counts)"
+        )
+    }
+
+    func testManipulationDeltaIsConsumedOnceAcrossCatchUpTicks() {
+        let manipulation = SourceCanonicalPhysgunManipulationInput(
+            distanceDeltaSourceUnits: 10,
+            rotationDelta: SourceQAngle(pitch: 1, yaw: 2, roll: 3)
+        )
+        let input = GModPlayableMovementInput(
+            viewAngles: SourceQAngle(pitch: 4, yaw: 5, roll: 6),
+            forwardMove: 100,
+            sideMove: -50,
+            upMove: 25,
+            buttons: [.attack, .forward],
+            physgunManipulation: manipulation
+        )
+
+        XCTAssertEqual(input.fixedTickInput(at: 0), input)
+        XCTAssertEqual(
+            input.fixedTickInput(at: 1),
+            GModPlayableMovementInput(
+                viewAngles: input.viewAngles,
+                forwardMove: input.forwardMove,
+                sideMove: input.sideMove,
+                upMove: input.upMove,
+                buttons: input.buttons,
+                physgunManipulation: .idle
+            )
         )
     }
 
