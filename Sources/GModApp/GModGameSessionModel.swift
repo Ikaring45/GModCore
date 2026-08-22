@@ -215,6 +215,52 @@ private final class GModGameFrameMailbox: @unchecked Sendable {
     }
 }
 
+/// Marks camera work from MainActor touch callbacks and admits it only on an
+/// MTKView frame. The single in-flight task keeps a busy game lane from
+/// building an unbounded camera-task queue while still allowing camera
+/// publication to run during `runHostFrame` actor suspension.
+private final class GModGameCameraFrameMailbox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isDirty = false
+    private var taskScheduled = false
+
+    func markDirty() {
+        lock.lock()
+        isDirty = true
+        lock.unlock()
+    }
+
+    func clear() {
+        lock.lock()
+        isDirty = false
+        lock.unlock()
+    }
+
+    func submit(
+        consume: @escaping @Sendable () async -> Void
+    ) {
+        lock.lock()
+        guard isDirty, !taskScheduled else {
+            lock.unlock()
+            return
+        }
+        isDirty = false
+        taskScheduled = true
+        lock.unlock()
+
+        Task {
+            await consume()
+            self.finishTask()
+        }
+    }
+
+    private func finishTask() {
+        lock.lock()
+        taskScheduled = false
+        lock.unlock()
+    }
+}
+
 /// A bounded, single-drain input lane for SwiftUI pointer samples. Consecutive
 /// moves are coalesced, while began/ended/cancelled samples retain ordering.
 /// This keeps a 120 Hz touch stream from spawning an unbounded number of Tasks.
@@ -329,6 +375,7 @@ final class GModGameSessionModel: ObservableObject {
     private let inputVideoSettings: GModInputVideoSettingsStore
     let audioController: GModMenuAudioController
     private nonisolated let frameMailbox = GModGameFrameMailbox()
+    private nonisolated let cameraFrameMailbox = GModGameCameraFrameMailbox()
     private nonisolated let pointerMailbox = GModGamePointerMailbox()
     private nonisolated let surfaceTextureResolver:
         GModMetalSurfaceSourceMaterialResolver
@@ -342,6 +389,7 @@ final class GModGameSessionModel: ObservableObject {
     private var sideAxis: Float = 0
     private var jumpPressed = false
     private var heldActionButtons: SourceInputButtons = []
+    private var touchLookFrameState = GModTouchLookFrameState()
     private var isHostPopupPresented = false
     private var sessionGeneration: UInt64 = 0
     private var laneGeneration: UInt64?
@@ -409,7 +457,7 @@ final class GModGameSessionModel: ObservableObject {
         return GModGameSessionContinuitySnapshot(
             map: activeMap,
             playerOrigin: playerOrigin,
-            viewAngles: viewAngles,
+            viewAngles: touchLookFrameState.inputAngles,
             fixedTickCount: fixedTickCount
         )
     }
@@ -587,6 +635,9 @@ final class GModGameSessionModel: ObservableObject {
                 playerOrigin = snapshot.playerWalkState.origin
                 movementStatus = "Movement ready"
                 viewAngles = snapshot.playerWalkState.viewAngles
+                touchLookFrameState.reset(
+                    to: snapshot.playerWalkState.viewAngles
+                )
                 worldHorizontalFieldOfViewDegrees =
                     snapshot.worldHorizontalFieldOfViewDegrees
                 clearHeldWorldInput()
@@ -650,6 +701,9 @@ final class GModGameSessionModel: ObservableObject {
     }
 
     nonisolated func submitFrame(_ request: GModMetalFrameRequest) {
+        cameraFrameMailbox.submit { [weak self] in
+            await self?.consumeCameraFrame()
+        }
         frameMailbox.submit(request) { [weak self] batch in
             await self?.consumeFrame(batch)
         }
@@ -891,15 +945,17 @@ final class GModGameSessionModel: ObservableObject {
             rejectLateWorldInput()
             return
         }
-        viewAngles = GModTouchLookPolicy.adjustedAngles(
-            current: viewAngles,
+        guard touchLookFrameState.adjust(
             deltaX: deltaX,
             deltaY: deltaY,
             sensitivity: inputVideoSettings.touchLookSensitivity,
             invertY: inputVideoSettings.invertTouchLookY
-        )
+        ) else { return }
+        cameraFrameMailbox.markDirty()
+        // Movement receives the latest Source angle immediately. The immutable
+        // Metal world scene is published by the next host frame, coalescing all
+        // touch samples admitted before that frame into one camera snapshot.
         publishMovementInput()
-        publishCameraScene()
     }
 
     /// Idempotently closes every host-input path before the app loses active
@@ -994,6 +1050,8 @@ final class GModGameSessionModel: ObservableObject {
         lastDeliveredMessages = 0
         playerOrigin = .zero
         viewAngles = .zero
+        touchLookFrameState.reset(to: .zero)
+        cameraFrameMailbox.clear()
         worldHorizontalFieldOfViewDegrees =
             GModPlayableWorldFieldOfView.defaultHorizontalDegrees
         worldScene = nil
@@ -1072,6 +1130,8 @@ final class GModGameSessionModel: ObservableObject {
         lastDeliveredMessages = 0
         playerOrigin = .zero
         viewAngles = .zero
+        touchLookFrameState.reset(to: .zero)
+        cameraFrameMailbox.clear()
         worldHorizontalFieldOfViewDegrees =
             GModPlayableWorldFieldOfView.defaultHorizontalDegrees
         worldScene = nil
@@ -2158,7 +2218,7 @@ final class GModGameSessionModel: ObservableObject {
         frameMailbox.setMovementInput(
             GModGameWorldInputPolicy.movementInput(
                 acceptsWorldInput: acceptsWorldInput,
-                viewAngles: viewAngles,
+                viewAngles: touchLookFrameState.inputAngles,
                 forwardAxis: forwardAxis,
                 sideAxis: sideAxis,
                 jumpPressed: jumpPressed,
@@ -2167,7 +2227,19 @@ final class GModGameSessionModel: ObservableObject {
         )
     }
 
+    private func consumeCameraFrame() {
+        guard isReady, !isInputSuspended,
+              !inputSuspensionInFlight, !isClientMenuTransitioning,
+              touchLookFrameState.hasPendingPresentation else {
+            return
+        }
+        publishCameraScene()
+    }
+
     private func publishCameraScene() {
+        if let replacement = touchLookFrameState.takePendingPresentation() {
+            viewAngles = replacement
+        }
         guard let worldScene else { return }
         let eye = Self.cameraEye(for: playerOrigin)
         let sourceEye = SourceVector3(eye.x, eye.y, eye.z)

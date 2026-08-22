@@ -1940,7 +1940,6 @@ private struct GModTouchLookPad: View {
     let width: Double
     let height: Double
     let onDelta: (_ deltaX: Float, _ deltaY: Float) -> Void
-    @State private var touchState = GModLookTouchState()
 
     var body: some View {
         ZStack {
@@ -1953,8 +1952,8 @@ private struct GModTouchLookPad: View {
             Image(systemName: "viewfinder")
                 .font(.system(size: 23, weight: .ultraLight))
                 .foregroundColor(Color.white.opacity(0.34))
-            GModTouchInputBridge { sample in
-                handleTouch(sample)
+            GModLookTouchInputBridge { deltaX, deltaY in
+                onDelta(deltaX, deltaY)
             }
         }
         .frame(width: CGFloat(width), height: CGFloat(height))
@@ -1963,14 +1962,6 @@ private struct GModTouchLookPad: View {
         .accessibilityIdentifier("garryspad.control.look")
     }
 
-    private func handleTouch(_ sample: GModTouchSample) {
-        var replacement = touchState
-        let delta = replacement.consume(sample)
-        touchState = replacement
-        if let delta {
-            onDelta(delta.x, delta.y)
-        }
-    }
 }
 
 private struct GModTouchActionButton: View {
