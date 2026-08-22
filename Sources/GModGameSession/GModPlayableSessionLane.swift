@@ -462,6 +462,20 @@ public actor GModPlayableSessionLane {
         return try session.dropActiveWeapon()
     }
 
+    /// Enqueues the fixed stock CLIENT `undo` command on the lane that owns
+    /// both Lua realms. The following ordinary host frame performs SERVER
+    /// dispatch and any resulting canonical deferred removal/replication.
+    public func requestUndo(
+        expectedGeneration: UInt64? = nil
+    ) throws {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        try session.requestUndo()
+    }
+
     public func renderClientVGUIFrame(
         expectedGeneration: UInt64? = nil
     ) throws -> GMLuaSurfaceFrameSnapshot {

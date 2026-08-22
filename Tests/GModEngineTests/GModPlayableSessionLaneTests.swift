@@ -1050,6 +1050,54 @@ final class GModPlayableSessionLaneTests: XCTestCase {
         _ = try await lane.close()
     }
 
+    func testTouchUndoUsesOriginalClientConsoleAndServerUndoStack()
+        async throws
+    {
+        let lane = GModPlayableSessionLane()
+        let snapshot = try await lane.start(
+            configuration: GModPlayableSessionConfiguration(map: .flatgrass)
+        )
+
+        try await lane.execute(
+            """
+            TOUCH_UNDO_COUNT = 0
+            undo.Create("touch-action")
+            undo.AddFunction(function(data)
+                assert(data.Name == "touch-action")
+                TOUCH_UNDO_COUNT = TOUCH_UNDO_COUNT + 1
+            end)
+            undo.SetPlayer(Player(1))
+            assert(undo.Finish("Touch action"))
+            """,
+            realm: .server,
+            sourceName: "=(touch undo original SERVER stack)",
+            expectedGeneration: snapshot.generation
+        )
+
+        try await lane.requestUndo(
+            expectedGeneration: snapshot.generation
+        )
+        let frame = try await lane.runHostFrame(
+            fixedTickCount: 1,
+            renderClientFrame: false,
+            expectedGeneration: snapshot.generation,
+            expectedInputEpoch: snapshot.inputEpoch
+        )
+        XCTAssertEqual(frame.actionFailures, [])
+        XCTAssertTrue(frame.clientSurfaceSounds.requests.contains {
+            $0.soundPath == "buttons/button15.wav"
+        })
+        try await lane.execute(
+            "assert(TOUCH_UNDO_COUNT == 1)",
+            realm: .server,
+            sourceName: "=(touch undo original SERVER result)",
+            expectedGeneration: snapshot.generation
+        )
+        _ = try await lane.close(
+            expectedGeneration: snapshot.generation
+        )
+    }
+
     private func installDropFinalizer(
         marker: String,
         lane: GModPlayableSessionLane,

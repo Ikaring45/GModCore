@@ -206,6 +206,10 @@ public struct GModMainView: View {
         localizationSelection.snapshot.appText(.dropWeaponButton)
     }
 
+    private var localizedUndoButton: String {
+        localizationSelection.snapshot.appText(.undoButton)
+    }
+
     private var localizedContextMenuButton: String {
         localizationSelection.snapshot.appText(
             game.isContextMenuOpen
@@ -431,6 +435,16 @@ public struct GModMainView: View {
                                                 ) { pressed in
                                                     if pressed {
                                                         game.dropActiveWeapon()
+                                                    }
+                                                }
+                                                GModTouchActionButton(
+                                                    label: localizedUndoButton,
+                                                    diameter: layout.heldActionDiameter,
+                                                    accessibilityIdentifier:
+                                                        "garryspad.control.undo"
+                                                ) { pressed in
+                                                    if pressed {
+                                                        game.undoLastAction()
                                                     }
                                                 }
                                                 GModTouchActionButton(

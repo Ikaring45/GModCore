@@ -461,6 +461,18 @@ public final class GModPlayableSession {
         )
     }
 
+    /// Queues the stock Sandbox undo console command from CLIENT. The command
+    /// remains a fixed literal so this touch boundary cannot become an
+    /// arbitrary Lua execution surface, and Entity removal stays owned by the
+    /// bundled `undo.lua` plus the ordinary CLIENT-to-SERVER FIFO.
+    public func requestUndo() throws {
+        try ensureOpen()
+        try clientRuntime.execute(
+            #"RunConsoleCommand("undo")"#,
+            sourceName: "=(touch stock undo command)"
+        )
+    }
+
     public convenience init(
         configuration: GModPlayableSessionConfiguration = .init(),
         attestedPropPhysicsAssets: [SourceAttestedPropPhysicsAsset] = [],
