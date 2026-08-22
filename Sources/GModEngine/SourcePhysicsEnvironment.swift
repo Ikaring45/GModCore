@@ -336,6 +336,9 @@ public enum SourcePhysicsBodyMutation: Equatable, Sendable {
     case applyTorqueCenter(SourceVector3)
     case setDamping(linear: Float, angular: Float)
     case setMassKilograms(Float)
+    /// `teleport` preserves GLua's optional `PhysObj:SetPos` collision mode.
+    case setPosition(SourceVector3, teleport: Bool)
+    case setAngles(SourceQAngle)
 }
 
 public struct SourcePhysicsBodyMutationCommand: Equatable, Sendable {
@@ -425,6 +428,21 @@ public struct SourcePhysicsBodyMutationCommand: Equatable, Sendable {
             else {
                 throw SourcePhysicsContractError
                     .massOutsideVPhysicsRange(massKilograms)
+            }
+        case let .setPosition(position, _):
+            try sourcePhysicsRequireFinite(
+                position,
+                field: "bodyMutation.position"
+            )
+        case let .setAngles(angles):
+            guard
+                angles.pitch.isFinite,
+                angles.yaw.isFinite,
+                angles.roll.isFinite
+            else {
+                throw SourcePhysicsContractError.nonFinite(
+                    field: "bodyMutation.angles"
+                )
             }
         case .wake,
              .sleep,

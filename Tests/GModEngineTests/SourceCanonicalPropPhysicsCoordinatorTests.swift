@@ -673,6 +673,7 @@ private final class RecordingPhysicsEnvironment: SourcePhysicsEnvironment {
         _ body: SourcePhysicsBodySnapshot,
         by mutation: SourcePhysicsBodyMutation
     ) throws -> SourcePhysicsBodySnapshot {
+        var transform = body.transform
         var linearVelocity = body.linearVelocity
         var angularVelocity = body.angularVelocity
         var damping = body.damping
@@ -727,12 +728,16 @@ private final class RecordingPhysicsEnvironment: SourcePhysicsEnvironment {
                 massKilograms: massKilograms,
                 principalInertia: body.massProperties.principalInertia * scale
             )
+        case let .setPosition(position, _):
+            transform.origin = position
+        case let .setAngles(angles):
+            transform.angles = angles
         }
         return try SourcePhysicsBodySnapshot(
             bodyID: body.bodyID,
             shape: body.shape,
             massProperties: massProperties,
-            transform: body.transform,
+            transform: transform,
             linearVelocity: linearVelocity,
             angularVelocity: angularVelocity,
             damping: damping,

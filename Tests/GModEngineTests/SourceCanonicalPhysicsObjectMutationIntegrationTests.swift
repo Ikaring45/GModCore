@@ -13,6 +13,100 @@ final class SourceCanonicalPhysicsObjectMutationIntegrationTests: XCTestCase {
     private let phyData = Data("exact mutation phy".utf8)
     private let studioChecksum: Int32 = 91_337
 
+    func testSetPosAndSetAnglesUseFullBodyFIFOAndPersistNextTick() throws {
+        let setup = try makeSetup()
+        defer { setup.close() }
+        let position = SourceVector3(100, 200, 300)
+        let angles = SourceQAngle(pitch: 11, yaw: 22, roll: 33)
+
+        let values = try setup.server.executeReturningValues(
+            """
+            local prop = assert(ents.Create("prop_physics"))
+            prop:SetModel("models/props/physics_mutation.mdl")
+            prop:SetPos(Vector(10, 20, 30))
+            prop:Spawn()
+            prop:Activate()
+            local phys = prop:GetPhysicsObject()
+            assert(IsValid(phys))
+            phys:EnableGravity(false)
+            phys:SetPos(Vector(100, 200, 300), true)
+            phys:SetAngles(Angle(11, 22, 33))
+            TRANSFORM_PROP = prop
+            return prop
+            """,
+            sourceName: "=(authoritative PhysObj transform FIFO)"
+        )
+        let entity = try XCTUnwrap(
+            setup.server.entityRegistry?.canonicalSnapshot(
+                for: try XCTUnwrap(values.first)
+            )
+        )
+        let bodyID = try SourcePhysicsBodyID(
+            entityIdentity: entity.identity,
+            solidIndex: 0
+        )
+        let pending = setup.transport
+            .preparePendingCanonicalPhysicsBodyCommands()
+        XCTAssertEqual(pending.map(\.sequence), [1, 2, 3, 4])
+        XCTAssertEqual(pending.compactMap { command in
+            guard case let .mutateBody(mutation) = command.payload else {
+                return nil
+            }
+            return mutation
+        }, try [
+            SourcePhysicsBodyMutationCommand(
+                bodyID: bodyID,
+                mutation: .setGravityEnabled(false)
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: bodyID,
+                mutation: .setPosition(position, teleport: true)
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: bodyID,
+                mutation: .setAngles(angles)
+            ),
+        ])
+
+        _ = try setup.adapter.runServerFixedTick()
+        let coordinator = SourceCanonicalPropPhysicsCoordinator(
+            environment: setup.environment,
+            commandSequenceSource: setup.transport
+        )
+        let firstStep = try coordinator.step(
+            inputs: setup.adapter.prepareCanonicalPropPhysicsStep(),
+            simulationTick: UInt64(setup.adapter.serverGlobals.tickCount)
+        )
+        XCTAssertEqual(firstStep.commandSequences, [1, 2, 3, 4, 5])
+        let firstBody = try XCTUnwrap(firstStep.bodies.first)
+        XCTAssertEqual(firstBody.bodyID, bodyID)
+        XCTAssertEqual(firstBody.transform.origin, position)
+        XCTAssertEqual(firstBody.transform.angles, angles)
+        XCTAssertFalse(firstBody.isGravityEnabled)
+        try setup.adapter.commitCanonicalPropPhysicsStep(firstStep)
+
+        try setup.server.execute(
+            """
+            local phys = TRANSFORM_PROP:GetPhysicsObject()
+            local pos = phys:GetPos()
+            local ang = phys:GetAngles()
+            assert(pos.x == 100 and pos.y == 200 and pos.z == 300)
+            assert(ang.p == 11 and ang.y == 22 and ang.r == 33)
+            """,
+            sourceName: "=(committed PhysObj transform snapshot)"
+        )
+
+        _ = try setup.adapter.runServerFixedTick()
+        let nextStep = try coordinator.step(
+            inputs: setup.adapter.prepareCanonicalPropPhysicsStep(),
+            simulationTick: UInt64(setup.adapter.serverGlobals.tickCount)
+        )
+        XCTAssertEqual(nextStep.commandSequences, [6])
+        XCTAssertEqual(nextStep.operations, [])
+        XCTAssertEqual(nextStep.bodies.first?.transform, firstBody.transform)
+        try setup.adapter.commitCanonicalPropPhysicsStep(nextStep)
+    }
+
     func testSetMassUsesFullBodyIdentityFIFOAndPublishesCanonicalSnapshot()
         throws
     {

@@ -69,6 +69,8 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
             assert(phys.GetMassCenter == nil)
             assert(phys:IsMotionEnabled() == true)
             assert(type(phys.SetMass) == "function")
+            assert(type(phys.SetPos) == "function")
+            assert(type(phys.SetAngles) == "function")
 
             phys:Wake()
             phys:Sleep()
@@ -97,6 +99,21 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
                 phys:SetMass(0 / 0)
             end)
             assert(massOK == false and massMessage ~= nil)
+            phys:SetPos(Vector(40, 50, 60))
+            phys:SetPos(Vector(41, 51, 61), true)
+            phys:SetAngles(Angle(11, 22, 33))
+            local transformOK, transformMessage = pcall(function()
+                phys:SetPos(Vector(math.huge, 0, 0))
+            end)
+            assert(transformOK == false and transformMessage ~= nil)
+            transformOK, transformMessage = pcall(function()
+                phys:SetPos(Vector(0, 0, 0), 1)
+            end)
+            assert(transformOK == false and transformMessage ~= nil)
+            transformOK, transformMessage = pcall(function()
+                phys:SetAngles(Angle(0, 0 / 0, 0))
+            end)
+            assert(transformOK == false and transformMessage ~= nil)
             local dampingOK, dampingMessage = pcall(function()
                 phys:SetDamping(-1, 2)
             end)
@@ -195,6 +212,28 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
             ),
             SourcePhysicsBodyMutationCommand(
                 bodyID: pending.bodyID,
+                mutation: .setPosition(
+                    SourceVector3(40, 50, 60),
+                    teleport: false
+                )
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .setPosition(
+                    SourceVector3(41, 51, 61),
+                    teleport: true
+                )
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .setAngles(SourceQAngle(
+                    pitch: 11,
+                    yaw: 22,
+                    roll: 33
+                ))
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
                 mutation: .applyCenterForce(SourceVector3(100, 200, 300))
             ),
             SourcePhysicsBodyMutationCommand(
@@ -213,7 +252,7 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
         let simulated = try makeBodySnapshot(
             bodyID: pending.bodyID,
             transform: SourceEntityTransform(
-                origin: SourceVector3(40, 50, 60),
+                origin: SourceVector3(41, 51, 61),
                 angles: SourceQAngle(pitch: 11, yaw: 22, roll: 33)
             ),
             linearVelocity: SourceVector3(14, 15, 16),
@@ -234,7 +273,9 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
             local current = Entity(37):GetPhysicsObject()
             assert(current == PENDING_PHYS)
             local pos = current:GetPos()
-            assert(pos.x == 40 and pos.y == 50 and pos.z == 60)
+            assert(pos.x == 41 and pos.y == 51 and pos.z == 61)
+            local angles = current:GetAngles()
+            assert(angles.p == 11 and angles.y == 22 and angles.r == 33)
             assert(current:IsCollisionEnabled() == true)
             assert(current:IsAsleep() == false)
             assert(current:GetMass() == 24)

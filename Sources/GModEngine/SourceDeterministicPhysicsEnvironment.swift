@@ -892,6 +892,19 @@ public final class SourceDeterministicPhysicsEnvironment:
                 massKilograms: massKilograms,
                 principalInertia: authored.principalInertia * scale
             )
+        case let .setPosition(position, teleport):
+            // IPhysicsObject exposes SetPosition on every body, independent
+            // of static/dynamic or motion-enabled state. This backend has no
+            // collision sweep inside an assignment, so GLua's `teleport=true`
+            // temporary collision suppression has no additional solver work;
+            // the bit is still retained by FIFO/replay. No undocumented wake,
+            // velocity, or contact-cache side effect is fabricated here.
+            _ = teleport
+            body.transform.origin = position
+        case let .setAngles(angles):
+            // GLua SetAngles is the angle-only projection of the same
+            // IPhysicsObject position boundary. Preserve every other state.
+            body.transform.angles = angles
         }
     }
 

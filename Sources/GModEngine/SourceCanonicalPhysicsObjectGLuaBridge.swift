@@ -398,6 +398,29 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
                 function: "PhysObj:SetMass"
             )))
         }
+        try setPhysicsMutationMethod("SetPos") { arguments in
+            .setPosition(
+                try self.requiredVector(
+                    arguments,
+                    at: 1,
+                    function: "PhysObj:SetPos"
+                ),
+                teleport: arguments.indices.contains(2)
+                    ? try self.requiredBoolean(
+                        arguments,
+                        at: 2,
+                        function: "PhysObj:SetPos"
+                    )
+                    : false
+            )
+        }
+        try setPhysicsMutationMethod("SetAngles") { arguments in
+            .setAngles(try self.requiredAngle(
+                arguments,
+                at: 1,
+                function: "PhysObj:SetAngles"
+            ))
+        }
     }
 
     private func setPhysicsMutationMethod(
@@ -598,6 +621,28 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
             Float(components.0),
             Float(components.1),
             Float(components.2)
+        )
+    }
+
+    private func requiredAngle(
+        _ arguments: [LuaValue],
+        at index: Int,
+        function: String
+    ) throws -> SourceQAngle {
+        guard arguments.indices.contains(index) else {
+            throw LuaError.runtime(
+                "bad argument #\(index) to '\(function)' " +
+                "(Angle expected, got no value)"
+            )
+        }
+        let components = try GMLuaVectorAngle.networkAngleComponents(
+            from: arguments[index],
+            function: function
+        )
+        return SourceQAngle(
+            pitch: Float(components.0),
+            yaw: Float(components.1),
+            roll: Float(components.2)
         )
     }
 

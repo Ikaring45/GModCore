@@ -245,7 +245,7 @@ public struct SourcePhysicsReplayFrame: Equatable, Sendable {
 
 /// Decoded value transcript plus its canonical little-endian binary form.
 public struct SourcePhysicsReplayLog: Equatable, Sendable {
-    public static let formatVersion: UInt16 = 6
+    public static let formatVersion: UInt16 = 7
 
     public let fixedTimeStepSeconds: Float
     public let frames: [SourcePhysicsReplayFrame]
@@ -819,6 +819,8 @@ private struct SourcePhysicsReplayTranscriptValidator {
              .applyCenterImpulse,
              .applyTorqueCenter:
             break
+        case .setPosition, .setAngles:
+            break
         }
         liveBodies[bodyID] = body
     }
@@ -1255,6 +1257,13 @@ private struct SourcePhysicsReplayEncoder {
         case let .setMassKilograms(massKilograms):
             try writeUInt8(14)
             try writeFloat(massKilograms, field: "mutation.massKilograms")
+        case let .setPosition(position, teleport):
+            try writeUInt8(15)
+            try write(position, field: "mutation.position")
+            try writeBool(teleport)
+        case let .setAngles(angles):
+            try writeUInt8(16)
+            try write(angles, field: "mutation.angles")
         }
     }
 
@@ -1490,6 +1499,15 @@ private struct SourcePhysicsReplayEncoder {
     }
 
     private mutating func write(
+        _ angles: SourceQAngle,
+        field: String
+    ) throws {
+        try writeFloat(angles.pitch, field: "\(field).pitch")
+        try writeFloat(angles.yaw, field: "\(field).yaw")
+        try writeFloat(angles.roll, field: "\(field).roll")
+    }
+
+    private mutating func write(
         _ motionType: SourcePhysicsMotionType
     ) throws {
         switch motionType {
@@ -1720,6 +1738,13 @@ private struct SourcePhysicsReplayDecoder {
             mutation = .setMassKilograms(try readFloat(
                 field: "mutation.massKilograms"
             ))
+        case 15:
+            mutation = .setPosition(
+                try readVector(field: "mutation.position"),
+                teleport: try readBool(field: "mutation.teleport")
+            )
+        case 16:
+            mutation = .setAngles(try readAngles(field: "mutation.angles"))
         default:
             throw SourcePhysicsReplayError.invalidTag(
                 field: "bodyMutation",
@@ -2082,6 +2107,14 @@ private struct SourcePhysicsReplayDecoder {
             try readFloat(field: "\(field).x"),
             try readFloat(field: "\(field).y"),
             try readFloat(field: "\(field).z")
+        )
+    }
+
+    private mutating func readAngles(field: String) throws -> SourceQAngle {
+        SourceQAngle(
+            pitch: try readFloat(field: "\(field).pitch"),
+            yaw: try readFloat(field: "\(field).yaw"),
+            roll: try readFloat(field: "\(field).roll")
         )
     }
 

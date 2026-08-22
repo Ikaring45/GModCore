@@ -156,6 +156,55 @@ struct SourcePhysicsEnvironmentTests {
         #expect(maximum.mutation == .setMassKilograms(50_000))
     }
 
+    @Test("body transform mutations are finite and retain teleport mode")
+    func bodyTransformMutationContractFailsClosed() throws {
+        let bodyID = try SourcePhysicsBodyID(
+            entityIdentity: makeIdentity(entryIndex: 814, serialNumber: 27),
+            solidIndex: 3
+        )
+        #expect(throws: SourcePhysicsContractError.nonFinite(
+            field: "bodyMutation.position"
+        )) {
+            _ = try SourcePhysicsBodyMutationCommand(
+                bodyID: bodyID,
+                mutation: .setPosition(
+                    SourceVector3(.nan, 2, 3),
+                    teleport: false
+                )
+            )
+        }
+        #expect(throws: SourcePhysicsContractError.nonFinite(
+            field: "bodyMutation.angles"
+        )) {
+            _ = try SourcePhysicsBodyMutationCommand(
+                bodyID: bodyID,
+                mutation: .setAngles(SourceQAngle(
+                    pitch: 1,
+                    yaw: .infinity,
+                    roll: 3
+                ))
+            )
+        }
+
+        let position = try SourcePhysicsBodyMutationCommand(
+            bodyID: bodyID,
+            mutation: .setPosition(SourceVector3(10, 20, 30), teleport: true)
+        )
+        let angles = try SourcePhysicsBodyMutationCommand(
+            bodyID: bodyID,
+            mutation: .setAngles(SourceQAngle(pitch: 11, yaw: 22, roll: 33))
+        )
+        #expect(position.bodyID.entityIdentity.handle == bodyID.entityIdentity.handle)
+        #expect(
+            position.mutation ==
+                .setPosition(SourceVector3(10, 20, 30), teleport: true)
+        )
+        #expect(
+            angles.mutation ==
+                .setAngles(SourceQAngle(pitch: 11, yaw: 22, roll: 33))
+        )
+    }
+
     @Test("shape, mass, inertia, and transforms reject missing or invented values")
     func invalidPhysicalInputsFailClosed() throws {
         #expect(throws: SourcePhysicsContractError.emptyShape) {

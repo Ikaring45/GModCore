@@ -223,6 +223,176 @@ struct SourceDeterministicPhysicsEnvironmentTests {
         #expect(rolledBackBody.massProperties == changedBody.massProperties)
     }
 
+    @Test("transform setters support static, dynamic, and motion-disabled bodies")
+    func transformMutationsAndRollback() throws {
+        let environment = SourceDeterministicPhysicsEnvironment(
+            configuration: try .init(gravity: .zero)
+        )
+        let staticID = try makeBodyID(entry: 92, serial: 12)
+        let dynamicID = try makeBodyID(entry: 93, serial: 12)
+        let disabledID = try makeBodyID(entry: 94, serial: 12)
+        let missingID = try makeBodyID(entry: 95, serial: 12)
+        let staticAngles = SourceQAngle(pitch: 1, yaw: 2, roll: 3)
+        let dynamicAngles = SourceQAngle(pitch: 11, yaw: 22, roll: 33)
+        let disabledAngles = SourceQAngle(pitch: 44, yaw: 55, roll: 66)
+
+        let transformed = try environment.execute(
+            SourcePhysicsCommandBatch(commands: [
+                SourcePhysicsCommand(
+                    sequence: 1,
+                    payload: .createBody(try makeCreation(
+                        bodyID: staticID,
+                        shape: makeCubeShape(),
+                        origin: .zero,
+                        motionType: .staticBody,
+                        mass: 10,
+                        inertia: SourceVector3(2, 3, 4),
+                        material: 1,
+                        gravity: false
+                    ))
+                ),
+                SourcePhysicsCommand(
+                    sequence: 2,
+                    payload: .createBody(try makeCreation(
+                        bodyID: dynamicID,
+                        shape: makeCubeShape(),
+                        origin: SourceVector3(100, 0, 0),
+                        motionType: .dynamicBody,
+                        mass: 10,
+                        inertia: SourceVector3(2, 3, 4),
+                        material: 1,
+                        gravity: false
+                    ))
+                ),
+                SourcePhysicsCommand(
+                    sequence: 3,
+                    payload: .createBody(try makeCreation(
+                        bodyID: disabledID,
+                        shape: makeCubeShape(),
+                        origin: SourceVector3(200, 0, 0),
+                        motionType: .dynamicBody,
+                        mass: 10,
+                        inertia: SourceVector3(2, 3, 4),
+                        material: 1,
+                        gravity: false
+                    ))
+                ),
+                SourcePhysicsCommand(
+                    sequence: 4,
+                    payload: .mutateBody(try .init(
+                        bodyID: disabledID,
+                        mutation: .setMotionEnabled(false)
+                    ))
+                ),
+                SourcePhysicsCommand(
+                    sequence: 5,
+                    payload: .mutateBody(try .init(
+                        bodyID: staticID,
+                        mutation: .setPosition(
+                            SourceVector3(10, 0, 0),
+                            teleport: false
+                        )
+                    ))
+                ),
+                SourcePhysicsCommand(
+                    sequence: 6,
+                    payload: .mutateBody(try .init(
+                        bodyID: staticID,
+                        mutation: .setAngles(staticAngles)
+                    ))
+                ),
+                SourcePhysicsCommand(
+                    sequence: 7,
+                    payload: .mutateBody(try .init(
+                        bodyID: dynamicID,
+                        mutation: .setPosition(
+                            SourceVector3(110, 0, 0),
+                            teleport: true
+                        )
+                    ))
+                ),
+                SourcePhysicsCommand(
+                    sequence: 8,
+                    payload: .mutateBody(try .init(
+                        bodyID: dynamicID,
+                        mutation: .setAngles(dynamicAngles)
+                    ))
+                ),
+                SourcePhysicsCommand(
+                    sequence: 9,
+                    payload: .mutateBody(try .init(
+                        bodyID: disabledID,
+                        mutation: .setPosition(
+                            SourceVector3(210, 0, 0),
+                            teleport: false
+                        )
+                    ))
+                ),
+                SourcePhysicsCommand(
+                    sequence: 10,
+                    payload: .mutateBody(try .init(
+                        bodyID: disabledID,
+                        mutation: .setAngles(disabledAngles)
+                    ))
+                ),
+                SourcePhysicsCommand(
+                    sequence: 11,
+                    payload: .simulate(.init(simulationTick: 1))
+                ),
+            ])
+        )
+        let bodies = Dictionary(
+            uniqueKeysWithValues: transformed.bodies.map { ($0.bodyID, $0) }
+        )
+        #expect(bodies[staticID]?.transform.origin == SourceVector3(10, 0, 0))
+        #expect(bodies[staticID]?.transform.angles == staticAngles)
+        #expect(bodies[staticID]?.isMotionEnabled == false)
+        #expect(bodies[dynamicID]?.transform.origin == SourceVector3(110, 0, 0))
+        #expect(bodies[dynamicID]?.transform.angles == dynamicAngles)
+        #expect(bodies[dynamicID]?.isMotionEnabled == true)
+        #expect(bodies[disabledID]?.transform.origin == SourceVector3(210, 0, 0))
+        #expect(bodies[disabledID]?.transform.angles == disabledAngles)
+        #expect(bodies[disabledID]?.isMotionEnabled == false)
+        #expect(bodies.values.allSatisfy { $0.linearVelocity == .zero })
+
+        #expect(throws: SourceDeterministicPhysicsEnvironment.Error.missingBody(
+            missingID
+        )) {
+            _ = try environment.execute(SourcePhysicsCommandBatch(commands: [
+                SourcePhysicsCommand(
+                    sequence: 12,
+                    payload: .mutateBody(try .init(
+                        bodyID: dynamicID,
+                        mutation: .setPosition(
+                            SourceVector3(999, 0, 0),
+                            teleport: true
+                        )
+                    ))
+                ),
+                SourcePhysicsCommand(
+                    sequence: 13,
+                    payload: .mutateBody(try .init(
+                        bodyID: missingID,
+                        mutation: .setAngles(.zero)
+                    ))
+                ),
+            ]))
+        }
+        let afterRollback = try environment.execute(
+            SourcePhysicsCommandBatch(commands: [
+                SourcePhysicsCommand(
+                    sequence: 12,
+                    payload: .simulate(.init(simulationTick: 2))
+                ),
+            ])
+        )
+        let dynamicAfterRollback = try #require(
+            afterRollback.bodies.first { $0.bodyID == dynamicID }
+        )
+        #expect(dynamicAfterRollback.transform.origin == SourceVector3(110, 0, 0))
+        #expect(dynamicAfterRollback.transform.angles == dynamicAngles)
+    }
+
     @Test("line and swept hull queries filter exact EHANDLE generations")
     func generationSafeQueries() throws {
         let environment = SourceDeterministicPhysicsEnvironment()
