@@ -261,19 +261,19 @@ final class GModPermissionStoreTests: XCTestCase {
     func testMenuLuaPermissionsUseNativeStoreAndResumeRealLocalHost() throws {
         let fixture = makeFixture()
         defer { fixture.cleanup() }
-        let runtime = GMLuaRuntime(realm: .menu, logger: { _ in })
-        defer { _ = runtime.close() }
+        let state = LuaState(output: { _ in })
+        defer { _ = state.close() }
         var changeCount = 0
         var localResumeCount = 0
 
         XCTAssertTrue(try GMLuaPermissions.install(
-            into: runtime.state,
+            into: state,
             realm: .menu,
             host: fixture.store.makeLuaPermissionsHost(),
             onPermissionsChanged: { changeCount += 1 },
             onLocalSessionConnect: { localResumeCount += 1 }
         ))
-        try runtime.execute(
+        try state.execute(
             #"""
             assert(permissions.IsGranted("connect") == false)
             permissions.Grant("connect", true)
