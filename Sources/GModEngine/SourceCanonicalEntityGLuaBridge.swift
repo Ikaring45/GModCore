@@ -156,6 +156,21 @@ public enum SourceCanonicalEntityGLuaBridge {
             state.setGlobal(name, value: .number(Double(mode.rawValue)))
         }
 
+        let observerModeConstants: [
+            (String, SourceCanonicalPlayerObserverMode)
+        ] = [
+            ("OBS_MODE_NONE", .none),
+            ("OBS_MODE_DEATHCAM", .deathCam),
+            ("OBS_MODE_FREEZECAM", .freezeCam),
+            ("OBS_MODE_FIXED", .fixed),
+            ("OBS_MODE_IN_EYE", .inEye),
+            ("OBS_MODE_CHASE", .chase),
+            ("OBS_MODE_ROAMING", .roaming),
+        ]
+        for (name, mode) in observerModeConstants {
+            state.setGlobal(name, value: .number(Double(mode.rawValue)))
+        }
+
         func native(
             _ name: String,
             _ body: @escaping LuaNativeFunction
@@ -212,6 +227,30 @@ public enum SourceCanonicalEntityGLuaBridge {
                 )
             }
             return settings
+        }
+
+        func requiredPlayerObserverState(
+            _ snapshot: SourceCanonicalEntitySnapshot,
+            function: String
+        ) throws -> SourceCanonicalPlayerObserverState {
+            guard let observer = snapshot.motion.playerObserverState else {
+                throw LuaError.runtime(
+                    "\(function) canonical Player observer state is unavailable"
+                )
+            }
+            return observer
+        }
+
+        func requiredPlayerColorState(
+            _ snapshot: SourceCanonicalEntitySnapshot,
+            function: String
+        ) throws -> SourceCanonicalPlayerColorState {
+            guard let colors = snapshot.playerColorState else {
+                throw LuaError.runtime(
+                    "\(function) canonical Player color state is unavailable"
+                )
+            }
+            return colors
         }
 
         func liveWeaponValue(
@@ -315,6 +354,43 @@ public enum SourceCanonicalEntityGLuaBridge {
                 )
             }
             return Float(number)
+        }
+
+        func requiredFinitePlayerColorVector(
+            _ arguments: [LuaValue],
+            index: Int,
+            function: String
+        ) throws -> SourceVector3 {
+            guard arguments.indices.contains(index) else {
+                throw LuaError.runtime(
+                    "bad argument #\(index) to '\(function)' " +
+                    "(finite Vector expected, got no value)"
+                )
+            }
+            let components = try GMLuaVectorAngle.networkVectorComponents(
+                from: arguments[index],
+                function: function
+            )
+            guard components.0.isFinite,
+                  components.1.isFinite,
+                  components.2.isFinite,
+                  abs(components.0) <= Double(Float.greatestFiniteMagnitude),
+                  abs(components.1) <= Double(Float.greatestFiniteMagnitude),
+                  abs(components.2) <= Double(Float.greatestFiniteMagnitude) else {
+                throw LuaError.runtime(
+                    "bad argument #\(index) to '\(function)' " +
+                    "(finite Vector expected)"
+                )
+            }
+            // The public API documents normalized RGB, but bundled Sandbox's
+            // own cl_weaponcolor default is 0.30 1.80 2.10. Preserve the
+            // engine-authored finite values instead of inventing a clamp that
+            // would change the original route.
+            return SourceVector3(
+                Float(components.0),
+                Float(components.1),
+                Float(components.2)
+            )
         }
 
         func vector(
@@ -582,6 +658,40 @@ public enum SourceCanonicalEntityGLuaBridge {
             }
             return [.number(Double(classID))]
         }
+        try setMethod("Player:GetObserverMode", on: playerMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Player:GetObserverMode",
+                kind: .player
+            )
+            let observer = try requiredPlayerObserverState(
+                snapshot,
+                function: "Player:GetObserverMode"
+            )
+            return [.number(Double(observer.mode.rawValue))]
+        }
+        try setMethod("Player:GetPlayerColor", on: playerMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Player:GetPlayerColor",
+                kind: .player
+            )
+            return [try vector(try requiredPlayerColorState(
+                snapshot,
+                function: "Player:GetPlayerColor"
+            ).playerColor)]
+        }
+        try setMethod("Player:GetWeaponColor", on: playerMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Player:GetWeaponColor",
+                kind: .player
+            )
+            return [try vector(try requiredPlayerColorState(
+                snapshot,
+                function: "Player:GetWeaponColor"
+            ).weaponColor)]
+        }
         for field in SourceCanonicalPlayerMovementField.allCases {
             let function = "Player:\(field.getterName)"
             try setMethod(function, on: playerMetatable) { arguments in
@@ -804,6 +914,122 @@ public enum SourceCanonicalEntityGLuaBridge {
             _ = try host.updateCanonicalEntity(player.identity) { candidate in
                 candidate.motion.playerClassID = Int32(classID)
             }
+            return []
+        }
+
+        try setMethod("Player:Spectate", on: playerMetatable) { arguments in
+            let player = try requiredSnapshot(
+                arguments.first,
+                function: "Player:Spectate",
+                kind: .player
+            )
+            let rawMode = try requiredInteger(
+                arguments,
+                index: 1,
+                function: "Player:Spectate"
+            )
+            guard let mode = SourceCanonicalPlayerObserverMode(
+                rawValue: Int32(rawMode)
+            ) else {
+                throw LuaError.runtime(
+                    "bad argument #1 to 'Player:Spectate' (OBS_MODE expected)"
+                )
+            }
+            _ = try requiredHost("Player:Spectate")
+                .updateCanonicalEntity(player.identity) { candidate in
+                    try candidate.startCanonicalSpectating(in: mode)
+                }
+            return []
+        }
+
+        try setMethod("Player:SetObserverMode", on: playerMetatable) { arguments in
+            let player = try requiredSnapshot(
+                arguments.first,
+                function: "Player:SetObserverMode",
+                kind: .player
+            )
+            let rawMode = try requiredInteger(
+                arguments,
+                index: 1,
+                function: "Player:SetObserverMode"
+            )
+            guard let mode = SourceCanonicalPlayerObserverMode(
+                rawValue: Int32(rawMode)
+            ) else {
+                throw LuaError.runtime(
+                    "bad argument #1 to 'Player:SetObserverMode' (OBS_MODE expected)"
+                )
+            }
+            _ = try requiredHost("Player:SetObserverMode")
+                .updateCanonicalEntity(player.identity) { candidate in
+                    try candidate.setCanonicalObserverMode(mode)
+                }
+            return []
+        }
+
+        try setMethod("Player:UnSpectate", on: playerMetatable) { arguments in
+            let player = try requiredSnapshot(
+                arguments.first,
+                function: "Player:UnSpectate",
+                kind: .player
+            )
+            let observer = try requiredPlayerObserverState(
+                player,
+                function: "Player:UnSpectate"
+            )
+            guard observer.mode != .none else { return [] }
+            _ = try requiredHost("Player:UnSpectate")
+                .updateCanonicalEntity(player.identity) { candidate in
+                    candidate.stopCanonicalSpectating()
+                }
+            return []
+        }
+
+        try setMethod("Player:SetPlayerColor", on: playerMetatable) { arguments in
+            let player = try requiredSnapshot(
+                arguments.first,
+                function: "Player:SetPlayerColor",
+                kind: .player
+            )
+            let color = try requiredFinitePlayerColorVector(
+                arguments,
+                index: 1,
+                function: "Player:SetPlayerColor"
+            )
+            _ = try requiredHost("Player:SetPlayerColor")
+                .updateCanonicalEntity(player.identity) { candidate in
+                    guard var colors = candidate.playerColorState else {
+                        throw LuaError.runtime(
+                            "Player:SetPlayerColor canonical Player color state is unavailable"
+                        )
+                    }
+                    colors.playerColor = color
+                    candidate.playerColorState = colors
+                }
+            return []
+        }
+
+        try setMethod("Player:SetWeaponColor", on: playerMetatable) { arguments in
+            let player = try requiredSnapshot(
+                arguments.first,
+                function: "Player:SetWeaponColor",
+                kind: .player
+            )
+            let color = try requiredFinitePlayerColorVector(
+                arguments,
+                index: 1,
+                function: "Player:SetWeaponColor"
+            )
+            _ = try requiredHost("Player:SetWeaponColor")
+                .updateCanonicalEntity(player.identity) { candidate in
+                    guard var colors = candidate.playerColorState else {
+                        throw LuaError.runtime(
+                            "Player:SetWeaponColor canonical Player color state is unavailable"
+                        )
+                    }
+                    colors.weaponColor = color
+                    candidate.playerColorState = colors
+                }
             return []
         }
 

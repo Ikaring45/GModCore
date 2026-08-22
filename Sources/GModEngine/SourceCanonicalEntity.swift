@@ -93,6 +93,9 @@ public struct SourceEntityMotionState: Equatable, Sendable {
     /// engine integer before it calls `OnPlayerSpawn`. Keeping it beside the
     /// Player-only snapshot state avoids a realm-local Lua mirror.
     public var playerClassID: Int32?
+    /// Source observer mode is Player-only engine state. Nil is reserved for
+    /// non-Player entities; canonical Players always carry an explicit mode.
+    public var playerObserverState: SourceCanonicalPlayerObserverState?
 
     public init(
         linearVelocity: SourceVector3 = .zero,
@@ -110,7 +113,8 @@ public struct SourceEntityMotionState: Equatable, Sendable {
         isAlive: Bool = true,
         playerMovementSettings:
             SourceCanonicalPlayerMovementSettings? = nil,
-        playerClassID: Int32? = nil
+        playerClassID: Int32? = nil,
+        playerObserverState: SourceCanonicalPlayerObserverState? = nil
     ) {
         self.linearVelocity = linearVelocity
         self.angularVelocity = angularVelocity
@@ -127,6 +131,7 @@ public struct SourceEntityMotionState: Equatable, Sendable {
         self.isAlive = isAlive
         self.playerMovementSettings = playerMovementSettings
         self.playerClassID = playerClassID
+        self.playerObserverState = playerObserverState
     }
 
     fileprivate var isFinite: Bool {
@@ -692,6 +697,9 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
     /// Host-configured local display name for a canonical Player. It is part
     /// of the replicated entity snapshot rather than a Lua-side nickname.
     public var playerDisplayName: String?
+    /// PlayerColor and PlayerWeaponColor material-proxy inputs. This is
+    /// Player-only vector state, not Entity color32 modulation.
+    public var playerColorState: SourceCanonicalPlayerColorState?
     /// Source-relative time at which the engine allocated this entity.
     /// CLIENT receives the SERVER value in the canonical snapshot so
     /// `GetCreationTime` remains comparable with the shared `CurTime` clock.
@@ -736,6 +744,7 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
         vehicle: SourceCanonicalEntityIdentity? = nil,
         creator: SourceCanonicalEntityIdentity? = nil,
         playerDisplayName: String? = nil,
+        playerColorState: SourceCanonicalPlayerColorState? = nil,
         creationTime: Float = 0,
         spawnEffect: Bool = false,
         networkVariables: SourceEntityNetworkVariables = .init(),
@@ -762,6 +771,7 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
         self.vehicle = vehicle
         self.creator = creator
         self.playerDisplayName = playerDisplayName
+        self.playerColorState = playerColorState
         self.creationTime = creationTime
         self.spawnEffect = spawnEffect
         self.networkVariables = networkVariables
@@ -833,12 +843,14 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
             return Self(
                 motion: SourceEntityMotionState(
                     playerMovementSettings: .legacyWorldWalkDefaults,
-                    playerClassID: 0
+                    playerClassID: 0,
+                    playerObserverState: .notObserving
                 ),
                 solidType: .boundingBox,
                 moveType: .walk,
                 viewOffset: SourceVector3(0, 0, 64),
                 playerDisplayName: "Player",
+                playerColorState: .white,
                 combat: .player
             )
         case .propPhysics:
@@ -895,6 +907,7 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
     public let vehicle: SourceCanonicalEntityIdentity?
     public let creator: SourceCanonicalEntityIdentity?
     public let playerDisplayName: String?
+    public let playerColorState: SourceCanonicalPlayerColorState?
     public let creationTime: Float
     public let spawnEffect: Bool
     public let networkVariables: SourceEntityNetworkVariables
@@ -931,6 +944,7 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         vehicle: SourceCanonicalEntityIdentity? = nil,
         creator: SourceCanonicalEntityIdentity? = nil,
         playerDisplayName: String? = nil,
+        playerColorState: SourceCanonicalPlayerColorState? = nil,
         creationTime: Float = 0,
         spawnEffect: Bool = false,
         networkVariables: SourceEntityNetworkVariables = .init(),
@@ -960,6 +974,7 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         self.vehicle = vehicle
         self.creator = creator
         self.playerDisplayName = playerDisplayName
+        self.playerColorState = playerColorState
         self.creationTime = creationTime
         self.spawnEffect = spawnEffect
         self.networkVariables = networkVariables
@@ -1024,6 +1039,9 @@ public enum SourceCanonicalEntityError: Error, Equatable, CustomStringConvertibl
     case invalidCollisionGroup(Int32)
     case playerDisplayNameRequired
     case playerDisplayNameRequiresPlayer
+    case playerColorStateRequired
+    case playerColorStateRequiresPlayer
+    case invalidPlayerColorState
     case invalidModelPath(String)
     case modelRequired(SourceCanonicalEntityKind)
     case modelValidationUnavailable(SourceEntityModelReference)
@@ -1089,6 +1107,12 @@ public enum SourceCanonicalEntityError: Error, Equatable, CustomStringConvertibl
             return "canonical Player requires a host-owned display name"
         case .playerDisplayNameRequiresPlayer:
             return "canonical Player display name is only valid on a Player"
+        case .playerColorStateRequired:
+            return "canonical Player requires engine-owned material-proxy colors"
+        case .playerColorStateRequiresPlayer:
+            return "canonical Player material-proxy colors are only valid on a Player"
+        case .invalidPlayerColorState:
+            return "canonical Player material-proxy color contains a non-finite component"
         case let .invalidModelPath(path):
             return "Source entity model path is structurally invalid: \(path)"
         case let .modelRequired(kind):
@@ -1185,6 +1209,7 @@ public final class SourceCanonicalEntity: SourceEntity {
             vehicle: state.vehicle,
             creator: state.creator,
             playerDisplayName: state.playerDisplayName,
+            playerColorState: state.playerColorState,
             creationTime: state.creationTime,
             spawnEffect: state.spawnEffect,
             networkVariables: state.networkVariables,
@@ -1659,11 +1684,13 @@ public final class SourceCanonicalEntityStore {
         if kind == .player {
             guard state.motion.playerMovementSettings != nil,
                   let playerClassID = state.motion.playerClassID,
-                  playerClassID >= 0 else {
+                  playerClassID >= 0,
+                  state.motion.playerObserverState != nil else {
                 throw SourceCanonicalEntityError.invalidMotion
             }
         } else if state.motion.playerMovementSettings != nil ||
-                    state.motion.playerClassID != nil {
+                    state.motion.playerClassID != nil ||
+                    state.motion.playerObserverState != nil {
             throw SourceCanonicalEntityError.invalidMotion
         }
         guard state.skin >= 0, state.skin <= Int(Int32.max) else {
@@ -1791,6 +1818,16 @@ public final class SourceCanonicalEntityStore {
             }
         } else if state.playerDisplayName != nil {
             throw SourceCanonicalEntityError.playerDisplayNameRequiresPlayer
+        }
+        if kind == .player {
+            guard let colors = state.playerColorState else {
+                throw SourceCanonicalEntityError.playerColorStateRequired
+            }
+            guard colors.isFinite else {
+                throw SourceCanonicalEntityError.invalidPlayerColorState
+            }
+        } else if state.playerColorState != nil {
+            throw SourceCanonicalEntityError.playerColorStateRequiresPlayer
         }
         if kind == .player {
             var classNames: [String] = []
