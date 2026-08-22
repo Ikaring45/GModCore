@@ -19,7 +19,19 @@ final class GModStockPropVerticalIntegrationTests: XCTestCase {
             modelPath: model.path,
             mdlSHA256: digest(mdlData),
             phySHA256: digest(phyData),
-            studioChecksum: studioChecksum
+            studioChecksum: studioChecksum,
+            // This vertical verifies the stock SpawnIcon, replication,
+            // rendering, and undo route. The bundled BSP intentionally keeps
+            // world surface-material indices nil until independent Source
+            // material-pair evidence is available, so this synthetic asset
+            // must not enter that unrelated fail-closed contact boundary.
+            bodyBehavior: SourceAttestedPropPhysicsBodyBehavior(
+                motionType: .dynamicBody,
+                damping: .zero,
+                isGravityEnabled: false,
+                isCollisionEnabled: false,
+                startsAwake: true
+            )
         )
         let resolver = try GModAttestedPropPhysicsAssetResolver(
             attestedAssets: [asset],

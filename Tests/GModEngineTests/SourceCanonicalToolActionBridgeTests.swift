@@ -200,6 +200,18 @@ final class SourceCanonicalToolActionBridgeTests: XCTestCase {
                 $0.kind == .player
             }
         )
+        // The dynamic collision fixture is positioned once from this Player's
+        // eye. Freeze world movement with real MOVETYPE_NOCLIP semantics so a
+        // preparatory tick cannot move the trace ray away from that hitbox.
+        _ = try session.sourceAdapter.updateCanonicalEntity(
+            player.identity
+        ) { state in
+            state.moveType = .noClip
+            state.motion.linearVelocity = .zero
+            state.motion.baseVelocity = .zero
+            state.motion.outputWishVelocity = .zero
+            state.motion.isOnGround = false
+        }
         let dynamic = ToolActionDynamicProvider()
         session.serverRuntime.traceBridge?.connect(provider:
             GMLuaCompositeTraceProvider(

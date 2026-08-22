@@ -118,6 +118,19 @@ final class SourceCanonicalStockWeaponCombatTests: XCTestCase {
         defer { _ = try? session.close() }
 
         let owner = try canonicalPlayer(in: session)
+        // Keep this combat fixture independent from BSP ground correction.
+        // The synthetic hitboxes below are authored at the canonical eye
+        // position once, so the tested Player must not fall away from them
+        // before the stock delayed fists Think callback performs its trace.
+        _ = try session.sourceAdapter.updateCanonicalEntity(
+            owner.identity
+        ) { state in
+            state.moveType = .noClip
+            state.motion.linearVelocity = .zero
+            state.motion.baseVelocity = .zero
+            state.motion.outputWishVelocity = .zero
+            state.motion.isOnGround = false
+        }
         var targetState = SourceCanonicalEntityState.defaults(for: .player)
         targetState.transform.origin = owner.transform.origin
         let targetCreated = try session.sourceAdapter.createCanonicalEntity(
@@ -146,6 +159,10 @@ final class SourceCanonicalStockWeaponCombatTests: XCTestCase {
             )
         )
         _ = try tick(session)
+        XCTAssertEqual(
+            try canonicalPlayer(in: session).viewOffset,
+            owner.viewOffset
+        )
 
         try give("weapon_fists", in: session)
         let fistsInitial = try tick(session)

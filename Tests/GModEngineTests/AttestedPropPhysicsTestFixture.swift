@@ -7,7 +7,8 @@ func makeAttestedPropPhysicsTestAsset(
     solidIndex: Int = 0,
     mdlSHA256: String = String(repeating: "a", count: 64),
     phySHA256: String = String(repeating: "b", count: 64),
-    studioChecksum: Int32 = 1_234
+    studioChecksum: Int32 = 1_234,
+    bodyBehavior: SourceAttestedPropPhysicsBodyBehavior? = nil
 ) throws -> SourceAttestedPropPhysicsAsset {
     let materialIndex = 7
     let vertices = [
@@ -53,7 +54,7 @@ func makeAttestedPropPhysicsTestAsset(
         ),
         solidIndex: solidIndex,
         materialIndex: materialIndex,
-        bodyBehavior: SourceAttestedPropPhysicsBodyBehavior(
+        bodyBehavior: bodyBehavior ?? SourceAttestedPropPhysicsBodyBehavior(
             motionType: .dynamicBody,
             damping: damping,
             isGravityEnabled: true,
