@@ -293,6 +293,7 @@ public struct GModPlayableFixedTickReport: Equatable, Sendable {
     public let movement: GModPlayableMovementResult
     public let inputButtons: GModPlayableInputButtonReport
     public let weaponGameplay: SourceCanonicalWeaponGameplayTickReport
+    public let weaponPickup: SourceCanonicalWeaponPickupTickReport
     public let physgunGameplay: SourceCanonicalPhysgunTickReport
     public let server: GMLuaSourceRuntimeRunReport
     public let propPhysics: SourceCanonicalPropPhysicsStepSnapshot
@@ -450,6 +451,7 @@ public final class GModPlayableSession {
         GModFirstPersonHandsSceneProjector?
     private let propPhysicsCoordinator: SourceCanonicalPropPhysicsCoordinator
     private let weaponGameplayController: SourceCanonicalWeaponGameplayController
+    private let weaponPickupController: SourceCanonicalWeaponPickupController
     private let physgunGameplayController:
         SourceCanonicalPhysgunGameplayController
     private var nextCommandNumber: Int32 = 1
@@ -1061,6 +1063,15 @@ public final class GModPlayableSession {
                     runtime: server,
                     host: sourceAdapter
                 )
+            let loadedWeaponPickupController =
+                SourceCanonicalWeaponPickupController(
+                    runtime: server,
+                    host: sourceAdapter
+                )
+            try SourceCanonicalWeaponPickupGLuaBridge.install(
+                into: server,
+                controller: loadedWeaponPickupController
+            )
             let loadedPhysgunGameplayController =
                 SourceCanonicalPhysgunGameplayController(
                     runtime: server,
@@ -1236,6 +1247,7 @@ public final class GModPlayableSession {
             serverWeldConstraintBridge = loadedServerWeldConstraintBridge
             propPhysicsCoordinator = loadedPropPhysicsCoordinator
             weaponGameplayController = loadedWeaponGameplayController
+            weaponPickupController = loadedWeaponPickupController
             physgunGameplayController = loadedPhysgunGameplayController
             worldWalkSolver = SourceWorldWalkSolver(
                 collisionProvider: loadedWorldWalkCollisionProvider,
@@ -1397,6 +1409,9 @@ public final class GModPlayableSession {
     @discardableResult
     public func runFixedTick(
         movementInput: GModPlayableMovementInput = .idle,
+        weaponPickupContactCandidates:
+            [SourceCanonicalEntityIdentity] = [],
+        weaponPickupUseTarget: SourceCanonicalEntityIdentity? = nil,
         maximumDeliveries: Int = 10_000
     ) throws -> GModPlayableFixedTickReport {
         try ensureOpen()
@@ -1457,6 +1472,11 @@ public final class GModPlayableSession {
         let weaponGameplay = weaponGameplayController.runServerTick(
             playerIdentity: playerIdentity
         )
+        let weaponPickup = try weaponPickupController.runServerTick(
+            playerIdentity: playerIdentity,
+            contactCandidates: weaponPickupContactCandidates,
+            useTarget: weaponPickupUseTarget
+        )
         serverRuntime.fireBulletsBridge?.endAuthoritativeCommand(
             commandNumber: command.commandNumber
         )
@@ -1480,6 +1500,7 @@ public final class GModPlayableSession {
             movement: movement,
             inputButtons: inputButtons,
             weaponGameplay: weaponGameplay,
+            weaponPickup: weaponPickup,
             physgunGameplay: physgunGameplay,
             server: serverReport,
             propPhysics: propPhysics,
