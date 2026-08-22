@@ -59,6 +59,7 @@ public enum GModStudioBodyGroupResolutionError: Error, Sendable, Equatable,
     case meshDecode(SourceStudioModelMeshDecodeError)
     case inconsistentChecksum(expected: Int32, actual: Int32)
     case inconsistentModelName(expected: String, actual: String)
+    case layout(SourceStudioBodyGroupLayoutError)
     case selection(SourceStudioBodyGroupSelectionError)
     case unexpected(type: String)
 
@@ -74,6 +75,8 @@ public enum GModStudioBodyGroupResolutionError: Error, Sendable, Equatable,
             return "Studio body-group checksum \(actual) does not match \(expected)"
         case let .inconsistentModelName(expected, actual):
             return "Studio body-group model '\(actual)' does not match '\(expected)'"
+        case let .layout(error):
+            return "Studio body-group layout failed: \(error)"
         case let .selection(error):
             return "Studio body-group selection failed: \(error)"
         case let .unexpected(type):
@@ -201,6 +204,59 @@ public final class GModStudioModelRepository: @unchecked Sendable {
         compilePolicy: GModStudioRenderableModelCompilePolicy =
             .initialIpadProp
     ) throws -> Int {
+        let mesh = try validatedBodyGroupMesh(
+            for: model,
+            compilePolicy: compilePolicy
+        )
+
+        do {
+            return try mesh.bodyValue(
+                applyingBodyGroups: subModelIDs,
+                to: currentBodyValue
+            )
+        } catch let error as SourceStudioBodyGroupSelectionError {
+            throw GModStudioBodyGroupResolutionError.selection(error)
+        } catch {
+            throw GModStudioBodyGroupResolutionError.unexpected(
+                type: String(reflecting: type(of: error))
+            )
+        }
+    }
+
+    /// Returns the exact ordered Studio body-part layout only after the same
+    /// MDL/VVD/VTX validation used by `bodyValue`. A model path alone never
+    /// supplies body-group counts or selection bases.
+    public func bodyGroupLayout(
+        for model: SourceEntityModelReference,
+        compilePolicy: GModStudioRenderableModelCompilePolicy =
+            .initialIpadProp
+    ) throws -> SourceStudioBodyGroupLayout {
+        let mesh = try validatedBodyGroupMesh(
+            for: model,
+            compilePolicy: compilePolicy
+        )
+        do {
+            return try SourceStudioBodyGroupLayout(
+                bodyParts: mesh.bodyParts.map {
+                    SourceStudioBodyGroupSelectionDescriptor(
+                        modelSelectionBase: $0.modelSelectionBase,
+                        modelCount: $0.models.count
+                    )
+                }
+            )
+        } catch let error as SourceStudioBodyGroupLayoutError {
+            throw GModStudioBodyGroupResolutionError.layout(error)
+        } catch {
+            throw GModStudioBodyGroupResolutionError.unexpected(
+                type: String(reflecting: type(of: error))
+            )
+        }
+    }
+
+    private func validatedBodyGroupMesh(
+        for model: SourceEntityModelReference,
+        compilePolicy: GModStudioRenderableModelCompilePolicy
+    ) throws -> SourceStudioModelMeshSnapshot {
         let asset: SourceStudioModelAsset
         switch renderAsset(for: model) {
         case let .loaded(loaded):
@@ -241,19 +297,7 @@ public final class GModStudioModelRepository: @unchecked Sendable {
                 actual: mesh.modelName
             )
         }
-
-        do {
-            return try mesh.bodyValue(
-                applyingBodyGroups: subModelIDs,
-                to: currentBodyValue
-            )
-        } catch let error as SourceStudioBodyGroupSelectionError {
-            throw GModStudioBodyGroupResolutionError.selection(error)
-        } catch {
-            throw GModStudioBodyGroupResolutionError.unexpected(
-                type: String(reflecting: type(of: error))
-            )
-        }
+        return mesh
     }
 
     private func outcome(

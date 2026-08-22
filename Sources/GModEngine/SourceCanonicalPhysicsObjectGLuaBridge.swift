@@ -237,6 +237,44 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
             return [try self.cachedValue(for: snapshot.bodyID)]
         }
 
+        // Source exposes individual vcollide solids through this zero-based
+        // index. Resolve that exact solid against the authoritative host; do
+        // not fall back to the primary body when the requested solid is
+        // absent, because tool traces carry this index as PhysicsBone.
+        try setMethod("Entity:GetPhysicsObjectNum", on: entityMetatable) { arguments in
+            guard let value = arguments.first,
+                  let entity = self.entityRegistry.canonicalSnapshot(for: value) else {
+                throw LuaError.runtime(
+                    "bad self to 'Entity:GetPhysicsObjectNum' " +
+                    "(live canonical Entity expected)"
+                )
+            }
+            let rawIndex = try self.requiredNumber(
+                arguments,
+                at: 1,
+                function: "Entity:GetPhysicsObjectNum"
+            )
+            guard rawIndex.isFinite,
+                  rawIndex.rounded(.towardZero) == rawIndex,
+                  let solidIndex = Int(exactly: rawIndex),
+                  solidIndex >= 0 else {
+                throw LuaError.runtime(
+                    "bad argument #1 to 'Entity:GetPhysicsObjectNum' " +
+                    "(non-negative integer expected)"
+                )
+            }
+            let bodyID = try SourcePhysicsBodyID(
+                entityIdentity: entity.identity,
+                solidIndex: solidIndex
+            )
+            guard let snapshot = self.host.value?.canonicalPhysicsObject(
+                for: bodyID
+            ), snapshot.bodyID == bodyID else {
+                return [self.state.getGlobal("NULL")]
+            }
+            return [try self.cachedValue(for: bodyID)]
+        }
+
         try setMethod("PhysObj:IsValid", on: physicsMetatable) { arguments in
             guard let value = arguments.first,
                   let payload = self.payload(for: value),
@@ -266,6 +304,26 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
         }
         try setPhysicsReadMethod("GetAngles") { snapshot in
             [try self.angle(snapshot.transform.angles)]
+        }
+        try setPhysicsReadMethod("LocalToWorld") { snapshot, arguments in
+            let local = try self.requiredVector(
+                arguments,
+                at: 1,
+                function: "PhysObj:LocalToWorld"
+            )
+            return [try self.vector(
+                snapshot.transform.transformPointFromLocal(local)
+            )]
+        }
+        try setPhysicsReadMethod("WorldToLocal") { snapshot, arguments in
+            let world = try self.requiredVector(
+                arguments,
+                at: 1,
+                function: "PhysObj:WorldToLocal"
+            )
+            return [try self.vector(
+                snapshot.transform.inverseTransformPointToLocal(world)
+            )]
         }
         try setPhysicsReadMethod("GetVelocity") { snapshot in
             [try self.vector(snapshot.linearVelocity)]
@@ -465,6 +523,26 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
                 function: "PhysObj:\(name)"
             )
             return try body(snapshot)
+        }
+    }
+
+    private func setPhysicsReadMethod(
+        _ name: String,
+        body: @escaping (
+            SourceCanonicalPhysicsObjectSnapshot,
+            [LuaValue]
+        ) throws -> [LuaValue]
+    ) throws {
+        guard let metatable = typeSystem.metatable(named: "PhysObj") else {
+            throw SourceCanonicalPhysicsObjectGLuaBridgeError
+                .missingRuntimeSurface("PhysObj metatable")
+        }
+        try setMethod("PhysObj:\(name)", on: metatable) { arguments in
+            let snapshot = try self.requiredSnapshot(
+                arguments.first,
+                function: "PhysObj:\(name)"
+            )
+            return try body(snapshot, arguments)
         }
     }
 

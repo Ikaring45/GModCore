@@ -98,6 +98,25 @@ public final class SourceCanonicalConstraintGraph: @unchecked Sendable {
         return SourceCanonicalConstraintRemovalResult(removed: removed)
     }
 
+    @discardableResult
+    public func remove(
+        identifier: UInt64
+    ) -> SourceCanonicalConstraintRecord? {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordsByIdentifier.removeValue(forKey: identifier)
+    }
+
+    public func records(
+        involving entity: SourceCanonicalEntityIdentity
+    ) -> [SourceCanonicalConstraintRecord] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordsByIdentifier.values
+            .filter { $0.entities.contains(entity) }
+            .sorted { $0.identifier < $1.identifier }
+    }
+
     /// Returns the complete connected component in deterministic full-EHANDLE
     /// order, including `entity` even when the graph is empty.
     public func allConstrainedEntities(

@@ -47,6 +47,8 @@ public enum GMLuaSourceRuntimeAdapterError: Error, CustomStringConvertible {
     case canonicalRemovalProjectionMissing(SourceCanonicalEntityIdentity)
     case canonicalMutationJournalCapacityExceeded(maximum: Int)
     case canonicalBodyGroupResolverUnavailable
+    case canonicalBodyGroupLayoutResolverUnavailable
+    case canonicalBodyGroupLayoutUnavailable(SourceEntityModelReference)
     case canonicalBodyGroupModelMissing(SourceCanonicalEntityIdentity)
     case canonicalPhysicsBodyAlreadyRegistered(SourcePhysicsBodyID)
     case canonicalPhysicsBodyMissing(SourcePhysicsBodyID)
@@ -85,6 +87,10 @@ public enum GMLuaSourceRuntimeAdapterError: Error, CustomStringConvertible {
             return "SERVER canonical mutation journal reached its bounded capacity of \(maximum) operations"
         case .canonicalBodyGroupResolverUnavailable:
             return "canonical Studio body-group resolver is unavailable"
+        case .canonicalBodyGroupLayoutResolverUnavailable:
+            return "canonical Studio body-group layout resolver is unavailable"
+        case let .canonicalBodyGroupLayoutUnavailable(model):
+            return "canonical Studio body-group layout is unavailable for \(model.path)"
         case let .canonicalBodyGroupModelMissing(identity):
             return "Source entity EHANDLE \(identity.handle.rawValue) has no Studio model for body-group resolution"
         case let .canonicalPhysicsBodyAlreadyRegistered(bodyID):
@@ -177,6 +183,8 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
     private let kernel: SourceRuntimeKernel
     private let canonicalEntities: SourceCanonicalEntityStore
     private let canonicalBodyGroupResolver: SourceCanonicalBodyGroupResolver?
+    private let canonicalBodyGroupLayoutResolver:
+        SourceCanonicalBodyGroupLayoutResolver?
     private let canonicalPropPhysicsAssetResolver:
         SourceCanonicalPropPhysicsAssetResolver
     private let mutationLock = NSRecursiveLock()
@@ -231,6 +239,8 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
         serverRuntime: GMLuaRuntime,
         canonicalModelValidator: SourceCanonicalModelValidator?,
         canonicalBodyGroupResolver: SourceCanonicalBodyGroupResolver? = nil,
+        canonicalBodyGroupLayoutResolver:
+            SourceCanonicalBodyGroupLayoutResolver? = nil,
         canonicalPropPhysicsAssetResolver:
             SourceCanonicalPropPhysicsAssetResolver? = nil,
         canonicalNetworkVariableAllocationPolicy:
@@ -241,6 +251,8 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
             initialEntitySerialNumber: nil,
             canonicalModelValidator: canonicalModelValidator,
             canonicalBodyGroupResolver: canonicalBodyGroupResolver,
+            canonicalBodyGroupLayoutResolver:
+                canonicalBodyGroupLayoutResolver,
             canonicalPropPhysicsAssetResolver:
                 canonicalPropPhysicsAssetResolver,
             canonicalNetworkVariableAllocationPolicy:
@@ -286,6 +298,8 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
         initialEntitySerialNumber: Int?,
         canonicalModelValidator: SourceCanonicalModelValidator? = nil,
         canonicalBodyGroupResolver: SourceCanonicalBodyGroupResolver? = nil,
+        canonicalBodyGroupLayoutResolver:
+            SourceCanonicalBodyGroupLayoutResolver? = nil,
         canonicalPropPhysicsAssetResolver:
             SourceCanonicalPropPhysicsAssetResolver? = nil,
         canonicalNetworkVariableAllocationPolicy:
@@ -338,6 +352,8 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
                 canonicalNetworkVariableAllocationPolicy
         )
         self.canonicalBodyGroupResolver = canonicalBodyGroupResolver
+        self.canonicalBodyGroupLayoutResolver =
+            canonicalBodyGroupLayoutResolver
         self.canonicalPropPhysicsAssetResolver =
             canonicalPropPhysicsAssetResolver ?? { _ in .unavailable }
         consoleDispatcher.connectForwardedCommandTransactionHost(self)
@@ -1043,6 +1059,62 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
         return try setCanonicalCollisionProperty(property, for: identity)
     }
 
+    /// Returns the exact Studio bodypart bases/counts for one validated model.
+    /// An absent resolver or absent bytes remains an explicit unsupported
+    /// boundary; it is not equivalent to a model with zero bodyparts.
+    public func canonicalBodyGroupLayout(
+        for model: SourceEntityModelReference
+    ) throws -> SourceStudioBodyGroupLayout {
+        try netTransport.withExclusiveLifecycleBoundary {
+            mutationLock.lock()
+            defer { mutationLock.unlock() }
+            try ensureOpenLocked()
+            return try resolvedCanonicalBodyGroupLayoutLocked(for: model)
+        }
+    }
+
+    /// Applies Source SDK `SetBodygroup` packing to canonical `m_nBody` and
+    /// publishes only when the requested group actually changes the value.
+    /// Invalid group IDs and selections above the Studio model count are the
+    /// Source-defined no-op; missing model metadata remains a hard boundary.
+    @discardableResult
+    public func setCanonicalBodyGroup(
+        _ bodyGroupID: Int,
+        selection: Int,
+        for identity: SourceCanonicalEntityIdentity
+    ) throws -> SourceCanonicalEntitySnapshot {
+        try withMutationBoundary {
+            try requireCanonicalServerProjectionLocked(identity)
+            guard let current = canonicalEntities.snapshot(for: identity) else {
+                throw GMLuaSourceRuntimeAdapterError.unknownEntity(identity)
+            }
+            guard let model = current.model else {
+                throw GMLuaSourceRuntimeAdapterError
+                    .canonicalBodyGroupModelMissing(identity)
+            }
+            let layout = try resolvedCanonicalBodyGroupLayoutLocked(for: model)
+            let updatedBodyValue = try layout.bodyValue(
+                settingBodyGroupID: bodyGroupID,
+                to: selection,
+                currentBodyValue: current.bodyValue
+            )
+            guard updatedBodyValue != current.bodyValue else { return current }
+
+            try preflightCanonicalMutationJournalLocked(additionalOperations: 1)
+            return try canonicalEntities.update(
+                identity,
+                { candidate in
+                    candidate.bodyValue = updatedBodyValue
+                },
+                publishing: { [unowned self] snapshot in
+                    _ = try self.requiredServerRegistryLocked()
+                        .applyAuthoritativeSnapshot(snapshot)
+                    self.canonicalMutationJournal.append(.update(snapshot))
+                }
+            )
+        }
+    }
+
     /// Resolves and commits `m_nBody` as one canonical copy/validate/publish
     /// transaction. Any missing model/provider, malformed selection, decode
     /// failure, or rejected publication leaves state, revision, and journal
@@ -1085,6 +1157,20 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
                 }
             )
         }
+    }
+
+    private func resolvedCanonicalBodyGroupLayoutLocked(
+        for model: SourceEntityModelReference
+    ) throws -> SourceStudioBodyGroupLayout {
+        guard let resolver = canonicalBodyGroupLayoutResolver else {
+            throw GMLuaSourceRuntimeAdapterError
+                .canonicalBodyGroupLayoutResolverUnavailable
+        }
+        guard let layout = try resolver(model) else {
+            throw GMLuaSourceRuntimeAdapterError
+                .canonicalBodyGroupLayoutUnavailable(model)
+        }
+        return layout
     }
 
     @discardableResult
@@ -1228,6 +1314,42 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
             ) {
                 canonicalEntityHandleOrder.remove(at: index)
             }
+            return snapshot
+        }
+    }
+
+    /// Reverses one entity whose complete create/spawn/activate history is
+    /// still the tail of the unpublished canonical journal. This narrow seam
+    /// lets multi-step engine bridges compensate an enqueue failure without
+    /// turning a half-created helper entity into visible Source state.
+    @discardableResult
+    public func rollbackUnpublishedCanonicalEntity(
+        _ identity: SourceCanonicalEntityIdentity
+    ) throws -> SourceCanonicalEntitySnapshot {
+        try withMutationBoundary {
+            try requireCanonicalServerProjectionLocked(identity)
+            guard let firstIndex = canonicalMutationJournal.firstIndex(where: {
+                guard case let .create(snapshot) = $0 else { return false }
+                return snapshot.identity == identity
+            }), canonicalMutationJournal[firstIndex...].allSatisfy({
+                Self.canonicalIdentity(of: $0) == identity
+            }), canonicalEntityHandleOrder.last == identity.handle.rawValue else {
+                throw GMLuaSourceRuntimeAdapterError
+                    .forwardedConsoleCommandTransactionCheckpointChanged
+            }
+            let registry = try requiredServerRegistryLocked()
+            let snapshot = try canonicalEntities.rollbackUnpublished(
+                identity,
+                publishing: { removal in
+                    guard try registry.applyAuthoritativeRemoval(removal) else {
+                        throw GMLuaSourceRuntimeAdapterError
+                            .canonicalRemovalProjectionMissing(removal.identity)
+                    }
+                }
+            )
+            removeCanonicalPhysicsBodiesLocked(for: identity)
+            canonicalEntityHandleOrder.removeLast()
+            canonicalMutationJournal.removeSubrange(firstIndex...)
             return snapshot
         }
     }

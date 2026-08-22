@@ -21,6 +21,21 @@ public enum SourceCanonicalQueuedPhysicsBodyCommand: Equatable, Sendable {
     }
 }
 
+/// Constraint mutations share the exact global FIFO used by canonical body
+/// mutations. They remain a separate public type so callers cannot enqueue a
+/// simulation/query barrier or fabricate backend-specific constraint data.
+public enum SourceCanonicalQueuedPhysicsConstraintCommand: Equatable, Sendable {
+    case createFixed(SourcePhysicsFixedConstraintCreationCommand)
+    case delete(SourcePhysicsConstraintDeletionCommand)
+
+    var payload: SourcePhysicsCommandPayload {
+        switch self {
+        case let .createFixed(command): .createFixedConstraint(command)
+        case let .delete(command): .deleteConstraint(command)
+        }
+    }
+}
+
 /// Transactional pending-command seam implemented by the same host object
 /// that owns the global net/console/entity/physics sequence clock.
 public protocol SourceCanonicalPropPhysicsMutationCommandQueue: AnyObject {
@@ -35,6 +50,21 @@ public protocol SourceCanonicalPropPhysicsMutationCommandQueue: AnyObject {
     /// Removes exactly the prepared prefix. This is called only after the
     /// environment and coordinator validation succeed; throws retain it.
     func commitPendingCanonicalPhysicsBodyCommands(
+        _ commands: [SourcePhysicsCommand]
+    )
+}
+
+/// Transactional enqueue seam used by the SERVER GLua constraint bridge.
+/// `rollback` removes only an exact uncommitted suffix; consumed commands are
+/// never resurrected and reserved global sequence numbers are intentionally
+/// not reused.
+public protocol SourceCanonicalPhysicsConstraintCommandQueue: AnyObject {
+    @discardableResult
+    func enqueueCanonicalPhysicsConstraintCommands(
+        _ commands: [SourceCanonicalQueuedPhysicsConstraintCommand]
+    ) throws -> [SourcePhysicsCommand]
+
+    func rollbackCanonicalPhysicsConstraintCommands(
         _ commands: [SourcePhysicsCommand]
     )
 }
@@ -122,6 +152,13 @@ public enum SourceCanonicalPropPhysicsCoordinatorError: Error, Equatable, Sendab
     case unsupportedPendingCommand(UInt64)
     case pendingCreationMismatch(SourcePhysicsBodyID)
     case pendingMutationBodyUnavailable(SourcePhysicsBodyID)
+    case pendingConstraintBodyUnavailable(
+        constraintID: SourcePhysicsConstraintID,
+        bodyID: SourcePhysicsBodyID
+    )
+    case pendingConstraintAlreadyExists(SourcePhysicsConstraintID)
+    case pendingConstraintUnavailable(SourcePhysicsConstraintID)
+    case environmentConstraintSetMismatch
     case environmentMissingBody(SourcePhysicsBodyID)
     case environmentRetainedDeletedBody(SourcePhysicsBodyID)
     case environmentBodyConfigurationMismatch(SourcePhysicsBodyID)
@@ -261,6 +298,7 @@ public struct SourceCanonicalPropPhysicsStepSnapshot: Equatable, Sendable {
     public let commandSequences: [UInt64]
     public let operations: [SourceCanonicalPropPhysicsOperation]
     public let bodies: [SourceCanonicalPropPhysicsMotionSnapshot]
+    public let fixedConstraints: [SourcePhysicsFixedConstraintSnapshot]
 
     public var fixedTimeStepSeconds: Float {
         SourcePhysicsContract.fixedTimeStepSeconds
@@ -296,6 +334,9 @@ public final class SourceCanonicalPropPhysicsCoordinator {
     private let environment: SourcePhysicsEnvironment
     private let commandSequenceSource: SourceCanonicalPropPhysicsCommandSequenceSource
     private var committedBodies: [SourcePhysicsBodyID: CommittedBody] = [:]
+    private var committedFixedConstraints: [
+        SourcePhysicsConstraintID: SourcePhysicsFixedConstraintSnapshot
+    ] = [:]
     private var committedSimulationTickStorage: UInt64?
 
     public private(set) var latestStepSnapshot: SourceCanonicalPropPhysicsStepSnapshot?
@@ -345,10 +386,11 @@ public final class SourceCanonicalPropPhysicsCoordinator {
             any SourceCanonicalPropPhysicsMutationCommandQueue
         let pendingCommands = mutationQueue?
             .preparePendingCanonicalPhysicsBodyCommands() ?? []
-        let pendingCreationIDs = try validatePendingCommands(
+        let pendingValidation = try validatePendingCommands(
             pendingCommands,
             desiredBodies: desiredBodies
         )
+        let pendingCreationIDs = pendingValidation.createdBodyIDs
         var deletionSet = Set(plan.deletions)
         for bodyID in pendingCreationIDs where desiredBodies[bodyID] == nil {
             deletionSet.insert(bodyID)
@@ -412,6 +454,7 @@ public final class SourceCanonicalPropPhysicsCoordinator {
             environmentSnapshot: environmentSnapshot,
             desiredBodies: desiredBodies,
             expectedMassStates: expectedMassStates(after: commands),
+            expectedConstraintIDs: pendingValidation.constraintIDs,
             deletedBodyIDs: deletions,
             finalCommandSequence: sequences[commandIndex],
             simulationTick: simulationTick
@@ -434,13 +477,19 @@ public final class SourceCanonicalPropPhysicsCoordinator {
             simulationTick: simulationTick,
             commandSequences: commands.map(\.sequence),
             operations: operations,
-            bodies: motionSnapshots
+            bodies: motionSnapshots,
+            fixedConstraints: environmentSnapshot.fixedConstraints
         )
 
         mutationQueue?.commitPendingCanonicalPhysicsBodyCommands(
             pendingCommands
         )
         committedBodies = candidateBodies
+        committedFixedConstraints = Dictionary(
+            uniqueKeysWithValues: environmentSnapshot.fixedConstraints.map {
+                ($0.constraintID, $0)
+            }
+        )
         committedSimulationTickStorage = simulationTick
         latestStepSnapshot = result
         return result
@@ -520,8 +569,12 @@ public final class SourceCanonicalPropPhysicsCoordinator {
     private func validatePendingCommands(
         _ commands: [SourcePhysicsCommand],
         desiredBodies: [SourcePhysicsBodyID: DesiredBody]
-    ) throws -> [SourcePhysicsBodyID] {
+    ) throws -> (
+        createdBodyIDs: [SourcePhysicsBodyID],
+        constraintIDs: Set<SourcePhysicsConstraintID>
+    ) {
         var liveBodyIDs = Set(committedBodies.keys)
+        var liveConstraintIDs = Set(committedFixedConstraints.keys)
         var createdBodyIDs: [SourcePhysicsBodyID] = []
         for command in commands {
             switch command.payload {
@@ -542,16 +595,33 @@ public final class SourceCanonicalPropPhysicsCoordinator {
                     throw SourceCanonicalPropPhysicsCoordinatorError
                         .pendingMutationBodyUnavailable(mutation.bodyID)
                 }
+            case let .createFixedConstraint(creation):
+                guard liveConstraintIDs.insert(creation.constraintID).inserted else {
+                    throw SourceCanonicalPropPhysicsCoordinatorError
+                        .pendingConstraintAlreadyExists(creation.constraintID)
+                }
+                for bodyID in [creation.referenceBodyID, creation.attachedBodyID]
+                    where !liveBodyIDs.contains(bodyID)
+                {
+                    throw SourceCanonicalPropPhysicsCoordinatorError
+                        .pendingConstraintBodyUnavailable(
+                            constraintID: creation.constraintID,
+                            bodyID: bodyID
+                        )
+                }
+            case let .deleteConstraint(deletion):
+                guard liveConstraintIDs.remove(deletion.constraintID) != nil else {
+                    throw SourceCanonicalPropPhysicsCoordinatorError
+                        .pendingConstraintUnavailable(deletion.constraintID)
+                }
             case .deleteBody,
-                 .createFixedConstraint,
-                 .deleteConstraint,
                  .simulate,
                  .query:
                 throw SourceCanonicalPropPhysicsCoordinatorError
                     .unsupportedPendingCommand(command.sequence)
             }
         }
-        return createdBodyIDs
+        return (createdBodyIDs, liveConstraintIDs)
     }
 
     private func requiresReplacement(
@@ -568,6 +638,7 @@ public final class SourceCanonicalPropPhysicsCoordinator {
         environmentSnapshot: SourcePhysicsEnvironmentSnapshot,
         desiredBodies: [SourcePhysicsBodyID: DesiredBody],
         expectedMassStates: [SourcePhysicsBodyID: ExpectedMassState],
+        expectedConstraintIDs: Set<SourcePhysicsConstraintID>,
         deletedBodyIDs: [SourcePhysicsBodyID],
         finalCommandSequence: UInt64,
         simulationTick: UInt64
@@ -592,6 +663,13 @@ public final class SourceCanonicalPropPhysicsCoordinator {
         let returnedBodies = Dictionary(
             uniqueKeysWithValues: environmentSnapshot.bodies.map { ($0.bodyID, $0) }
         )
+        let returnedConstraintIDs = Set(
+            environmentSnapshot.fixedConstraints.map(\.constraintID)
+        )
+        guard returnedConstraintIDs == expectedConstraintIDs else {
+            throw SourceCanonicalPropPhysicsCoordinatorError
+                .environmentConstraintSetMismatch
+        }
         for bodyID in deletedBodyIDs where desiredBodies[bodyID] == nil {
             guard returnedBodies[bodyID] == nil else {
                 throw SourceCanonicalPropPhysicsCoordinatorError

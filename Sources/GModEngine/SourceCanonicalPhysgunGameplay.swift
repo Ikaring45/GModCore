@@ -17,6 +17,9 @@ public enum SourceCanonicalPhysgunWeaponDefinition {
         guard runtime.realm == .server || runtime.realm == .client else {
             throw LuaError.runtime("weapon_physgun requires SERVER or CLIENT")
         }
+        if runtime.realm == .server {
+            try installPhysObjIsMoveableAlias(into: runtime)
+        }
         guard case let .table(weapons) = runtime.state.getGlobal("weapons") else {
             throw LuaError.runtime("weapon_physgun requires the weapons library")
         }
@@ -108,6 +111,47 @@ public enum SourceCanonicalPhysgunWeaponDefinition {
         return true
     }
 
+    /// The stock base gamemode's `OnPhysgunFreeze` uses the historical
+    /// `PhysObj:IsMoveable` spelling. Source exposes the same motion-enabled
+    /// state through both names; reuse the canonical full-body validated
+    /// `IsMotionEnabled` implementation instead of introducing a second host
+    /// query or a guessed result.
+    private static func installPhysObjIsMoveableAlias(
+        into runtime: GMLuaRuntime
+    ) throws {
+        guard let metatable = runtime.typeSystem?.metatable(named: "PhysObj") else {
+            throw LuaError.runtime("weapon_physgun requires the PhysObj metatable")
+        }
+        let key = LuaValue.string("IsMoveable")
+        let existing = try runtime.state.rawTableValue(for: key, in: metatable)
+        switch existing {
+        case .luaFunction, .nativeFunction:
+            return
+        case .nilValue:
+            break
+        default:
+            throw LuaError.runtime(
+                "PhysObj:IsMoveable is \(existing.typeName), expected function or nil"
+            )
+        }
+        let motionEnabled = try runtime.state.rawTableValue(
+            for: .string("IsMotionEnabled"),
+            in: metatable
+        )
+        switch motionEnabled {
+        case .luaFunction, .nativeFunction:
+            try runtime.state.setRawTableValue(
+                motionEnabled,
+                for: key,
+                in: metatable
+            )
+        default:
+            throw LuaError.runtime(
+                "PhysObj:IsMotionEnabled is \(motionEnabled.typeName), expected function"
+            )
+        }
+    }
+
     private static func callable(
         named name: String,
         in table: LuaTable,
@@ -151,6 +195,10 @@ extension GMLuaSourceRuntimeAdapter: SourceCanonicalPhysgunHost {}
 public enum SourceCanonicalPhysgunEventKind: String, Equatable, Sendable {
     case pickup
     case move
+    case freeze
+    case freezeIntercepted
+    case unfreeze
+    case unfreezeRejected
     case drop
     case rejected
     case staleHoldCleared
@@ -182,6 +230,12 @@ public enum SourceCanonicalPhysgunFailureStage: String, Equatable, Sendable {
     case trace
     case permission
     case pickupHook
+    case freezeHook
+    case reloadHook
+    case unfreezeTrace
+    case unfreezePermission
+    case unfreezeMotion
+    case unfreezeHook
     case motion
     case dropHook
 }
@@ -255,9 +309,48 @@ public final class SourceCanonicalPhysgunGameplayController {
         let hitPosition: SourceVector3
     }
 
+    private struct TargetedUnfreezeResult {
+        let count: Int
+        let events: [SourceCanonicalPhysgunEvent]
+        let failures: [SourceCanonicalPhysgunFailure]
+
+        static let none = TargetedUnfreezeResult(
+            count: 0,
+            events: [],
+            failures: []
+        )
+    }
+
     private let runtime: GMLuaRuntime
     private weak var host: (any SourceCanonicalPhysgunHost)?
     private var heldByPlayer: [SourceCanonicalEntityIdentity: HeldBody] = [:]
+    private var pendingUnfreezeResults:
+        [SourceCanonicalEntityIdentity: [TargetedUnfreezeResult]] = [:]
+    private var targetedPhysgunUnfreezeBridgeInstalled = false
+    private lazy var targetedPhysgunUnfreezeFunction = LuaNativeFunctionBox(
+        { [weak self] arguments in
+            guard let self else {
+                throw LuaError.runtime(
+                    "Player:PhysgunUnfreeze controller is unavailable"
+                )
+            }
+            guard let playerValue = arguments.first,
+                  let registry = self.runtime.entityRegistry,
+                  let playerIdentity = registry.canonicalIdentity(for: playerValue),
+                  self.host?.canonicalSnapshot(for: playerIdentity)?.kind == .player else {
+                throw LuaError.runtime(
+                    "bad self to 'Player:PhysgunUnfreeze' (live Player expected)"
+                )
+            }
+            let result = self.performTargetedUnfreeze(
+                playerIdentity: playerIdentity,
+                playerValue: playerValue
+            )
+            self.pendingUnfreezeResults[playerIdentity, default: []].append(result)
+            return [.number(Double(result.count))]
+        },
+        debugName: "Player:PhysgunUnfreeze"
+    )
 
     public init(runtime: GMLuaRuntime, host: any SourceCanonicalPhysgunHost) {
         precondition(runtime.realm == .server)
@@ -298,6 +391,21 @@ public final class SourceCanonicalPhysgunGameplayController {
             host.canonicalSnapshot(for: $0)
         }
 
+        if let activeWeapon,
+           activeWeapon.kind == .weapon,
+           activeWeapon.className == SourceCanonicalPhysgunWeaponDefinition.className,
+           buttons.current.contains(.reload),
+           !buttons.previous.contains(.reload) {
+            let report = runReloadHook(
+                player: player,
+                playerValue: playerValue,
+                weapon: activeWeapon,
+                registry: registry
+            )
+            events.append(contentsOf: report.events)
+            failures.append(contentsOf: report.failures)
+        }
+
         if let held = heldByPlayer[player.identity] {
             guard let activeWeapon,
                   activeWeapon.identity == held.weapon,
@@ -330,6 +438,46 @@ public final class SourceCanonicalPhysgunGameplayController {
                 events.append(event(.staleHoldCleared, held: held))
                 return SourceCanonicalPhysgunTickReport(events: events)
             }
+            if buttons.current.contains(.attack2),
+               !buttons.previous.contains(.attack2) {
+                let entityValue = registry.entity(at: held.entity.entryIndex)
+                let weaponValue = registry.entity(at: held.weapon.entryIndex)
+                guard registry.canonicalIdentity(for: entityValue) == held.entity,
+                      registry.canonicalIdentity(for: weaponValue) == held.weapon else {
+                    heldByPlayer.removeValue(forKey: player.identity)
+                    events.append(event(.staleHoldCleared, held: held))
+                    return SourceCanonicalPhysgunTickReport(events: events)
+                }
+                do {
+                    let gamemodeRan = try dispatchFreezeHook(
+                        playerValue: playerValue,
+                        weaponValue: weaponValue,
+                        entityValue: entityValue,
+                        held: held
+                    )
+                    heldByPlayer.removeValue(forKey: player.identity)
+                    events.append(event(
+                        gamemodeRan ? .freeze : .freezeIntercepted,
+                        held: held
+                    ))
+                    dispatchDropHook(
+                        playerValue: playerValue,
+                        held: held,
+                        registry: registry,
+                        failures: &failures
+                    )
+                    events.append(event(.drop, held: held))
+                } catch {
+                    failures.append(SourceCanonicalPhysgunFailure(
+                        stage: .freezeHook,
+                        message: GMLuaRuntime.describe(error)
+                    ))
+                }
+                return SourceCanonicalPhysgunTickReport(
+                    events: events,
+                    failures: failures
+                )
+            }
             do {
                 try queueMotion(
                     held: held,
@@ -355,7 +503,10 @@ public final class SourceCanonicalPhysgunGameplayController {
               activeWeapon.className == SourceCanonicalPhysgunWeaponDefinition.className,
               buttons.current.contains(.attack),
               !buttons.previous.contains(.attack) else {
-            return .idle
+            return SourceCanonicalPhysgunTickReport(
+                events: events,
+                failures: failures
+            )
         }
         let weaponValue = registry.entity(at: activeWeapon.identity.entryIndex)
         guard registry.canonicalIdentity(for: weaponValue) == activeWeapon.identity else {
@@ -603,6 +754,226 @@ public final class SourceCanonicalPhysgunGameplayController {
         }
     }
 
+    private func runReloadHook(
+        player: SourceCanonicalEntitySnapshot,
+        playerValue: LuaValue,
+        weapon: SourceCanonicalEntitySnapshot,
+        registry: GMLuaEntityRegistry
+    ) -> SourceCanonicalPhysgunTickReport {
+        pendingUnfreezeResults[player.identity] = []
+        var events: [SourceCanonicalPhysgunEvent] = []
+        var failures: [SourceCanonicalPhysgunFailure] = []
+        do {
+            let weaponValue = registry.entity(at: weapon.identity.entryIndex)
+            guard registry.canonicalIdentity(for: weaponValue) == weapon.identity else {
+                pendingUnfreezeResults.removeValue(forKey: player.identity)
+                return .idle
+            }
+            guard case let .table(hook) = runtime.state.getGlobal("hook") else {
+                throw LuaError.runtime("weapon_physgun reload requires hook table")
+            }
+            let call = try runtime.state.rawTableValue(
+                for: .string("Call"),
+                in: hook
+            )
+            switch call {
+            case .luaFunction, .nativeFunction:
+                break
+            default:
+                throw LuaError.runtime(
+                    "hook.Call is \(call.typeName), expected function"
+                )
+            }
+            let gamemode = runtime.state.getGlobal("GAMEMODE")
+            guard case .table = gamemode else {
+                throw LuaError.runtime(
+                    "GAMEMODE is \(gamemode.typeName), expected table"
+                )
+            }
+            // Stock weapon_physgun routes the edge through this hook. A
+            // non-nil addon result suppresses the gamemode fallback inside
+            // hook.Call; therefore the native Player:PhysgunUnfreeze bridge
+            // below is never entered on a rejected reload.
+            _ = try runtime.state.call(
+                call,
+                arguments: [
+                    .string("OnPhysgunReload"),
+                    gamemode,
+                    weaponValue,
+                    playerValue,
+                ]
+            )
+        } catch {
+            failures.append(SourceCanonicalPhysgunFailure(
+                stage: .reloadHook,
+                message: GMLuaRuntime.describe(error)
+            ))
+        }
+        for result in pendingUnfreezeResults.removeValue(
+            forKey: player.identity
+        ) ?? [] {
+            events.append(contentsOf: result.events)
+            failures.append(contentsOf: result.failures)
+        }
+        return SourceCanonicalPhysgunTickReport(
+            events: events,
+            failures: failures
+        )
+    }
+
+    /// Replaces only stock Lua's `Player:PhysgunUnfreeze` body after gamemode
+    /// startup. The public hook route remains Lua-owned; this bridge narrows
+    /// the currently supported behavior to the one body under the sight line.
+    /// Double-reload/all-object and constraint-graph expansion remain
+    /// deliberately unsupported until their complete Source contracts exist.
+    public func installTargetedPhysgunUnfreezeBridge() throws {
+        guard !targetedPhysgunUnfreezeBridgeInstalled else { return }
+        guard let playerMetatable = runtime.typeSystem?.metatable(named: "Player") else {
+            throw LuaError.runtime(
+                "weapon_physgun reload requires the Player metatable"
+            )
+        }
+        let key = LuaValue.string("PhysgunUnfreeze")
+        let existing = try runtime.state.rawTableValue(for: key, in: playerMetatable)
+        if case let .nativeFunction(function) = existing,
+           function === targetedPhysgunUnfreezeFunction {
+            targetedPhysgunUnfreezeBridgeInstalled = true
+            return
+        }
+        switch existing {
+        case .luaFunction, .nativeFunction:
+            try runtime.state.setRawTableValue(
+                .nativeFunction(targetedPhysgunUnfreezeFunction),
+                for: key,
+                in: playerMetatable
+            )
+            targetedPhysgunUnfreezeBridgeInstalled = true
+        default:
+            throw LuaError.runtime(
+                "Player:PhysgunUnfreeze is \(existing.typeName), expected function"
+            )
+        }
+    }
+
+    private func performTargetedUnfreeze(
+        playerIdentity: SourceCanonicalEntityIdentity,
+        playerValue: LuaValue
+    ) -> TargetedUnfreezeResult {
+        guard let host,
+              let registry = runtime.entityRegistry,
+              let player = host.canonicalSnapshot(for: playerIdentity),
+              player.kind == .player,
+              player.lifecycle == .active,
+              let weaponIdentity = player.weaponInventory.activeWeapon,
+              let weapon = host.canonicalSnapshot(for: weaponIdentity),
+              weapon.kind == .weapon,
+              weapon.className == SourceCanonicalPhysgunWeaponDefinition.className else {
+            return .none
+        }
+        let weaponValue = registry.entity(at: weapon.identity.entryIndex)
+        guard registry.canonicalIdentity(for: weaponValue) == weapon.identity else {
+            return .none
+        }
+
+        let hit: TraceHit
+        do {
+            guard let traced = try trace(
+                player: player,
+                playerValue: playerValue,
+                weaponValue: weaponValue,
+                registry: registry,
+                host: host
+            ) else { return .none }
+            hit = traced
+        } catch {
+            return targetedUnfreezeFailure(.unfreezeTrace, error)
+        }
+        guard !hit.body.isMotionEnabled else { return .none }
+
+        let entityValue = registry.entity(at: hit.entity.identity.entryIndex)
+        guard registry.canonicalIdentity(for: entityValue) == hit.entity.identity else {
+            return .none
+        }
+        let physicsValue: LuaValue
+        do {
+            physicsValue = try physicsObjectValue(
+                entityValue: entityValue,
+                bodyID: hit.body.bodyID
+            )
+            guard try isTrackedFrozenBody(
+                playerValue: playerValue,
+                entityIdentity: hit.entity.identity,
+                physicsValue: physicsValue,
+                registry: registry
+            ) else { return .none }
+        } catch {
+            return targetedUnfreezeFailure(.unfreezePermission, error)
+        }
+
+        let allowed: Bool
+        do {
+            allowed = try canPlayerUnfreeze(
+                playerValue: playerValue,
+                entityValue: entityValue,
+                physicsValue: physicsValue
+            )
+        } catch {
+            return targetedUnfreezeFailure(.unfreezePermission, error)
+        }
+        guard allowed else {
+            return TargetedUnfreezeResult(
+                count: 0,
+                events: [event(.unfreezeRejected, player: player, weapon: weapon, hit: hit)],
+                failures: []
+            )
+        }
+
+        do {
+            for mutation in [
+                SourcePhysicsBodyMutation.setMotionEnabled(true),
+                .wake,
+            ] {
+                try host.enqueueCanonicalPhysicsObjectMutation(
+                    SourcePhysicsBodyMutationCommand(
+                        bodyID: hit.body.bodyID,
+                        mutation: mutation
+                    )
+                )
+            }
+        } catch {
+            return targetedUnfreezeFailure(.unfreezeMotion, error)
+        }
+        var failures: [SourceCanonicalPhysgunFailure] = []
+        if let message = runtime.dispatchContainedHostHook(
+            named: "PlayerUnfrozeObject",
+            arguments: [playerValue, entityValue, physicsValue]
+        ) {
+            failures.append(SourceCanonicalPhysgunFailure(
+                stage: .unfreezeHook,
+                message: message
+            ))
+        }
+        return TargetedUnfreezeResult(
+            count: 1,
+            events: [event(.unfreeze, player: player, weapon: weapon, hit: hit)],
+            failures: failures
+        )
+    }
+
+    private func targetedUnfreezeFailure(
+        _ stage: SourceCanonicalPhysgunFailureStage,
+        _ error: Error
+    ) -> TargetedUnfreezeResult {
+        TargetedUnfreezeResult(
+            count: 0,
+            events: [],
+            failures: [SourceCanonicalPhysgunFailure(
+                stage: stage,
+                message: GMLuaRuntime.describe(error)
+            )]
+        )
+    }
+
     private func queueMotion(
         held: HeldBody,
         player: SourceCanonicalEntitySnapshot,
@@ -666,6 +1037,188 @@ public final class SourceCanonicalPhysgunGameplayController {
         }
     }
 
+    /// Dispatches the stock engine freeze callback with its documented
+    /// `(weapon, physobj, entity, player)` order. `hook.Call` returns non-nil
+    /// when an addon intercepted the callback, so that path must not be
+    /// reported as the base gamemode having frozen the body. In either case
+    /// the physgun releases its hold; any actual motion-state change remains a
+    /// SERVER FIFO mutation performed by the callback's `EnableMotion` call.
+    private func dispatchFreezeHook(
+        playerValue: LuaValue,
+        weaponValue: LuaValue,
+        entityValue: LuaValue,
+        held: HeldBody
+    ) throws -> Bool {
+        let physicsValue = try physicsObjectValue(
+            entityValue: entityValue,
+            bodyID: held.bodyID
+        )
+
+        guard case let .table(hook) = runtime.state.getGlobal("hook") else {
+            throw LuaError.runtime("weapon_physgun freeze requires hook table")
+        }
+        let call = try runtime.state.rawTableValue(for: .string("Call"), in: hook)
+        switch call {
+        case .luaFunction, .nativeFunction:
+            break
+        default:
+            throw LuaError.runtime(
+                "hook.Call is \(call.typeName), expected function"
+            )
+        }
+        let gamemode = runtime.state.getGlobal("GAMEMODE")
+        guard case .table = gamemode else {
+            throw LuaError.runtime(
+                "GAMEMODE is \(gamemode.typeName), expected table"
+            )
+        }
+        let result = try runtime.state.call(
+            call,
+            arguments: [
+                .string("OnPhysgunFreeze"),
+                gamemode,
+                weaponValue,
+                physicsValue,
+                entityValue,
+                playerValue,
+            ]
+        ).first ?? .nilValue
+        if case .nilValue = result {
+            return true
+        }
+        return false
+    }
+
+    private func physicsObjectValue(
+        entityValue: LuaValue,
+        bodyID: SourcePhysicsBodyID
+    ) throws -> LuaValue {
+        guard let entityMetatable = runtime.typeSystem?.metatable(named: "Entity") else {
+            throw LuaError.runtime(
+                "weapon_physgun requires the Entity metatable"
+            )
+        }
+        let getPhysicsObject = try runtime.state.rawTableValue(
+            for: .string("GetPhysicsObjectNum"),
+            in: entityMetatable
+        )
+        switch getPhysicsObject {
+        case .luaFunction, .nativeFunction:
+            break
+        default:
+            throw LuaError.runtime(
+                "Entity:GetPhysicsObjectNum is \(getPhysicsObject.typeName), expected function"
+            )
+        }
+        let value = try runtime.state.call(
+            getPhysicsObject,
+            arguments: [
+                entityValue,
+                .number(Double(bodyID.solidIndex)),
+            ]
+        ).first ?? .nilValue
+        guard let object = GMLuaTypeSystem.typedObject(from: value),
+              object.metaName == "PhysObj",
+              object.isValid else {
+            throw LuaError.runtime(
+                "Entity:GetPhysicsObjectNum did not return the live canonical PhysObj"
+            )
+        }
+        return value
+    }
+
+    private func isTrackedFrozenBody(
+        playerValue: LuaValue,
+        entityIdentity: SourceCanonicalEntityIdentity,
+        physicsValue: LuaValue,
+        registry: GMLuaEntityRegistry
+    ) throws -> Bool {
+        guard let playerTable = registry.luaTable(for: playerValue) else {
+            throw LuaError.runtime(
+                "Player:PhysgunUnfreeze requires the live Player table"
+            )
+        }
+        let stored = try runtime.state.rawTableValue(
+            for: .string("FrozenPhysicsObjects"),
+            in: playerTable
+        )
+        guard case let .table(frozenObjects) = stored else { return false }
+        for (_, entryValue) in try runtime.state.rawTablePairs(in: frozenObjects) {
+            guard case let .table(entry) = entryValue else { continue }
+            let entityValue = try runtime.state.rawTableValue(
+                for: .string("ent"),
+                in: entry
+            )
+            let storedPhysicsValue = try runtime.state.rawTableValue(
+                for: .string("phys"),
+                in: entry
+            )
+            if registry.canonicalIdentity(for: entityValue) == entityIdentity,
+               sameLuaReference(storedPhysicsValue, physicsValue) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func sameLuaReference(_ lhs: LuaValue, _ rhs: LuaValue) -> Bool {
+        switch (lhs, rhs) {
+        case let (.userdata(left), .userdata(right)):
+            return left === right
+        case let (.table(left), .table(right)):
+            return left === right
+        default:
+            return false
+        }
+    }
+
+    private func canPlayerUnfreeze(
+        playerValue: LuaValue,
+        entityValue: LuaValue,
+        physicsValue: LuaValue
+    ) throws -> Bool {
+        guard case let .table(hook) = runtime.state.getGlobal("hook") else {
+            throw LuaError.runtime(
+                "Player:PhysgunUnfreeze requires hook table"
+            )
+        }
+        let call = try runtime.state.rawTableValue(for: .string("Call"), in: hook)
+        switch call {
+        case .luaFunction, .nativeFunction:
+            break
+        default:
+            throw LuaError.runtime(
+                "hook.Call is \(call.typeName), expected function"
+            )
+        }
+        let gamemode = runtime.state.getGlobal("GAMEMODE")
+        guard case .table = gamemode else {
+            throw LuaError.runtime(
+                "GAMEMODE is \(gamemode.typeName), expected table"
+            )
+        }
+        let result = try runtime.state.call(
+            call,
+            arguments: [
+                .string("CanPlayerUnfreeze"),
+                gamemode,
+                playerValue,
+                entityValue,
+                physicsValue,
+            ]
+        ).first ?? .nilValue
+        switch result {
+        case let .boolean(value):
+            return value
+        case .nilValue:
+            return false
+        default:
+            throw LuaError.runtime(
+                "CanPlayerUnfreeze returned \(result.typeName), expected boolean or nil"
+            )
+        }
+    }
+
     private func event(
         _ kind: SourceCanonicalPhysgunEventKind,
         held: HeldBody
@@ -676,6 +1229,21 @@ public final class SourceCanonicalPhysgunGameplayController {
             weapon: held.weapon,
             entity: held.entity,
             bodyID: held.bodyID
+        )
+    }
+
+    private func event(
+        _ kind: SourceCanonicalPhysgunEventKind,
+        player: SourceCanonicalEntitySnapshot,
+        weapon: SourceCanonicalEntitySnapshot,
+        hit: TraceHit
+    ) -> SourceCanonicalPhysgunEvent {
+        SourceCanonicalPhysgunEvent(
+            kind: kind,
+            player: player.identity,
+            weapon: weapon.identity,
+            entity: hit.entity.identity,
+            bodyID: hit.body.bodyID
         )
     }
 

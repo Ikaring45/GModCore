@@ -10,6 +10,11 @@ public enum SourceCanonicalEntityKind: String, CaseIterable, Equatable, Hashable
     case world = "worldspawn"
     case player = "player"
     case propPhysics = "prop_physics"
+    /// Engine-owned entity representing one live VPhysics constraint. The
+    /// concrete backend object remains identified separately by
+    /// `SourcePhysicsConstraintID`; this entity supplies Source lifetime,
+    /// EHANDLE generation, undo, and replication semantics.
+    case physicsConstraint = "phys_constraint"
     /// One concrete SWEP owned by the canonical entity list. Its snapshot
     /// `className` is the actual registered SWEP class rather than this
     /// category spelling.
@@ -21,7 +26,7 @@ public enum SourceCanonicalEntityKind: String, CaseIterable, Equatable, Hashable
         switch self {
         case .weapon:
             return Self.isStructurallyValidWeaponClassName(className)
-        case .world, .player, .propPhysics:
+        case .world, .player, .propPhysics, .physicsConstraint:
             return className == self.className
         }
     }
@@ -700,6 +705,9 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
     /// PlayerColor and PlayerWeaponColor material-proxy inputs. This is
     /// Player-only vector state, not Entity color32 modulation.
     public var playerColorState: SourceCanonicalPlayerColorState?
+    /// Player reserve ammunition keyed by the engine's canonical ammo IDs.
+    /// Nil is reserved for non-Player entities.
+    public var playerAmmoState: SourceCanonicalPlayerAmmoState?
     /// Source-relative time at which the engine allocated this entity.
     /// CLIENT receives the SERVER value in the canonical snapshot so
     /// `GetCreationTime` remains comparable with the shared `CurTime` clock.
@@ -745,6 +753,7 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
         creator: SourceCanonicalEntityIdentity? = nil,
         playerDisplayName: String? = nil,
         playerColorState: SourceCanonicalPlayerColorState? = nil,
+        playerAmmoState: SourceCanonicalPlayerAmmoState? = nil,
         creationTime: Float = 0,
         spawnEffect: Bool = false,
         networkVariables: SourceEntityNetworkVariables = .init(),
@@ -772,6 +781,7 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
         self.creator = creator
         self.playerDisplayName = playerDisplayName
         self.playerColorState = playerColorState
+        self.playerAmmoState = playerAmmoState
         self.creationTime = creationTime
         self.spawnEffect = spawnEffect
         self.networkVariables = networkVariables
@@ -851,10 +861,13 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
                 viewOffset: SourceVector3(0, 0, 64),
                 playerDisplayName: "Player",
                 playerColorState: .white,
+                playerAmmoState: .empty,
                 combat: .player
             )
         case .propPhysics:
             return Self(solidType: .vPhysics, moveType: .vPhysics)
+        case .physicsConstraint:
+            return Self(solidType: .none, moveType: .none)
         case .weapon:
             return Self(weaponHoldType: "normal")
         }
@@ -908,6 +921,7 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
     public let creator: SourceCanonicalEntityIdentity?
     public let playerDisplayName: String?
     public let playerColorState: SourceCanonicalPlayerColorState?
+    public let playerAmmoState: SourceCanonicalPlayerAmmoState?
     public let creationTime: Float
     public let spawnEffect: Bool
     public let networkVariables: SourceEntityNetworkVariables
@@ -945,6 +959,7 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         creator: SourceCanonicalEntityIdentity? = nil,
         playerDisplayName: String? = nil,
         playerColorState: SourceCanonicalPlayerColorState? = nil,
+        playerAmmoState: SourceCanonicalPlayerAmmoState? = nil,
         creationTime: Float = 0,
         spawnEffect: Bool = false,
         networkVariables: SourceEntityNetworkVariables = .init(),
@@ -975,6 +990,7 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         self.creator = creator
         self.playerDisplayName = playerDisplayName
         self.playerColorState = playerColorState
+        self.playerAmmoState = playerAmmoState
         self.creationTime = creationTime
         self.spawnEffect = spawnEffect
         self.networkVariables = networkVariables
@@ -1042,6 +1058,9 @@ public enum SourceCanonicalEntityError: Error, Equatable, CustomStringConvertibl
     case playerColorStateRequired
     case playerColorStateRequiresPlayer
     case invalidPlayerColorState
+    case playerAmmoStateRequired
+    case playerAmmoStateRequiresPlayer
+    case invalidPlayerAmmoState
     case invalidModelPath(String)
     case modelRequired(SourceCanonicalEntityKind)
     case modelValidationUnavailable(SourceEntityModelReference)
@@ -1113,6 +1132,12 @@ public enum SourceCanonicalEntityError: Error, Equatable, CustomStringConvertibl
             return "canonical Player material-proxy colors are only valid on a Player"
         case .invalidPlayerColorState:
             return "canonical Player material-proxy color contains a non-finite component"
+        case .playerAmmoStateRequired:
+            return "canonical Player requires engine-owned reserve ammunition"
+        case .playerAmmoStateRequiresPlayer:
+            return "canonical reserve ammunition is only valid on a Player"
+        case .invalidPlayerAmmoState:
+            return "canonical Player reserve ammunition violates the default ammo catalog"
         case let .invalidModelPath(path):
             return "Source entity model path is structurally invalid: \(path)"
         case let .modelRequired(kind):
@@ -1210,6 +1235,7 @@ public final class SourceCanonicalEntity: SourceEntity {
             creator: state.creator,
             playerDisplayName: state.playerDisplayName,
             playerColorState: state.playerColorState,
+            playerAmmoState: state.playerAmmoState,
             creationTime: state.creationTime,
             spawnEffect: state.spawnEffect,
             networkVariables: state.networkVariables,
@@ -1828,6 +1854,16 @@ public final class SourceCanonicalEntityStore {
             }
         } else if state.playerColorState != nil {
             throw SourceCanonicalEntityError.playerColorStateRequiresPlayer
+        }
+        if kind == .player {
+            guard let ammo = state.playerAmmoState else {
+                throw SourceCanonicalEntityError.playerAmmoStateRequired
+            }
+            guard ammo.isValid else {
+                throw SourceCanonicalEntityError.invalidPlayerAmmoState
+            }
+        } else if state.playerAmmoState != nil {
+            throw SourceCanonicalEntityError.playerAmmoStateRequiresPlayer
         }
         if kind == .player {
             var classNames: [String] = []

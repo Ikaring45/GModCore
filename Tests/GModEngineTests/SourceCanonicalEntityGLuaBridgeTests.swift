@@ -14,6 +14,14 @@ final class SourceCanonicalEntityGLuaBridgeTests: XCTestCase {
             modelPath: acceptedModel.path
         )
         let bodyGroupMesh = makeBodyGroupMesh()
+        let bodyGroupLayout = try SourceStudioBodyGroupLayout(
+            bodyParts: bodyGroupMesh.bodyParts.map {
+                SourceStudioBodyGroupSelectionDescriptor(
+                    modelSelectionBase: $0.modelSelectionBase,
+                    modelCount: $0.models.count
+                )
+            }
+        )
         let adapter = try GMLuaSourceRuntimeAdapter(
             serverRuntime: runtime,
             initialEntitySerialNumber: 4,
@@ -28,6 +36,9 @@ final class SourceCanonicalEntityGLuaBridgeTests: XCTestCase {
                     applyingBodyGroups: subModelIDs,
                     to: currentBodyValue
                 )
+            },
+            canonicalBodyGroupLayoutResolver: { model in
+                model == acceptedModel ? bodyGroupLayout : nil
             },
             canonicalPropPhysicsAssetResolver:
                 makeAttestedPropPhysicsTestResolver(asset: propAsset)
@@ -80,6 +91,17 @@ final class SourceCanonicalEntityGLuaBridgeTests: XCTestCase {
             prop:SetSkin(3)
             assert(prop:GetSkin() == 3)
             prop:SetBodyGroups("12")
+            assert(prop:GetNumBodyGroups() == 2)
+            assert(prop:GetBodygroup(0) == 1)
+            assert(prop:GetBodygroup(1) == 2)
+            assert(prop:GetBodygroup(-1) == 0)
+            assert(prop:GetBodygroup(12) == 0)
+            prop:SetBodygroup(1, 1)
+            assert(prop:GetBodygroup(1) == 1)
+            prop:SetBodygroup(-1, 1)
+            prop:SetBodygroup(1, 3)
+            assert(prop:GetBodygroup(1) == 1)
+            assert(pcall(function() prop:SetBodygroup(1, -1) end) == false)
             prop:SetPos(Vector(100, 200, 300))
             prop:SetAngles(Angle(15, 25, 35))
             local localPoint = Vector(7, -11, 13)
@@ -103,7 +125,7 @@ final class SourceCanonicalEntityGLuaBridgeTests: XCTestCase {
         XCTAssertEqual(prop.lifecycle, .active)
         XCTAssertEqual(prop.model, acceptedModel)
         XCTAssertEqual(prop.skin, 3)
-        XCTAssertEqual(prop.bodyValue, 5)
+        XCTAssertEqual(prop.bodyValue, 3)
         XCTAssertEqual(prop.transform.origin, SourceVector3(100, 200, 300))
         XCTAssertEqual(
             prop.transform.angles,
@@ -287,10 +309,32 @@ final class SourceCanonicalEntityGLuaBridgeTests: XCTestCase {
         let unavailableValues = try unavailableRuntime.executeReturningValues(
             """
             local prop = ents.Create("prop_physics")
+            assert(prop:GetNumBodyGroups() == 0)
+            assert(prop:GetBodygroup(0) == 0)
             prop:SetModel("models/props/test.mdl")
             local ok, message = pcall(function() prop:SetBodyGroups("10") end)
             assert(ok == false)
             assert(string.find(message, "resolver is unavailable", 1, true))
+            local queryOK, queryMessage = pcall(function()
+                return prop:GetNumBodyGroups()
+            end)
+            assert(queryOK == false)
+            assert(string.find(
+                queryMessage,
+                "layout resolver is unavailable",
+                1,
+                true
+            ))
+            local singleOK, singleMessage = pcall(function()
+                prop:SetBodygroup(0, 1)
+            end)
+            assert(singleOK == false)
+            assert(string.find(
+                singleMessage,
+                "layout resolver is unavailable",
+                1,
+                true
+            ))
             return prop
             """,
             sourceName: "=(canonical body-group resolver unavailable)"

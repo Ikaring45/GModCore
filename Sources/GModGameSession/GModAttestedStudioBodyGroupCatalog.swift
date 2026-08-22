@@ -29,6 +29,7 @@ public enum GModAttestedStudioBodyGroupResolutionError: Error, Equatable,
         mdlSHA256: String,
         studioChecksum: Int32
     )
+    case layout(SourceStudioBodyGroupLayoutError)
     case selection(SourceStudioBodyGroupSelectionError)
 
     public var description: String {
@@ -42,6 +43,8 @@ public enum GModAttestedStudioBodyGroupResolutionError: Error, Equatable,
         case let .exactMetadataMissing(modelPath, mdlSHA256, studioChecksum):
             return "no exact Studio body-group metadata for \(modelPath) " +
                 "\(mdlSHA256) checksum \(studioChecksum)"
+        case let .layout(error):
+            return "attested Studio body-group layout failed: \(error)"
         case let .selection(error):
             return "attested Studio body-group selection failed: \(error)"
         }
@@ -99,6 +102,43 @@ public struct GModAttestedStudioBodyGroupCatalog: Sendable {
         applyingBodyGroups subModelIDs: String,
         to currentBodyValue: Int
     ) throws -> Int {
+        let metadata = try resolvedMetadata(
+            for: model,
+            resolvedPropAsset: resolvedPropAsset
+        )
+        do {
+            return try metadata.bodyValue(
+                applyingBodyGroups: subModelIDs,
+                to: currentBodyValue
+            )
+        } catch let error as SourceStudioBodyGroupSelectionError {
+            throw GModAttestedStudioBodyGroupResolutionError.selection(error)
+        }
+    }
+
+    /// Returns an exact layout only when the separately resolved prop asset
+    /// matches the catalog's full path/hash/checksum identity.
+    public func bodyGroupLayout(
+        for model: SourceEntityModelReference,
+        resolvedPropAsset: SourceCanonicalPropPhysicsAssetResolution
+    ) throws -> SourceStudioBodyGroupLayout {
+        let metadata = try resolvedMetadata(
+            for: model,
+            resolvedPropAsset: resolvedPropAsset
+        )
+        do {
+            return try SourceStudioBodyGroupLayout(
+                bodyParts: metadata.bodyParts
+            )
+        } catch let error as SourceStudioBodyGroupLayoutError {
+            throw GModAttestedStudioBodyGroupResolutionError.layout(error)
+        }
+    }
+
+    private func resolvedMetadata(
+        for model: SourceEntityModelReference,
+        resolvedPropAsset: SourceCanonicalPropPhysicsAssetResolution
+    ) throws -> SourceAttestedStudioBodyGroupMetadata {
         let asset: SourceAttestedPropPhysicsAsset
         switch resolvedPropAsset {
         case let .valid(value):
@@ -125,14 +165,7 @@ public struct GModAttestedStudioBodyGroupCatalog: Sendable {
                     studioChecksum: asset.studioChecksum
                 )
         }
-        do {
-            return try metadata.bodyValue(
-                applyingBodyGroups: subModelIDs,
-                to: currentBodyValue
-            )
-        } catch let error as SourceStudioBodyGroupSelectionError {
-            throw GModAttestedStudioBodyGroupResolutionError.selection(error)
-        }
+        return metadata
     }
 }
 

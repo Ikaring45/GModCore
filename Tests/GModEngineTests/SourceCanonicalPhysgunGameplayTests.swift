@@ -100,6 +100,8 @@ final class SourceCanonicalPhysgunGameplayTests: XCTestCase {
             assert(definition.Primary.Automatic == true)
             PHYSGUN_PICKUPS = 0
             PHYSGUN_DROPS = 0
+            PHYSGUN_FREEZES = 0
+            PHYSGUN_UNFREEZES = 0
             hook.Add("OnPhysgunPickup", "physgun_vertical_pickup", function(ply, ent)
                 assert(ply == Player(\(session.configuration.playerUserID)))
                 assert(ent:GetClass() == "prop_physics")
@@ -109,6 +111,18 @@ final class SourceCanonicalPhysgunGameplayTests: XCTestCase {
                 assert(ply == Player(\(session.configuration.playerUserID)))
                 assert(ent:GetClass() == "prop_physics")
                 PHYSGUN_DROPS = PHYSGUN_DROPS + 1
+            end)
+            hook.Add("PlayerFrozeObject", "physgun_vertical_freeze", function(ply, ent, phys)
+                assert(ply == Player(\(session.configuration.playerUserID)))
+                assert(ent:GetClass() == "prop_physics")
+                assert(IsValid(phys))
+                PHYSGUN_FREEZES = PHYSGUN_FREEZES + 1
+            end)
+            hook.Add("PlayerUnfrozeObject", "physgun_vertical_unfreeze", function(ply, ent, phys)
+                assert(ply == Player(\(session.configuration.playerUserID)))
+                assert(ent:GetClass() == "prop_physics")
+                assert(IsValid(phys))
+                PHYSGUN_UNFREEZES = PHYSGUN_UNFREEZES + 1
             end)
             local ply = Player(\(session.configuration.playerUserID))
             local weapon = ply:Give("weapon_physgun")
@@ -193,9 +207,224 @@ final class SourceCanonicalPhysgunGameplayTests: XCTestCase {
             SourceCanonicalPhysgunGameplayController.maximumLinearSpeed + 0.001
         )
 
+        try session.serverRuntime.execute(
+            """
+            hook.Add("OnPhysgunFreeze", "physgun_vertical_freeze_reject", function()
+                return false
+            end)
+            """,
+            sourceName: "=(intercept physgun freeze)"
+        )
+        let interceptedFreeze = try session.runFixedTick(
+            movementInput: .init(
+                viewAngles: SourceQAngle(pitch: 0, yaw: 20, roll: 0),
+                buttons: [.attack, .attack2]
+            )
+        )
+        XCTAssertEqual(interceptedFreeze.physgunGameplay.failures, [])
+        XCTAssertEqual(
+            interceptedFreeze.physgunGameplay.events.map(\.kind),
+            [.freezeIntercepted, .drop]
+        )
+        XCTAssertTrue(try XCTUnwrap(
+            session.sourceAdapter.canonicalPhysicsObject(for: first.body.bodyID)
+        ).isMotionEnabled)
+
+        // A rejected freeze releases the prop with its current velocity. Put
+        // the fixture back on the sight line through the authoritative FIFO
+        // so the next assertion measures pickup/unfreeze rather than a trace
+        // miss caused by that ordinary post-drop inertia.
+        let playerAfterIntercept = try canonicalPlayer(in: session)
+        let yawTwenty = SourceQAngle(pitch: 0, yaw: 20, roll: 0)
+        let resetOrigin = playerAfterIntercept.transform.origin +
+            playerAfterIntercept.viewOffset + yawTwenty.sourceBasis.forward * 48
+        for mutation in [
+            SourcePhysicsBodyMutation.setPosition(resetOrigin, teleport: true),
+            .setLinearVelocity(.zero),
+            .setAngularVelocity(.zero),
+        ] {
+            try session.sourceAdapter.enqueueCanonicalPhysicsObjectMutation(
+                SourcePhysicsBodyMutationCommand(
+                    bodyID: first.body.bodyID,
+                    mutation: mutation
+                )
+            )
+        }
+        _ = try session.runFixedTick(
+            movementInput: .init(
+                viewAngles: yawTwenty
+            )
+        )
+        try session.serverRuntime.execute(
+            "hook.Remove('OnPhysgunFreeze', 'physgun_vertical_freeze_reject')",
+            sourceName: "=(allow stock physgun freeze)"
+        )
+        let firstAfterIntercept = try XCTUnwrap(
+            session.sourceAdapter.canonicalPhysicsObject(for: first.body.bodyID)
+        )
+        dynamic.candidates = [try candidate(
+            entity: try XCTUnwrap(
+                session.sourceAdapter.canonicalSnapshot(for: first.entity.identity)
+            ),
+            body: firstAfterIntercept
+        )]
+        let repickupBeforeFreeze = try session.runFixedTick(
+            movementInput: .init(
+                viewAngles: yawTwenty,
+                buttons: [.attack]
+            )
+        )
+        XCTAssertEqual(repickupBeforeFreeze.physgunGameplay.failures, [])
+        XCTAssertEqual(repickupBeforeFreeze.physgunGameplay.events.map(\.kind), [.pickup])
+
+        let freeze = try session.runFixedTick(
+            movementInput: .init(
+                viewAngles: yawTwenty,
+                buttons: [.attack, .attack2]
+            )
+        )
+        XCTAssertEqual(freeze.physgunGameplay.failures, [])
+        XCTAssertEqual(freeze.physgunGameplay.events.map(\.kind), [.freeze, .drop])
+        let frozenBody = try XCTUnwrap(
+            session.sourceAdapter.canonicalPhysicsObject(for: first.body.bodyID)
+        )
+        XCTAssertEqual(frozenBody.motionType, .dynamicBody)
+        XCTAssertFalse(frozenBody.isMotionEnabled)
+
+        dynamic.candidates = [try candidate(
+            entity: try XCTUnwrap(
+                session.sourceAdapter.canonicalSnapshot(for: first.entity.identity)
+            ),
+            body: frozenBody
+        )]
+        try session.serverRuntime.execute(
+            """
+            hook.Add("OnPhysgunReload", "physgun_vertical_reload_reject", function()
+                return false
+            end)
+            """,
+            sourceName: "=(intercept physgun reload)"
+        )
+        let interceptedReload = try session.runFixedTick(
+            movementInput: .init(
+                viewAngles: yawTwenty,
+                buttons: [.reload]
+            )
+        )
+        XCTAssertEqual(interceptedReload.physgunGameplay.failures, [])
+        XCTAssertEqual(interceptedReload.physgunGameplay.events, [])
+        XCTAssertFalse(try XCTUnwrap(
+            session.sourceAdapter.canonicalPhysicsObject(for: first.body.bodyID)
+        ).isMotionEnabled)
+
+        _ = try session.runFixedTick(
+            movementInput: .init(viewAngles: yawTwenty)
+        )
+        try session.serverRuntime.execute(
+            """
+            hook.Remove("OnPhysgunReload", "physgun_vertical_reload_reject")
+            hook.Add("CanPlayerUnfreeze", "physgun_vertical_unfreeze_reject", function()
+                return false
+            end)
+            """,
+            sourceName: "=(reject targeted physgun unfreeze)"
+        )
+        let rejectedUnfreeze = try session.runFixedTick(
+            movementInput: .init(
+                viewAngles: yawTwenty,
+                buttons: [.reload]
+            )
+        )
+        XCTAssertEqual(rejectedUnfreeze.physgunGameplay.failures, [])
+        XCTAssertEqual(
+            rejectedUnfreeze.physgunGameplay.events.map(\.kind),
+            [.unfreezeRejected]
+        )
+        XCTAssertFalse(try XCTUnwrap(
+            session.sourceAdapter.canonicalPhysicsObject(for: first.body.bodyID)
+        ).isMotionEnabled)
+
+        _ = try session.runFixedTick(
+            movementInput: .init(viewAngles: yawTwenty)
+        )
+        try session.serverRuntime.execute(
+            "hook.Remove('CanPlayerUnfreeze', 'physgun_vertical_unfreeze_reject')",
+            sourceName: "=(allow targeted physgun unfreeze)"
+        )
+        let unfreeze = try session.runFixedTick(
+            movementInput: .init(
+                viewAngles: yawTwenty,
+                buttons: [.reload]
+            )
+        )
+        XCTAssertEqual(unfreeze.physgunGameplay.failures, [])
+        XCTAssertEqual(unfreeze.physgunGameplay.events.map(\.kind), [.unfreeze])
+        XCTAssertTrue(try XCTUnwrap(
+            session.sourceAdapter.canonicalPhysicsObject(for: first.body.bodyID)
+        ).isMotionEnabled)
+
+        // Re-freeze the already tracked fixture through the authoritative
+        // mutation queue so the existing pickup path still proves that taking
+        // hold of a frozen body enables motion on the next fixed tick.
+        try session.sourceAdapter.enqueueCanonicalPhysicsObjectMutation(
+            SourcePhysicsBodyMutationCommand(
+                bodyID: first.body.bodyID,
+                mutation: .setMotionEnabled(false)
+            )
+        )
+        _ = try session.runFixedTick(
+            movementInput: .init(viewAngles: yawTwenty)
+        )
+        try session.serverRuntime.execute(
+            """
+            PHYSGUN_ADDON_UNFREEZE = 0
+            local playerMeta = assert(FindMetaTable("Player"))
+            playerMeta.PhysgunUnfreeze = function(self)
+                assert(self == Player(\(session.configuration.playerUserID)))
+                PHYSGUN_ADDON_UNFREEZE = PHYSGUN_ADDON_UNFREEZE + 1
+                return 77
+            end
+            """,
+            sourceName: "=(addon-owned physgun unfreeze override)"
+        )
+        let addonReload = try session.runFixedTick(
+            movementInput: .init(
+                viewAngles: yawTwenty,
+                buttons: [.reload]
+            )
+        )
+        XCTAssertEqual(addonReload.physgunGameplay.failures, [])
+        XCTAssertEqual(addonReload.physgunGameplay.events, [])
+        XCTAssertFalse(try XCTUnwrap(
+            session.sourceAdapter.canonicalPhysicsObject(for: first.body.bodyID)
+        ).isMotionEnabled)
+        try session.serverRuntime.execute(
+            "assert(PHYSGUN_ADDON_UNFREEZE == 1)",
+            sourceName: "=(addon physgun unfreeze override retained)"
+        )
+        dynamic.candidates = [try candidate(
+            entity: try XCTUnwrap(
+                session.sourceAdapter.canonicalSnapshot(for: first.entity.identity)
+            ),
+            body: try XCTUnwrap(
+                session.sourceAdapter.canonicalPhysicsObject(for: first.body.bodyID)
+            )
+        )]
+        let pickupFrozen = try session.runFixedTick(
+            movementInput: .init(
+                viewAngles: yawTwenty,
+                buttons: [.attack]
+            )
+        )
+        XCTAssertEqual(pickupFrozen.physgunGameplay.failures, [])
+        XCTAssertEqual(pickupFrozen.physgunGameplay.events.map(\.kind), [.pickup])
+        XCTAssertTrue(try XCTUnwrap(
+            session.sourceAdapter.canonicalPhysicsObject(for: first.body.bodyID)
+        ).isMotionEnabled)
+
         let drop = try session.runFixedTick(
             movementInput: .init(
-                viewAngles: SourceQAngle(pitch: 0, yaw: 20, roll: 0)
+                viewAngles: yawTwenty
             )
         )
         XCTAssertEqual(drop.physgunGameplay.failures, [])
@@ -205,6 +434,19 @@ final class SourceCanonicalPhysgunGameplayTests: XCTestCase {
         )
         XCTAssertEqual(droppedBody.motionType, .dynamicBody)
         XCTAssertTrue(droppedBody.isMotionEnabled)
+
+        // The next test prop is spawned on the same deterministic sight-line
+        // fixture. Remove the completed first prop before creating it so this
+        // controller test does not depend on a prop-vs-prop material pair.
+        _ = try session.sourceAdapter.markCanonicalEntityForRemoval(
+            first.entity.identity
+        )
+        _ = try session.runFixedTick(
+            movementInput: .init(viewAngles: yawTwenty)
+        )
+        XCTAssertNil(
+            session.sourceAdapter.canonicalPhysicsObject(for: first.body.bodyID)
+        )
 
         let secondPlayer = try canonicalPlayer(in: session)
         let second = try createTarget(
@@ -286,8 +528,10 @@ final class SourceCanonicalPhysgunGameplayTests: XCTestCase {
 
         try session.serverRuntime.execute(
             """
-            assert(PHYSGUN_PICKUPS == 2, "pickup hook count " .. tostring(PHYSGUN_PICKUPS))
-            assert(PHYSGUN_DROPS == 1, "drop hook count " .. tostring(PHYSGUN_DROPS))
+            assert(PHYSGUN_PICKUPS == 4, "pickup hook count " .. tostring(PHYSGUN_PICKUPS))
+            assert(PHYSGUN_DROPS == 3, "drop hook count " .. tostring(PHYSGUN_DROPS))
+            assert(PHYSGUN_FREEZES == 1, "freeze hook count " .. tostring(PHYSGUN_FREEZES))
+            assert(PHYSGUN_UNFREEZES == 1, "unfreeze hook count " .. tostring(PHYSGUN_UNFREEZES))
             """,
             sourceName: "=(physgun hook counts)"
         )

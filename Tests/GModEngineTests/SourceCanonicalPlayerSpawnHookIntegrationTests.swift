@@ -186,15 +186,34 @@ final class SourceCanonicalPlayerSpawnHookIntegrationTests: XCTestCase {
         )
     }
 
-    func testOriginalSandboxPlayerSpawnHookReplicatesCanonicalPlayerColors()
-        throws
-    {
+    func testOriginalSandboxPlayerSpawnReplicatesCanonicalColorsAmmoAndWeapons()
+        throws {
         let configuration = GModPlayableSessionConfiguration(
             map: .construct,
             playerEntityIndex: 7,
             playerUserID: 70
         )
-        let session = try GModPlayableSession(configuration: configuration)
+        let playerModel = SourceEntityModelReference(
+            "models/player/kleiner.mdl"
+        )
+        // This fixture stands in for already-decoded Studio metadata only in
+        // the route test. Production sessions resolve the same fields from
+        // validated MDL/VVD/VTX bytes or an exact full-identity attestation.
+        let playerBodyGroupLayout = try SourceStudioBodyGroupLayout(
+            bodyParts: [
+                .init(modelSelectionBase: 1, modelCount: 2),
+                .init(modelSelectionBase: 2, modelCount: 3),
+            ]
+        )
+        let session = try GModPlayableSession(
+            configuration: configuration,
+            textMeasurer: nil,
+            logger: { _, _ in },
+            worldWalkCollisionProvider: nil,
+            canonicalBodyGroupLayoutResolverForTesting: { model in
+                model == playerModel ? playerBodyGroupLayout : nil
+            }
+        )
         defer { _ = try? session.close() }
         let serverRegistry = try XCTUnwrap(session.serverRuntime.entityRegistry)
         let clientRegistry = try XCTUnwrap(session.clientRuntime.entityRegistry)
@@ -202,6 +221,7 @@ final class SourceCanonicalPlayerSpawnHookIntegrationTests: XCTestCase {
             clientRegistry.canonicalSnapshot(at: configuration.playerEntityIndex)
         )
         XCTAssertEqual(initialClient.playerColorState, .white)
+        XCTAssertEqual(initialClient.playerAmmoState, .empty)
 
         let values = try session.serverRuntime.executeReturningValues(
             """
@@ -219,6 +239,11 @@ final class SourceCanonicalPlayerSpawnHookIntegrationTests: XCTestCase {
         guard case let .boolean(completed)? = values.first else {
             return XCTFail("original PlayerSpawn result was malformed")
         }
+        XCTAssertFalse(
+            completed,
+            "original PlayerSpawn unexpectedly completed past the next " +
+                "unsupported engine boundary"
+        )
         if !completed,
            case let .string(message)? = values.dropFirst().first {
             XCTAssertFalse(
@@ -229,6 +254,23 @@ final class SourceCanonicalPlayerSpawnHookIntegrationTests: XCTestCase {
             XCTAssertFalse(
                 message.utf8String.contains("PlayerColor"),
                 "original PlayerSpawn must advance beyond Player colors: " +
+                    message.utf8String
+            )
+            XCTAssertFalse(
+                message.utf8String.contains("RemoveAllAmmo") ||
+                    message.utf8String.contains("GiveAmmo"),
+                "original PlayerLoadout must advance beyond reserve ammo: " +
+                    message.utf8String
+            )
+            XCTAssertFalse(
+                message.utf8String.contains("GetNumBodyGroups") ||
+                    message.utf8String.contains("SetBodygroup"),
+                "original player model route must advance beyond Studio " +
+                    "body groups: " + message.utf8String
+            )
+            XCTAssertTrue(
+                message.utf8String.contains("GetHands"),
+                "unexpected next original PlayerSpawn blocker: " +
                     message.utf8String
             )
         }
@@ -247,6 +289,48 @@ final class SourceCanonicalPlayerSpawnHookIntegrationTests: XCTestCase {
             authoredServer.playerColorState?.weaponColor,
             SourceVector3(0.30, 1.80, 2.10)
         )
+        XCTAssertEqual(authoredServer.model, playerModel)
+        XCTAssertEqual(authoredServer.bodyValue, 0)
+        XCTAssertEqual(
+            authoredServer.playerAmmoState?.entries,
+            [
+                .init(typeID: 1, typeName: "AR2", count: 100),
+                .init(typeID: 2, typeName: "AR2AltFire", count: 6),
+                .init(typeID: 3, typeName: "Pistol", count: 256),
+                .init(typeID: 4, typeName: "SMG1", count: 256),
+                .init(typeID: 5, typeName: "357", count: 32),
+                .init(typeID: 6, typeName: "XBowBolt", count: 32),
+                .init(typeID: 7, typeName: "Buckshot", count: 64),
+                .init(typeID: 10, typeName: "Grenade", count: 5),
+            ]
+        )
+        XCTAssertEqual(
+            authoredServer.weaponInventory.weapons.map(\.className),
+            [
+                "weapon_crowbar",
+                "weapon_pistol",
+                "weapon_smg1",
+                "weapon_frag",
+                "weapon_physcannon",
+                "weapon_crossbow",
+                "weapon_shotgun",
+                "weapon_357",
+                "weapon_rpg",
+                "weapon_ar2",
+                "gmod_tool",
+                "gmod_camera",
+                "weapon_physgun",
+            ],
+            "original Player:Give calls must use the canonical Weapon inventory"
+        )
+        for record in authoredServer.weaponInventory.weapons {
+            let weapon = try XCTUnwrap(
+                serverRegistry.canonicalSnapshot(at: record.identity.entryIndex)
+            )
+            XCTAssertEqual(weapon.identity, record.identity)
+            XCTAssertEqual(weapon.kind, .weapon)
+            XCTAssertEqual(weapon.className, record.className)
+        }
         XCTAssertEqual(
             clientRegistry.canonicalSnapshot(
                 at: configuration.playerEntityIndex
@@ -264,6 +348,11 @@ final class SourceCanonicalPlayerSpawnHookIntegrationTests: XCTestCase {
         )
         XCTAssertEqual(replicated.identity, authoredServer.identity)
         XCTAssertEqual(replicated.playerColorState, serverAfterTick.playerColorState)
+        XCTAssertEqual(replicated.playerAmmoState, serverAfterTick.playerAmmoState)
+        XCTAssertEqual(
+            replicated.weaponInventory,
+            serverAfterTick.weaponInventory
+        )
         try session.clientRuntime.execute(
             """
             local ply = Player(70)
@@ -275,8 +364,19 @@ final class SourceCanonicalPlayerSpawnHookIntegrationTests: XCTestCase {
             assert(math.abs(weaponColor.x - 0.30) < 0.000001)
             assert(math.abs(weaponColor.y - 1.80) < 0.000001)
             assert(math.abs(weaponColor.z - 2.10) < 0.000001)
+            assert(ply:GetAmmoCount("Pistol") == 256)
+            assert(ply:GetAmmoCount(4) == 256)
+            assert(ply:GetAmmoCount("grenade") == 5)
+            assert(ply:GetAmmoCount("AR2") == 100)
+            assert(#ply:GetWeapons() == 13)
+            assert(ply:HasWeapon("weapon_physgun"))
+            assert(ply:GetNumBodyGroups() == 2)
+            assert(ply:GetBodygroup(0) == 0)
+            assert(ply:GetBodygroup(1) == 0)
             assert(ply.SetPlayerColor == nil)
             assert(ply.SetWeaponColor == nil)
+            assert(ply.GiveAmmo == nil)
+            assert(ply.RemoveAllAmmo == nil)
             """,
             sourceName: "=(replicated canonical Player colors)"
         )

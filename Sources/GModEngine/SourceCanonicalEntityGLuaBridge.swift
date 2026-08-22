@@ -41,6 +41,16 @@ public protocol SourceCanonicalEntityLuaHost: AnyObject {
         for player: SourceCanonicalEntityIdentity
     ) throws -> SourceCanonicalEntitySnapshot
 
+    func canonicalBodyGroupLayout(
+        for model: SourceEntityModelReference
+    ) throws -> SourceStudioBodyGroupLayout
+
+    func setCanonicalBodyGroup(
+        _ bodyGroupID: Int,
+        selection: Int,
+        for identity: SourceCanonicalEntityIdentity
+    ) throws -> SourceCanonicalEntitySnapshot
+
     func setCanonicalBodyGroups(
         _ subModelIDs: String,
         for identity: SourceCanonicalEntityIdentity
@@ -253,6 +263,18 @@ public enum SourceCanonicalEntityGLuaBridge {
             return colors
         }
 
+        func requiredPlayerAmmoState(
+            _ snapshot: SourceCanonicalEntitySnapshot,
+            function: String
+        ) throws -> SourceCanonicalPlayerAmmoState {
+            guard let ammo = snapshot.playerAmmoState else {
+                throw LuaError.runtime(
+                    "\(function) canonical Player ammo state is unavailable"
+                )
+            }
+            return ammo
+        }
+
         func liveWeaponValue(
             _ record: SourceCanonicalWeaponRecord
         ) -> LuaValue? {
@@ -322,6 +344,152 @@ public enum SourceCanonicalEntityGLuaBridge {
                 )
             }
             return Int(number)
+        }
+
+        func requiredSignedInteger(
+            _ arguments: [LuaValue],
+            index: Int,
+            function: String
+        ) throws -> Int {
+            guard arguments.indices.contains(index) else {
+                throw LuaError.runtime(
+                    "bad argument #\(index) to '\(function)' " +
+                        "(32-bit integer expected, got no value)"
+                )
+            }
+            let number: Double?
+            switch arguments[index] {
+            case let .number(value):
+                number = value
+            case let .string(value):
+                number = Double(value.utf8String)
+            default:
+                number = nil
+            }
+            guard let number,
+                  number.isFinite,
+                  number.rounded(.towardZero) == number,
+                  let value = Int32(exactly: number) else {
+                throw LuaError.runtime(
+                    "bad argument #\(index) to '\(function)' " +
+                        "(32-bit integer expected)"
+                )
+            }
+            return Int(value)
+        }
+
+        func requiredAmmoAmount(
+            _ arguments: [LuaValue],
+            index: Int,
+            function: String
+        ) throws -> Int32 {
+            guard arguments.indices.contains(index) else {
+                throw LuaError.runtime(
+                    "bad argument #\(index) to '\(function)' " +
+                    "(32-bit integer expected, got no value)"
+                )
+            }
+            let number: Double?
+            switch arguments[index] {
+            case let .number(value):
+                number = value
+            case let .string(value):
+                number = Double(value.utf8String)
+            default:
+                number = nil
+            }
+            guard let number,
+                  number.isFinite,
+                  number.rounded(.towardZero) == number,
+                  let amount = Int32(exactly: number) else {
+                throw LuaError.runtime(
+                    "bad argument #\(index) to '\(function)' " +
+                    "(32-bit integer expected)"
+                )
+            }
+            return amount
+        }
+
+        func resolvedDefaultAmmoType(
+            _ arguments: [LuaValue],
+            index: Int,
+            function: String
+        ) throws -> SourceCanonicalDefaultAmmoType? {
+            guard arguments.indices.contains(index) else {
+                throw LuaError.runtime(
+                    "bad argument #\(index) to '\(function)' " +
+                    "(default ammo name or ID expected, got no value)"
+                )
+            }
+            switch arguments[index] {
+            case let .string(value):
+                return SourceCanonicalDefaultAmmoCatalog.type(
+                    name: value.utf8String
+                )
+            case let .number(value):
+                guard value.isFinite,
+                      value.rounded(.towardZero) == value,
+                      let id = Int32(exactly: value) else {
+                    throw LuaError.runtime(
+                        "bad argument #\(index) to '\(function)' " +
+                        "(32-bit ammo ID expected)"
+                    )
+                }
+                return SourceCanonicalDefaultAmmoCatalog.type(id: id)
+            default:
+                throw LuaError.runtime(
+                    "bad argument #\(index) to '\(function)' " +
+                    "(default ammo name or ID expected)"
+                )
+            }
+        }
+
+        func optionalBoolean(
+            _ arguments: [LuaValue],
+            index: Int,
+            function: String,
+            default defaultValue: Bool
+        ) throws -> Bool {
+            guard arguments.indices.contains(index) else { return defaultValue }
+            switch arguments[index] {
+            case let .boolean(value):
+                return value
+            case .nilValue:
+                return defaultValue
+            default:
+                throw LuaError.runtime(
+                    "bad argument #\(index) to '\(function)' " +
+                    "(boolean expected)"
+                )
+            }
+        }
+
+        func maximumReserveAmmoCount(function: String) throws -> Int32 {
+            // Garry's Mod's engine default is 9999. A positive host ConVar
+            // overrides it. Values below one request per-type maxcarry data,
+            // which this fixed default catalog does not yet own.
+            guard let raw = runtime.engineConVarCatalog?.currentValue(
+                for: "gmod_maxammo"
+            ) else { return 9_999 }
+            guard let number = Double(raw), number.isFinite else {
+                throw LuaError.runtime(
+                    "\(function) gmod_maxammo is not a finite number"
+                )
+            }
+            let integer = number.rounded(.towardZero)
+            guard integer >= 1 else {
+                throw LuaError.runtime(
+                    "\(function) per-ammo maxcarry is unavailable while " +
+                    "gmod_maxammo is below one"
+                )
+            }
+            guard integer <= Double(Int32.max),
+                  let maximum = Int32(exactly: integer) else {
+                throw LuaError.runtime(
+                    "\(function) gmod_maxammo exceeds Source's 32-bit range"
+                )
+            }
+            return maximum
         }
 
         func requiredNonNegativeFloat(
@@ -554,6 +722,13 @@ public enum SourceCanonicalEntityGLuaBridge {
             )
             return [.number(Double(snapshot.moveType.rawValue))]
         }
+        try setMethod("Entity:IsWorld", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Entity:IsWorld"
+            )
+            return [.boolean(snapshot.kind == .world)]
+        }
         try setMethod("Entity:GetCollisionGroup", on: entityMetatable) { arguments in
             let snapshot = try requiredSnapshot(
                 arguments.first,
@@ -574,6 +749,8 @@ public enum SourceCanonicalEntityGLuaBridge {
                 function: "Entity:IsConstraint"
             )
             switch snapshot.kind {
+            case .physicsConstraint:
+                return [.boolean(true)]
             case .world, .player, .propPhysics, .weapon:
                 return [.boolean(false)]
             }
@@ -584,13 +761,41 @@ public enum SourceCanonicalEntityGLuaBridge {
                 function: "Entity:IsWidget"
             )
             switch snapshot.kind {
-            case .world, .player, .propPhysics, .weapon:
+            case .world, .player, .propPhysics, .physicsConstraint, .weapon:
                 return [.boolean(false)]
             }
         }
         try setMethod("Entity:GetSkin", on: entityMetatable) { arguments in
             let snapshot = try requiredSnapshot(arguments.first, function: "Entity:GetSkin")
             return [.number(Double(snapshot.skin))]
+        }
+        try setMethod("Entity:GetNumBodyGroups", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Entity:GetNumBodyGroups"
+            )
+            guard let model = snapshot.model else { return [.number(0)] }
+            let layout = try requiredHost("Entity:GetNumBodyGroups")
+                .canonicalBodyGroupLayout(for: model)
+            return [.number(Double(layout.bodyGroupCount))]
+        }
+        try setMethod("Entity:GetBodygroup", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Entity:GetBodygroup"
+            )
+            let bodyGroupID = try requiredSignedInteger(
+                arguments,
+                index: 1,
+                function: "Entity:GetBodygroup"
+            )
+            guard let model = snapshot.model else { return [.number(0)] }
+            let layout = try requiredHost("Entity:GetBodygroup")
+                .canonicalBodyGroupLayout(for: model)
+            return [.number(Double(try layout.selection(
+                forBodyGroupID: bodyGroupID,
+                bodyValue: snapshot.bodyValue
+            )))]
         }
         // `lua/includes/extensions/entity.lua` implements the public
         // Entity:GetColor/SetColor methods over these native four-part APIs.
@@ -821,6 +1026,23 @@ public enum SourceCanonicalEntityGLuaBridge {
                   let record = snapshot.weaponInventory.weapon(identity: identity),
                   let value = liveWeaponValue(record) else { return [nullValue] }
             return [value]
+        }
+        try setMethod("Player:GetAmmoCount", on: playerMetatable) { arguments in
+            let player = try requiredSnapshot(
+                arguments.first,
+                function: "Player:GetAmmoCount",
+                kind: .player
+            )
+            guard let type = try resolvedDefaultAmmoType(
+                arguments,
+                index: 1,
+                function: "Player:GetAmmoCount"
+            ) else { return [.number(0)] }
+            let ammo = try requiredPlayerAmmoState(
+                player,
+                function: "Player:GetAmmoCount"
+            )
+            return [.number(Double(ammo.count(for: type)))]
         }
 
         // Model validation is a read surface in both SERVER and CLIENT. Stock
@@ -1078,6 +1300,83 @@ public enum SourceCanonicalEntityGLuaBridge {
             return []
         }
 
+        try setMethod("Player:RemoveAllAmmo", on: playerMetatable) { arguments in
+            let player = try requiredSnapshot(
+                arguments.first,
+                function: "Player:RemoveAllAmmo",
+                kind: .player
+            )
+            let current = try requiredPlayerAmmoState(
+                player,
+                function: "Player:RemoveAllAmmo"
+            )
+            guard !current.entries.isEmpty else { return [] }
+            _ = try requiredHost("Player:RemoveAllAmmo")
+                .updateCanonicalEntity(player.identity) { candidate in
+                    guard var ammo = candidate.playerAmmoState,
+                          ammo.removeAll() else {
+                        throw SourceCanonicalEntityError.invalidPlayerAmmoState
+                    }
+                    candidate.playerAmmoState = ammo
+                }
+            return []
+        }
+
+        try setMethod("Player:GiveAmmo", on: playerMetatable) { arguments in
+            let player = try requiredSnapshot(
+                arguments.first,
+                function: "Player:GiveAmmo",
+                kind: .player
+            )
+            let amount = try requiredAmmoAmount(
+                arguments,
+                index: 1,
+                function: "Player:GiveAmmo"
+            )
+            let type = try resolvedDefaultAmmoType(
+                arguments,
+                index: 2,
+                function: "Player:GiveAmmo"
+            )
+            _ = try optionalBoolean(
+                arguments,
+                index: 3,
+                function: "Player:GiveAmmo",
+                default: false
+            )
+            guard amount > 0, let type else { return [.number(0)] }
+            let maximum = try maximumReserveAmmoCount(
+                function: "Player:GiveAmmo"
+            )
+            var prospective = try requiredPlayerAmmoState(
+                player,
+                function: "Player:GiveAmmo"
+            )
+            let expectedAdded = prospective.give(
+                amount,
+                of: type,
+                maximumCount: maximum
+            )
+            guard expectedAdded > 0 else { return [.number(0)] }
+
+            _ = try requiredHost("Player:GiveAmmo")
+                .updateCanonicalEntity(player.identity) { candidate in
+                    guard var ammo = candidate.playerAmmoState else {
+                        throw SourceCanonicalEntityError.playerAmmoStateRequired
+                    }
+                    let added = ammo.give(
+                        amount,
+                        of: type,
+                        maximumCount: maximum
+                    )
+                    guard added == expectedAdded else {
+                        throw SourceCanonicalEntityError.invalidPlayerAmmoState
+                    }
+                    candidate.playerAmmoState = ammo
+                }
+            return [.number(Double(expectedAdded))]
+        }
+
         try setMethod("Player:Give", on: playerMetatable) { arguments in
             let player = try requiredSnapshot(
                 arguments.first,
@@ -1282,6 +1581,29 @@ public enum SourceCanonicalEntityGLuaBridge {
             let host = try requiredHost("Entity:SetBodyGroups")
             _ = try host.setCanonicalBodyGroups(
                 subModelIDs,
+                for: snapshot.identity
+            )
+            return []
+        }
+        try setMethod("Entity:SetBodygroup", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Entity:SetBodygroup"
+            )
+            let bodyGroupID = try requiredSignedInteger(
+                arguments,
+                index: 1,
+                function: "Entity:SetBodygroup"
+            )
+            let selection = try requiredSignedInteger(
+                arguments,
+                index: 2,
+                function: "Entity:SetBodygroup"
+            )
+            let host = try requiredHost("Entity:SetBodygroup")
+            _ = try host.setCanonicalBodyGroup(
+                bodyGroupID,
+                selection: selection,
                 for: snapshot.identity
             )
             return []

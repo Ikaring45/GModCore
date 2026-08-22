@@ -434,6 +434,8 @@ public final class GModPlayableSession {
     public let physicsEnvironment: SourceDeterministicPhysicsEnvironment
     public let serverToolActionBridge: SourceCanonicalToolActionBridge
     public let clientToolActionBridge: SourceCanonicalToolActionBridge
+    public let serverWeldConstraintBridge:
+        SourceCanonicalWeldConstraintGLuaBridge
 
     let serverFileSystem: GMLuaMountedFileSystem
     let clientFileSystem: GMLuaMountedFileSystem
@@ -607,6 +609,8 @@ public final class GModPlayableSession {
             GModAttestedPropPhysicsAssetResolver? = nil,
         attestedStudioBodyGroupMetadataForTesting:
             [SourceAttestedStudioBodyGroupMetadata]? = nil,
+        canonicalBodyGroupLayoutResolverForTesting:
+            SourceCanonicalBodyGroupLayoutResolver? = nil,
         studioModelRepositoryForTesting: GModStudioModelRepository? = nil,
         studioRenderableModelCacheForTesting:
             GModStudioRenderableModelCache? = nil
@@ -939,10 +943,30 @@ public final class GModPlayableSession {
                     )
                 }
             }
+            let activeBodyGroupLayoutResolver:
+                SourceCanonicalBodyGroupLayoutResolver
+            if let canonicalBodyGroupLayoutResolverForTesting {
+                activeBodyGroupLayoutResolver =
+                    canonicalBodyGroupLayoutResolverForTesting
+            } else if let loadedStudioModelRepository {
+                activeBodyGroupLayoutResolver = { model in
+                    try loadedStudioModelRepository.bodyGroupLayout(for: model)
+                }
+            } else {
+                activeBodyGroupLayoutResolver = { model in
+                    try loadedAttestedStudioBodyGroupCatalog.bodyGroupLayout(
+                        for: model,
+                        resolvedPropAsset:
+                            activePropPhysicsAssetResolver(model)
+                    )
+                }
+            }
             let sourceAdapter = try GMLuaSourceRuntimeAdapter(
                 serverRuntime: server,
                 canonicalModelValidator: activeModelValidator,
                 canonicalBodyGroupResolver: activeBodyGroupResolver,
+                canonicalBodyGroupLayoutResolver:
+                    activeBodyGroupLayoutResolver,
                 canonicalPropPhysicsAssetResolver:
                     activePropPhysicsAssetResolver
             )
@@ -1031,6 +1055,17 @@ public final class GModPlayableSession {
                 )
 
             try server.loadFile("lua/includes/init.lua")
+            // The bundled constraint module defines the public functions
+            // during init. Install the engine-owned fixed-joint subset only
+            // after that load so stock weld.lua reaches this SERVER boundary.
+            let loadedServerWeldConstraintBridge = try
+                SourceCanonicalWeldConstraintGLuaBridge.install(
+                    into: server,
+                    entityHost: sourceAdapter,
+                    physicsHost: sourceAdapter,
+                    commandQueue: session.netTransport,
+                    constraintGraph: toolConstraintGraph
+                )
             try SourceCanonicalPhysgunWeaponDefinition.install(
                 into: server,
                 host: sourceAdapter
@@ -1049,6 +1084,12 @@ public final class GModPlayableSession {
                 runtime: server,
                 fileSystem: serverFiles
             ).start(targetGamemodeNamed: trimmedGamemode)
+            // Stock Sandbox owns the public reload hook and calls this Player
+            // method. Replace its bundled body exactly once after gamemode
+            // startup; later addon overrides must remain addon-owned instead
+            // of being overwritten on every reload edge.
+            try loadedPhysgunGameplayController
+                .installTargetedPhysgunUnfreezeBridge()
             var playerState = SourceCanonicalEntityState.defaults(for: .player)
             playerState.applyPlayerWalkState(SourceWorldWalkState(
                 origin: loadedSpawn.origin,
@@ -1174,6 +1215,7 @@ public final class GModPlayableSession {
             physicsEnvironment = loadedPhysicsEnvironment
             serverToolActionBridge = loadedServerToolActionBridge
             clientToolActionBridge = loadedClientToolActionBridge
+            serverWeldConstraintBridge = loadedServerWeldConstraintBridge
             propPhysicsCoordinator = loadedPropPhysicsCoordinator
             weaponGameplayController = loadedWeaponGameplayController
             physgunGameplayController = loadedPhysgunGameplayController

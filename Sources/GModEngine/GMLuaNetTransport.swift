@@ -1258,7 +1258,8 @@ public enum GMLuaPhysicsSequenceReservationError: Error, Equatable, Sendable {
 
 public final class GMLuaNetTransport: @unchecked Sendable,
     SourceCanonicalPropPhysicsCommandSequenceSource,
-    SourceCanonicalPropPhysicsMutationCommandQueue
+    SourceCanonicalPropPhysicsMutationCommandQueue,
+    SourceCanonicalPhysicsConstraintCommandQueue
 {
     public static let maximumPayloadBytes = 65_533
     public static let maximumPayloadBits = maximumPayloadBytes * 8
@@ -1352,22 +1353,35 @@ public final class GMLuaNetTransport: @unchecked Sendable,
     public func enqueueCanonicalPhysicsBodyCommands(
         _ bodyCommands: [SourceCanonicalQueuedPhysicsBodyCommand]
     ) throws -> [SourcePhysicsCommand] {
-        guard !bodyCommands.isEmpty else { return [] }
+        try enqueueCanonicalPhysicsPayloads(bodyCommands.map(\.payload))
+    }
+
+    @discardableResult
+    public func enqueueCanonicalPhysicsConstraintCommands(
+        _ constraintCommands: [SourceCanonicalQueuedPhysicsConstraintCommand]
+    ) throws -> [SourcePhysicsCommand] {
+        try enqueueCanonicalPhysicsPayloads(constraintCommands.map(\.payload))
+    }
+
+    private func enqueueCanonicalPhysicsPayloads(
+        _ payloads: [SourcePhysicsCommandPayload]
+    ) throws -> [SourcePhysicsCommand] {
+        guard !payloads.isEmpty else { return [] }
         let transaction = Thread.current.threadDictionary[
             deliveryTransactionThreadKey
         ] as? GMLuaTransportDeliveryTransactionContext
         lock.lock()
         defer { lock.unlock() }
-        let requested = UInt64(bodyCommands.count)
+        let requested = UInt64(payloads.count)
         guard requested <= UInt64.max - nextSequence else {
             throw GMLuaPhysicsSequenceReservationError.sequenceExhausted
         }
         let first = nextSequence + 1
         nextSequence += requested
-        let commands = bodyCommands.enumerated().map { offset, command in
+        let commands = payloads.enumerated().map { offset, payload in
             SourcePhysicsCommand(
                 sequence: first + UInt64(offset),
-                payload: command.payload
+                payload: payload
             )
         }
         if let transaction {
@@ -1376,6 +1390,32 @@ public final class GMLuaNetTransport: @unchecked Sendable,
             pendingPhysicsBodyCommands.append(contentsOf: commands)
         }
         return commands
+    }
+
+    public func rollbackCanonicalPhysicsConstraintCommands(
+        _ commands: [SourcePhysicsCommand]
+    ) {
+        guard !commands.isEmpty else { return }
+        let transaction = Thread.current.threadDictionary[
+            deliveryTransactionThreadKey
+        ] as? GMLuaTransportDeliveryTransactionContext
+        lock.lock()
+        defer { lock.unlock() }
+        if let transaction {
+            precondition(transaction.physicsBodyCommands.count >= commands.count)
+            precondition(
+                Array(transaction.physicsBodyCommands.suffix(commands.count)) == commands,
+                "constraint rollback must match the staged physics FIFO suffix"
+            )
+            transaction.physicsBodyCommands.removeLast(commands.count)
+        } else {
+            precondition(pendingPhysicsBodyCommands.count >= commands.count)
+            precondition(
+                Array(pendingPhysicsBodyCommands.suffix(commands.count)) == commands,
+                "constraint rollback must match the pending physics FIFO suffix"
+            )
+            pendingPhysicsBodyCommands.removeLast(commands.count)
+        }
     }
 
     public func preparePendingCanonicalPhysicsBodyCommands()

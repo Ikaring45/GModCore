@@ -456,6 +456,11 @@ private struct SourcePhysicsReplayLiveBody {
     }
 }
 
+private struct SourcePhysicsReplayLiveFixedConstraint {
+    let creation: SourcePhysicsFixedConstraintCreationCommand
+    var attachedPoseInReference: SourceEntityTransform?
+}
+
 private struct SourcePhysicsReplayTranscriptValidator {
     let budget: SourcePhysicsReplayBudget
     private var counter = SourcePhysicsReplayBudgetCounter()
@@ -466,7 +471,7 @@ private struct SourcePhysicsReplayTranscriptValidator {
         SourcePhysicsBodyID: SourcePhysicsReplayLiveBody
     ] = [:]
     private var liveFixedConstraints: [
-        SourcePhysicsConstraintID: SourcePhysicsFixedConstraintCreationCommand
+        SourcePhysicsConstraintID: SourcePhysicsReplayLiveFixedConstraint
     ] = [:]
     private var retiredConstraintIDs = Set<SourcePhysicsConstraintID>()
     private var liveHandleByEntry: [Int: UInt32] = [:]
@@ -622,15 +627,16 @@ private struct SourcePhysicsReplayTranscriptValidator {
                 let bodyID = deletion.bodyID
                 if let constraint = liveFixedConstraints.values
                     .filter({
-                        $0.referenceBodyID == bodyID ||
-                            $0.attachedBodyID == bodyID
+                        $0.creation.referenceBodyID == bodyID ||
+                            $0.creation.attachedBodyID == bodyID
                     })
                     .min(by: {
-                        $0.constraintID.rawValue < $1.constraintID.rawValue
+                        $0.creation.constraintID.rawValue <
+                            $1.creation.constraintID.rawValue
                     }) {
                     throw SourcePhysicsReplayError.bodyDeletedWithLiveConstraint(
                         bodyID: bodyID,
-                        constraintID: constraint.constraintID
+                        constraintID: constraint.creation.constraintID
                     )
                 }
                 guard liveBodies.removeValue(forKey: bodyID) != nil else {
@@ -671,7 +677,11 @@ private struct SourcePhysicsReplayTranscriptValidator {
                         bodyID: bodyID
                     )
                 }
-                liveFixedConstraints[creation.constraintID] = creation
+                liveFixedConstraints[creation.constraintID] =
+                    SourcePhysicsReplayLiveFixedConstraint(
+                        creation: creation,
+                        attachedPoseInReference: nil
+                    )
                 events[commandIndex] = .fixedConstraintCreated(
                     commandSequence: command.sequence,
                     command: creation
@@ -1002,7 +1012,7 @@ private struct SourcePhysicsReplayTranscriptValidator {
         }
     }
 
-    private func validateConstraintSnapshots(
+    private mutating func validateConstraintSnapshots(
         _ constraints: [SourcePhysicsFixedConstraintSnapshot],
         simulationTick: UInt64
     ) throws {
@@ -1030,10 +1040,12 @@ private struct SourcePhysicsReplayTranscriptValidator {
             )
         }
         for constraint in constraints {
-            guard let creation = liveFixedConstraints[
+            guard var liveConstraint = liveFixedConstraints[
                 constraint.constraintID
-            ], creation.referenceBodyID == constraint.referenceBodyID,
-               creation.attachedBodyID == constraint.attachedBodyID else {
+            ], liveConstraint.creation.referenceBodyID ==
+                constraint.referenceBodyID,
+               liveConstraint.creation.attachedBodyID ==
+                constraint.attachedBodyID else {
                 throw SourcePhysicsReplayError
                     .environmentConstraintDefinitionMismatch(
                         constraint.constraintID
@@ -1045,6 +1057,18 @@ private struct SourcePhysicsReplayTranscriptValidator {
                     expected: simulationTick,
                     received: constraint.simulationTick
                 )
+            }
+            if let expectedPose = liveConstraint.attachedPoseInReference {
+                guard expectedPose == constraint.attachedPoseInReference else {
+                    throw SourcePhysicsReplayError
+                        .environmentConstraintDefinitionMismatch(
+                            constraint.constraintID
+                        )
+                }
+            } else {
+                liveConstraint.attachedPoseInReference =
+                    constraint.attachedPoseInReference
+                liveFixedConstraints[constraint.constraintID] = liveConstraint
             }
         }
     }

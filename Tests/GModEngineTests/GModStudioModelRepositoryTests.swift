@@ -1,7 +1,7 @@
 import Foundation
 import XCTest
 @testable import GModGameSession
-import GModEngine
+@testable import GModEngine
 
 final class GModStudioModelRepositoryTests: XCTestCase {
     func testExplicitDX90PathsAreCachedAndMissingModelIsInvalid() {
@@ -101,6 +101,67 @@ final class GModStudioModelRepositoryTests: XCTestCase {
         XCTAssertLessThanOrEqual(repository.cachedRawByteCount, 1_160)
     }
 
+    func testBodyGroupLayoutAndBodyValueShareValidatedStudioMesh() throws {
+        let model = SourceEntityModelReference("models/props/bodygroup.mdl")
+        let checksum: Int32 = 701
+        let files = studioFiles([(model.path, checksum)])
+        let loader = SourceStudioModelAssetLoader(
+            reader: CountingStudioAssetReader(files: files),
+            budget: repositoryBudget()
+        )
+        let paths = SourceStudioModelAssetPaths(
+            mdl: model.path,
+            vvd: "models/props/bodygroup.vvd",
+            vtx: "models/props/bodygroup.dx90.vtx"
+        )
+        let asset = try XCTUnwrap(
+            loader.load(paths: paths, requirement: .render).asset
+        )
+        let mesh = makeBodyGroupMesh(
+            checksum: asset.validation.checksum,
+            modelName: asset.renderPayload.model.header.name
+        )
+        let repository = GModStudioModelRepository(
+            decodeRootMesh: { _, _ in mesh },
+            loadAsset: { _, _ in .loaded(asset) }
+        )
+
+        let layout = try repository.bodyGroupLayout(for: model)
+        XCTAssertEqual(layout.bodyGroupCount, 2)
+        XCTAssertEqual(layout.bodyParts, [
+            .init(modelSelectionBase: 1, modelCount: 2),
+            .init(modelSelectionBase: 2, modelCount: 3),
+        ])
+        XCTAssertEqual(
+            try repository.bodyValue(
+                for: model,
+                applyingBodyGroups: "12",
+                to: 0
+            ),
+            5
+        )
+
+        let mismatchedMesh = makeBodyGroupMesh(
+            checksum: checksum &+ 1,
+            modelName: asset.renderPayload.model.header.name
+        )
+        let mismatchedRepository = GModStudioModelRepository(
+            decodeRootMesh: { _, _ in mismatchedMesh },
+            loadAsset: { _, _ in .loaded(asset) }
+        )
+        XCTAssertThrowsError(
+            try mismatchedRepository.bodyGroupLayout(for: model)
+        ) { error in
+            XCTAssertEqual(
+                error as? GModStudioBodyGroupResolutionError,
+                .inconsistentChecksum(
+                    expected: checksum,
+                    actual: checksum &+ 1
+                )
+            )
+        }
+    }
+
     private func repositoryBudget() -> SourceStudioModelAssetBudget {
         SourceStudioModelAssetBudget(
             maximumBytesByKind: [.mdl: 4_096, .vvd: 4_096, .vtx: 4_096],
@@ -122,6 +183,34 @@ final class GModStudioModelRepositoryTests: XCTestCase {
             files["\(stem).dx90.vtx"] = makeVTX(checksum: model.checksum)
         }
         return files
+    }
+
+    private func makeBodyGroupMesh(
+        checksum: Int32,
+        modelName: String
+    ) -> SourceStudioModelMeshSnapshot {
+        SourceStudioModelMeshSnapshot(
+            checksum: checksum,
+            modelName: modelName,
+            lodIndex: 0,
+            bodyParts: [2, 3].enumerated().map { bodyGroupID, modelCount in
+                SourceStudioBodyPartMeshSnapshot(
+                    index: bodyGroupID,
+                    name: "body_\(bodyGroupID)",
+                    modelSelectionBase: bodyGroupID == 0 ? 1 : 2,
+                    models: (0..<modelCount).map { modelID in
+                        SourceStudioSubmodelSnapshot(
+                            index: modelID,
+                            name: "model_\(modelID)",
+                            type: 0,
+                            boundingRadius: 1,
+                            rootLODVertexCount: 0,
+                            meshes: []
+                        )
+                    }
+                )
+            }
+        )
     }
 
     private func makeMDL(path: String, checksum: Int32) -> Data {

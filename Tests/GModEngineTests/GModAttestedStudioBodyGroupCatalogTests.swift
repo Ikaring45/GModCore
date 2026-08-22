@@ -37,6 +37,12 @@ final class GModAttestedStudioBodyGroupCatalogTests: XCTestCase {
             catalog.metadata(exactlyMatching: exactAsset),
             metadata
         )
+        let layout = try catalog.bodyGroupLayout(
+            for: SourceEntityModelReference(metadata.normalizedModelPath),
+            resolvedPropAsset: .valid(exactAsset)
+        )
+        XCTAssertEqual(layout.bodyGroupCount, 1)
+        XCTAssertEqual(layout.bodyParts, metadata.bodyParts)
     }
 
     func testHashOrChecksumMismatchStaysAbsent() throws {
@@ -56,5 +62,21 @@ final class GModAttestedStudioBodyGroupCatalogTests: XCTestCase {
 
         XCTAssertNil(catalog.metadata(exactlyMatching: wrongHash))
         XCTAssertNil(catalog.metadata(exactlyMatching: wrongChecksum))
+
+        XCTAssertThrowsError(
+            try catalog.bodyGroupLayout(
+                for: SourceEntityModelReference(metadata.normalizedModelPath),
+                resolvedPropAsset: .valid(wrongHash)
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? GModAttestedStudioBodyGroupResolutionError,
+                .exactMetadataMissing(
+                    modelPath: wrongHash.normalizedModelPath,
+                    mdlSHA256: wrongHash.mdlSHA256,
+                    studioChecksum: wrongHash.studioChecksum
+                )
+            )
+        }
     }
 }
