@@ -49,8 +49,28 @@ public struct GModContentSHA256: @unchecked Sendable {
         #if canImport(CryptoKit)
         appleHasher.update(data: data)
         #else
-        for byte in data {
-            append(byte)
+        byteCount &+= UInt64(data.count)
+        data.withUnsafeBytes { bytes in
+            var cursor = 0
+
+            if !pending.isEmpty {
+                let copied = min(64 - pending.count, bytes.count)
+                if copied > 0 {
+                    pending.append(contentsOf: bytes[0..<copied])
+                    cursor += copied
+                }
+                if pending.count == 64 {
+                    compressPendingBlock()
+                }
+            }
+
+            while cursor <= bytes.count - 64 {
+                Self.compress(bytes, offset: cursor, state: &state)
+                cursor += 64
+            }
+            if cursor < bytes.count {
+                pending.append(contentsOf: bytes[cursor..<bytes.count])
+            }
         }
         #endif
     }
@@ -81,8 +101,11 @@ public struct GModContentSHA256: @unchecked Sendable {
             copy.pending.append(UInt8(truncatingIfNeeded: bitCount >> UInt64(shift)))
         }
         var cursor = 0
+        let finalBlocks = copy.pending
         while cursor < copy.pending.count {
-            copy.compress(Array(copy.pending[cursor..<cursor + 64]))
+            finalBlocks.withUnsafeBytes { bytes in
+                Self.compress(bytes, offset: cursor, state: &copy.state)
+            }
             cursor += 64
         }
         return copy.state.map { String(format: "%08x", $0) }.joined()
@@ -90,72 +113,87 @@ public struct GModContentSHA256: @unchecked Sendable {
     }
 
     #if !canImport(CryptoKit)
-    private mutating func compress(_ block: [UInt8]) {
-        precondition(block.count == 64)
-        var words = Array(repeating: UInt32(0), count: 64)
-        for index in 0..<16 {
-            let offset = index * 4
-            words[index] = UInt32(block[offset]) << 24 |
-                UInt32(block[offset + 1]) << 16 |
-                UInt32(block[offset + 2]) << 8 |
-                UInt32(block[offset + 3])
-        }
-        for index in 16..<64 {
-            let x = words[index - 15]
-            let y = words[index - 2]
-            let sigma0 = rotateRight(x, by: 7) ^ rotateRight(x, by: 18) ^ (x >> 3)
-            let sigma1 = rotateRight(y, by: 17) ^ rotateRight(y, by: 19) ^ (y >> 10)
-            words[index] = words[index - 16] &+ sigma0 &+
-                words[index - 7] &+ sigma1
-        }
+    private static func compress(
+        _ block: UnsafeRawBufferPointer,
+        offset blockOffset: Int,
+        state: inout [UInt32]
+    ) {
+        precondition(blockOffset >= 0 && blockOffset <= block.count - 64)
+        withUnsafeTemporaryAllocation(of: UInt32.self, capacity: 64) { words in
+            for index in 0..<16 {
+                let offset = blockOffset + index * 4
+                words[index] = UInt32(block[offset]) << 24 |
+                    UInt32(block[offset + 1]) << 16 |
+                    UInt32(block[offset + 2]) << 8 |
+                    UInt32(block[offset + 3])
+            }
+            for index in 16..<64 {
+                let x = words[index - 15]
+                let y = words[index - 2]
+                let sigma0 = rotateRight(x, by: 7) ^
+                    rotateRight(x, by: 18) ^ (x >> 3)
+                let sigma1 = rotateRight(y, by: 17) ^
+                    rotateRight(y, by: 19) ^ (y >> 10)
+                words[index] = words[index - 16] &+ sigma0 &+
+                    words[index - 7] &+ sigma1
+            }
 
-        var a = state[0]
-        var b = state[1]
-        var c = state[2]
-        var d = state[3]
-        var e = state[4]
-        var f = state[5]
-        var g = state[6]
-        var h = state[7]
-        for index in 0..<64 {
-            let sum1 = rotateRight(e, by: 6) ^ rotateRight(e, by: 11) ^
-                rotateRight(e, by: 25)
-            let choice = (e & f) ^ (~e & g)
-            let temporary1 = h &+ sum1 &+ choice &+
-                Self.roundConstants[index] &+ words[index]
-            let sum0 = rotateRight(a, by: 2) ^ rotateRight(a, by: 13) ^
-                rotateRight(a, by: 22)
-            let majority = (a & b) ^ (a & c) ^ (b & c)
-            let temporary2 = sum0 &+ majority
-            h = g
-            g = f
-            f = e
-            e = d &+ temporary1
-            d = c
-            c = b
-            b = a
-            a = temporary1 &+ temporary2
+            var a = state[0]
+            var b = state[1]
+            var c = state[2]
+            var d = state[3]
+            var e = state[4]
+            var f = state[5]
+            var g = state[6]
+            var h = state[7]
+            for index in 0..<64 {
+                let sum1 = rotateRight(e, by: 6) ^ rotateRight(e, by: 11) ^
+                    rotateRight(e, by: 25)
+                let choice = (e & f) ^ (~e & g)
+                let temporary1 = h &+ sum1 &+ choice &+
+                    roundConstants[index] &+ words[index]
+                let sum0 = rotateRight(a, by: 2) ^ rotateRight(a, by: 13) ^
+                    rotateRight(a, by: 22)
+                let majority = (a & b) ^ (a & c) ^ (b & c)
+                let temporary2 = sum0 &+ majority
+                h = g
+                g = f
+                f = e
+                e = d &+ temporary1
+                d = c
+                c = b
+                b = a
+                a = temporary1 &+ temporary2
+            }
+            state[0] &+= a
+            state[1] &+= b
+            state[2] &+= c
+            state[3] &+= d
+            state[4] &+= e
+            state[5] &+= f
+            state[6] &+= g
+            state[7] &+= h
         }
-        state[0] &+= a
-        state[1] &+= b
-        state[2] &+= c
-        state[3] &+= d
-        state[4] &+= e
-        state[5] &+= f
-        state[6] &+= g
-        state[7] &+= h
     }
 
     private mutating func append(_ byte: UInt8) {
         byteCount &+= 1
         pending.append(byte)
         if pending.count == 64 {
-            compress(pending)
-            pending.removeAll(keepingCapacity: true)
+            compressPendingBlock()
         }
     }
 
-    private func rotateRight(_ value: UInt32, by count: UInt32) -> UInt32 {
+    private mutating func compressPendingBlock() {
+        precondition(pending.count == 64)
+        let block = pending
+        block.withUnsafeBytes { bytes in
+            Self.compress(bytes, offset: 0, state: &state)
+        }
+        pending.removeAll(keepingCapacity: true)
+    }
+
+    private static func rotateRight(_ value: UInt32, by count: UInt32) -> UInt32 {
         (value >> count) | (value << (32 - count))
     }
     #endif
