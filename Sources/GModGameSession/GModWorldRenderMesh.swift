@@ -483,6 +483,9 @@ public struct GModWorldRenderMeshDiagnostics: Sendable, Equatable {
     public let emittedDisplacementTriangleCount: Int
     public let removedDisplacementTriangleCount: Int
     public let maximumDisplacementOffsetFromBase: Float
+    /// `false` when the loaded BSP has an exact displacement-triangle collision
+    /// representation available to the playable session's detailed world
+    /// provider. Retained as a compatibility diagnostic for older callers.
     public let displacementCollisionIsBrushOnly: Bool
     public let waterSurfaceFaceCount: Int
     public let waterBelowSurfaceFaceCount: Int
@@ -510,7 +513,7 @@ public struct GModWorldRenderMeshDiagnostics: Sendable, Equatable {
         emittedDisplacementTriangleCount: Int = 0,
         removedDisplacementTriangleCount: Int = 0,
         maximumDisplacementOffsetFromBase: Float = 0,
-        displacementCollisionIsBrushOnly: Bool = true,
+        displacementCollisionIsBrushOnly: Bool = false,
         waterSurfaceFaceCount: Int = 0,
         waterBelowSurfaceFaceCount: Int = 0
     ) {
@@ -1152,7 +1155,7 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
                 emittedDisplacementTriangleCount: emittedDisplacementTriangles,
                 removedDisplacementTriangleCount: removedDisplacementTriangles,
                 maximumDisplacementOffsetFromBase: maximumDisplacementOffset,
-                displacementCollisionIsBrushOnly: true,
+                displacementCollisionIsBrushOnly: false,
                 waterSurfaceFaceCount: waterSurfaceFaces,
                 waterBelowSurfaceFaceCount: waterBelowSurfaceFaces
             )

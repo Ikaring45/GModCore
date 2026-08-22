@@ -193,7 +193,7 @@ final class GModWorldRenderMeshTests: XCTestCase {
             1_285.72998,
             accuracy: 0.001
         )
-        XCTAssertTrue(mesh.diagnostics.displacementCollisionIsBrushOnly)
+        XCTAssertFalse(mesh.diagnostics.displacementCollisionIsBrushOnly)
         XCTAssertEqual(mesh.diagnostics.waterSurfaceFaceCount, 60)
         XCTAssertEqual(mesh.diagnostics.waterBelowSurfaceFaceCount, 30)
         XCTAssertEqual(bsp.textureNames.count, 204)
@@ -289,7 +289,7 @@ final class GModWorldRenderMeshTests: XCTestCase {
             649.83197,
             accuracy: 0.001
         )
-        XCTAssertTrue(mesh.diagnostics.displacementCollisionIsBrushOnly)
+        XCTAssertFalse(mesh.diagnostics.displacementCollisionIsBrushOnly)
         XCTAssertEqual(mesh.diagnostics.waterSurfaceFaceCount, 0)
         XCTAssertEqual(mesh.diagnostics.waterBelowSurfaceFaceCount, 0)
         XCTAssertEqual(bsp.textureNames.count, 18)
