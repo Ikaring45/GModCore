@@ -16,31 +16,42 @@ public struct GMLuaTraceRequest: Equatable, Sendable {
     public let ray: SourceRay
     public let mask: SourceContents
     public let worldIdentity: GMLuaSourceEntityIdentity
+    /// Caller collision group passed to the host's real game-rules policy.
+    /// The utility layer does not guess a collision matrix.
+    public let collisionGroup: Int32
     /// Complete realm-local handles named by an Entity/table filter. The BSP
     /// provider has no dynamic candidates, so these do not alter its world
     /// result; a later dynamic provider can apply them without reparsing Lua.
     public let excludedEntityHandles: [SourceBaseHandle]
+    /// Complete handles selected by an Entity/table whitelist. Empty means no
+    /// whitelist, not an empty whitelist; the parsed filter retains that
+    /// distinction inside the realm-local bridge.
+    public let includedEntityHandles: [SourceBaseHandle]
 
     init(
         kind: GMLuaTraceKind,
         ray: SourceRay,
         mask: SourceContents,
         worldIdentity: GMLuaSourceEntityIdentity,
-        excludedEntityHandles: [SourceBaseHandle]
+        collisionGroup: Int32 = 0,
+        excludedEntityHandles: [SourceBaseHandle],
+        includedEntityHandles: [SourceBaseHandle] = []
     ) {
         self.kind = kind
         self.ray = ray
         self.mask = mask
         self.worldIdentity = worldIdentity
+        self.collisionGroup = collisionGroup
         self.excludedEntityHandles = excludedEntityHandles
+        self.includedEntityHandles = includedEntityHandles
     }
 }
 
 /// Host boundary for `util.TraceLine` and `util.TraceHull`.
 ///
-/// Providers are world-only in this milestone. A hit must carry the exact
-/// `request.worldIdentity.handle`; the Lua bridge rejects dynamic entities and
-/// stale world generations instead of silently returning the wrong userdata.
+/// Existing implementations may remain world-only. A
+/// ``GMLuaDynamicTraceCandidateProvider`` can be composed with one through
+/// ``GMLuaCompositeTraceProvider`` without changing this BSP contract.
 public protocol GMLuaTraceProvider: Sendable {
     var isWorldReady: Bool { get }
     func traceWorld(_ request: GMLuaTraceRequest) throws -> SourceGameTrace
@@ -49,10 +60,12 @@ public protocol GMLuaTraceProvider: Sendable {
 public enum GMLuaTraceBridgeError: Error, Equatable, CustomStringConvertible {
     case providerUnavailable
     case worldNotReady
+    case dynamicWorldNotReady
     case canonicalWorldUnavailable
     case staleWorldIdentity(expected: UInt32, actual: UInt32)
     case hitMissingWorldIdentity
     case unsupportedNonWorldIdentity(Int)
+    case dynamicEntityUnavailable(UInt32)
     case inconsistentMissIdentity(UInt32)
     case nonFiniteProviderResult(String)
 
@@ -62,6 +75,8 @@ public enum GMLuaTraceBridgeError: Error, Equatable, CustomStringConvertible {
             return "no world trace provider is connected"
         case .worldNotReady:
             return "the trace provider's world is not ready"
+        case .dynamicWorldNotReady:
+            return "the dynamic trace provider is not ready"
         case .canonicalWorldUnavailable:
             return "canonical Source Entity(0) world mirror is unavailable"
         case let .staleWorldIdentity(expected, actual):
@@ -70,6 +85,8 @@ public enum GMLuaTraceBridgeError: Error, Equatable, CustomStringConvertible {
             return "world trace reported a hit without an Entity(0) identity"
         case let .unsupportedNonWorldIdentity(index):
             return "dynamic entity trace hit at index \(index) is not implemented"
+        case let .dynamicEntityUnavailable(rawValue):
+            return "dynamic trace returned unavailable EHANDLE \(rawValue)"
         case let .inconsistentMissIdentity(rawValue):
             return "trace miss unexpectedly carried entity handle \(rawValue)"
         case let .nonFiniteProviderResult(field):
@@ -83,8 +100,7 @@ public enum GMLuaTraceBridgeError: Error, Equatable, CustomStringConvertible {
 public final class GMLuaTraceBridge: @unchecked Sendable {
     /// Inputs that are rejected unless they retain the documented defaults.
     public static let unavailableInputCapabilities = [
-        "function/string filter", "collisiongroup != COLLISION_GROUP_NONE", "ignoreworld",
-        "whitelist", "hitclientonly",
+        "string filter", "ignoreworld", "hitclientonly",
     ]
 
     /// BSP collision currently has no texture-name, surface-property-table, or
@@ -119,9 +135,63 @@ public final class GMLuaTraceBridge: @unchecked Sendable {
         lock.unlock()
     }
 
-    fileprivate func trace(_ request: GMLuaTraceRequest) throws -> SourceGameTrace {
+    fileprivate func trace(
+        _ request: GMLuaTraceRequest,
+        shouldHitDynamicEntity: (GMLuaDynamicTraceCandidate) throws -> Bool
+    ) throws -> SourceGameTrace {
         let current = try readyProvider()
-        return try current.traceWorld(request)
+        var result = try current.traceWorld(request)
+        try validateWorldIdentity(result, request: request)
+        guard let dynamic = current as? any GMLuaDynamicTraceCandidateProvider else {
+            return result
+        }
+        guard dynamic.isDynamicTraceReady else {
+            throw GMLuaTraceBridgeError.dynamicWorldNotReady
+        }
+        let candidates = try dynamic.dynamicTraceCandidates(for: request)
+            .sorted {
+                $0.identity.handle.rawValue < $1.identity.handle.rawValue
+            }
+        for candidate in candidates {
+            guard dynamic.shouldCollide(
+                queryCollisionGroup: request.collisionGroup,
+                candidateCollisionGroup: candidate.collisionGroup
+            ), try shouldHitDynamicEntity(candidate) else { continue }
+            let candidateTrace = try GMLuaDynamicTraceEngine.trace(
+                request,
+                candidate: candidate
+            )
+            guard candidateTrace.didHit else { continue }
+            GMLuaDynamicTraceEngine.merge(candidateTrace, into: &result)
+        }
+        return result
+    }
+
+    private func validateWorldIdentity(
+        _ trace: SourceGameTrace,
+        request: GMLuaTraceRequest
+    ) throws {
+        guard trace.fraction.isFinite else {
+            throw GMLuaTraceBridgeError.nonFiniteProviderResult("Fraction")
+        }
+        if trace.didHit {
+            guard let handle = trace.entityHandle else {
+                throw GMLuaTraceBridgeError.hitMissingWorldIdentity
+            }
+            guard handle.entryIndex == 0 else {
+                throw GMLuaTraceBridgeError
+                    .unsupportedNonWorldIdentity(handle.entryIndex)
+            }
+            guard handle == request.worldIdentity.handle else {
+                throw GMLuaTraceBridgeError.staleWorldIdentity(
+                    expected: request.worldIdentity.handle.rawValue,
+                    actual: handle.rawValue
+                )
+            }
+        } else if let handle = trace.entityHandle {
+            throw GMLuaTraceBridgeError
+                .inconsistentMissIdentity(handle.rawValue)
+        }
     }
 
     fileprivate func ensureWorldReady() throws {
@@ -343,12 +413,26 @@ public enum GMLuaUtilTrace {
                     ray: parsed.ray,
                     mask: parsed.mask,
                     worldIdentity: worldIdentity,
-                    excludedEntityHandles: parsed.excludedEntityHandles
+                    collisionGroup: parsed.collisionGroup,
+                    excludedEntityHandles: parsed.filter.excludedHandles,
+                    includedEntityHandles: parsed.filter.includedHandles
                 )
 
                 let trace: SourceGameTrace
                 do {
-                    trace = try bridge.trace(request)
+                    trace = try bridge.trace(request) { candidate in
+                        let entityValue = try GMLuaUtilTrace.dynamicEntityValue(
+                            for: candidate.identity.handle,
+                            registry: entityRegistry,
+                            function: functionName
+                        )
+                        return try parsed.filter.shouldHit(
+                            candidate: candidate,
+                            entityValue: entityValue,
+                            state: state,
+                            function: functionName
+                        )
+                    }
                 } catch {
                     throw LuaError.runtime("\(functionName) failed: \(String(describing: error))")
                 }
@@ -359,15 +443,34 @@ public enum GMLuaUtilTrace {
                     )
                 }
                 do {
-                    try validateProviderResult(trace, request: request)
+                    try validateProviderResult(
+                        trace,
+                        request: request,
+                        entityRegistry: entityRegistry
+                    )
                 } catch {
                     throw LuaError.runtime("\(functionName) failed: \(String(describing: error))")
+                }
+
+                let hitEntityValue: LuaValue
+                if let handle = trace.entityHandle, trace.didHit {
+                    if handle.entryIndex == 0 {
+                        hitEntityValue = worldValue
+                    } else {
+                        hitEntityValue = try GMLuaUtilTrace.dynamicEntityValue(
+                            for: handle,
+                            registry: entityRegistry,
+                            function: functionName
+                        )
+                    }
+                } else {
+                    hitEntityValue = state.getGlobal("NULL")
                 }
 
                 let result = parsed.output ?? LuaTable()
                 try writeResult(
                     trace,
-                    worldValue: worldValue,
+                    hitEntityValue: hitEntityValue,
                     result: result,
                     state: state,
                     typeSystem: typeSystem
@@ -376,6 +479,15 @@ public enum GMLuaUtilTrace {
                         entityRegistry.sourceMirrorIdentity(for: worldValue)) == worldIdentity else {
                     throw LuaError.runtime(
                         "\(functionName) failed: Entity(0) changed while writing the trace result"
+                    )
+                }
+                if let handle = trace.entityHandle,
+                   handle.entryIndex != 0,
+                   trace.didHit {
+                    _ = try GMLuaUtilTrace.dynamicEntityValue(
+                        for: handle,
+                        registry: entityRegistry,
+                        function: functionName
                     )
                 }
                 return [.table(result)]
@@ -392,8 +504,43 @@ public enum GMLuaUtilTrace {
     private struct ParsedConfiguration {
         let ray: SourceRay
         let mask: SourceContents
-        let excludedEntityHandles: [SourceBaseHandle]
+        let collisionGroup: Int32
+        let filter: ParsedFilter
         let output: LuaTable?
+    }
+
+    private enum ParsedFilter {
+        case none
+        case entities(handles: Set<SourceBaseHandle>, whitelist: Bool)
+        case function(LuaValue)
+
+        var excludedHandles: [SourceBaseHandle] {
+            guard case let .entities(handles, false) = self else { return [] }
+            return handles.sorted { $0.rawValue < $1.rawValue }
+        }
+
+        var includedHandles: [SourceBaseHandle] {
+            guard case let .entities(handles, true) = self else { return [] }
+            return handles.sorted { $0.rawValue < $1.rawValue }
+        }
+
+        func shouldHit(
+            candidate: GMLuaDynamicTraceCandidate,
+            entityValue: LuaValue,
+            state: LuaState,
+            function: String
+        ) throws -> Bool {
+            switch self {
+            case .none:
+                return true
+            case let .entities(handles, whitelist):
+                let contains = handles.contains(candidate.identity.handle)
+                return whitelist ? contains : !contains
+            case let .function(callback):
+                let values = try state.call(callback, arguments: [entityValue])
+                return values.first?.isTruthy ?? false
+            }
+        }
     }
 
     private static func parseConfiguration(
@@ -451,17 +598,30 @@ public enum GMLuaUtilTrace {
         }
 
         let mask = try maskField(in: table, function: function, state: state)
-        let excludedEntityHandles = try filterField(
+        let whitelist = try optionalBooleanField(
+            "whitelist",
+            defaultValue: false,
+            in: table,
+            function: function,
+            state: state
+        )
+        let filter = try filterField(
             in: table,
             function: function,
             state: state,
-            entityRegistry: entityRegistry
+            entityRegistry: entityRegistry,
+            whitelist: whitelist
         )
-        try rejectUnsupportedInputs(in: table, function: function, state: state)
+        let collisionGroup = try parseSupportedInputs(
+            in: table,
+            function: function,
+            state: state
+        )
         return ParsedConfiguration(
             ray: ray,
             mask: mask,
-            excludedEntityHandles: excludedEntityHandles,
+            collisionGroup: collisionGroup,
+            filter: filter,
             output: try outputField(in: table, function: function, state: state)
         )
     }
@@ -609,11 +769,11 @@ public enum GMLuaUtilTrace {
         return SourceContents(rawValue: rawValue)
     }
 
-    private static func rejectUnsupportedInputs(
+    private static func parseSupportedInputs(
         in table: LuaTable,
         function: String,
         state: LuaState
-    ) throws {
+    ) throws -> Int32 {
         let collisionGroup = try optionalInt32Field(
             "collisiongroup",
             defaultValue: 0,
@@ -621,13 +781,7 @@ public enum GMLuaUtilTrace {
             function: function,
             state: state
         )
-        guard collisionGroup == 0 else {
-            throw LuaError.runtime(
-                "\(function) supports only COLLISION_GROUP_NONE (0)"
-            )
-        }
-
-        for name in ["ignoreworld", "whitelist", "hitclientonly"] {
+        for name in ["ignoreworld", "hitclientonly"] {
             let enabled = try optionalBooleanField(
                 name,
                 defaultValue: false,
@@ -641,21 +795,37 @@ public enum GMLuaUtilTrace {
                 )
             }
         }
+        return collisionGroup
     }
 
-    /// Entity and Entity-table filters are meaningful even before dynamic
-    /// collision exists: they describe candidates the provider must exclude,
-    /// while the immutable BSP world remains independently traceable. Function
-    /// and class-name filters require invoking dynamic candidate semantics and
-    /// remain explicitly unavailable.
+    /// Entity/table filters keep complete EHANDLE generations. Function filters
+    /// stay realm-local and are invoked only for live dynamic candidates; Lua
+    /// userdata never enters the provider request.
     private static func filterField(
         in table: LuaTable,
         function: String,
         state: LuaState,
-        entityRegistry: GMLuaEntityRegistry
-    ) throws -> [SourceBaseHandle] {
+        entityRegistry: GMLuaEntityRegistry,
+        whitelist: Bool
+    ) throws -> ParsedFilter {
         let value = try rawField("filter", in: table, state: state)
-        if case .nilValue = value { return [] }
+        if case .nilValue = value {
+            return whitelist
+                ? .entities(handles: [], whitelist: true)
+                : .none
+        }
+
+        switch value {
+        case .luaFunction, .nativeFunction:
+            guard !whitelist else {
+                throw LuaError.runtime(
+                    "\(function) field 'whitelist' is only valid with Entity/table filters"
+                )
+            }
+            return .function(value)
+        default:
+            break
+        }
 
         let values: [LuaValue]
         if case let .table(filterTable) = value {
@@ -672,11 +842,10 @@ public enum GMLuaUtilTrace {
 
         var handles = Set<SourceBaseHandle>()
         for filteredValue in values {
-            guard let object = GMLuaTypeSystem.typedObject(from: filteredValue),
-                  object.metaName == "Entity" || object.metaName == "Player" else {
+            guard let object = GMLuaTypeSystem.typedObject(from: filteredValue) else {
                 throw LuaError.runtime(
-                    "\(function) field 'filter' supports only an Entity or table of Entities " +
-                        "until dynamic function/string filtering is implemented"
+                    "\(function) field 'filter' supports only an Entity, table of Entities, " +
+                        "or function"
                 )
             }
             // `NULL` and stale invalid Entity userdata are valid filter values
@@ -692,7 +861,7 @@ public enum GMLuaUtilTrace {
                 )
             }
         }
-        return handles.sorted { $0.rawValue < $1.rawValue }
+        return .entities(handles: handles, whitelist: whitelist)
     }
 
     private static func optionalInt32Field(
@@ -741,9 +910,30 @@ public enum GMLuaUtilTrace {
         return output
     }
 
+    private static func dynamicEntityValue(
+        for handle: SourceBaseHandle,
+        registry: GMLuaEntityRegistry,
+        function: String
+    ) throws -> LuaValue {
+        guard handle.isValid, handle.entryIndex != 0 else {
+            throw LuaError.runtime(
+                "\(function) received an invalid dynamic EHANDLE"
+            )
+        }
+        let value = registry.entity(at: handle.entryIndex)
+        let identity = registry.canonicalIdentity(for: value) ??
+            registry.sourceMirrorIdentity(for: value)
+        guard identity?.handle == handle else {
+            throw GMLuaTraceBridgeError
+                .dynamicEntityUnavailable(handle.rawValue)
+        }
+        return value
+    }
+
     private static func validateProviderResult(
         _ trace: SourceGameTrace,
-        request: GMLuaTraceRequest
+        request: GMLuaTraceRequest,
+        entityRegistry: GMLuaEntityRegistry
     ) throws {
         for (name, value) in [
             ("StartPos", trace.startPosition),
@@ -767,14 +957,21 @@ public enum GMLuaUtilTrace {
             guard let handle = trace.entityHandle else {
                 throw GMLuaTraceBridgeError.hitMissingWorldIdentity
             }
-            guard handle.entryIndex == 0 else {
-                throw GMLuaTraceBridgeError.unsupportedNonWorldIdentity(handle.entryIndex)
-            }
-            guard handle == request.worldIdentity.handle else {
-                throw GMLuaTraceBridgeError.staleWorldIdentity(
-                    expected: request.worldIdentity.handle.rawValue,
-                    actual: handle.rawValue
-                )
+            if handle.entryIndex == 0 {
+                guard handle == request.worldIdentity.handle else {
+                    throw GMLuaTraceBridgeError.staleWorldIdentity(
+                        expected: request.worldIdentity.handle.rawValue,
+                        actual: handle.rawValue
+                    )
+                }
+            } else {
+                let value = entityRegistry.entity(at: handle.entryIndex)
+                let identity = entityRegistry.canonicalIdentity(for: value) ??
+                    entityRegistry.sourceMirrorIdentity(for: value)
+                guard identity?.handle == handle else {
+                    throw GMLuaTraceBridgeError
+                        .dynamicEntityUnavailable(handle.rawValue)
+                }
             }
         } else if let handle = trace.entityHandle {
             throw GMLuaTraceBridgeError.inconsistentMissIdentity(handle.rawValue)
@@ -783,7 +980,7 @@ public enum GMLuaUtilTrace {
 
     private static func writeResult(
         _ trace: SourceGameTrace,
-        worldValue: LuaValue,
+        hitEntityValue: LuaValue,
         result: LuaTable,
         state: LuaState,
         typeSystem: GMLuaTypeSystem
@@ -804,12 +1001,12 @@ public enum GMLuaUtilTrace {
             ("Fraction", .number(Double(trace.fraction))),
             ("FractionLeftSolid", .number(Double(trace.fractionLeftSolid))),
             ("Hit", .boolean(hit)),
-            ("HitWorld", .boolean(hit)),
-            ("HitNonWorld", .boolean(false)),
+            ("HitWorld", .boolean(trace.didHitWorld)),
+            ("HitNonWorld", .boolean(trace.didHitNonWorldEntity)),
             ("StartSolid", .boolean(trace.startSolid)),
             ("AllSolid", .boolean(trace.allSolid)),
             ("Contents", .number(Double(Int32(bitPattern: trace.contents.rawValue)))),
-            ("Entity", hit ? worldValue : nullValue),
+            ("Entity", hit ? hitEntityValue : nullValue),
             ("SurfaceFlags", .number(Double(trace.surface.flags))),
             ("DispFlags", .number(Double(trace.displacementFlags))),
             ("HitBox", .number(Double(trace.hitBox))),
