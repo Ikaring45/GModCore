@@ -337,7 +337,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 55;
+				CURRENT_PROJECT_VERSION = 56;
 				ENABLE_PREVIEWS = YES;
 				GCC_TREAT_WARNINGS_AS_ERRORS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -352,7 +352,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.55;
+				MARKETING_VERSION = 0.1.56;
 				PRODUCT_BUNDLE_IDENTIFIER = org.example.GarrysPAD;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -371,7 +371,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 55;
+				CURRENT_PROJECT_VERSION = 56;
 				GCC_TREAT_WARNINGS_AS_ERRORS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "Garry's PAD";
@@ -385,7 +385,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.55;
+				MARKETING_VERSION = 0.1.56;
 				PRODUCT_BUNDLE_IDENTIFIER = org.example.GarrysPAD;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -402,7 +402,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 55;
+				CURRENT_PROJECT_VERSION = 56;
 				GCC_TREAT_WARNINGS_AS_ERRORS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
@@ -411,7 +411,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.55;
+				MARKETING_VERSION = 0.1.56;
 				PRODUCT_BUNDLE_IDENTIFIER = org.example.GarrysPADUITests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -430,7 +430,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 55;
+				CURRENT_PROJECT_VERSION = 56;
 				GCC_TREAT_WARNINGS_AS_ERRORS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
@@ -439,7 +439,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.55;
+				MARKETING_VERSION = 0.1.56;
 				PRODUCT_BUNDLE_IDENTIFIER = org.example.GarrysPADUITests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;

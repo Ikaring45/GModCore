@@ -31,11 +31,12 @@ No skipped or unfinished feature is reported as a pass. See
 [`LUA51_CONFORMANCE_STATUS.md`](LUA51_CONFORMANCE_STATUS.md) for the exact
 verification boundary.
 
-The 0.1.55 release restores the physical-iPad Q-menu Surface handoff and makes
-the sky-to-world Metal attachment store/load boundary explicit for tile GPUs.
-It also begins the canonical Source Entity path shared by world, Player, and
-future props without claiming prop spawning or physics yet. It owns one SERVER
-and one CLIENT, loads the
+The 0.1.56 release carries the canonical Source Entity path through the stock
+Sandbox prop and weapon command routes, replicated dynamic-model snapshots,
+and the Metal scene boundary. Home, Options, Problems, and Console now share
+the same Lua/Derma/Surface pipeline as gameplay VGUI. The stock Hint timers
+create real notification panels instead of stopping on missing Panel or Player
+methods. It owns one SERVER and one CLIENT, loads the
 original authorized Base/Sandbox/Derma/Spawnmenu Lua in measured order,
 creates the real `g_SpawnMenu`, and renders its Surface commands through the
 Metal overlay. The stock Weapons tab, tree categories, ContentIcons, tool
@@ -77,23 +78,24 @@ selection remain live. Normal play does not expose the old Render Preview,
 map buttons, counters, Console, or diagnostic frame unless Developer
 diagnostics is explicitly enabled.
 
-This is not full Garry's Mod playability. Static props and Studio-model
-rendering, arbitrary addon mounting, Steam/authentication, sockets,
-prediction, displacement collision, complete step/water/ladder movement,
-dynamic entity physics, and a complete weapon/tool runtime remain explicit
-boundaries. Spawnmenu navigation and callbacks are exercised end to end, but
-an unsupported host action is still reported rather than presented as a
-successful spawn.
+This is not full Garry's Mod playability. Arbitrary addon mounting,
+Steam/authentication, sockets, prediction, displacement collision, complete
+step/water/ladder movement, a general rigid-body backend, and the complete
+Physgun/Toolgun action set remain explicit boundaries. The stock Spawnmenu
+weapon route now creates and selects a canonical replicated Weapon. Prop
+creation continues to require an exact validated Studio/VPhysics asset set;
+missing or unverified physics data is not replaced with a guessed body.
 
-The 0.1.55 focused Windows gates cover the Q-menu Surface handoff, bundled-map
-ordinary-world range retention, canonical Entity identity/lifecycle, registry
-projection, and net/console/entity FIFO with warnings treated as errors.
+The 0.1.56 focused gates cover canonical Entity/Weapon identity and
+replication, stock Hint-to-NoticePanel rendering, targeted Player console
+delivery, MENU Derma actions, dynamic model projection, and BSP trace workspace
+reuse with warnings treated as errors.
 The previously validated real 4.876 GB content pack validates all 2,641
 authorized payload SHA-256
 values and passes Home background, both maps, six-face painted sky, water,
 materials, Sandbox startup, and movement gates. That external pack was not
-re-read for the 0.1.55 correction. Embedded Metal source
-and pipeline contracts are checked locally, but the exact 0.1.55 Apple
+re-read for the 0.1.56 correction. Embedded Metal source
+and pipeline contracts are checked locally, but the exact 0.1.56 Apple
 package/app/Metal build, Simulator launch, and physical-iPad behavior remain
 CI/device gates rather than inferred passes.
 
