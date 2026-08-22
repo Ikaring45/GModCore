@@ -113,6 +113,8 @@ public enum SourcePhysicsReplayError: Error, Equatable, Sendable {
         operation: String
     )
     case bodyNotLive(SourcePhysicsBodyID)
+    case bodyMutationNotSupported(SourcePhysicsBodyID)
+    case bodyMutationWhileMotionDisabled(SourcePhysicsBodyID)
     case duplicateLiveBody(SourcePhysicsBodyID)
     case liveEntityGenerationConflict(
         entryIndex: Int,
@@ -201,6 +203,10 @@ public enum SourcePhysicsReplayEventSnapshot: Equatable, Sendable {
         commandSequence: UInt64,
         bodyID: SourcePhysicsBodyID
     )
+    case bodyMutated(
+        commandSequence: UInt64,
+        command: SourcePhysicsBodyMutationCommand
+    )
     case simulated(
         commandSequence: UInt64,
         simulationTick: UInt64
@@ -239,7 +245,7 @@ public struct SourcePhysicsReplayFrame: Equatable, Sendable {
 
 /// Decoded value transcript plus its canonical little-endian binary form.
 public struct SourcePhysicsReplayLog: Equatable, Sendable {
-    public static let formatVersion: UInt16 = 1
+    public static let formatVersion: UInt16 = 2
 
     public let fixedTimeStepSeconds: Float
     public let frames: [SourcePhysicsReplayFrame]
@@ -397,6 +403,20 @@ private struct SourcePhysicsReplayPreparedFrame {
     let eventsWithoutQueries: [Int: SourcePhysicsReplayEventSnapshot]
 }
 
+private struct SourcePhysicsReplayLiveBody {
+    let creation: SourcePhysicsBodyCreationCommand
+    var isMotionEnabled: Bool
+    var isGravityEnabled: Bool
+    var isCollisionEnabled: Bool
+
+    init(creation: SourcePhysicsBodyCreationCommand) {
+        self.creation = creation
+        isMotionEnabled = creation.motionType != .staticBody
+        isGravityEnabled = creation.isGravityEnabled
+        isCollisionEnabled = creation.isCollisionEnabled
+    }
+}
+
 private struct SourcePhysicsReplayTranscriptValidator {
     let budget: SourcePhysicsReplayBudget
     private var counter = SourcePhysicsReplayBudgetCounter()
@@ -404,7 +424,7 @@ private struct SourcePhysicsReplayTranscriptValidator {
     private var lastSimulationTick: UInt64?
     private var currentSimulationTick: UInt64?
     private var liveBodies: [
-        SourcePhysicsBodyID: SourcePhysicsBodyCreationCommand
+        SourcePhysicsBodyID: SourcePhysicsReplayLiveBody
     ] = [:]
     private var liveHandleByEntry: [Int: UInt32] = [:]
     private var everCreatedBodies = Set<SourcePhysicsBodyID>()
@@ -478,6 +498,8 @@ private struct SourcePhysicsReplayTranscriptValidator {
                     )
                 }
                 deletes[deletion.bodyID] = (commandIndex, command.sequence)
+            case .mutateBody:
+                break
             case let .simulate(simulate):
                 try validateSimulationTick(simulate.simulationTick)
             case let .query(query):
@@ -505,7 +527,7 @@ private struct SourcePhysicsReplayTranscriptValidator {
                 switch command.payload {
                 case .simulate, .query:
                     return true
-                case .createBody, .deleteBody:
+                case .createBody, .deleteBody, .mutateBody:
                     return false
                 }
             }
@@ -533,7 +555,9 @@ private struct SourcePhysicsReplayTranscriptValidator {
                         throw SourcePhysicsReplayError
                             .updateDidNotComplete(bodyID)
                     }
-                    liveBodies[bodyID] = creation
+                    liveBodies[bodyID] = SourcePhysicsReplayLiveBody(
+                        creation: creation
+                    )
                     events[commandIndex] = .bodyUpdated(
                         deleteCommandSequence: update.deleteSequence,
                         createCommandSequence: update.createSequence,
@@ -560,6 +584,12 @@ private struct SourcePhysicsReplayTranscriptValidator {
                         bodyID: bodyID
                     )
                 }
+            case let .mutateBody(mutation):
+                try apply(mutation, toLiveBodyAt: mutation.bodyID)
+                events[commandIndex] = .bodyMutated(
+                    commandSequence: command.sequence,
+                    command: mutation
+                )
             case let .simulate(simulate):
                 currentSimulationTick = simulate.simulationTick
                 events[commandIndex] = .simulated(
@@ -716,8 +746,55 @@ private struct SourcePhysicsReplayTranscriptValidator {
         } else {
             liveHandleByEntry[identity.entryIndex] = handle
         }
-        liveBodies[bodyID] = creation
+        liveBodies[bodyID] = SourcePhysicsReplayLiveBody(creation: creation)
         everCreatedBodies.insert(bodyID)
+    }
+
+    private mutating func apply(
+        _ command: SourcePhysicsBodyMutationCommand,
+        toLiveBodyAt bodyID: SourcePhysicsBodyID
+    ) throws {
+        guard var body = liveBodies[bodyID] else {
+            throw SourcePhysicsReplayError.bodyNotLive(bodyID)
+        }
+        let supportsMotion = body.creation.motionType != .staticBody
+        let requiresEnabledDynamicMotion: Bool
+        switch command.mutation {
+        case .wake, .sleep, .applyCenterForce, .applyCenterImpulse:
+            requiresEnabledDynamicMotion = true
+        default:
+            requiresEnabledDynamicMotion = false
+        }
+        if requiresEnabledDynamicMotion {
+            guard body.creation.motionType == .dynamicBody else {
+                throw SourcePhysicsReplayError.bodyMutationNotSupported(bodyID)
+            }
+            guard body.isMotionEnabled else {
+                throw SourcePhysicsReplayError
+                    .bodyMutationWhileMotionDisabled(bodyID)
+            }
+        }
+        switch command.mutation {
+        case let .setMotionEnabled(enabled):
+            guard supportsMotion else {
+                throw SourcePhysicsReplayError.bodyMutationNotSupported(bodyID)
+            }
+            body.isMotionEnabled = enabled
+        case let .setGravityEnabled(enabled):
+            body.isGravityEnabled = enabled
+        case let .setCollisionEnabled(enabled):
+            body.isCollisionEnabled = enabled
+        case .setLinearVelocity,
+             .addLinearVelocity,
+             .setAngularVelocity,
+             .addAngularVelocity:
+            guard supportsMotion else {
+                throw SourcePhysicsReplayError.bodyMutationNotSupported(bodyID)
+            }
+        case .wake, .sleep, .applyCenterForce, .applyCenterImpulse:
+            break
+        }
+        liveBodies[bodyID] = body
     }
 
     private mutating func retireHandleIfNoBodiesRemain(
@@ -760,19 +837,20 @@ private struct SourcePhysicsReplayTranscriptValidator {
             )
         }
         for body in bodies {
-            guard let creation = liveBodies[body.bodyID] else {
+            guard let liveBody = liveBodies[body.bodyID] else {
                 throw SourcePhysicsReplayError.environmentBodySetMismatch(
                     expected: expected,
                     received: received
                 )
             }
             guard
-                body.shape == creation.shape,
-                body.massProperties == creation.massProperties,
-                body.motionType == creation.motionType,
-                body.materialIndex == creation.materialIndex,
-                body.isGravityEnabled == creation.isGravityEnabled,
-                body.isCollisionEnabled == creation.isCollisionEnabled
+                body.shape == liveBody.creation.shape,
+                body.massProperties == liveBody.creation.massProperties,
+                body.motionType == liveBody.creation.motionType,
+                body.materialIndex == liveBody.creation.materialIndex,
+                body.isMotionEnabled == liveBody.isMotionEnabled,
+                body.isGravityEnabled == liveBody.isGravityEnabled,
+                body.isCollisionEnabled == liveBody.isCollisionEnabled
             else {
                 throw SourcePhysicsReplayError
                     .environmentBodyDefinitionMismatch(body.bodyID)
@@ -1074,12 +1152,54 @@ private struct SourcePhysicsReplayEncoder {
         case let .deleteBody(deletion):
             try writeUInt8(1)
             try write(deletion.bodyID)
+        case let .mutateBody(mutation):
+            try writeUInt8(4)
+            try write(mutation)
         case let .simulate(simulate):
             try writeUInt8(2)
             try writeUInt64(simulate.simulationTick)
         case let .query(query):
             try writeUInt8(3)
             try write(query)
+        }
+    }
+
+    private mutating func write(
+        _ command: SourcePhysicsBodyMutationCommand
+    ) throws {
+        try write(command.bodyID)
+        switch command.mutation {
+        case .wake:
+            try writeUInt8(0)
+        case .sleep:
+            try writeUInt8(1)
+        case let .setMotionEnabled(enabled):
+            try writeUInt8(2)
+            try writeBool(enabled)
+        case let .setGravityEnabled(enabled):
+            try writeUInt8(3)
+            try writeBool(enabled)
+        case let .setCollisionEnabled(enabled):
+            try writeUInt8(4)
+            try writeBool(enabled)
+        case let .setLinearVelocity(value):
+            try writeUInt8(5)
+            try write(value, field: "mutation.linearVelocity")
+        case let .addLinearVelocity(value):
+            try writeUInt8(6)
+            try write(value, field: "mutation.linearVelocityDelta")
+        case let .setAngularVelocity(value):
+            try writeUInt8(7)
+            try write(value, field: "mutation.angularVelocity")
+        case let .addAngularVelocity(value):
+            try writeUInt8(8)
+            try write(value, field: "mutation.angularVelocityDelta")
+        case let .applyCenterForce(value):
+            try writeUInt8(9)
+            try write(value, field: "mutation.centerForce")
+        case let .applyCenterImpulse(value):
+            try writeUInt8(10)
+            try write(value, field: "mutation.centerImpulse")
         }
     }
 
@@ -1169,6 +1289,7 @@ private struct SourcePhysicsReplayEncoder {
             body.materialIndex,
             field: "body.materialIndex"
         )
+        try writeBool(body.isMotionEnabled)
         try writeBool(body.isGravityEnabled)
         try writeBool(body.isCollisionEnabled)
         try writeBool(body.isSleeping)
@@ -1226,6 +1347,10 @@ private struct SourcePhysicsReplayEncoder {
             try writeUInt8(2)
             try writeUInt64(commandSequence)
             try write(bodyID)
+        case let .bodyMutated(commandSequence, command):
+            try writeUInt8(5)
+            try writeUInt64(commandSequence)
+            try write(command)
         case let .simulated(commandSequence, simulationTick):
             try writeUInt8(3)
             try writeUInt64(commandSequence)
@@ -1458,6 +1583,8 @@ private struct SourcePhysicsReplayDecoder {
             ))
         case 3:
             payload = .query(try readQuery())
+        case 4:
+            payload = .mutateBody(try readBodyMutation())
         default:
             throw SourcePhysicsReplayError.invalidTag(
                 field: "command",
@@ -1465,6 +1592,65 @@ private struct SourcePhysicsReplayDecoder {
             )
         }
         return SourcePhysicsCommand(sequence: sequence, payload: payload)
+    }
+
+    private mutating func readBodyMutation() throws
+        -> SourcePhysicsBodyMutationCommand
+    {
+        let bodyID = try readBodyID()
+        let tag = try readUInt8()
+        let mutation: SourcePhysicsBodyMutation
+        switch tag {
+        case 0:
+            mutation = .wake
+        case 1:
+            mutation = .sleep
+        case 2:
+            mutation = .setMotionEnabled(try readBool(
+                field: "mutation.motionEnabled"
+            ))
+        case 3:
+            mutation = .setGravityEnabled(try readBool(
+                field: "mutation.gravityEnabled"
+            ))
+        case 4:
+            mutation = .setCollisionEnabled(try readBool(
+                field: "mutation.collisionEnabled"
+            ))
+        case 5:
+            mutation = .setLinearVelocity(try readVector(
+                field: "mutation.linearVelocity"
+            ))
+        case 6:
+            mutation = .addLinearVelocity(try readVector(
+                field: "mutation.linearVelocityDelta"
+            ))
+        case 7:
+            mutation = .setAngularVelocity(try readVector(
+                field: "mutation.angularVelocity"
+            ))
+        case 8:
+            mutation = .addAngularVelocity(try readVector(
+                field: "mutation.angularVelocityDelta"
+            ))
+        case 9:
+            mutation = .applyCenterForce(try readVector(
+                field: "mutation.centerForce"
+            ))
+        case 10:
+            mutation = .applyCenterImpulse(try readVector(
+                field: "mutation.centerImpulse"
+            ))
+        default:
+            throw SourcePhysicsReplayError.invalidTag(
+                field: "bodyMutation",
+                value: tag
+            )
+        }
+        return try SourcePhysicsBodyMutationCommand(
+            bodyID: bodyID,
+            mutation: mutation
+        )
     }
 
     private mutating func readCreation() throws
@@ -1599,6 +1785,7 @@ private struct SourcePhysicsReplayDecoder {
             angularVelocity: readVector(field: "body.angularVelocity"),
             motionType: readMotionType(),
             materialIndex: readNonnegativeInt(field: "body.materialIndex"),
+            isMotionEnabled: readBool(field: "body.isMotionEnabled"),
             isGravityEnabled: readBool(field: "body.isGravityEnabled"),
             isCollisionEnabled: readBool(field: "body.isCollisionEnabled"),
             isSleeping: readBool(field: "body.isSleeping"),
@@ -1691,6 +1878,11 @@ private struct SourcePhysicsReplayDecoder {
             )
         case 4:
             return .queryCompleted(try readQueryResult())
+        case 5:
+            return .bodyMutated(
+                commandSequence: try readUInt64(),
+                command: try readBodyMutation()
+            )
         default:
             throw SourcePhysicsReplayError.invalidTag(
                 field: "event",
