@@ -453,6 +453,18 @@ public actor GModPlayableSessionLane {
         return try session.requestPreviousWeapon()
     }
 
+    /// Queues one CLIENT noclip toggle on the session-owned command FIFO.
+    public func requestToggleNoClip(
+        expectedGeneration: UInt64? = nil
+    ) throws {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        try session.requestToggleNoClip()
+    }
+
     /// Shares the session's already-validated, immutable BSP pak index with
     /// the App renderer. Returning this Sendable read-only object avoids a
     /// second 40+ MB map read and keeps Lua and Metal on the same GAME layer.

@@ -467,6 +467,14 @@ public enum SourceCanonicalEntityGLuaBridge {
             )
             return [.boolean(snapshot.motion.isAlive)]
         }
+        try setMethod("Player:InVehicle", on: playerMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Player:InVehicle",
+                kind: .player
+            )
+            return [.boolean(snapshot.vehicle != nil)]
+        }
         for method in ["Nick", "Name", "GetName"] {
             try setMethod("Player:\(method)", on: playerMetatable) { arguments in
                 let snapshot = try requiredSnapshot(

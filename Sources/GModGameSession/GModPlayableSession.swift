@@ -530,6 +530,16 @@ public final class GModPlayableSession {
         )
     }
 
+    /// Queues the engine-owned `noclip` command through the connected CLIENT
+    /// console surface. SERVER Sandbox Lua retains the PlayerNoClip decision;
+    /// this touch-safe boundary neither predicts nor directly mutates state.
+    public func requestToggleNoClip() throws {
+        try ensureOpen()
+        try clientRuntime.invokeClientRunConsoleCommand(
+            command: SourceCanonicalNoClipConsoleCommand.commandName
+        )
+    }
+
     /// Drops the currently selected canonical Weapon through the same
     /// `Player:DropWeapon` implementation exposed to original SERVER Lua.
     /// The full EHANDLE is resolved immediately before dispatch, so a reused
@@ -1029,8 +1039,9 @@ public final class GModPlayableSession {
             let sourcePlayer = try sourceAdapter.activateCanonicalEntity(
                 createdSourcePlayer.identity
             )
-            // Original CLIENT RunConsoleCommand("use", class) reaches this
-            // SERVER-owned Source command only through SharedSession's FIFO.
+            // Original CLIENT RunConsoleCommand("use", class) and `noclip`
+            // reach these SERVER-owned Source commands only through
+            // SharedSession's FIFO.
             // Reconnect after the canonical Player exists so the handler can
             // retain an immutable full EHANDLE while preserving the earlier
             // mp_friendlyfire host route used during SERVER startup.
@@ -1045,6 +1056,19 @@ public final class GModPlayableSession {
                         )
                     }
                     return .handled
+                }
+                if invocation.command.caseInsensitiveCompare(
+                    SourceCanonicalNoClipConsoleCommand.commandName
+                ) == .orderedSame {
+                    guard let sourceAdapter else {
+                        throw SourceCanonicalNoClipConsoleHostError
+                            .runtimeAdapterReleased
+                    }
+                    return try SourceCanonicalNoClipConsoleCommand.handle(
+                        invocation,
+                        adapter: sourceAdapter,
+                        playerIdentity: sourcePlayer.identity
+                    ).hostDisposition
                 }
                 guard invocation.command.caseInsensitiveCompare(
                     SourceCanonicalWeaponUseConsoleCommand.commandName
