@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import GModEngine
 
-@Suite("Renderer-neutral Source Studio root mesh decoding")
+@Suite("Renderer-neutral Source Studio LOD mesh decoding")
 struct SourceStudioModelMeshTests {
     private let checksum: Int32 = 0x1357_2468
 
@@ -100,6 +100,65 @@ struct SourceStudioModelMeshTests {
             SourceStudioTangent(x: 1, y: 0, z: 0, w: 1),
             SourceStudioTangent(x: 2, y: 0, z: 0, w: 1)
         ])
+    }
+
+    @Test("An authored VTX LOD uses its own hierarchy and the matching VVD fixups")
+    func decodesAuthoredLowerLOD() throws {
+        let payload = try loadPayload(files: multiLODFixture())
+        let snapshot = try SourceStudioModelMeshDecoder.decodeLOD(
+            payload,
+            lodIndex: 1,
+            budget: decodeBudget()
+        )
+        let vertices = try #require(
+            snapshot.bodyParts.first?.models.first?.meshes.first?.stripGroups.first?.vertices
+        )
+
+        #expect(snapshot.lodIndex == 1)
+        #expect(vertices.map(\.originalMeshVertexIndex) == [0, 1])
+        #expect(vertices.map(\.rootLODVertexIndex) == [0, 1])
+        #expect(vertices.map(\.sourceVVDVertexIndex) == [2, 0])
+        #expect(vertices.map(\.position) == [
+            SourceVector3(30, 31, 32),
+            SourceVector3(10, 11, 12)
+        ])
+
+        let root = try SourceStudioModelMeshDecoder.decodeRootLOD(
+            payload,
+            budget: decodeBudget()
+        )
+        #expect(root.lodIndex == 0)
+        #expect(root.bodyParts.first?.models.first?.meshes.first?.stripGroups.first?
+            .vertices.map(\.sourceVVDVertexIndex) == [2, 0, 1])
+    }
+
+    @Test("Authored switch points drive Source's projected unit-sphere LOD metric")
+    func selectsLODFromAuthoredSwitchPoints() throws {
+        let payload = try loadPayload(files: multiLODFixture())
+        let table = try SourceStudioModelMeshDecoder.decodeLODTable(
+            payload,
+            bodyPartIndex: 0,
+            modelIndex: 0
+        )
+
+        #expect(table.switchPoints == [0, 12.5, -1])
+        #expect(table.renderableLODCount == 2)
+        #expect(try SourceStudioModelLODSelector.metric(
+            projectedUnitSphereSize: 20
+        ) == 5)
+        #expect(try SourceStudioModelLODSelector.selectLOD(
+            table: table,
+            projectedUnitSphereSize: 20
+        ) == 0)
+        #expect(try SourceStudioModelLODSelector.selectLOD(
+            table: table,
+            projectedUnitSphereSize: 5
+        ) == 1)
+        #expect(try SourceStudioModelLODSelector.selectLOD(
+            table: table,
+            lodMetric: 0,
+            minimumLODIndex: 1
+        ) == 1)
     }
 
     @Test("MDL and VTX hierarchy mismatches fail before a snapshot is returned")
@@ -274,6 +333,26 @@ private extension SourceStudioModelMeshTests {
         ]
     }
 
+    func multiLODFixture() -> [String: Data] {
+        let fixups: [(lod: Int32, source: Int32, count: Int32)] = [
+            (lod: 2, source: 2, count: 1),
+            (lod: 1, source: 0, count: 1),
+            (lod: 0, source: 1, count: 1)
+        ]
+        var mdl = [UInt8](makeMDL())
+        putInt32(2, at: Offsets.mdlMesh + 56, into: &mdl)
+        putInt32(1, at: Offsets.mdlMesh + 60, into: &mdl)
+        var vvd = [UInt8](makeVVD(fixups: fixups))
+        putInt32(3, at: 12, into: &vvd)
+        putInt32(2, at: 20, into: &vvd)
+        putInt32(1, at: 24, into: &vvd)
+        return [
+            Paths.mdl: Data(mdl),
+            Paths.vvd: Data(vvd),
+            Paths.vtx: makeMultiLODVTX()
+        ]
+    }
+
     func makeMDL() -> Data {
         var bytes = [UInt8](repeating: 0, count: 928)
         putUInt32(SourceStudioModel.magic, at: 0, into: &bytes)
@@ -425,6 +504,57 @@ private extension SourceStudioModelMeshTests {
         putInt32(27, at: strip + 23, into: &bytes)
         putInt32(0, at: Offsets.vtxBoneChange, into: &bytes)
         putInt32(0, at: Offsets.vtxBoneChange + 4, into: &bytes)
+        return Data(bytes)
+    }
+
+    func makeMultiLODVTX() -> Data {
+        let body = 60
+        let model = 68
+        let lods = 76
+        let meshBases = [112, 121, 130]
+        let groupBases = [139, 191, 234]
+        let vertexCounts = [3, 2, 1]
+        let switchPoints: [Float] = [0, 12.5, -1]
+        var bytes = [UInt8](repeating: 0, count: 268)
+        putInt32(7, at: 0, into: &bytes)
+        putInt32(32, at: 4, into: &bytes)
+        putUInt16(32, at: 8, into: &bytes)
+        putUInt16(3, at: 10, into: &bytes)
+        putInt32(3, at: 12, into: &bytes)
+        putInt32(checksum, at: 16, into: &bytes)
+        putInt32(3, at: 20, into: &bytes)
+        putInt32(36, at: 24, into: &bytes)
+        putInt32(1, at: 28, into: &bytes)
+        putInt32(Int32(body), at: 32, into: &bytes)
+
+        putInt32(1, at: body, into: &bytes)
+        putInt32(8, at: body + 4, into: &bytes)
+        putInt32(3, at: model, into: &bytes)
+        putInt32(8, at: model + 4, into: &bytes)
+        for lodIndex in 0..<3 {
+            let lod = lods + lodIndex * 12
+            putInt32(1, at: lod, into: &bytes)
+            putInt32(Int32(meshBases[lodIndex] - lod), at: lod + 4, into: &bytes)
+            putFloat(switchPoints[lodIndex], at: lod + 8, into: &bytes)
+
+            let mesh = meshBases[lodIndex]
+            putInt32(1, at: mesh, into: &bytes)
+            putInt32(Int32(groupBases[lodIndex] - mesh), at: mesh + 4, into: &bytes)
+            let group = groupBases[lodIndex]
+            let vertexCount = vertexCounts[lodIndex]
+            putInt32(Int32(vertexCount), at: group, into: &bytes)
+            putInt32(25, at: group + 4, into: &bytes)
+            bytes[group + 24] = 0x02
+            for vertexIndex in 0..<vertexCount {
+                let vertex = group + 25 + vertexIndex * 9
+                bytes[vertex] = 0
+                bytes[vertex + 3] = 1
+                putUInt16(UInt16(vertexIndex), at: vertex + 4, into: &bytes)
+                bytes[vertex + 6] = 0
+                bytes[vertex + 7] = 0xFF
+                bytes[vertex + 8] = 0xFF
+            }
+        }
         return Data(bytes)
     }
 }

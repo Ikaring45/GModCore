@@ -137,9 +137,14 @@ public enum GModStudioRenderableModelCompiler {
         asset: SourceStudioModelAsset,
         bodyValue: Int,
         skinFamilyIndex: Int,
+        lodIndex: Int = 0,
         policy: GModStudioRenderableModelCompilePolicy
     ) throws -> GModStudioRenderableModelSnapshot {
-        let mesh = try decodeMesh(asset: asset, budget: policy.meshDecodeBudget)
+        let mesh = try decodeMesh(
+            asset: asset,
+            lodIndex: lodIndex,
+            budget: policy.meshDecodeBudget
+        )
         try requireIdentity(
             expectedChecksum: asset.validation.checksum,
             expectedName: asset.renderPayload.model.header.name,
@@ -229,11 +234,13 @@ public enum GModStudioRenderableModelCompiler {
 private extension GModStudioRenderableModelCompiler {
     static func decodeMesh(
         asset: SourceStudioModelAsset,
+        lodIndex: Int,
         budget: SourceStudioMeshDecodeBudget
     ) throws -> SourceStudioModelMeshSnapshot {
         do {
-            return try SourceStudioModelMeshDecoder.decodeRootLOD(
+            return try SourceStudioModelMeshDecoder.decodeLOD(
                 asset.renderPayload,
+                lodIndex: lodIndex,
                 budget: budget
             )
         } catch let error as SourceStudioModelMeshDecodeError {

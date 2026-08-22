@@ -7,10 +7,12 @@ import Foundation
 // - The same revision's `src/public/optimize.h`:
 //   OptimizedModel VTX v7 hierarchy and packed record layouts.
 //
-// This boundary decodes the root LOD only. That is the layout Source exposes
-// before any lower-LOD selection. Material names, flex deltas, eyes, and
-// special material operations remain explicit unsupported features instead of
-// being approximated by renderer-specific substitutes.
+// This boundary decodes an explicitly selected authored LOD. The VTX switch
+// points are exposed separately so a renderer can feed Source's projected
+// unit-sphere metric into the original selection rule without inventing a
+// distance threshold. Material names, flex deltas, eyes, and special material
+// operations remain explicit unsupported features instead of being
+// approximated by renderer-specific substitutes.
 
 public struct SourceStudioMeshDecodeBudget: Sendable, Equatable {
     public let maximumRootVertices: Int
@@ -79,7 +81,9 @@ public enum SourceStudioModelMeshDecodeError: Error, Sendable, Equatable,
     case unterminatedString(field: String, start: Int)
     case nonFiniteFloat(field: String, offset: Int)
     case hierarchyCountMismatch(field: String, mdl: Int, vtx: Int)
+    case invalidLODIndex(value: Int, count: Int)
     case rootVertexCountMismatch(expected: Int, actual: Int)
+    case lodVertexCountMismatch(lod: Int, expected: Int, actual: Int)
     case invalidReference(field: String, value: Int, upperBound: Int)
     case invalidBoneCount(field: String, value: Int, maximum: Int)
     case invalidTopologyFlags(
@@ -114,8 +118,12 @@ public enum SourceStudioModelMeshDecodeError: Error, Sendable, Equatable,
             return "\(field) contains a non-finite Float at byte \(offset)"
         case let .hierarchyCountMismatch(field, mdl, vtx):
             return "\(field) count differs between MDL (\(mdl)) and VTX (\(vtx))"
+        case let .invalidLODIndex(value, count):
+            return "Studio LOD index \(value) is outside 0..<\(count)"
         case let .rootVertexCountMismatch(expected, actual):
             return "VVD root fixups produce \(actual) vertices; header declares \(expected)"
+        case let .lodVertexCountMismatch(lod, expected, actual):
+            return "VVD LOD \(lod) fixups/mesh layout produce \(actual) vertices; header declares \(expected)"
         case let .invalidReference(field, value, upperBound):
             return "\(field) reference \(value) is outside 0..<\(upperBound)"
         case let .invalidBoneCount(field, value, maximum):
@@ -263,12 +271,147 @@ public struct SourceStudioModelMeshSnapshot: Sendable, Equatable {
     public let bodyParts: [SourceStudioBodyPartMeshSnapshot]
 }
 
+/// The authored VTX LOD switch table for one MDL submodel. Source stores this
+/// table per optimized model, so the caller selects the table belonging to the
+/// bodygroup submodel it is about to draw instead of assuming all submodels
+/// contain identical thresholds.
+public struct SourceStudioModelLODTableSnapshot: Sendable, Equatable {
+    public let bodyPartIndex: Int
+    public let modelIndex: Int
+    public let switchPoints: [Float]
+
+    public init(bodyPartIndex: Int, modelIndex: Int, switchPoints: [Float]) {
+        self.bodyPartIndex = bodyPartIndex
+        self.modelIndex = modelIndex
+        self.switchPoints = switchPoints
+    }
+
+    /// A negative switch point on the final VTX LOD marks Source's shadow LOD,
+    /// which is never returned by normal model LOD selection.
+    public var renderableLODCount: Int {
+        guard let last = switchPoints.last else { return 0 }
+        return last < 0 ? switchPoints.count - 1 : switchPoints.count
+    }
+}
+
+public enum SourceStudioModelLODSelectionError: Error, Sendable, Equatable,
+    CustomStringConvertible
+{
+    case emptyTable
+    case noRenderableLOD
+    case nonFiniteSwitchPoint(index: Int)
+    case invalidMinimumLOD(value: Int, renderableCount: Int)
+    case invalidProjectedUnitSphereSize(Float)
+    case invalidLODMetric(Float)
+
+    public var description: String {
+        switch self {
+        case .emptyTable:
+            return "Studio VTX LOD switch table is empty"
+        case .noRenderableLOD:
+            return "Studio VTX LOD switch table contains only a shadow LOD"
+        case let .nonFiniteSwitchPoint(index):
+            return "Studio VTX LOD switch point \(index) is not finite"
+        case let .invalidMinimumLOD(value, count):
+            return "minimum Studio LOD \(value) is outside 0..<\(count) renderable LODs"
+        case let .invalidProjectedUnitSphereSize(value):
+            return "projected unit-sphere size \(value) is not finite and nonnegative"
+        case let .invalidLODMetric(value):
+            return "Studio LOD metric \(value) is not finite and nonnegative"
+        }
+    }
+}
+
+/// Renderer-neutral form of `studiohwdata_t::LODMetric` and
+/// `studiohwdata_t::GetLODForMetric` from Source SDK 2013. The renderer remains
+/// responsible for projecting the model's unit sphere; this type does not
+/// guess a FOV-, viewport-, radius-, or distance-based replacement threshold.
+public enum SourceStudioModelLODSelector {
+    public static func metric(
+        projectedUnitSphereSize: Float
+    ) throws -> Float {
+        guard projectedUnitSphereSize.isFinite,
+              projectedUnitSphereSize >= 0 else {
+            throw SourceStudioModelLODSelectionError
+                .invalidProjectedUnitSphereSize(projectedUnitSphereSize)
+        }
+        let result: Float = projectedUnitSphereSize == 0
+            ? 0
+            : 100 / projectedUnitSphereSize
+        guard result.isFinite else {
+            throw SourceStudioModelLODSelectionError.invalidLODMetric(result)
+        }
+        return result
+    }
+
+    public static func selectLOD(
+        table: SourceStudioModelLODTableSnapshot,
+        projectedUnitSphereSize: Float,
+        minimumLODIndex: Int = 0
+    ) throws -> Int {
+        try selectLOD(
+            table: table,
+            lodMetric: metric(projectedUnitSphereSize: projectedUnitSphereSize),
+            minimumLODIndex: minimumLODIndex
+        )
+    }
+
+    public static func selectLOD(
+        table: SourceStudioModelLODTableSnapshot,
+        lodMetric: Float,
+        minimumLODIndex: Int = 0
+    ) throws -> Int {
+        guard !table.switchPoints.isEmpty else {
+            throw SourceStudioModelLODSelectionError.emptyTable
+        }
+        guard lodMetric.isFinite, lodMetric >= 0 else {
+            throw SourceStudioModelLODSelectionError.invalidLODMetric(lodMetric)
+        }
+        for (index, point) in table.switchPoints.enumerated() where !point.isFinite {
+            throw SourceStudioModelLODSelectionError.nonFiniteSwitchPoint(index: index)
+        }
+        let renderableCount = table.renderableLODCount
+        guard renderableCount > 0 else {
+            throw SourceStudioModelLODSelectionError.noRenderableLOD
+        }
+        guard minimumLODIndex >= 0, minimumLODIndex < renderableCount else {
+            throw SourceStudioModelLODSelectionError.invalidMinimumLOD(
+                value: minimumLODIndex,
+                renderableCount: renderableCount
+            )
+        }
+
+        if minimumLODIndex < renderableCount - 1 {
+            for index in minimumLODIndex..<(renderableCount - 1) {
+                if table.switchPoints[index + 1] > lodMetric {
+                    return index
+                }
+            }
+        }
+        return renderableCount - 1
+    }
+}
+
 public enum SourceStudioModelMeshDecoder {
     public static func decodeRootLOD(
         _ payload: SourceStudioImmutableRenderPayload,
         budget: SourceStudioMeshDecodeBudget
     ) throws -> SourceStudioModelMeshSnapshot {
+        try decodeLOD(payload, lodIndex: 0, budget: budget)
+    }
+
+    public static func decodeLOD(
+        _ payload: SourceStudioImmutableRenderPayload,
+        lodIndex: Int,
+        budget: SourceStudioMeshDecodeBudget
+    ) throws -> SourceStudioModelMeshSnapshot {
         try validate(budget: budget)
+        guard lodIndex >= 0, lodIndex < payload.vtxHeader.lodCount else {
+            throw SourceStudioModelMeshDecodeError.invalidLODIndex(
+                value: lodIndex,
+                count: payload.vtxHeader.lodCount
+            )
+        }
 
         let mdl = MeshReader(payload.mdlData)
         let vvd = MeshReader(payload.vvdData)
@@ -281,11 +424,32 @@ public enum SourceStudioModelMeshDecoder {
             cap: budget.maximumRootVertices,
             field: "VVD root vertices"
         )
-        let rootToSource = try rootVertexMapping(
+        let lodVertexCount = payload.vvdHeader.lodVertexCounts[lodIndex]
+        let rootToSource = try vertexMapping(
             reader: vvd,
             header: payload.vvdHeader,
-            rootVertexCount: rootVertexCount
+            lodIndex: 0,
+            lodVertexCount: rootVertexCount
         )
+        let lodToSource = lodIndex == 0 ? rootToSource : try vertexMapping(
+            reader: vvd,
+            header: payload.vvdHeader,
+            lodIndex: lodIndex,
+            lodVertexCount: lodVertexCount
+        )
+        var rootIndexBySource = [Int](repeating: -1, count: rootVertexCount)
+        for (rootIndex, sourceIndex) in rootToSource.enumerated() {
+            guard sourceIndex >= 0, sourceIndex < rootVertexCount else {
+                throw SourceStudioModelMeshDecodeError.invalidReference(
+                    field: "VVD root source vertex",
+                    value: sourceIndex,
+                    upperBound: rootVertexCount
+                )
+            }
+            if rootIndexBySource[sourceIndex] == -1 {
+                rootIndexBySource[sourceIndex] = rootIndex
+            }
+        }
 
         let mdlBodyPartCount = try mdl.count(at: 232, field: "studiohdr_t.numbodyparts")
         let vtxBodyPartCount = payload.vtxHeader.bodyPartCount
@@ -319,6 +483,7 @@ public enum SourceStudioModelMeshDecoder {
         )
 
         var bodyParts: [SourceStudioBodyPartMeshSnapshot] = []
+        var lodVertexCursor = 0
         bodyParts.reserveCapacity(mdlBodyPartCount)
         for bodyPartIndex in 0..<mdlBodyPartCount {
             let mdlBody = mdlBodyPartBase + bodyPartIndex * Layout.mdlBodyPart
@@ -371,7 +536,11 @@ public enum SourceStudioModelMeshDecoder {
                     mdl: mdl,
                     vvd: vvd,
                     vtx: vtx,
+                    lodIndex: lodIndex,
+                    lodVertexCursor: &lodVertexCursor,
+                    lodToSource: lodToSource,
                     rootToSource: rootToSource,
+                    rootIndexBySource: rootIndexBySource,
                     budget: budget,
                     accounting: &accounting
                 ))
@@ -384,11 +553,136 @@ public enum SourceStudioModelMeshDecoder {
             ))
         }
 
+        guard lodVertexCursor == lodVertexCount else {
+            if lodIndex == 0 {
+                throw SourceStudioModelMeshDecodeError.rootVertexCountMismatch(
+                    expected: lodVertexCount,
+                    actual: lodVertexCursor
+                )
+            }
+            throw SourceStudioModelMeshDecodeError.lodVertexCountMismatch(
+                lod: lodIndex,
+                expected: lodVertexCount,
+                actual: lodVertexCursor
+            )
+        }
+
         return SourceStudioModelMeshSnapshot(
             checksum: payload.model.header.checksum,
             modelName: payload.model.header.name,
-            lodIndex: 0,
+            lodIndex: lodIndex,
             bodyParts: bodyParts
+        )
+    }
+
+    public static func decodeLODTable(
+        _ payload: SourceStudioImmutableRenderPayload,
+        bodyPartIndex: Int,
+        modelIndex: Int
+    ) throws -> SourceStudioModelLODTableSnapshot {
+        let mdl = MeshReader(payload.mdlData)
+        let vtx = MeshReader(payload.vtxData)
+        let mdlBodyPartCount = try mdl.count(
+            at: 232,
+            field: "studiohdr_t.numbodyparts"
+        )
+        guard mdlBodyPartCount == payload.vtxHeader.bodyPartCount else {
+            throw SourceStudioModelMeshDecodeError.hierarchyCountMismatch(
+                field: "body parts",
+                mdl: mdlBodyPartCount,
+                vtx: payload.vtxHeader.bodyPartCount
+            )
+        }
+        guard bodyPartIndex >= 0,
+              bodyPartIndex < payload.vtxHeader.bodyPartCount else {
+            throw SourceStudioModelMeshDecodeError.invalidReference(
+                field: "VTX body part",
+                value: bodyPartIndex,
+                upperBound: payload.vtxHeader.bodyPartCount
+            )
+        }
+        let mdlBodyPartBase = try mdl.table(
+            base: 0,
+            relativeOffset: mdl.int32(
+                at: 236,
+                field: "studiohdr_t.bodypartindex"
+            ),
+            count: mdlBodyPartCount,
+            stride: Layout.mdlBodyPart,
+            field: "studiohdr_t.bodyparts"
+        ) + bodyPartIndex * Layout.mdlBodyPart
+        let bodyPartBase = try vtx.table(
+            base: 0,
+            relativeOffset: vtx.int32(at: 32, field: "FileHeader_t.bodyPartOffset"),
+            count: payload.vtxHeader.bodyPartCount,
+            stride: Layout.vtxBodyPart,
+            field: "FileHeader_t.bodyParts"
+        ) + bodyPartIndex * Layout.vtxBodyPart
+        let modelCount = try vtx.count(
+            at: bodyPartBase,
+            field: "bodyPart[\(bodyPartIndex)].vtx.numModels"
+        )
+        let mdlModelCount = try mdl.count(
+            at: mdlBodyPartBase + 4,
+            field: "bodyPart[\(bodyPartIndex)].nummodels"
+        )
+        guard mdlModelCount == modelCount else {
+            throw SourceStudioModelMeshDecodeError.hierarchyCountMismatch(
+                field: "bodyPart[\(bodyPartIndex)].models",
+                mdl: mdlModelCount,
+                vtx: modelCount
+            )
+        }
+        guard modelIndex >= 0, modelIndex < modelCount else {
+            throw SourceStudioModelMeshDecodeError.invalidReference(
+                field: "bodyPart[\(bodyPartIndex)].vtx.model",
+                value: modelIndex,
+                upperBound: modelCount
+            )
+        }
+        let modelBase = try vtx.table(
+            base: bodyPartBase,
+            relativeOffset: vtx.int32(
+                at: bodyPartBase + 4,
+                field: "bodyPart[\(bodyPartIndex)].vtx.modelOffset"
+            ),
+            count: modelCount,
+            stride: Layout.vtxModel,
+            field: "bodyPart[\(bodyPartIndex)].vtx.models"
+        ) + modelIndex * Layout.vtxModel
+        let lodCount = try vtx.count(
+            at: modelBase,
+            field: "bodyPart[\(bodyPartIndex)].model[\(modelIndex)].vtx.numLODs"
+        )
+        guard lodCount == payload.vtxHeader.lodCount else {
+            throw SourceStudioModelMeshDecodeError.hierarchyCountMismatch(
+                field: "bodyPart[\(bodyPartIndex)].model[\(modelIndex)].LODs",
+                mdl: payload.vtxHeader.lodCount,
+                vtx: lodCount
+            )
+        }
+        let lodBase = try vtx.table(
+            base: modelBase,
+            relativeOffset: vtx.int32(
+                at: modelBase + 4,
+                field: "bodyPart[\(bodyPartIndex)].model[\(modelIndex)].vtx.lodOffset"
+            ),
+            count: lodCount,
+            stride: Layout.vtxModelLOD,
+            field: "bodyPart[\(bodyPartIndex)].model[\(modelIndex)].vtx.LODs"
+        )
+        var points: [Float] = []
+        points.reserveCapacity(lodCount)
+        for lodIndex in 0..<lodCount {
+            points.append(try vtx.float(
+                at: lodBase + lodIndex * Layout.vtxModelLOD + 8,
+                field: "bodyPart[\(bodyPartIndex)].model[\(modelIndex)].vtx.LOD[\(lodIndex)].switchPoint"
+            ))
+        }
+        return SourceStudioModelLODTableSnapshot(
+            bodyPartIndex: bodyPartIndex,
+            modelIndex: modelIndex,
+            switchPoints: points
         )
     }
 }
@@ -460,14 +754,16 @@ private extension SourceStudioModelMeshDecoder {
         return next
     }
 
-    static func rootVertexMapping(
+    static func vertexMapping(
         reader: MeshReader,
         header: SourceStudioVVDHeader,
-        rootVertexCount: Int
+        lodIndex: Int,
+        lodVertexCount: Int
     ) throws -> [Int] {
-        guard header.fixupCount > 0 else { return Array(0..<rootVertexCount) }
+        guard header.fixupCount > 0 else { return Array(0..<lodVertexCount) }
         var mapping: [Int] = []
-        mapping.reserveCapacity(rootVertexCount)
+        mapping.reserveCapacity(lodVertexCount)
+        let sourceVertexCount = header.lodVertexCounts[0]
         for index in 0..<header.fixupCount {
             let base = header.fixupTableStart + index * Layout.fixup
             let lod = try reader.int32(at: base, field: "vertexFileFixup_t[\(index)].lod")
@@ -479,25 +775,32 @@ private extension SourceStudioModelMeshDecoder {
                 at: base + 8,
                 field: "vertexFileFixup_t[\(index)].numVertexes"
             )
-            if lod >= 0 {
+            if lod >= Int32(lodIndex) {
                 let end = try reader.checkedEnd(
                     start: source,
                     count: count,
                     field: "vertexFileFixup_t[\(index)].vertices"
                 )
-                guard end <= rootVertexCount else {
+                guard end <= sourceVertexCount else {
                     throw SourceStudioModelMeshDecodeError.invalidReference(
                         field: "vertexFileFixup_t[\(index)].source vertices",
                         value: end,
-                        upperBound: rootVertexCount + 1
+                        upperBound: sourceVertexCount + 1
                     )
                 }
                 mapping.append(contentsOf: source..<end)
             }
         }
-        guard mapping.count == rootVertexCount else {
-            throw SourceStudioModelMeshDecodeError.rootVertexCountMismatch(
-                expected: rootVertexCount,
+        guard mapping.count == lodVertexCount else {
+            if lodIndex == 0 {
+                throw SourceStudioModelMeshDecodeError.rootVertexCountMismatch(
+                    expected: lodVertexCount,
+                    actual: mapping.count
+                )
+            }
+            throw SourceStudioModelMeshDecodeError.lodVertexCountMismatch(
+                lod: lodIndex,
+                expected: lodVertexCount,
                 actual: mapping.count
             )
         }
@@ -513,7 +816,11 @@ private extension SourceStudioModelMeshDecoder {
         mdl: MeshReader,
         vvd: MeshReader,
         vtx: MeshReader,
+        lodIndex: Int,
+        lodVertexCursor: inout Int,
+        lodToSource: [Int],
         rootToSource: [Int],
+        rootIndexBySource: [Int],
         budget: SourceStudioMeshDecodeBudget,
         accounting: inout DecodeAccounting
     ) throws -> SourceStudioSubmodelSnapshot {
@@ -577,7 +884,11 @@ private extension SourceStudioModelMeshDecoder {
             stride: Layout.vtxModelLOD,
             field: "\(prefix).vtx.LODs"
         )
-        let vtxMeshCount = try vtx.count(at: lodBase, field: "\(prefix).vtx.LOD[0].numMeshes")
+        let selectedLODBase = lodBase + lodIndex * Layout.vtxModelLOD
+        let vtxMeshCount = try vtx.count(
+            at: selectedLODBase,
+            field: "\(prefix).vtx.LOD[\(lodIndex)].numMeshes"
+        )
         guard mdlMeshCount == vtxMeshCount else {
             throw SourceStudioModelMeshDecodeError.hierarchyCountMismatch(
                 field: "\(prefix).meshes",
@@ -599,35 +910,58 @@ private extension SourceStudioModelMeshDecoder {
             field: "\(prefix).meshes"
         )
         let vtxMeshBase = try vtx.table(
-            base: lodBase,
-            relativeOffset: vtx.int32(at: lodBase + 4, field: "\(prefix).vtx.LOD[0].meshOffset"),
+            base: selectedLODBase,
+            relativeOffset: vtx.int32(
+                at: selectedLODBase + 4,
+                field: "\(prefix).vtx.LOD[\(lodIndex)].meshOffset"
+            ),
             count: vtxMeshCount,
             stride: Layout.vtxMesh,
-            field: "\(prefix).vtx.LOD[0].meshes"
+            field: "\(prefix).vtx.LOD[\(lodIndex)].meshes"
         )
 
         var meshes: [SourceStudioMeshSnapshot] = []
+        var modelLODVertexCount = 0
         meshes.reserveCapacity(mdlMeshCount)
         for meshIndex in 0..<mdlMeshCount {
+            let mdlMeshBase = mdlMeshBase + meshIndex * Layout.mdlMesh
+            let meshLODVertexCount = try mdl.count(
+                at: mdlMeshBase + 52 + lodIndex * 4,
+                field: "\(prefix).mesh[\(meshIndex)].vertexdata.numLODVertexes[\(lodIndex)]"
+            )
             meshes.append(try decodeMesh(
                 bodyPartIndex: bodyPartIndex,
                 modelIndex: modelIndex,
                 meshIndex: meshIndex,
                 mdlModelBase: mdlBase,
-                mdlBase: mdlMeshBase + meshIndex * Layout.mdlMesh,
+                mdlBase: mdlMeshBase,
                 vtxBase: vtxMeshBase + meshIndex * Layout.vtxMesh,
                 modelVertexCount: modelVertexCount,
-                modelVertexStart: Int(modelVertexByteOffset) / Layout.studioVertex,
-                modelTangentStart: Int(modelTangentByteOffset) / Layout.tangent,
+                meshLODVertexCount: meshLODVertexCount,
+                lodVertexStart: lodVertexCursor + modelLODVertexCount,
                 payload: payload,
                 mdl: mdl,
                 vvd: vvd,
                 vtx: vtx,
+                lodToSource: lodToSource,
                 rootToSource: rootToSource,
+                rootIndexBySource: rootIndexBySource,
                 budget: budget,
                 accounting: &accounting
             ))
+            modelLODVertexCount = try requireBudget(
+                meshLODVertexCount,
+                current: modelLODVertexCount,
+                cap: lodToSource.count,
+                field: "\(prefix) LOD[\(lodIndex)] vertices"
+            )
         }
+        lodVertexCursor = try requireBudget(
+            modelLODVertexCount,
+            current: lodVertexCursor,
+            cap: lodToSource.count,
+            field: "VVD LOD[\(lodIndex)] mesh vertices"
+        )
 
         return SourceStudioSubmodelSnapshot(
             index: modelIndex,
@@ -647,13 +981,15 @@ private extension SourceStudioModelMeshDecoder {
         mdlBase: Int,
         vtxBase: Int,
         modelVertexCount: Int,
-        modelVertexStart: Int,
-        modelTangentStart: Int,
+        meshLODVertexCount: Int,
+        lodVertexStart: Int,
         payload: SourceStudioImmutableRenderPayload,
         mdl: MeshReader,
         vvd: MeshReader,
         vtx: MeshReader,
+        lodToSource: [Int],
         rootToSource: [Int],
+        rootIndexBySource: [Int],
         budget: SourceStudioMeshDecodeBudget,
         accounting: inout DecodeAccounting
     ) throws -> SourceStudioMeshSnapshot {
@@ -734,13 +1070,14 @@ private extension SourceStudioModelMeshDecoder {
                 meshIndex: meshIndex,
                 groupIndex: groupIndex,
                 vtxBase: stripGroupBase + groupIndex * Layout.vtxStripGroup,
-                meshVertexCount: meshVertexCount,
-                rootVertexStart: modelVertexStart + meshVertexOffset,
-                rootTangentStart: modelTangentStart + meshVertexOffset,
+                meshLODVertexCount: meshLODVertexCount,
+                lodVertexStart: lodVertexStart,
                 payload: payload,
                 vvd: vvd,
                 vtx: vtx,
+                lodToSource: lodToSource,
                 rootToSource: rootToSource,
+                rootIndexBySource: rootIndexBySource,
                 budget: budget,
                 accounting: &accounting
             ))
@@ -761,13 +1098,14 @@ private extension SourceStudioModelMeshDecoder {
         meshIndex: Int,
         groupIndex: Int,
         vtxBase: Int,
-        meshVertexCount: Int,
-        rootVertexStart: Int,
-        rootTangentStart: Int,
+        meshLODVertexCount: Int,
+        lodVertexStart: Int,
         payload: SourceStudioImmutableRenderPayload,
         vvd: MeshReader,
         vtx: MeshReader,
+        lodToSource: [Int],
         rootToSource: [Int],
+        rootIndexBySource: [Int],
         budget: SourceStudioMeshDecodeBudget,
         accounting: inout DecodeAccounting
     ) throws -> SourceStudioStripGroupSnapshot {
@@ -842,15 +1180,31 @@ private extension SourceStudioModelMeshDecoder {
                 at: base + 4,
                 field: "\(prefix).vertex[\(vertexIndex)].origMeshVertID"
             ))
-            guard originalMeshVertex < meshVertexCount else {
+            guard originalMeshVertex < meshLODVertexCount else {
                 throw SourceStudioModelMeshDecodeError.invalidReference(
                     field: "\(prefix).vertex[\(vertexIndex)].origMeshVertID",
                     value: originalMeshVertex,
-                    upperBound: meshVertexCount
+                    upperBound: meshLODVertexCount
                 )
             }
-            let rootVertexIndex = rootVertexStart + originalMeshVertex
-            let rootTangentIndex = rootTangentStart + originalMeshVertex
+            let lodVertexIndex = lodVertexStart + originalMeshVertex
+            guard lodVertexIndex >= 0, lodVertexIndex < lodToSource.count else {
+                throw SourceStudioModelMeshDecodeError.invalidReference(
+                    field: "\(prefix).vertex[\(vertexIndex)].LODVertex",
+                    value: lodVertexIndex,
+                    upperBound: lodToSource.count
+                )
+            }
+            let sourceVertexIndex = lodToSource[lodVertexIndex]
+            guard sourceVertexIndex >= 0,
+                  sourceVertexIndex < rootIndexBySource.count else {
+                throw SourceStudioModelMeshDecodeError.invalidReference(
+                    field: "\(prefix).vertex[\(vertexIndex)].sourceVVDVertex",
+                    value: sourceVertexIndex,
+                    upperBound: rootIndexBySource.count
+                )
+            }
+            let rootVertexIndex = rootIndexBySource[sourceVertexIndex]
             guard rootVertexIndex >= 0, rootVertexIndex < rootToSource.count else {
                 throw SourceStudioModelMeshDecodeError.invalidReference(
                     field: "\(prefix).vertex[\(vertexIndex)].rootLODVertex",
@@ -858,15 +1212,7 @@ private extension SourceStudioModelMeshDecoder {
                     upperBound: rootToSource.count
                 )
             }
-            guard rootTangentIndex >= 0, rootTangentIndex < rootToSource.count else {
-                throw SourceStudioModelMeshDecodeError.invalidReference(
-                    field: "\(prefix).vertex[\(vertexIndex)].rootLODTangent",
-                    value: rootTangentIndex,
-                    upperBound: rootToSource.count
-                )
-            }
-            let sourceVertexIndex = rootToSource[rootVertexIndex]
-            let sourceTangentIndex = rootToSource[rootTangentIndex]
+            let sourceTangentIndex = sourceVertexIndex
             let sourceVertexBase = payload.vvdHeader.vertexDataStart
                 + sourceVertexIndex * Layout.studioVertex
             let canonicalBoneCount = Int(try vvd.uint8(

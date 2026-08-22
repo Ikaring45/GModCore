@@ -31,17 +31,20 @@ public struct GModStudioRenderableModelResourceID:
 {
     public let normalizedModelPath: String
     public let checksum: Int32
+    public let lodIndex: Int
     public let bodyValue: Int
     public let skinFamilyIndex: Int
 
     public init(
         normalizedModelPath: String,
         checksum: Int32,
+        lodIndex: Int = 0,
         bodyValue: Int,
         skinFamilyIndex: Int
     ) {
         self.normalizedModelPath = normalizedModelPath
         self.checksum = checksum
+        self.lodIndex = lodIndex
         self.bodyValue = bodyValue
         self.skinFamilyIndex = skinFamilyIndex
     }
@@ -54,6 +57,7 @@ public struct GModStudioRenderableModelResourceID:
             return lhs.normalizedModelPath < rhs.normalizedModelPath
         }
         if lhs.checksum != rhs.checksum { return lhs.checksum < rhs.checksum }
+        if lhs.lodIndex != rhs.lodIndex { return lhs.lodIndex < rhs.lodIndex }
         if lhs.bodyValue != rhs.bodyValue { return lhs.bodyValue < rhs.bodyValue }
         return lhs.skinFamilyIndex < rhs.skinFamilyIndex
     }
@@ -139,6 +143,7 @@ public final class GModStudioRenderableModelCache:
 {
     private struct Key: Hashable {
         let normalizedModelPath: String
+        let lodIndex: Int
         let bodyValue: Int
         let skinFamilyIndex: Int
     }
@@ -153,6 +158,7 @@ public final class GModStudioRenderableModelCache:
     private let compile: @Sendable (
         SourceEntityModelReference,
         Int,
+        Int,
         Int
     ) -> GModStudioRenderableModelResolution
     private var entries: [Key: Entry] = [:]
@@ -164,43 +170,65 @@ public final class GModStudioRenderableModelCache:
         compilePolicy: GModStudioRenderableModelCompilePolicy = .initialIpadProp,
         cachePolicy: GModStudioRenderableModelCachePolicy = .initialIpadPropScene
     ) throws {
-        try self.init(policy: cachePolicy) { model, bodyValue, skinFamilyIndex in
-            guard let normalized = GModStudioModelPath.cacheKey(model.path) else {
-                return .failed(.cache(.invalidModelPath(model.path)))
-            }
-            switch repository.renderAsset(for: model) {
-            case let .unavailable(error):
-                return .failed(.assetUnavailable(error))
-            case let .loaded(asset):
-                do {
-                    let compiled = try GModStudioRenderableModelCompiler.compile(
-                        asset: asset,
-                        bodyValue: bodyValue,
-                        skinFamilyIndex: skinFamilyIndex,
-                        policy: compilePolicy
-                    )
-                    return .resolved(GModStudioRenderableModelResource(
-                        id: GModStudioRenderableModelResourceID(
-                            normalizedModelPath: normalized,
-                            checksum: compiled.checksum,
+        try self.init(
+            policy: cachePolicy,
+            compileLOD: { model, bodyValue, skinFamilyIndex, lodIndex in
+                guard let normalized = GModStudioModelPath.cacheKey(model.path) else {
+                    return .failed(.cache(.invalidModelPath(model.path)))
+                }
+                switch repository.renderAsset(for: model) {
+                case let .unavailable(error):
+                    return .failed(.assetUnavailable(error))
+                case let .loaded(asset):
+                    do {
+                        let compiled = try GModStudioRenderableModelCompiler.compile(
+                            asset: asset,
                             bodyValue: bodyValue,
-                            skinFamilyIndex: skinFamilyIndex
-                        ),
-                        model: compiled
-                    ))
-                } catch let error as GModStudioRenderableModelCompileError {
-                    return .failed(.compile(error))
-                } catch {
-                    return .failed(.unexpected(String(reflecting: type(of: error))))
+                            skinFamilyIndex: skinFamilyIndex,
+                            lodIndex: lodIndex,
+                            policy: compilePolicy
+                        )
+                        return .resolved(GModStudioRenderableModelResource(
+                            id: GModStudioRenderableModelResourceID(
+                                normalizedModelPath: normalized,
+                                checksum: compiled.checksum,
+                                lodIndex: compiled.lodIndex,
+                                bodyValue: bodyValue,
+                                skinFamilyIndex: skinFamilyIndex
+                            ),
+                            model: compiled
+                        ))
+                    } catch let error as GModStudioRenderableModelCompileError {
+                        return .failed(.compile(error))
+                    } catch {
+                        return .failed(.unexpected(String(reflecting: type(of: error))))
+                    }
                 }
             }
-        }
+        )
+    }
+
+    convenience init(
+        policy: GModStudioRenderableModelCachePolicy,
+        compile: @escaping @Sendable (
+            SourceEntityModelReference,
+            Int,
+            Int
+        ) -> GModStudioRenderableModelResolution
+    ) throws {
+        try self.init(
+            policy: policy,
+            compileLOD: { model, bodyValue, skinFamilyIndex, _ in
+                compile(model, bodyValue, skinFamilyIndex)
+            }
+        )
     }
 
     init(
         policy: GModStudioRenderableModelCachePolicy,
-        compile: @escaping @Sendable (
+        compileLOD: @escaping @Sendable (
             SourceEntityModelReference,
+            Int,
             Int,
             Int
         ) -> GModStudioRenderableModelResolution
@@ -213,7 +241,7 @@ public final class GModStudioRenderableModelCache:
             )
         }
         self.policy = policy
-        self.compile = compile
+        self.compile = compileLOD
     }
 
     public func resolve(
@@ -221,11 +249,29 @@ public final class GModStudioRenderableModelCache:
         bodyValue: Int,
         skinFamilyIndex: Int
     ) -> GModStudioRenderableModelResolution {
+        resolve(
+            model: model,
+            bodyValue: bodyValue,
+            skinFamilyIndex: skinFamilyIndex,
+            lodIndex: 0
+        )
+    }
+
+    /// Resolves and caches one exact authored LOD. The selected index is part
+    /// of both the cache key and immutable resource identity, so a lower-LOD
+    /// miss can never alias the root geometry for the same model appearance.
+    public func resolve(
+        model: SourceEntityModelReference,
+        bodyValue: Int,
+        skinFamilyIndex: Int,
+        lodIndex: Int
+    ) -> GModStudioRenderableModelResolution {
         guard let normalized = GModStudioModelPath.cacheKey(model.path) else {
             return .failed(.cache(.invalidModelPath(model.path)))
         }
         let key = Key(
             normalizedModelPath: normalized,
+            lodIndex: lodIndex,
             bodyValue: bodyValue,
             skinFamilyIndex: skinFamilyIndex
         )
@@ -240,7 +286,12 @@ public final class GModStudioRenderableModelCache:
         // Studio I/O and decode must not hold the cache lock. A simultaneous
         // miss may compile the same immutable appearance twice; the first
         // committed result wins and both callers observe that one entry.
-        let compiledResolution = compile(model, bodyValue, skinFamilyIndex)
+        let compiledResolution = compile(
+            model,
+            bodyValue,
+            skinFamilyIndex,
+            lodIndex
+        )
         let resolution: GModStudioRenderableModelResolution
         let geometryBytes: Int
         switch compiledResolution {
