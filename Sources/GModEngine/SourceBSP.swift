@@ -1361,7 +1361,12 @@ public struct SourceBSP: Sendable, Equatable {
         headNode: Int32? = nil
     ) throws -> Int {
         var child = try resolvedHeadNode(headNode)
-        var visitedNodes = Set<Int>()
+        // A point lookup follows exactly one child per node. The BSP was
+        // already tri-colour validated at load, so retaining a Set here only
+        // adds a heap allocation to every contents sample (WaterMove performs
+        // several per tick). Keep a defensive step bound for malformed state
+        // without allocating per query.
+        var remainingNodeVisits = nodes.count
 
         while child >= 0 {
             let nodeIndex = Int(child)
@@ -1372,9 +1377,10 @@ public struct SourceBSP: Sendable, Equatable {
                     availableCount: nodes.count
                 )
             }
-            guard visitedNodes.insert(nodeIndex).inserted else {
+            guard remainingNodeVisits > 0 else {
                 throw SourceBSPError.cyclicNodeGraph(nodeIndex: nodeIndex)
             }
+            remainingNodeVisits -= 1
 
             let node = nodes[nodeIndex]
             let plane = planes[Int(node.planeIndex)]
