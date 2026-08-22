@@ -202,6 +202,18 @@ public enum SourceCanonicalEntityGLuaBridge {
             return snapshot
         }
 
+        func requiredPlayerMovementSettings(
+            _ snapshot: SourceCanonicalEntitySnapshot,
+            function: String
+        ) throws -> SourceCanonicalPlayerMovementSettings {
+            guard let settings = snapshot.motion.playerMovementSettings else {
+                throw LuaError.runtime(
+                    "\(function) canonical Player movement state is unavailable"
+                )
+            }
+            return settings
+        }
+
         func liveWeaponValue(
             _ record: SourceCanonicalWeaponRecord
         ) -> LuaValue? {
@@ -271,6 +283,38 @@ public enum SourceCanonicalEntityGLuaBridge {
                 )
             }
             return Int(number)
+        }
+
+        func requiredNonNegativeFloat(
+            _ arguments: [LuaValue],
+            index: Int,
+            function: String
+        ) throws -> Float {
+            guard arguments.indices.contains(index) else {
+                throw LuaError.runtime(
+                    "bad argument #\(index) to '\(function)' " +
+                    "(finite non-negative number expected, got no value)"
+                )
+            }
+            let number: Double?
+            switch arguments[index] {
+            case let .number(value):
+                number = value
+            case let .string(value):
+                number = Double(value.utf8String)
+            default:
+                number = nil
+            }
+            guard let number,
+                  number.isFinite,
+                  number >= 0,
+                  number <= Double(Float.greatestFiniteMagnitude) else {
+                throw LuaError.runtime(
+                    "bad argument #\(index) to '\(function)' " +
+                    "(finite non-negative number expected)"
+                )
+            }
+            return Float(number)
         }
 
         func vector(
@@ -518,6 +562,34 @@ public enum SourceCanonicalEntityGLuaBridge {
             )
             return [.boolean(snapshot.motion.isAlive)]
         }
+        try setMethod("Player:GetClassID", on: playerMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Player:GetClassID",
+                kind: .player
+            )
+            guard let classID = snapshot.motion.playerClassID else {
+                throw LuaError.runtime(
+                    "Player:GetClassID canonical Player class state is unavailable"
+                )
+            }
+            return [.number(Double(classID))]
+        }
+        for field in SourceCanonicalPlayerMovementField.allCases {
+            let function = "Player:\(field.getterName)"
+            try setMethod(function, on: playerMetatable) { arguments in
+                let snapshot = try requiredSnapshot(
+                    arguments.first,
+                    function: function,
+                    kind: .player
+                )
+                let settings = try requiredPlayerMovementSettings(
+                    snapshot,
+                    function: function
+                )
+                return [.number(Double(field.value(in: settings)))]
+            }
+        }
         try setMethod("Player:InVehicle", on: playerMetatable) { arguments in
             let snapshot = try requiredSnapshot(
                 arguments.first,
@@ -709,6 +781,51 @@ public enum SourceCanonicalEntityGLuaBridge {
         // CLIENT owns immutable replicated snapshots only. Returning here
         // keeps every mutation surface and ents.Create SERVER-exclusive.
         guard runtime.realm == .server else { return }
+
+        try setMethod("Player:SetClassID", on: playerMetatable) { arguments in
+            let player = try requiredSnapshot(
+                arguments.first,
+                function: "Player:SetClassID",
+                kind: .player
+            )
+            let classID = try requiredInteger(
+                arguments,
+                index: 1,
+                function: "Player:SetClassID"
+            )
+            let host = try requiredHost("Player:SetClassID")
+            _ = try host.updateCanonicalEntity(player.identity) { candidate in
+                candidate.motion.playerClassID = Int32(classID)
+            }
+            return []
+        }
+
+        for field in SourceCanonicalPlayerMovementField.allCases {
+            let function = "Player:\(field.setterName)"
+            try setMethod(function, on: playerMetatable) { arguments in
+                let player = try requiredSnapshot(
+                    arguments.first,
+                    function: function,
+                    kind: .player
+                )
+                let value = try requiredNonNegativeFloat(
+                    arguments,
+                    index: 1,
+                    function: function
+                )
+                let host = try requiredHost(function)
+                _ = try host.updateCanonicalEntity(player.identity) { candidate in
+                    guard var settings = candidate.motion.playerMovementSettings else {
+                        throw LuaError.runtime(
+                            "\(function) canonical Player movement state is unavailable"
+                        )
+                    }
+                    field.set(value, in: &settings)
+                    candidate.motion.playerMovementSettings = settings
+                }
+                return []
+            }
+        }
 
         try setMethod("Weapon:SetHoldType", on: weaponMetatable) { arguments in
             let weapon = try requiredSnapshot(

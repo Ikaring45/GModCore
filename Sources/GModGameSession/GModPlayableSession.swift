@@ -1280,7 +1280,16 @@ public final class GModPlayableSession {
     ) throws -> GModPlayableFixedTickReport {
         try ensureOpen()
         let commandNumber = nextCommandNumber
-        let stateBeforeMovement = playerWalkState
+        guard let playerSnapshot = sourceAdapter.canonicalSnapshot(
+            for: playerIdentity
+        ) else {
+            preconditionFailure("canonical Player is unavailable")
+        }
+        guard let playerMovement =
+                playerSnapshot.motion.playerMovementSettings else {
+            preconditionFailure("canonical Player movement state is unavailable")
+        }
+        let stateBeforeMovement = Self.playerWalkState(from: playerSnapshot)
         let command = SourceUserCommand(
             commandNumber: commandNumber,
             tickCount: commandNumber,
@@ -1294,7 +1303,12 @@ public final class GModPlayableSession {
         do {
             let tick = try worldWalkSolver.simulate(
                 state: stateBeforeMovement,
-                command: command
+                command: command,
+                maximumSpeed: playerMovement.maximumSpeed(
+                    for: movementInput.buttons
+                ),
+                crouchedWalkSpeed: playerMovement.crouchedWalkSpeed,
+                jumpPower: playerMovement.jumpPower
             )
             if tick.state != stateBeforeMovement {
                 _ = try sourceAdapter.updateCanonicalEntity(

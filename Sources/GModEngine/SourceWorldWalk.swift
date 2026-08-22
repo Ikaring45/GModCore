@@ -379,7 +379,61 @@ public struct SourceWorldWalkSolver: Sendable {
         state: SourceWorldWalkState,
         command: SourceUserCommand
     ) throws -> SourceWorldWalkTick {
+        let jumpPower = sqrt(
+            2 * configuration.movement.gravity * configuration.jumpHeight
+        )
+        return try simulateConfigured(
+            state: state,
+            command: command,
+            crouchedWalkSpeed: Self.duckSpeedScale,
+            jumpPower: jumpPower
+        )
+    }
+
+    /// Runs one command with the canonical Player values selected by the
+    /// owning gamemode. The solver remains stateless: the values arrive with
+    /// the exact Player snapshot for this command and do not become a second
+    /// mutable host configuration.
+    public func simulate(
+        state: SourceWorldWalkState,
+        command: SourceUserCommand,
+        maximumSpeed: Float,
+        crouchedWalkSpeed: Float,
+        jumpPower: Float
+    ) throws -> SourceWorldWalkTick {
+        var effectiveConfiguration = configuration
+        effectiveConfiguration.maximumSpeed = maximumSpeed
+        effectiveConfiguration.clientMaximumSpeed = maximumSpeed
+        return try SourceWorldWalkSolver(
+            collisionProvider: collisionProvider,
+            configuration: effectiveConfiguration
+        ).simulateConfigured(
+            state: state,
+            command: command,
+            crouchedWalkSpeed: crouchedWalkSpeed,
+            jumpPower: jumpPower
+        )
+    }
+
+    private func simulateConfigured(
+        state: SourceWorldWalkState,
+        command: SourceUserCommand,
+        crouchedWalkSpeed: Float,
+        jumpPower: Float
+    ) throws -> SourceWorldWalkTick {
+        let configuration = self.configuration
         try validate(configuration: configuration)
+        for (name, value) in [
+            ("Player crouchedWalkSpeed", crouchedWalkSpeed),
+            ("Player jumpPower", jumpPower),
+        ] {
+            guard value.isFinite else {
+                throw SourceWorldWalkError.nonFinite(name)
+            }
+            guard value >= 0 else {
+                throw SourceWorldWalkError.invalidConfiguration(name)
+            }
+        }
         try validate(state: state)
         try validate(command: command)
         try rejectUnsupportedState(state)
@@ -419,9 +473,13 @@ public struct SourceWorldWalkSolver: Sendable {
         // crop, including the command that successfully stands up.
         var movementCommand = command
         if next.isDucked, next.isOnGround {
-            movementCommand.forwardMove *= Self.duckSpeedScale
-            movementCommand.sideMove *= Self.duckSpeedScale
-            movementCommand.upMove *= Self.duckSpeedScale
+            // Garry's Mod exposes this as a multiplier and documents values
+            // above one as having no effect, so retain the authored value in
+            // the Player snapshot while clamping only its movement effect.
+            let effectiveCrouchedWalkSpeed = min(crouchedWalkSpeed, 1)
+            movementCommand.forwardMove *= effectiveCrouchedWalkSpeed
+            movementCommand.sideMove *= effectiveCrouchedWalkSpeed
+            movementCommand.upMove *= effectiveCrouchedWalkSpeed
         }
 
         // This bounded slice commits the fully-ducked endpoints immediately.
@@ -544,9 +602,7 @@ public struct SourceWorldWalkSolver: Sendable {
         // The SDK's default jump height is 21 Source units; deriving the
         // impulse keeps custom gravity values coherent.
         if movementCommand.buttons.contains(.jump), next.isOnGround {
-            next.velocity.z = sqrt(
-                2 * configuration.movement.gravity * configuration.jumpHeight
-            )
+            next.velocity.z = jumpPower
             next.isOnGround = false
         }
 

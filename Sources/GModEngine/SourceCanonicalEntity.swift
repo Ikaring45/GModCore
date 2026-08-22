@@ -89,6 +89,10 @@ public struct SourceEntityMotionState: Equatable, Sendable {
     /// non-Player as movement-configurable.
     public var playerMovementSettings:
         SourceCanonicalPlayerMovementSettings?
+    /// Original `player_manager` stores the registered class through this
+    /// engine integer before it calls `OnPlayerSpawn`. Keeping it beside the
+    /// Player-only snapshot state avoids a realm-local Lua mirror.
+    public var playerClassID: Int32?
 
     public init(
         linearVelocity: SourceVector3 = .zero,
@@ -105,7 +109,8 @@ public struct SourceEntityMotionState: Equatable, Sendable {
         ladderNormal: SourceVector3 = .zero,
         isAlive: Bool = true,
         playerMovementSettings:
-            SourceCanonicalPlayerMovementSettings? = nil
+            SourceCanonicalPlayerMovementSettings? = nil,
+        playerClassID: Int32? = nil
     ) {
         self.linearVelocity = linearVelocity
         self.angularVelocity = angularVelocity
@@ -121,6 +126,7 @@ public struct SourceEntityMotionState: Equatable, Sendable {
         self.ladderNormal = ladderNormal
         self.isAlive = isAlive
         self.playerMovementSettings = playerMovementSettings
+        self.playerClassID = playerClassID
     }
 
     fileprivate var isFinite: Bool {
@@ -814,7 +820,8 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
             // origin. Ducking can later authoritatively change this value.
             return Self(
                 motion: SourceEntityMotionState(
-                    playerMovementSettings: .legacyWorldWalkDefaults
+                    playerMovementSettings: .legacyWorldWalkDefaults,
+                    playerClassID: 0
                 ),
                 solidType: .boundingBox,
                 moveType: .walk,
@@ -1625,10 +1632,13 @@ public final class SourceCanonicalEntityStore {
             throw SourceCanonicalEntityError.invalidMotion
         }
         if kind == .player {
-            guard state.motion.playerMovementSettings != nil else {
+            guard state.motion.playerMovementSettings != nil,
+                  let playerClassID = state.motion.playerClassID,
+                  playerClassID >= 0 else {
                 throw SourceCanonicalEntityError.invalidMotion
             }
-        } else if state.motion.playerMovementSettings != nil {
+        } else if state.motion.playerMovementSettings != nil ||
+                    state.motion.playerClassID != nil {
             throw SourceCanonicalEntityError.invalidMotion
         }
         guard state.skin >= 0, state.skin <= Int(Int32.max) else {
