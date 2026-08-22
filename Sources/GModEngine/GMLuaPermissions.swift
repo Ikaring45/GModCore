@@ -248,7 +248,7 @@ public enum GMLuaPermissions {
         return table
     }
 
-    private static func onMainActor<T>(
+    private static func onMainActor<T: Sendable>(
         _ operation: @MainActor () throws -> T
     ) throws -> T {
         guard Thread.isMainThread else {
