@@ -226,6 +226,21 @@ public struct GMLuaSourceTextureScroll: Sendable, Equatable {
     public let angleDegrees: Float
 }
 
+/// Keeps the provenance of Water's dependent render target binding. Source's
+/// shader-declared runtime target is real SDK behavior, not an inferred VMT
+/// value; authored custom names remain separate for renderer capability checks.
+public enum GMLuaSourceWaterTextureReference: Sendable, Equatable {
+    case authored(String)
+    case sourceShaderDefault(String)
+
+    public var name: String {
+        switch self {
+        case let .authored(name), let .sourceShaderDefault(name):
+            return name
+        }
+    }
+}
+
 /// Shader-specific Water inputs parsed from the real resolved VMT. Optional
 /// values remain absent rather than being replaced with invented defaults.
 public struct GMLuaResolvedSourceWaterMaterial: Sendable, Equatable {
@@ -238,7 +253,11 @@ public struct GMLuaResolvedSourceWaterMaterial: Sendable, Equatable {
     public let fogEnd: Float?
     public let reflectionAmount: Float?
     public let refractionAmount: Float?
+    public let reflectionTexture: GMLuaSourceWaterTextureReference
+    public let refractionTexture: GMLuaSourceWaterTextureReference
+    public let reflectEntities: Bool?
     public let normalTexture: GMLuaResolvedSourceTexture?
+    public let duDvTexture: GMLuaResolvedSourceTexture?
     public let bumpTexture: GMLuaResolvedSourceTexture?
     public let textureScroll: GMLuaSourceTextureScroll?
 }
@@ -490,8 +509,32 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
             .map { Float($0) }
         let normalTexture = try document.string(named: "$normalmap")
             .flatMap { try resolveSourceTexture(named: $0, mipPolicy: mipPolicy) }
+        let duDvTexture = try document.string(named: "$dudvmap")
+            .flatMap {
+                try resolveSourceTexture(
+                    named: $0,
+                    mipPolicy: mipPolicy,
+                    semantic: .waterDuDv
+                )
+            }
         let bumpTexture = try document.string(named: "$bumpmap")
             .flatMap { try resolveSourceTexture(named: $0, mipPolicy: mipPolicy) }
+        let reflectionTexture: GMLuaSourceWaterTextureReference
+        if let authored = try document.string(named: "$reflecttexture") {
+            reflectionTexture = .authored(authored)
+        } else {
+            reflectionTexture = .sourceShaderDefault(
+                SourceWaterShaderContract.reflectionRenderTargetName
+            )
+        }
+        let refractionTexture: GMLuaSourceWaterTextureReference
+        if let authored = try document.string(named: "$refracttexture") {
+            refractionTexture = .authored(authored)
+        } else {
+            refractionTexture = .sourceShaderDefault(
+                SourceWaterShaderContract.refractionRenderTargetName
+            )
+        }
 
         let textureScroll = document.proxies.first(where: {
             $0.name.caseInsensitiveCompare("TextureScroll") == .orderedSame
@@ -524,7 +567,11 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
             fogEnd: try float("$fogend"),
             reflectionAmount: try float("$reflectamount"),
             refractionAmount: try float("$refractamount"),
+            reflectionTexture: reflectionTexture,
+            refractionTexture: refractionTexture,
+            reflectEntities: try document.boolean(named: "$reflectentities"),
             normalTexture: normalTexture,
+            duDvTexture: duDvTexture,
             bumpTexture: bumpTexture,
             textureScroll: textureScroll
         )
@@ -741,9 +788,15 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
         )
     }
 
+    private enum SourceTextureSemantic: Equatable {
+        case generic
+        case waterDuDv
+    }
+
     private func resolveSourceTexture(
         named textureName: String,
-        mipPolicy: GMLuaSourceTextureMipPolicy
+        mipPolicy: GMLuaSourceTextureMipPolicy,
+        semantic: SourceTextureSemantic = .generic
     ) throws -> GMLuaResolvedSourceTexture? {
         guard let logicalPath = try Self.normalizedVTFPath(textureName) else {
             throw GMLuaSourceMaterialError.unsafeLogicalPath(textureName)
@@ -767,7 +820,12 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
             logicalPath: logicalPath
         )
         do {
-            let mipImages = try Self.decodeMipImages(from: vtf, policy: mipPolicy)
+            let mipImages = try Self.decodeMipImages(
+                from: vtf,
+                policy: mipPolicy,
+                semantic: semantic,
+                allocationLimits: vtfLimits
+            )
             guard let image = mipImages.first else {
                 throw SourceVTFError.invalidMipCount(0, maximum: vtf.mipCount)
             }
@@ -937,18 +995,35 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
 
     private static func decodeMipImages(
         from vtf: SourceVTFFile,
-        policy: GMLuaSourceTextureMipPolicy
+        policy: GMLuaSourceTextureMipPolicy,
+        semantic: SourceTextureSemantic = .generic,
+        allocationLimits: SourceVTFAllocationLimits = .default
     ) throws -> [SourceVTFDecodedImage] {
         var images: [SourceVTFDecodedImage] = []
         let decodedMipCount = policy == .authoredChain ? vtf.mipCount : 1
         images.reserveCapacity(decodedMipCount)
         for mipLevel in 0..<decodedMipCount {
-            images.append(try vtf.decodeRGBA8(
-                mipLevel: mipLevel,
-                frame: 0,
-                face: 0,
-                slice: 0
-            ))
+            if semantic == .waterDuDv, vtf.imageFormat == .uv88 {
+                let resource = try vtf.subresource(
+                    mipLevel: mipLevel,
+                    frame: 0,
+                    face: 0,
+                    slice: 0
+                )
+                images.append(try SourceWaterDuDvTextureDecoder.decodeUV88(
+                    data: resource.data,
+                    width: resource.width,
+                    height: resource.height,
+                    allocationLimits: allocationLimits
+                ))
+            } else {
+                images.append(try vtf.decodeRGBA8(
+                    mipLevel: mipLevel,
+                    frame: 0,
+                    face: 0,
+                    slice: 0
+                ))
+            }
         }
         return images
     }

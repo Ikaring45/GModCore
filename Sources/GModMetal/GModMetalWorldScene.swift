@@ -517,6 +517,43 @@ public struct GModMetalWorldWaterSurface: Sendable, Equatable {
     }
 }
 
+/// A Water texture parameter can drive this renderer only when it names the
+/// Source runtime target represented by our owned Metal render target. Custom
+/// authored textures are retained as a typed unsupported state instead of
+/// silently sampling an unrelated allocation.
+public enum GModMetalWaterRenderTargetBinding: Sendable, Equatable {
+    case authoredRuntimeTarget(String)
+    case sourceShaderDefaultRuntimeTarget(String)
+    case unsupportedAuthoredTexture(String)
+
+    var isRenderable: Bool {
+        switch self {
+        case .authoredRuntimeTarget, .sourceShaderDefaultRuntimeTarget:
+            return true
+        case .unsupportedAuthoredTexture:
+            return false
+        }
+    }
+}
+
+public enum GModMetalWaterReflectionEntityMode: Sendable, Equatable {
+    case authored(Bool)
+    /// The Source Water shader declares `$reflectentities` disabled.
+    case sourceShaderDefaultDisabled
+
+    var drawsDynamicEntities: Bool {
+        if case let .authored(value) = self { return value }
+        return false
+    }
+}
+
+public enum GModMetalWaterDistortionEncoding: Sendable, Equatable {
+    case none
+    case tangentSpaceNormal
+    /// Biased Source UV88/RG displacement. It never supplies a surface normal.
+    case duDvRG
+}
+
 public struct GModMetalWorldWaterMaterial: Sendable, Equatable {
     public let resourceIdentifier: String
     public let isAboveWater: Bool
@@ -526,10 +563,15 @@ public struct GModMetalWorldWaterMaterial: Sendable, Equatable {
     public let fogEnd: Float?
     public let reflectionAmount: Float?
     public let refractionAmount: Float?
+    public let reflectionTextureBinding: GModMetalWaterRenderTargetBinding
+    public let refractionTextureBinding: GModMetalWaterRenderTargetBinding
+    public let reflectionEntityMode: GModMetalWaterReflectionEntityMode
     public let normalBitmap: GModMetalSurfaceBitmap?
+    public let distortionEncoding: GModMetalWaterDistortionEncoding
     public let textureScrollRate: Float?
     public let textureScrollAngleDegrees: Float?
     public let unsupportedBumpTextureFormat: String?
+    public let unsupportedDuDvTextureFormat: String?
 
     public init(
         resourceIdentifier: String,
@@ -543,7 +585,15 @@ public struct GModMetalWorldWaterMaterial: Sendable, Equatable {
         normalBitmap: GModMetalSurfaceBitmap?,
         textureScrollRate: Float?,
         textureScrollAngleDegrees: Float?,
-        unsupportedBumpTextureFormat: String?
+        unsupportedBumpTextureFormat: String?,
+        reflectionTextureBinding: GModMetalWaterRenderTargetBinding =
+            .sourceShaderDefaultRuntimeTarget("_rt_WaterReflection"),
+        refractionTextureBinding: GModMetalWaterRenderTargetBinding =
+            .sourceShaderDefaultRuntimeTarget("_rt_WaterRefraction"),
+        reflectionEntityMode: GModMetalWaterReflectionEntityMode =
+            .sourceShaderDefaultDisabled,
+        distortionEncoding: GModMetalWaterDistortionEncoding? = nil,
+        unsupportedDuDvTextureFormat: String? = nil
     ) {
         self.resourceIdentifier = resourceIdentifier
         self.isAboveWater = isAboveWater
@@ -553,10 +603,17 @@ public struct GModMetalWorldWaterMaterial: Sendable, Equatable {
         self.fogEnd = fogEnd
         self.reflectionAmount = reflectionAmount
         self.refractionAmount = refractionAmount
+        self.reflectionTextureBinding = reflectionTextureBinding
+        self.refractionTextureBinding = refractionTextureBinding
+        self.reflectionEntityMode = reflectionEntityMode
         self.normalBitmap = normalBitmap
+        self.distortionEncoding = normalBitmap == nil
+            ? .none
+            : distortionEncoding ?? .tangentSpaceNormal
         self.textureScrollRate = textureScrollRate
         self.textureScrollAngleDegrees = textureScrollAngleDegrees
         self.unsupportedBumpTextureFormat = unsupportedBumpTextureFormat
+        self.unsupportedDuDvTextureFormat = unsupportedDuDvTextureFormat
     }
 
     /// Preserves every authored Water VMT value while allowing the shared
@@ -575,7 +632,12 @@ public struct GModMetalWorldWaterMaterial: Sendable, Equatable {
             normalBitmap: nil,
             textureScrollRate: textureScrollRate,
             textureScrollAngleDegrees: textureScrollAngleDegrees,
-            unsupportedBumpTextureFormat: unsupportedBumpTextureFormat
+            unsupportedBumpTextureFormat: unsupportedBumpTextureFormat,
+            reflectionTextureBinding: reflectionTextureBinding,
+            refractionTextureBinding: refractionTextureBinding,
+            reflectionEntityMode: reflectionEntityMode,
+            distortionEncoding: .none,
+            unsupportedDuDvTextureFormat: unsupportedDuDvTextureFormat
         )
     }
 }
@@ -715,6 +777,7 @@ struct GModMetalWaterRenderTargetPlan: Sendable, Equatable {
     let sourceSurfaceZ: Float
     let requiresReflection: Bool
     let requiresRefraction: Bool
+    let drawsReflectedDynamicEntities: Bool
     /// Source writes water depth to refraction-target alpha only for the
     /// above-water view. One shared target can represent the plane only when
     /// every refracting material agrees on the authored fog range.
@@ -724,19 +787,23 @@ struct GModMetalWaterRenderTargetPlan: Sendable, Equatable {
         sourceSurfaceZ: Float,
         requiresReflection: Bool,
         requiresRefraction: Bool,
+        drawsReflectedDynamicEntities: Bool = false,
         refractionFog: GModMetalWaterRefractionFog? = nil
     ) {
         self.sourceSurfaceZ = sourceSurfaceZ
         self.requiresReflection = requiresReflection
         self.requiresRefraction = requiresRefraction
+        self.drawsReflectedDynamicEntities = drawsReflectedDynamicEntities
         self.refractionFog = refractionFog
     }
 
     func targetFlags(for material: GModMetalWorldWaterMaterial) -> UInt32 {
         let reflection: UInt32 = requiresReflection &&
-            material.reflectionAmount != nil ? 1 : 0
+            material.reflectionAmount != nil &&
+            material.reflectionTextureBinding.isRenderable ? 1 : 0
         let refraction: UInt32 = requiresRefraction &&
-            material.refractionAmount != nil ? 2 : 0
+            material.refractionAmount != nil &&
+            material.refractionTextureBinding.isRenderable ? 2 : 0
         return reflection | refraction
     }
 }
@@ -757,6 +824,10 @@ enum GModMetalWaterRenderTargetContract {
                     surface: surface,
                     cameraZ: cameraZ
                   ) else { return nil }
+            // Keep every authored water surface in the single-plane check,
+            // including a typed unsupported target. Otherwise one supported
+            // plane could suppress the ordinary fallback draw of a second
+            // unsupported plane when the composite pass takes ownership.
             guard material.reflectionAmount != nil ||
                     material.refractionAmount != nil else { return nil }
             return (surface, material)
@@ -766,16 +837,38 @@ enum GModMetalWaterRenderTargetContract {
         guard surfaceBits.count == 1 else { return nil }
         // `CUnderWaterView` creates only an out-of-water refraction view;
         // Source's reflected view belongs to `CAboveWaterView`.
-        let requiresReflection = cameraZ >= first.surface.surfaceZ &&
-            visible.contains { $0.material.reflectionAmount != nil }
+        let requestedReflection = cameraZ >= first.surface.surfaceZ &&
+            visible.contains {
+                $0.material.reflectionAmount != nil &&
+                    $0.material.reflectionTextureBinding.isRenderable
+            }
         let requiresRefraction = visible.contains {
-            $0.material.refractionAmount != nil
+            $0.material.refractionAmount != nil &&
+                $0.material.refractionTextureBinding.isRenderable
         }
+        guard requestedReflection || requiresRefraction else { return nil }
+        let reflectingEntityModes: Set<Bool> = requestedReflection
+            ? Set(visible.compactMap { entry -> Bool? in
+                guard entry.material.reflectionAmount != nil,
+                      entry.material.reflectionTextureBinding.isRenderable else {
+                    return nil
+                }
+                return entry.material.reflectionEntityMode.drawsDynamicEntities
+            })
+            : []
+        // One shared reflection target cannot simultaneously represent two
+        // different `$reflectentities` contracts on the same water plane. In
+        // that case refraction can still use its independent owned target.
+        let requiresReflection = requestedReflection &&
+            reflectingEntityModes.count <= 1
         guard requiresReflection || requiresRefraction else { return nil }
+        let drawsReflectedDynamicEntities = reflectingEntityModes.first ?? false
         let refractionFog: GModMetalWaterRefractionFog?
         if cameraZ >= first.surface.surfaceZ, requiresRefraction {
             let refractingMaterials = visible.compactMap {
-                $0.material.refractionAmount == nil ? nil : $0.material
+                $0.material.refractionAmount == nil ||
+                    !$0.material.refractionTextureBinding.isRenderable
+                    ? nil : $0.material
             }
             let authoredRanges: [SIMD2<Float>] = refractingMaterials.compactMap {
                 material in
@@ -808,6 +901,7 @@ enum GModMetalWaterRenderTargetContract {
             sourceSurfaceZ: first.surface.surfaceZ,
             requiresReflection: requiresReflection,
             requiresRefraction: requiresRefraction,
+            drawsReflectedDynamicEntities: drawsReflectedDynamicEntities,
             refractionFog: refractionFog
         )
     }

@@ -8,6 +8,12 @@ import Foundation
 /// for the authored Water VMT inputs without pretending a DuDv texture is a
 /// tangent-space normal map.
 public enum SourceWaterShaderContract {
+    /// Shader-declared Source SDK Water runtime targets. These are retained as
+    /// typed defaults so a VMT omission is distinguishable from a fabricated
+    /// renderer fallback and from an explicitly authored custom texture.
+    public static let reflectionRenderTargetName = "_rt_WaterReflection"
+    public static let refractionRenderTargetName = "_rt_WaterRefraction"
+
     public static let defaultNearPlane: Float = 1
     public static let defaultFarPlane: Float = 65_536
     public static let refractionFogBias: Float = 0.05
@@ -91,5 +97,94 @@ public enum SourceWaterShaderContract {
 
     private static func saturate(_ value: Float) -> Float {
         Swift.min(1, Swift.max(0, value))
+    }
+}
+
+public enum SourceWaterDuDvDecodeError: Error, Sendable, Equatable {
+    case invalidDimensions(width: Int, height: Int)
+    case invalidEncodedByteCount(expected: Int, actual: Int)
+}
+
+/// Water-only decoder for Source's `IMAGE_FORMAT_UV88` displacement maps.
+///
+/// Generic VTF decoding intentionally continues to reject UV88: its two
+/// biased vector components are not a colour image and must not be presented
+/// as a tangent-space normal. The Metal Water shader consumes only R/G from
+/// this RGBA8 transport image and reconstructs the signed DuDv offset there.
+public enum SourceWaterDuDvTextureDecoder {
+    public static func decodeUV88(
+        data: Data,
+        width: Int,
+        height: Int,
+        allocationLimits: SourceVTFAllocationLimits = .default
+    ) throws -> SourceVTFDecodedImage {
+        guard width > 0, height > 0 else {
+            throw SourceWaterDuDvDecodeError.invalidDimensions(
+                width: width,
+                height: height
+            )
+        }
+        guard data.count <= allocationLimits.maximumEncodedBytes else {
+            throw SourceVTFError.allocationLimitExceeded(
+                context: "Water UV88 encoded bytes",
+                limit: allocationLimits.maximumEncodedBytes,
+                actual: data.count
+            )
+        }
+        let pixels = width.multipliedReportingOverflow(by: height)
+        guard !pixels.overflow else {
+            throw SourceVTFError.arithmeticOverflow(
+                "Water UV88 pixel count"
+            )
+        }
+        guard pixels.partialValue <= allocationLimits.maximumPixelCount else {
+            throw SourceVTFError.allocationLimitExceeded(
+                context: "Water UV88 pixel count",
+                limit: allocationLimits.maximumPixelCount,
+                actual: pixels.partialValue
+            )
+        }
+        let encodedBytes = pixels.partialValue.multipliedReportingOverflow(by: 2)
+        let decodedBytes = pixels.partialValue.multipliedReportingOverflow(by: 4)
+        guard !encodedBytes.overflow, !decodedBytes.overflow else {
+            throw SourceVTFError.arithmeticOverflow(
+                "Water UV88 byte count"
+            )
+        }
+        guard data.count == encodedBytes.partialValue else {
+            throw SourceWaterDuDvDecodeError.invalidEncodedByteCount(
+                expected: encodedBytes.partialValue,
+                actual: data.count
+            )
+        }
+        guard decodedBytes.partialValue <=
+                allocationLimits.maximumDecodedBytes else {
+            throw SourceVTFError.allocationLimitExceeded(
+                context: "Water UV88 decoded RGBA8 bytes",
+                limit: allocationLimits.maximumDecodedBytes,
+                actual: decodedBytes.partialValue
+            )
+        }
+
+        var rgba = Data(count: decodedBytes.partialValue)
+        rgba.withUnsafeMutableBytes { rawOutput in
+            let output = rawOutput.bindMemory(to: UInt8.self)
+            data.withUnsafeBytes { rawInput in
+                let input = rawInput.bindMemory(to: UInt8.self)
+                for pixel in 0..<pixels.partialValue {
+                    output[pixel * 4] = input[pixel * 2]
+                    output[pixel * 4 + 1] = input[pixel * 2 + 1]
+                    // B/A are transport lanes only. DuDv never enters the
+                    // tangent-normal path, so no synthetic Z is implied.
+                    output[pixel * 4 + 2] = 0
+                    output[pixel * 4 + 3] = 255
+                }
+            }
+        }
+        return SourceVTFDecodedImage(
+            width: width,
+            height: height,
+            rgbaBytes: rgba
+        )
     }
 }

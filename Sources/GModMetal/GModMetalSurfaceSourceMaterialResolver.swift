@@ -410,23 +410,39 @@ public final class GModMetalSurfaceSourceMaterialResolver:
             return nil
         }
 
-        let normalBitmap: GModMetalSurfaceBitmap?
-        if let normalTexture = material.normalTexture,
-           normalTexture.status == .decoded,
-           let width = normalTexture.width,
-           let height = normalTexture.height,
-           let rgbaBytes = normalTexture.rgbaBytes {
-            normalBitmap = try makeBitmap(
-                resourceIdentifier: normalTexture.logicalPath,
+        func bitmap(
+            _ texture: GMLuaResolvedSourceTexture?
+        ) throws -> GModMetalSurfaceBitmap? {
+            guard let texture,
+                  texture.status == .decoded,
+                  let width = texture.width,
+                  let height = texture.height,
+                  let rgbaBytes = texture.rgbaBytes else { return nil }
+            return try makeBitmap(
+                resourceIdentifier: texture.logicalPath,
                 width: width,
                 height: height,
                 rgbaBytes: rgbaBytes,
-                mipImages: normalTexture.mipImages,
-                flags: normalTexture.flags,
+                mipImages: texture.mipImages,
+                flags: texture.flags,
                 alphaRepresentation: .straight
             )
+        }
+        let decodedNormalBitmap = try bitmap(material.normalTexture)
+        let decodedDuDvBitmap = try bitmap(material.duDvTexture)
+        let distortionBitmap: GModMetalSurfaceBitmap?
+        let distortionEncoding: GModMetalWaterDistortionEncoding
+        if let decodedNormalBitmap {
+            // Native Water consumes `$normalmap`; `$dudvmap` remains a
+            // compatibility path only when no decoded normal is available.
+            distortionBitmap = decodedNormalBitmap
+            distortionEncoding = .tangentSpaceNormal
+        } else if let decodedDuDvBitmap {
+            distortionBitmap = decodedDuDvBitmap
+            distortionEncoding = .duDvRG
         } else {
-            normalBitmap = nil
+            distortionBitmap = nil
+            distortionEncoding = .none
         }
 
         let unsupportedBumpTextureFormat: String?
@@ -435,13 +451,46 @@ public final class GModMetalSurfaceSourceMaterialResolver:
         } else {
             unsupportedBumpTextureFormat = nil
         }
+        let unsupportedDuDvTextureFormat: String?
+        if case let .unsupportedImageFormat(format)? =
+            material.duDvTexture?.status {
+            unsupportedDuDvTextureFormat = String(describing: format)
+        } else {
+            unsupportedDuDvTextureFormat = nil
+        }
+
+        func renderTargetBinding(
+            _ reference: GMLuaSourceWaterTextureReference,
+            expectedName: String
+        ) -> GModMetalWaterRenderTargetBinding {
+            let actual = reference.name.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            guard actual.caseInsensitiveCompare(expectedName) == .orderedSame else {
+                return .unsupportedAuthoredTexture(reference.name)
+            }
+            switch reference {
+            case .authored:
+                return .authoredRuntimeTarget(reference.name)
+            case .sourceShaderDefault:
+                return .sourceShaderDefaultRuntimeTarget(reference.name)
+            }
+        }
+        let reflectionEntityMode: GModMetalWaterReflectionEntityMode =
+            material.reflectEntities.map {
+                .authored($0)
+            } ?? .sourceShaderDefaultDisabled
 
         let textureScroll = material.textureScroll.flatMap { scroll in
-            scroll.targetVariable
+            let target = scroll.targetVariable
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-                .caseInsensitiveCompare("$bumptransform") == .orderedSame
-                ? scroll
-                : nil
+            let isWaterNormalTransform = target.caseInsensitiveCompare(
+                "$bumptransform"
+            ) == .orderedSame
+            let isDuDvTransform = target.caseInsensitiveCompare(
+                "$dudvmaptransform"
+            ) == .orderedSame
+            return isWaterNormalTransform || isDuDvTransform ? scroll : nil
         }
         return GModMetalWorldWaterMaterial(
             resourceIdentifier: material.materialPath,
@@ -456,10 +505,23 @@ public final class GModMetalSurfaceSourceMaterialResolver:
             fogEnd: material.fogEnd,
             reflectionAmount: material.reflectionAmount,
             refractionAmount: material.refractionAmount,
-            normalBitmap: normalBitmap,
+            normalBitmap: distortionBitmap,
             textureScrollRate: textureScroll?.rate,
             textureScrollAngleDegrees: textureScroll?.angleDegrees,
-            unsupportedBumpTextureFormat: unsupportedBumpTextureFormat
+            unsupportedBumpTextureFormat: unsupportedBumpTextureFormat,
+            reflectionTextureBinding: renderTargetBinding(
+                material.reflectionTexture,
+                expectedName:
+                    SourceWaterShaderContract.reflectionRenderTargetName
+            ),
+            refractionTextureBinding: renderTargetBinding(
+                material.refractionTexture,
+                expectedName:
+                    SourceWaterShaderContract.refractionRenderTargetName
+            ),
+            reflectionEntityMode: reflectionEntityMode,
+            distortionEncoding: distortionEncoding,
+            unsupportedDuDvTextureFormat: unsupportedDuDvTextureFormat
         )
     }
 

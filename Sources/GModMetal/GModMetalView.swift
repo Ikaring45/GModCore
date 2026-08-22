@@ -554,7 +554,8 @@ public struct GModMetalView:
             let cameraEyeAndTargetFlags: SIMD4<Float>
             /// Authored fog start/end, above-water bit, enabled bit.
             let fogStartEndAboveAndEnabled: SIMD4<Float>
-            let cameraForwardAndPadding: SIMD4<Float>
+            /// Camera forward and distortion encoding (normal=1, DuDv=2).
+            let cameraForwardAndDistortionEncoding: SIMD4<Float>
         }
 
         /// Secondary bindings used by LightmappedGeneric and
@@ -3419,6 +3420,18 @@ public struct GModMetalView:
                         skyboxSampler: skyboxSamplerState,
                         encoder: reflectionSkyEncoder
                     )
+                    drawWorldSunSprites(
+                        scene: pair.scene,
+                        viewport: drawableViewport,
+                        metalCameraEye: reflected.eye,
+                        metalCameraForward: reflected.forward,
+                        metalCameraUp: reflected.up,
+                        device: device,
+                        uploadBudget: &worldUploadBudget,
+                        pipeline: worldSunSpritePipeline,
+                        depthState: skyboxDepthState,
+                        encoder: reflectionSkyEncoder
+                    )
                     reflectionSkyEncoder.endEncoding()
 
                     let reflectionWorldDescriptor =
@@ -3451,7 +3464,8 @@ public struct GModMetalView:
                                 sourceCameraZ: pair.scene.cameraEye.z
                         ),
                         rendersWater: false,
-                        drawsDynamicEntities: false,
+                        drawsDynamicEntities:
+                            waterPlan.drawsReflectedDynamicEntities,
                         usesWorldVisibility: false,
                         recordsDiagnostics: false,
                         device: device,
@@ -3877,9 +3891,11 @@ public struct GModMetalView:
                         material.isAboveWater ? 1 : 0,
                         hasValidWaterFog ? 1 : 0
                     ),
-                    cameraForwardAndPadding: SIMD4<Float>(
+                    cameraForwardAndDistortionEncoding: SIMD4<Float>(
                         metalCameraForward,
-                        0
+                        material.distortionEncoding == .duDvRG ? 2 :
+                            material.distortionEncoding == .tangentSpaceNormal
+                                ? 1 : 0
                     )
                 )
                 withUnsafeBytes(of: &uniforms) { bytes in
@@ -4366,9 +4382,11 @@ public struct GModMetalView:
                         material.isAboveWater ? 1 : 0,
                         hasValidWaterFog ? 1 : 0
                     ),
-                    cameraForwardAndPadding: SIMD4<Float>(
+                    cameraForwardAndDistortionEncoding: SIMD4<Float>(
                         metalCameraForward,
-                        0
+                        material.distortionEncoding == .duDvRG ? 2 :
+                            material.distortionEncoding == .tangentSpaceNormal
+                                ? 1 : 0
                     )
                 )
                 withUnsafeBytes(of: &uniforms) { bytes in
@@ -4583,9 +4601,11 @@ public struct GModMetalView:
                         material.isAboveWater ? 1 : 0,
                         hasRenderableWaterFog ? 1 : 0
                     ),
-                    cameraForwardAndPadding: SIMD4<Float>(
+                    cameraForwardAndDistortionEncoding: SIMD4<Float>(
                         scene.metalCameraForward,
-                        0
+                        material.distortionEncoding == .duDvRG ? 2 :
+                            material.distortionEncoding == .tangentSpaceNormal
+                                ? 1 : 0
                     )
                 )
                 withUnsafeBytes(of: &waterUniforms) { bytes in
@@ -6150,7 +6170,7 @@ public struct GModMetalView:
             float4 sourceAmountsAndViewport;
             float4 cameraEyeAndTargetFlags;
             float4 fogStartEndAboveAndEnabled;
-            float4 cameraForwardAndPadding;
+            float4 cameraForwardAndDistortionEncoding;
         };
 
         struct WorldTerrainUniforms
@@ -7033,7 +7053,8 @@ public struct GModMetalView:
             WorldVertexOutput input,
             constant WorldWaterUniforms &water,
             float3 tangentNormal,
-            float normalAlpha,
+            float2 distortionOffset,
+            float distortionAlpha,
             texture2d<float> refractionColor,
             texture2d<float> reflectionColor
         )
@@ -7067,7 +7088,7 @@ public struct GModMetalView:
             // `water_ps2x_helper.h` scales both dependent UV amounts by the
             // unwarped depth target for Water materials without `$basetexture`.
             amounts *= waterFogDepthValue;
-            float2 normalOffset = tangentNormal.xy * normalAlpha;
+            float2 normalOffset = distortionOffset * distortionAlpha;
             float2 reflectionBase = float2(baseUV.x, 1.0 - baseUV.y);
             float2 reflectionUV = reflectionBase + normalOffset * amounts.x;
             float2 refractionUV = baseUV + normalOffset * amounts.y;
@@ -7098,7 +7119,7 @@ public struct GModMetalView:
                     float forwardDistance = dot(
                         input.worldPosition -
                             water.cameraEyeAndTargetFlags.xyz,
-                        water.cameraForwardAndPadding.xyz
+                            water.cameraForwardAndDistortionEncoding.xyz
                     );
                     float projectedDepth = (
                         forwardDistance * farPlane - nearPlane * farPlane
@@ -7154,6 +7175,7 @@ public struct GModMetalView:
                 input,
                 water,
                 float3(0.0, 0.0, 1.0),
+                float2(0.0),
                 1.0,
                 refractionColor,
                 reflectionColor
@@ -7177,6 +7199,25 @@ public struct GModMetalView:
                 normalSampler,
                 animatedUV
             );
+            uint distortionEncoding = uint(max(
+                water.cameraForwardAndDistortionEncoding.w,
+                0.0
+            ) + 0.5);
+            if (distortionEncoding == 2u)
+            {
+                // UV88/RG is a signed displacement field only. Fresnel keeps
+                // the geometric water normal instead of treating DuDv as a
+                // fabricated tangent-space normal.
+                return gmodWaterRenderTargetComposite(
+                    input,
+                    water,
+                    float3(0.0, 0.0, 1.0),
+                    normalSample.rg * 2.0 - 1.0,
+                    1.0,
+                    refractionColor,
+                    reflectionColor
+                );
+            }
             float3 decodedNormal = normalSample.xyz * 2.0 - 1.0;
             float normalLengthSquared = dot(decodedNormal, decodedNormal);
             float3 tangentNormal = normalLengthSquared > 1.0e-12
@@ -7186,6 +7227,7 @@ public struct GModMetalView:
                 input,
                 water,
                 tangentNormal,
+                tangentNormal.xy,
                 normalSample.a,
                 refractionColor,
                 reflectionColor

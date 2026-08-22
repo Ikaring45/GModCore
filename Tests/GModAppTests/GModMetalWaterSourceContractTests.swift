@@ -1,5 +1,6 @@
 import XCTest
 @testable import GModMetal
+import GModEngine
 
 final class GModMetalWaterSourceContractTests: XCTestCase {
     func testReflectedCameraKeepsReflectedRightDirection() {
@@ -184,6 +185,104 @@ final class GModMetalWaterSourceContractTests: XCTestCase {
         XCTAssertEqual(plan.targetFlags(for: both), 3)
     }
 
+    func testAuthoredUnsupportedTargetDoesNotAliasOwnedRuntimeTarget() {
+        let unsupported = material(
+            reflectionAmount: 0.4,
+            refractionAmount: nil,
+            reflectionTextureBinding:
+                .unsupportedAuthoredTexture("water/custom_reflection")
+        )
+
+        XCTAssertNil(GModMetalWaterRenderTargetContract.plan(
+            materialRanges: [range(material: unsupported)],
+            cameraZ: 300
+        ))
+    }
+
+    func testSharedReflectionRejectsConflictingReflectEntitiesContracts() throws {
+        let worldOnly = material(
+            reflectionAmount: 0.4,
+            refractionAmount: nil,
+            reflectionEntityMode: .authored(false)
+        )
+        let withEntities = material(
+            reflectionAmount: 0.4,
+            refractionAmount: nil,
+            reflectionEntityMode: .authored(true)
+        )
+        let entityPlan = try XCTUnwrap(
+            GModMetalWaterRenderTargetContract.plan(
+                materialRanges: [range(material: withEntities)],
+                cameraZ: 300
+            )
+        )
+        XCTAssertTrue(entityPlan.drawsReflectedDynamicEntities)
+        XCTAssertNil(GModMetalWaterRenderTargetContract.plan(
+            materialRanges: [
+                range(material: worldOnly),
+                range(material: withEntities),
+            ],
+            cameraZ: 300
+        ))
+    }
+
+    func testWaterAdapterKeepsUV88AsDuDvDistortion() throws {
+        let files: [String: Data] = [
+            "materials/water/dudv_contract.vmt": Data(
+                """
+                "Water"
+                {
+                    "$abovewater" "1"
+                    "$fogcolor" "{ 7 58 66 }"
+                    "$reflectamount" ".4"
+                    "$refractamount" "1"
+                    "$reflecttexture" "_rt_WaterReflection"
+                    "$refracttexture" "_rt_WaterRefraction"
+                    "$reflectentities" "1"
+                    "$dudvmap" "water/dudv_contract"
+                    "Proxies"
+                    {
+                        "TextureScroll"
+                        {
+                            "texturescrollvar" "$dudvmaptransform"
+                            "texturescrollrate" ".03"
+                            "texturescrollangle" "90"
+                        }
+                    }
+                }
+                """.utf8
+            ),
+            "materials/water/dudv_contract.vtf": makeWaterUV88VTF(
+                u: 16,
+                v: 240
+            ),
+        ]
+        let resolver = GModMetalSurfaceSourceMaterialResolver { path in
+            files[path.lowercased()]
+        }
+        let water = try XCTUnwrap(
+            resolver.resolveWaterMaterial(named: "water/dudv_contract")
+        )
+
+        XCTAssertEqual(water.distortionEncoding, .duDvRG)
+        XCTAssertEqual(
+            water.normalBitmap?.rgbaBytes,
+            Data([16, 240, 0, 255])
+        )
+        XCTAssertEqual(
+            water.reflectionTextureBinding,
+            .authoredRuntimeTarget("_rt_WaterReflection")
+        )
+        XCTAssertEqual(
+            water.refractionTextureBinding,
+            .authoredRuntimeTarget("_rt_WaterRefraction")
+        )
+        XCTAssertEqual(water.reflectionEntityMode, .authored(true))
+        XCTAssertEqual(water.textureScrollRate, 0.03)
+        XCTAssertEqual(water.textureScrollAngleDegrees, 90)
+        XCTAssertNil(water.unsupportedDuDvTextureFormat)
+    }
+
     func testSourceFresnelUsesFifthPowerOfOneMinusSaturatedNDotV() {
         XCTAssertEqual(
             GModMetalWaterSamplingContract.fresnel(
@@ -264,7 +363,11 @@ final class GModMetalWaterSourceContractTests: XCTestCase {
         fogStart: Float? = nil,
         fogEnd: Float? = nil,
         reflectionAmount: Float?,
-        refractionAmount: Float?
+        refractionAmount: Float?,
+        reflectionTextureBinding: GModMetalWaterRenderTargetBinding =
+            .sourceShaderDefaultRuntimeTarget("_rt_WaterReflection"),
+        reflectionEntityMode: GModMetalWaterReflectionEntityMode =
+            .sourceShaderDefaultDisabled
     ) -> GModMetalWorldWaterMaterial {
         GModMetalWorldWaterMaterial(
             resourceIdentifier: "materials/water/source_contract.vmt",
@@ -278,7 +381,9 @@ final class GModMetalWaterSourceContractTests: XCTestCase {
             normalBitmap: nil,
             textureScrollRate: nil,
             textureScrollAngleDegrees: nil,
-            unsupportedBumpTextureFormat: nil
+            unsupportedBumpTextureFormat: nil,
+            reflectionTextureBinding: reflectionTextureBinding,
+            reflectionEntityMode: reflectionEntityMode
         )
     }
 
@@ -318,4 +423,32 @@ final class GModMetalWaterSourceContractTests: XCTestCase {
             lhs.x * rhs.y - lhs.y * rhs.x
         )
     }
+}
+
+private func makeWaterUV88VTF(u: UInt8, v: UInt8) -> Data {
+    var bytes = [UInt8](repeating: 0, count: 80)
+    func write(_ value: UInt16, at offset: Int) {
+        bytes[offset] = UInt8(truncatingIfNeeded: value)
+        bytes[offset + 1] = UInt8(truncatingIfNeeded: value >> 8)
+    }
+    func write(_ value: UInt32, at offset: Int) {
+        bytes[offset] = UInt8(truncatingIfNeeded: value)
+        bytes[offset + 1] = UInt8(truncatingIfNeeded: value >> 8)
+        bytes[offset + 2] = UInt8(truncatingIfNeeded: value >> 16)
+        bytes[offset + 3] = UInt8(truncatingIfNeeded: value >> 24)
+    }
+    bytes.replaceSubrange(0..<4, with: [0x56, 0x54, 0x46, 0x00])
+    write(UInt32(7), at: 4)
+    write(UInt32(2), at: 8)
+    write(UInt32(80), at: 12)
+    write(UInt16(1), at: 16)
+    write(UInt16(1), at: 18)
+    write(UInt16(1), at: 24)
+    write(Float(1).bitPattern, at: 48)
+    write(UInt32(bitPattern: SourceVTFImageFormat.uv88.rawValue), at: 52)
+    bytes[56] = 1
+    write(UInt32(bitPattern: SourceVTFImageFormat.unknown.rawValue), at: 57)
+    write(UInt16(1), at: 63)
+    bytes.append(contentsOf: [u, v])
+    return Data(bytes)
 }
