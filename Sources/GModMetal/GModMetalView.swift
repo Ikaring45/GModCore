@@ -1026,6 +1026,11 @@ public struct GModMetalView:
         private let worldVisibilityWorkspace =
             GModMetalWorldVisibilityWorkspace()
 
+        /// Separate cache because Source's 3D sky uses a fixed sky-camera PVS
+        /// origin and scaled clip planes while sharing the ordinary view basis.
+        private let sky3DVisibilityWorkspace =
+            GModMetalWorldVisibilityWorkspace()
+
         /// Full-resolution Source water views. These are rebuilt only when the
         /// physical drawable or attachment formats change.
         private var cachedWaterRenderTargets:
@@ -1995,6 +2000,7 @@ public struct GModMetalView:
             case .clear:
                 activeWorldScene = nil
                 worldVisibilityWorkspace.reset()
+                sky3DVisibilityWorkspace.reset()
                 cachedWorldTextures.removeAll(keepingCapacity: true)
                 cachedWorldLightmap = nil
                 worldTextureUploadFailureReason = nil
@@ -2025,6 +2031,7 @@ public struct GModMetalView:
 
                     if !cacheMatches {
                         worldVisibilityWorkspace.reset()
+                        sky3DVisibilityWorkspace.reset()
                         cachedWorldMesh = try Self.makeCachedWorldMesh(
                             scene,
                             device: device
@@ -3738,8 +3745,9 @@ public struct GModMetalView:
                 scene.skyboxVisibility
             ) else { return }
 
-            let sky3DRanges = scene.materialRanges.filter {
-                $0.renderLayer == .sky3D && $0.waterSurface == nil
+            let sky3DRanges = scene.materialRanges.enumerated().filter {
+                $0.element.renderLayer == .sky3D &&
+                    $0.element.waterSurface == nil
             }
             let sky3DWaterRanges = scene.materialRanges.filter {
                 $0.renderLayer == .sky3D && $0.waterSurface != nil
@@ -3749,13 +3757,33 @@ public struct GModMetalView:
             let clipPlanes = GModMetalSky3DProjectionContract.bakedClipPlanes(
                 scale: sky3D.scale
             )
+            let aspect = Float(width) / Float(height)
             let sky3DProjection = Self.makePerspectiveMatrix(
                 verticalFieldOfViewRadians:
                     scene.verticalFieldOfViewRadians,
-                aspect: Float(width) / Float(height),
+                aspect: aspect,
                 near: clipPlanes.near,
                 far: clipPlanes.far
             )
+            let appliesSky3DVisibility: Bool
+            if let visibility = scene.sky3DVisibility {
+                appliesSky3DVisibility = sky3DVisibilityWorkspace.update(
+                    scene: scene,
+                    visibility: visibility.bspVisibility,
+                    renderLayer: .sky3D,
+                    sourceCameraEye: visibility.sourceVisibilityOrigin,
+                    metalCameraEye: metalCameraEye,
+                    metalCameraForward: metalCameraForward,
+                    metalCameraUp: metalCameraUp,
+                    verticalFieldOfViewRadians:
+                        scene.verticalFieldOfViewRadians,
+                    aspectRatio: aspect,
+                    nearPlane: clipPlanes.near,
+                    farPlane: clipPlanes.far
+                )
+            } else {
+                appliesSky3DVisibility = false
+            }
             let sky3DFog = sky3D.fog.flatMap {
                 GModMetalSky3DFogContract.uniforms(
                     fog: $0,
@@ -3787,7 +3815,29 @@ public struct GModMetalView:
                 lightmapTexture == nil ? nil : lightmapSampler,
                 index: 1
             )
-            for range in sky3DRanges {
+            var visibleDrawSpanCursor = 0
+            for (materialRangeIndex, range) in sky3DRanges {
+                var firstVisibleDrawSpan = visibleDrawSpanCursor
+                if appliesSky3DVisibility {
+                    while visibleDrawSpanCursor <
+                            sky3DVisibilityWorkspace.visibleDrawSpans.count,
+                          sky3DVisibilityWorkspace.visibleDrawSpans[
+                            visibleDrawSpanCursor
+                          ].materialRangeIndex < materialRangeIndex {
+                        visibleDrawSpanCursor += 1
+                    }
+                    firstVisibleDrawSpan = visibleDrawSpanCursor
+                    while visibleDrawSpanCursor <
+                            sky3DVisibilityWorkspace.visibleDrawSpans.count,
+                          sky3DVisibilityWorkspace.visibleDrawSpans[
+                            visibleDrawSpanCursor
+                          ].materialRangeIndex == materialRangeIndex {
+                        visibleDrawSpanCursor += 1
+                    }
+                    guard firstVisibleDrawSpan < visibleDrawSpanCursor else {
+                        continue
+                    }
+                }
                 if let bitmap = range.bitmap,
                    let texture = worldTexture(
                        for: bitmap,
@@ -3833,7 +3883,21 @@ public struct GModMetalView:
                     )
                     encoder.setFragmentTexture(nil, index: 0)
                 }
-                draw(range)
+                if appliesSky3DVisibility {
+                    for index in firstVisibleDrawSpan..<visibleDrawSpanCursor {
+                        let span = sky3DVisibilityWorkspace.visibleDrawSpans[index]
+                        encoder.drawIndexedPrimitives(
+                            type: .triangle,
+                            indexCount: span.indexCount,
+                            indexType: .uint32,
+                            indexBuffer: mesh.indexBuffer,
+                            indexBufferOffset: span.firstIndex *
+                                MemoryLayout<UInt32>.stride
+                        )
+                    }
+                } else {
+                    draw(range)
+                }
             }
 
             guard rendersWater else { return }

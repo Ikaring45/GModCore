@@ -206,6 +206,19 @@ final class GModWorldSceneAdapterTests: XCTestCase {
             maximumDensity: 0.75,
             isRadial: false
         )
+        let sourceSkyVisibility = GModWorldSky3DVisibility(
+            sourceVisibilityOrigin: SourceVector3(64, 128, 256),
+            scale: 16,
+            bspVisibility: GModWorldVisibility(
+                headNode: 0,
+                planes: [],
+                nodes: [],
+                leafClusters: [],
+                potentialVisibility: nil,
+                spans: [],
+                spanClusters: []
+            )
+        )
         let mesh = GModWorldRenderMesh(
             vertices: [],
             indices: [],
@@ -219,6 +232,7 @@ final class GModWorldSceneAdapterTests: XCTestCase {
                 sourceFaceCount: 4,
                 fogStatus: .available(sourceFog)
             ),
+            sky3DVisibility: sourceSkyVisibility,
             diagnostics: GModWorldRenderMeshDiagnostics(
                 sourceFaceCount: 0,
                 emittedFaceCount: 0,
@@ -251,6 +265,12 @@ final class GModWorldSceneAdapterTests: XCTestCase {
         XCTAssertEqual(fog.end, sourceFog.end)
         XCTAssertEqual(fog.maximumDensity, sourceFog.maximumDensity)
         XCTAssertEqual(fog.isRadial, sourceFog.isRadial)
+        let visibility = try XCTUnwrap(scene.sky3DVisibility)
+        XCTAssertEqual(
+            visibility.sourceVisibilityOrigin,
+            SIMD3<Float>(64, 128, 256)
+        )
+        XCTAssertEqual(visibility.bspVisibility.headNode, 0)
     }
 
     func testMakeWorldSceneChargesWaterNormalAgainstSharedRetentionBudget() throws {

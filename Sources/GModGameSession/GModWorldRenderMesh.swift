@@ -447,8 +447,30 @@ extension GModWorldVisibility {
         nearPlane: Float,
         farPlane: Float
     ) -> GModWorldVisibilitySelectionMetrics? {
+        selectionMetrics(
+            sourceVisibilityEye: cameraEye,
+            cameraEye: cameraEye,
+            cameraForward: cameraForward,
+            cameraUp: cameraUp,
+            verticalFieldOfViewRadians: verticalFieldOfViewRadians,
+            aspectRatio: aspectRatio,
+            nearPlane: nearPlane,
+            farPlane: farPlane
+        )
+    }
+
+    func selectionMetrics(
+        sourceVisibilityEye: SourceVector3,
+        cameraEye: SourceVector3,
+        cameraForward: SourceVector3,
+        cameraUp: SourceVector3,
+        verticalFieldOfViewRadians: Float,
+        aspectRatio: Float,
+        nearPlane: Float,
+        farPlane: Float
+    ) -> GModWorldVisibilitySelectionMetrics? {
         guard let potentialVisibility,
-              let cameraCluster = cameraCluster(at: cameraEye),
+              let cameraCluster = cameraCluster(at: sourceVisibilityEye),
               cameraCluster >= 0 else { return nil }
         var decodedRow: [UInt8] = []
         guard potentialVisibility.decodeRow(
@@ -964,6 +986,7 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
     public let sky3D: GModWorldSky3D?
     public let skyVisibility: GModWorldSkyVisibility?
     public let worldVisibility: GModWorldVisibility?
+    public let sky3DVisibility: GModWorldSky3DVisibility?
     public let lightmapAtlas: GModWorldLightmapAtlas?
     public let environmentLighting: GModWorldEnvironmentLighting?
     public let sunSprites: [GModWorldSunSprite]
@@ -979,6 +1002,7 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
         sky3D: GModWorldSky3D? = nil,
         skyVisibility: GModWorldSkyVisibility? = nil,
         worldVisibility: GModWorldVisibility? = nil,
+        sky3DVisibility: GModWorldSky3DVisibility? = nil,
         lightmapAtlas: GModWorldLightmapAtlas? = nil,
         environmentLighting: GModWorldEnvironmentLighting? = nil,
         sunSprites: [GModWorldSunSprite] = [],
@@ -993,6 +1017,7 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
         self.sky3D = sky3D
         self.skyVisibility = skyVisibility
         self.worldVisibility = worldVisibility
+        self.sky3DVisibility = sky3DVisibility
         self.lightmapAtlas = lightmapAtlas
         self.environmentLighting = environmentLighting
         self.sunSprites = sunSprites
@@ -1048,6 +1073,8 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
         vertices.reserveCapacity(allocationEstimate.worldVertexCount)
         var materialIndices: [GModWorldMaterialBucketKey: [UInt32]] = [:]
         var materialVisibilitySpans:
+            [GModWorldMaterialBucketKey: [GModWorldPendingVisibilitySpan]] = [:]
+        var sky3DMaterialVisibilitySpans:
             [GModWorldMaterialBucketKey: [GModWorldPendingVisibilitySpan]] = [:]
         var materialOrder: [GModWorldMaterialBucketKey] = []
         var sourceMaterialNames: [GModWorldMaterialBucketKey: Set<String>] = [:]
@@ -1398,21 +1425,28 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
                 materialIndices[materialKey]?.count ?? visibilityLocalFirstIndex
             let visibilityIndexCount =
                 visibilityLocalEndIndex - visibilityLocalFirstIndex
-            if renderLayer == .world,
-               matchedWaterSurface == nil,
+            if matchedWaterSurface == nil,
                visibilityIndexCount > 0,
                let bounds = Self.visibilityBounds(
                 vertices[visibilityVertexStart..<vertices.count]
                ) {
-                materialVisibilitySpans[materialKey, default: []].append(
-                    GModWorldPendingVisibilitySpan(
-                        sourceFaceIndex: faceIndex,
-                        localFirstIndex: visibilityLocalFirstIndex,
-                        indexCount: visibilityIndexCount,
-                        minimum: bounds.minimum,
-                        maximum: bounds.maximum
-                    )
+                let pending = GModWorldPendingVisibilitySpan(
+                    sourceFaceIndex: faceIndex,
+                    localFirstIndex: visibilityLocalFirstIndex,
+                    indexCount: visibilityIndexCount,
+                    minimum: bounds.minimum,
+                    maximum: bounds.maximum
                 )
+                switch renderLayer {
+                case .world:
+                    materialVisibilitySpans[materialKey, default: []]
+                        .append(pending)
+                case .sky3D:
+                    sky3DMaterialVisibilitySpans[materialKey, default: []]
+                        .append(pending)
+                case .sky2D:
+                    break
+                }
             }
             emittedFaces += 1
         }
@@ -1527,6 +1561,41 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
         )
         var visibilitySpanClusters: [Int16] = []
         visibilitySpanClusters.reserveCapacity(bsp.leafFaces.count)
+        var sky3DVisibilitySpans: [GModWorldVisibilitySpan] = []
+        sky3DVisibilitySpans.reserveCapacity(
+            sky3DMaterialVisibilitySpans.values.reduce(0) { $0 + $1.count }
+        )
+        var sky3DVisibilitySpanClusters: [Int16] = []
+        sky3DVisibilitySpanClusters.reserveCapacity(bsp.leafFaces.count)
+
+        func appendVisibilitySpans(
+            _ pendingSpans: [GModWorldPendingVisibilitySpan],
+            materialRangeIndex: Int,
+            materialFirstIndex: Int,
+            faceClusters: [[Int16]],
+            to spans: inout [GModWorldVisibilitySpan],
+            spanClusters: inout [Int16]
+        ) {
+            for pending in pendingSpans {
+                let localFaceIndex = pending.sourceFaceIndex - firstFace
+                guard faceClusters.indices.contains(localFaceIndex) else {
+                    continue
+                }
+                let clusters = faceClusters[localFaceIndex]
+                let clusterStartIndex = spanClusters.count
+                spanClusters.append(contentsOf: clusters)
+                spans.append(GModWorldVisibilitySpan(
+                    materialRangeIndex: materialRangeIndex,
+                    firstIndex: materialFirstIndex + pending.localFirstIndex,
+                    indexCount: pending.indexCount,
+                    minimum: pending.minimum,
+                    maximum: pending.maximum,
+                    clusterStartIndex: clusterStartIndex,
+                    clusterCount: clusters.count
+                ))
+            }
+        }
+
         for (materialRangeIndex, key) in materialOrder.enumerated() {
             let grouped = materialIndices[key] ?? []
             let firstIndex = indices.count
@@ -1546,23 +1615,27 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
                 )
             )
             if let faceClusters, waterSurfaces[key] == nil {
-                for pending in materialVisibilitySpans[key] ?? [] {
-                    let localFaceIndex = pending.sourceFaceIndex - firstFace
-                    guard faceClusters.indices.contains(localFaceIndex) else {
-                        continue
-                    }
-                    let clusters = faceClusters[localFaceIndex]
-                    let clusterStartIndex = visibilitySpanClusters.count
-                    visibilitySpanClusters.append(contentsOf: clusters)
-                    visibilitySpans.append(GModWorldVisibilitySpan(
+                switch key.renderLayer {
+                case .world:
+                    appendVisibilitySpans(
+                        materialVisibilitySpans[key] ?? [],
                         materialRangeIndex: materialRangeIndex,
-                        firstIndex: firstIndex + pending.localFirstIndex,
-                        indexCount: pending.indexCount,
-                        minimum: pending.minimum,
-                        maximum: pending.maximum,
-                        clusterStartIndex: clusterStartIndex,
-                        clusterCount: clusters.count
-                    ))
+                        materialFirstIndex: firstIndex,
+                        faceClusters: faceClusters,
+                        to: &visibilitySpans,
+                        spanClusters: &visibilitySpanClusters
+                    )
+                case .sky3D:
+                    appendVisibilitySpans(
+                        sky3DMaterialVisibilitySpans[key] ?? [],
+                        materialRangeIndex: materialRangeIndex,
+                        materialFirstIndex: firstIndex,
+                        faceClusters: faceClusters,
+                        to: &sky3DVisibilitySpans,
+                        spanClusters: &sky3DVisibilitySpanClusters
+                    )
+                case .sky2D:
+                    break
                 }
             }
         }
@@ -1572,6 +1645,14 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
             return count + range.indexCount
         }
         let visibilityIndexCount = visibilitySpans.reduce(0) {
+            $0 + $1.indexCount
+        }
+        let cullableSky3DIndexCount = materialRanges.reduce(0) { count, range in
+            guard range.renderLayer == .sky3D,
+                  range.waterSurface == nil else { return count }
+            return count + range.indexCount
+        }
+        let sky3DVisibilityIndexCount = sky3DVisibilitySpans.reduce(0) {
             $0 + $1.indexCount
         }
         let sky3D = sky3DContext.map {
@@ -1601,6 +1682,28 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
         } else {
             worldVisibility = nil
         }
+        let sky3DVisibility: GModWorldSky3DVisibility?
+        if let sky3D,
+           let skyVisibility,
+           faceClusters != nil,
+           cullableSky3DIndexCount > 0,
+           sky3DVisibilityIndexCount == cullableSky3DIndexCount {
+            sky3DVisibility = GModWorldSky3DVisibility(
+                sourceVisibilityOrigin: sky3D.origin,
+                scale: sky3D.scale,
+                bspVisibility: GModWorldVisibility(
+                    headNode: skyVisibility.headNode,
+                    planes: skyVisibility.planes,
+                    nodes: skyVisibility.nodes,
+                    leafClusters: bsp.leaves.map(\.cluster),
+                    potentialVisibility: potentialVisibility,
+                    spans: sky3DVisibilitySpans,
+                    spanClusters: sky3DVisibilitySpanClusters
+                )
+            )
+        } else {
+            sky3DVisibility = nil
+        }
         return Self(
             vertices: vertices,
             indices: indices,
@@ -1611,6 +1714,7 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
             sky3D: sky3D,
             skyVisibility: skyVisibility,
             worldVisibility: worldVisibility,
+            sky3DVisibility: sky3DVisibility,
             lightmapAtlas: lightmapAtlas,
             environmentLighting: environmentLightingResult.lighting,
             sunSprites: sunSpriteResult.sprites,
