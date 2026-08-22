@@ -636,7 +636,7 @@ public struct GModMetalWorldWaterMaterial: Sendable, Equatable {
             reflectionTextureBinding: reflectionTextureBinding,
             refractionTextureBinding: refractionTextureBinding,
             reflectionEntityMode: reflectionEntityMode,
-            distortionEncoding: .none,
+            distortionEncoding: GModMetalWaterDistortionEncoding.none,
             unsupportedDuDvTextureFormat: unsupportedDuDvTextureFormat
         )
     }
