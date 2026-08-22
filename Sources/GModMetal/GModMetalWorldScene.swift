@@ -394,17 +394,50 @@ enum GModMetalWaterRenderContract {
     ) -> Bool {
         (cameraZ >= surface.surfaceZ) == material.isAboveWater
     }
+}
 
-    /// Single-pass fallback transparency uses the first amount explicitly
-    /// present in the real VMT: `$reflectamount`, then `$refractamount` for the
-    /// beneath material that omits reflection. Reflection/refraction render
-    /// targets remain a separately diagnosed milestone; no constant is made up.
-    static func fallbackAlpha(
-        _ material: GModMetalWorldWaterMaterial
-    ) -> Float? {
-        guard let explicitAmount = material.reflectionAmount ??
-            material.refractionAmount else { return nil }
-        return Swift.min(1, Swift.max(0, explicitAmount))
+struct GModMetalWaterDependentTextureCoordinates: Sendable, Equatable {
+    let reflection: SIMD2<Float>
+    let refraction: SIMD2<Float>
+}
+
+/// Source's Water pixel shader treats `$reflectamount` and `$refractamount`
+/// as independent, signed distortion scales. They are not opacity values and
+/// are not normalized by render-target dimensions.
+enum GModMetalWaterSamplingContract {
+    /// Mirrors `water_ps2x_helper.h`: the tangent-space eye vector has already
+    /// been normalized before `saturate(dot(eye, normal))` is evaluated.
+    static func fresnel(
+        normal: SIMD3<Float>,
+        normalizedEyeVector: SIMD3<Float>
+    ) -> Float {
+        let dotProduct = normal.x * normalizedEyeVector.x +
+            normal.y * normalizedEyeVector.y +
+            normal.z * normalizedEyeVector.z
+        let nDotV = Swift.min(1, Swift.max(0, dotProduct))
+        let oneMinusNDotV = 1 - nDotV
+        let squared = oneMinusNDotV * oneMinusNDotV
+        return squared * squared * oneMinusNDotV
+    }
+
+    /// Mirrors the dependent texture-coordinate calculation in
+    /// `water_ps2x_helper.h`. Normal alpha scales both offsets, while each VMT
+    /// amount remains separate and signed.
+    static func dependentTextureCoordinates(
+        reflectionBase: SIMD2<Float>,
+        refractionBase: SIMD2<Float>,
+        decodedNormal: SIMD4<Float>,
+        reflectionAmount: Float,
+        refractionAmount: Float
+    ) -> GModMetalWaterDependentTextureCoordinates {
+        let normalOffset = SIMD2<Float>(
+            decodedNormal.x * decodedNormal.w,
+            decodedNormal.y * decodedNormal.w
+        )
+        return GModMetalWaterDependentTextureCoordinates(
+            reflection: reflectionBase + normalOffset * reflectionAmount,
+            refraction: refractionBase + normalOffset * refractionAmount
+        )
     }
 }
 
@@ -434,9 +467,8 @@ enum GModMetalWaterRenderTargetContract {
                     surface: surface,
                     cameraZ: cameraZ
                   ) else { return nil }
-            let reflection = material.reflectionAmount ?? 0
-            let refraction = material.refractionAmount ?? 0
-            guard reflection > 0 || refraction > 0 else { return nil }
+            guard material.reflectionAmount != nil ||
+                    material.refractionAmount != nil else { return nil }
             return (surface, material)
         }
         guard let first = visible.first else { return nil }
@@ -445,10 +477,10 @@ enum GModMetalWaterRenderTargetContract {
         return GModMetalWaterRenderTargetPlan(
             sourceSurfaceZ: first.surface.surfaceZ,
             requiresReflection: visible.contains {
-                ($0.material.reflectionAmount ?? 0) > 0
+                $0.material.reflectionAmount != nil
             },
             requiresRefraction: visible.contains {
-                ($0.material.refractionAmount ?? 0) > 0
+                $0.material.refractionAmount != nil
             }
         )
     }
@@ -461,9 +493,9 @@ struct GModMetalWaterReflectedCamera: Sendable, Equatable {
 }
 
 enum GModMetalWaterReflectionContract {
-    /// Source Z maps to Metal Y. Reflecting the complete camera basis across
-    /// that plane preserves handedness as `makeViewMatrix` rebuilds the right
-    /// vector from the reflected forward/up pair.
+    /// Source Z maps to Metal Y. Forward is reflected across the water plane;
+    /// up is reflected and then negated. This lets `makeViewMatrix` rebuild a
+    /// reflected right vector instead of horizontally mirroring the image.
     static func reflectedCamera(
         eye: SIMD3<Float>,
         forward: SIMD3<Float>,
@@ -477,7 +509,7 @@ enum GModMetalWaterReflectionContract {
                 eye.z
             ),
             forward: SIMD3<Float>(forward.x, -forward.y, forward.z),
-            up: SIMD3<Float>(up.x, -up.y, up.z)
+            up: SIMD3<Float>(-up.x, up.y, -up.z)
         )
     }
 }
@@ -488,15 +520,28 @@ enum GModMetalWaterReflectionContract {
 /// real camera, while reflection keeps the camera's own half-space.
 enum GModMetalWaterClipPlaneContract {
     static let disabled = SIMD4<Float>(0, 0, 0, 1)
+    /// `CBaseWorldView::PushView` expands the retained side by two Source
+    /// units to keep geometry at the water boundary from leaving a seam.
+    static let sourceFudge: Float = 2
 
     static func refraction(
         sourceSurfaceZ: Float,
         sourceCameraZ: Float
     ) -> SIMD4<Float> {
         if sourceCameraZ >= sourceSurfaceZ {
-            return SIMD4<Float>(0, -1, 0, sourceSurfaceZ)
+            return SIMD4<Float>(
+                0,
+                -1,
+                0,
+                sourceSurfaceZ + sourceFudge
+            )
         }
-        return SIMD4<Float>(0, 1, 0, -sourceSurfaceZ)
+        return SIMD4<Float>(
+            0,
+            1,
+            0,
+            -sourceSurfaceZ + sourceFudge
+        )
     }
 
     static func reflection(
@@ -504,9 +549,19 @@ enum GModMetalWaterClipPlaneContract {
         sourceCameraZ: Float
     ) -> SIMD4<Float> {
         if sourceCameraZ >= sourceSurfaceZ {
-            return SIMD4<Float>(0, 1, 0, -sourceSurfaceZ)
+            return SIMD4<Float>(
+                0,
+                1,
+                0,
+                -sourceSurfaceZ + sourceFudge
+            )
         }
-        return SIMD4<Float>(0, -1, 0, sourceSurfaceZ)
+        return SIMD4<Float>(
+            0,
+            -1,
+            0,
+            sourceSurfaceZ + sourceFudge
+        )
     }
 
     static func retains(
