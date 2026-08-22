@@ -89,6 +89,29 @@ private struct FractionZeroGroundProvider: SourceWorldWalkCollisionProvider {
     }
 }
 
+private enum WorldWalkInjectedTraceError: Error, Equatable {
+    case ladderContact
+}
+
+private struct LadderContactThrowingProvider: SourceWorldWalkCollisionProvider {
+    func traceWorldWalk(
+        _ ray: SourceRay,
+        mask _: SourceContents
+    ) throws -> SourceGameTrace {
+        if ray.delta.z == 0, ray.delta.lengthSquared > 0 {
+            throw WorldWalkInjectedTraceError.ladderContact
+        }
+        return SourceGameTrace(ray: ray)
+    }
+
+    func worldWalkPointContents(
+        at _: SourceVector3,
+        mask _: SourceContents
+    ) throws -> SourceContents {
+        .empty
+    }
+}
+
 final class SourceWorldWalkTests: XCTestCase {
     private let worldHandle = SourceBaseHandle(entryIndex: 0, serialNumber: 0)
 
@@ -309,7 +332,7 @@ final class SourceWorldWalkTests: XCTestCase {
         XCTAssertFalse(SourceWorldWalkSolver.unsupportedFeatures.contains(.jump))
         XCTAssertTrue(SourceWorldWalkSolver.unsupportedFeatures.contains(.duck))
         XCTAssertTrue(SourceWorldWalkSolver.unsupportedFeatures.contains(.water))
-        XCTAssertTrue(SourceWorldWalkSolver.unsupportedFeatures.contains(.ladder))
+        XCTAssertFalse(SourceWorldWalkSolver.unsupportedFeatures.contains(.ladder))
         XCTAssertFalse(
             SourceWorldWalkSolver.unsupportedFeatures.contains(.displacementCollision)
         )
@@ -353,7 +376,7 @@ final class SourceWorldWalkTests: XCTestCase {
         XCTAssertEqual(tick.commandNumber, 1)
     }
 
-    func testWaterMovesAndJumpSwimsWhileLadderRemainsExplicit() throws {
+    func testWaterMovesAndJumpSwims() throws {
         var waterWorld = floorWorld()
         waterWorld.addAxisAlignedBox(
             SourceAABBCollider(
@@ -376,25 +399,140 @@ final class SourceWorldWalkTests: XCTestCase {
         XCTAssertGreaterThan(swimming.state.origin.x, state.origin.x)
         XCTAssertGreaterThan(swimming.state.origin.z, state.origin.z)
         XCTAssertFalse(swimming.state.isOnGround)
+    }
 
-        var ladderWorld = floorWorld()
-        ladderWorld.addAxisAlignedBox(
-            SourceAABBCollider(
-                mins: SourceVector3(-100, -100, -10),
-                maxs: SourceVector3(100, 100, 100),
-                contents: .ladder,
-                entityHandle: worldHandle
-            )
+    func testConstructRealLadderContentsPlaneClimbDescendJumpAndContactLoss() throws {
+        let data = try GModGameAssets.data(for: .construct, kind: .bsp)
+        let bsp = try SourceBSP(data: data)
+        let ladderBrushes = bsp.brushes.enumerated().filter { _, brush in
+            SourceContents(rawValue: UInt32(bitPattern: brush.contents)).contains(.ladder)
+        }
+        XCTAssertEqual(ladderBrushes.map(\.offset), [803])
+
+        // Authored gm_construct LADDER brush 803 spans x -2932 ... -2908,
+        // y -1058 ... -1056, z -144 ... -16. This standing origin is one
+        // Source unit outside the -Y expanded hull face, in the authored room
+        // leaf, so the SDK's exact
+        // two-unit LadderDistance trace must select the map-authored plane.
+        let origin = SourceVector3(-2920, -1075, -95)
+        let towardLadder = SourceVector3(0, 1, 0)
+        let contact = try bsp.traceWorld(
+            SourceRay(
+                start: origin,
+                end: origin + towardLadder * SourceWorldWalkSolver.ladderDistance,
+                mins: SourceWorldWalkSolver.standingHullMins,
+                maxs: SourceWorldWalkSolver.standingHullMaxs
+            ),
+            mask: SourceWorldWalkSolver.ladderMask
         )
-        let ladderSolver = makeSolver(world: ladderWorld, maximumSpeed: 200)
+        XCTAssertTrue(contact.contents.contains(.ladder))
+        XCTAssertEqual(contact.plane.normal, SourceVector3(0, -1, 0))
+        XCTAssertEqual(contact.fraction, 0.484_375, accuracy: 0.000_001)
+
+        let solver = SourceWorldWalkSolver(
+            collisionProvider: SourceBSPWorldWalkCollisionProvider(bsp: bsp),
+            configuration: SourceWorldWalkConfiguration(maximumSpeed: 200)
+        )
+        let facingLadder = SourceQAngle(pitch: 0, yaw: 90, roll: 0)
+
+        let climbed = try solver.simulate(
+            state: SourceWorldWalkState(origin: origin, viewAngles: facingLadder),
+            command: SourceUserCommand(
+                commandNumber: 1,
+                tickCount: 1,
+                viewAngles: facingLadder,
+                forwardMove: 200,
+                buttons: [.forward]
+            )
+        ).state
+        XCTAssertEqual(climbed.moveType, .ladder)
+        XCTAssertEqual(climbed.ladderNormal, SourceVector3(0, -1, 0))
+        XCTAssertEqual(climbed.velocity.x, 0, accuracy: 0.000_01)
+        XCTAssertEqual(climbed.velocity.y, 0, accuracy: 0.000_01)
+        XCTAssertEqual(climbed.velocity.z, 200, accuracy: 0.000_01)
+        XCTAssertEqual(
+            climbed.origin.z - origin.z,
+            SourceWorldWalkSolver.maximumClimbSpeed * SourceGlobalVars.intervalPerTick,
+            accuracy: 0.000_001
+        )
+
+        let descended = try solver.simulate(
+            state: climbed,
+            command: SourceUserCommand(
+                commandNumber: 2,
+                tickCount: 2,
+                viewAngles: facingLadder,
+                forwardMove: -200,
+                buttons: [.back]
+            )
+        ).state
+        XCTAssertEqual(descended.moveType, .ladder)
+        XCTAssertEqual(descended.velocity.x, 0, accuracy: 0.000_01)
+        XCTAssertEqual(descended.velocity.y, 0, accuracy: 0.000_01)
+        XCTAssertEqual(descended.velocity.z, -200, accuracy: 0.000_01)
+        XCTAssertEqual(descended.origin.z, origin.z, accuracy: 0.000_001)
+
+        let jumped = try solver.simulate(
+            state: descended,
+            command: SourceUserCommand(
+                commandNumber: 3,
+                tickCount: 3,
+                viewAngles: facingLadder,
+                buttons: [.jump]
+            )
+        ).state
+        XCTAssertEqual(jumped.moveType, .walk)
+        XCTAssertEqual(jumped.velocity.y, -SourceWorldWalkSolver.ladderJumpOffSpeed)
+        XCTAssertLessThan(jumped.origin.y, descended.origin.y)
+
+        var lostContact = descended
+        lostContact.origin.y = -1084
+        let detached = try solver.simulate(
+            state: lostContact,
+            command: SourceUserCommand(
+                commandNumber: 4,
+                tickCount: 4,
+                viewAngles: facingLadder
+            )
+        ).state
+        XCTAssertEqual(detached.moveType, .walk)
+        XCTAssertEqual(detached.origin.y, lostContact.origin.y)
+    }
+
+    func testLadderTraceAndMalformedLadderStateFailTransactionally() throws {
+        let throwingSolver = SourceWorldWalkSolver(
+            collisionProvider: LadderContactThrowingProvider()
+        )
+        let input = SourceWorldWalkState(origin: SourceVector3(10, 20, 30))
         XCTAssertThrowsError(
-            try ladderSolver.simulate(
-                state: state,
-                command: SourceUserCommand(commandNumber: 1)
+            try throwingSolver.simulate(
+                state: input,
+                command: SourceUserCommand(
+                    commandNumber: 1,
+                    forwardMove: 200,
+                    buttons: [.forward]
+                )
             )
         ) {
-            XCTAssertEqual($0 as? SourceWorldWalkError, .unsupported(.ladder))
+            XCTAssertEqual($0 as? WorldWalkInjectedTraceError, .ladderContact)
         }
+        XCTAssertEqual(input, SourceWorldWalkState(origin: SourceVector3(10, 20, 30)))
+
+        var malformed = input
+        malformed.moveType = .ladder
+        malformed.ladderNormal = SourceVector3(.nan, 0, 0)
+        XCTAssertThrowsError(
+            try throwingSolver.simulate(
+                state: malformed,
+                command: SourceUserCommand(commandNumber: 2)
+            )
+        ) {
+            XCTAssertEqual(
+                $0 as? SourceWorldWalkError,
+                .nonFinite("state ladderNormal.x")
+            )
+        }
+        XCTAssertTrue(malformed.ladderNormal.x.isNaN)
     }
 
     func testProviderCannotInjectDynamicOrIdentitylessHits() throws {
@@ -494,7 +632,7 @@ final class SourceWorldWalkTests: XCTestCase {
         ) {
             XCTAssertEqual(
                 $0 as? SourceWorldWalkError,
-                .nonFinite("command wish velocity lengthSquared")
+                .nonFinite("ladder wish velocity lengthSquared")
             )
         }
     }

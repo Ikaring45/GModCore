@@ -167,15 +167,21 @@ public struct SourceWorldWalkState: Equatable, Sendable {
     public var movement: SourceMoveData
     public var viewAngles: SourceQAngle
     public var moveType: SourceMoveType
+    /// Last world ladder plane selected by `CGameMovement::LadderMove`.
+    /// Source retains this vector on the player and uses its negation for the
+    /// next contact trace while `MOVETYPE_LADDER` is active.
+    public var ladderNormal: SourceVector3
 
     public init(
         movement: SourceMoveData = SourceMoveData(),
         viewAngles: SourceQAngle = .zero,
-        moveType: SourceMoveType = .walk
+        moveType: SourceMoveType = .walk,
+        ladderNormal: SourceVector3 = .zero
     ) {
         self.movement = movement
         self.viewAngles = viewAngles
         self.moveType = moveType
+        self.ladderNormal = ladderNormal
     }
 
     public init(
@@ -191,6 +197,7 @@ public struct SourceWorldWalkState: Equatable, Sendable {
         )
         self.viewAngles = viewAngles
         moveType = .walk
+        ladderNormal = .zero
     }
 
     public var origin: SourceVector3 {
@@ -244,19 +251,23 @@ public struct SourceWorldWalkSolver: Sendable {
     public static let standingHullMins = SourceVector3(-16, -16, 0)
     public static let standingHullMaxs = SourceVector3(16, 16, 72)
     public static let playerMask = SourceMasks.playerSolidBrushOnly
+    public static let ladderMask = SourceMasks.playerSolid
     public static let groundProbeDistance: Float = 2
     public static let groundSnapUpDistance: Float = 2
     public static let groundSnapDownDistance: Float = 18
     public static let walkableNormalZ: Float = 0.7
     public static let maximumBumps = 4
     public static let maximumClipPlanes = 5
+    /// Fixed Source SDK 2013 `CGameMovement` ladder contract.
+    public static let ladderDistance: Float = 2
+    public static let maximumClimbSpeed: Float = 200
+    public static let ladderJumpOffSpeed: Float = 270
 
     public static let unsupportedFeatures: [SourceWorldWalkUnsupportedFeature] = [
         .stepUp,
         .duck,
         .verticalMove,
         .water,
-        .ladder,
         .dynamicEntityCollision,
         .movingGround,
         .vPhysics,
@@ -267,7 +278,7 @@ public struct SourceWorldWalkSolver: Sendable {
     ]
 
     private static let unsupportedContentsMask: SourceContents = [
-        .water, .slime, .ladder,
+        .water, .slime,
     ]
     private static let nonJumpUpwardVelocity: Float = 140
 
@@ -301,6 +312,28 @@ public struct SourceWorldWalkSolver: Sendable {
         _ = try categorizeGround(move: &next.movement)
 
         var diagnostics = MovementDiagnostics()
+
+        // Source SDK 2013 PlayerMove calls LadderMove after its initial
+        // categorization and before dispatching the resulting move type. A
+        // jump can therefore find a ladder and switch straight back to WALK
+        // in this same command with a 270-unit normal impulse.
+        let hasLadderContact = try ladderMove(state: &next, command: command)
+        if !hasLadderContact, next.moveType == .ladder {
+            next.moveType = .walk
+        }
+        if next.moveType == .ladder {
+            try slideMove(move: &next.movement, diagnostics: &diagnostics)
+            _ = try environmentLevel(at: next.origin)
+            try validate(state: next)
+            return SourceWorldWalkTick(
+                commandNumber: command.commandNumber,
+                state: next,
+                bumpCount: diagnostics.bumpCount,
+                collisionCount: diagnostics.collisionCount,
+                didSnapToGround: false
+            )
+        }
+
         if initialWaterLevel >= 2 {
             try waterMove(
                 move: &next.movement,
@@ -383,6 +416,110 @@ public struct SourceWorldWalkSolver: Sendable {
             collisionCount: diagnostics.collisionCount,
             didSnapToGround: diagnostics.didSnapToGround
         )
+    }
+
+    /// The world-brush `CONTENTS_LADDER` portion of Source SDK 2013
+    /// `CGameMovement::LadderMove`. Surface-property `climbable` and dynamic
+    /// physprop ladders remain outside this world-only collision boundary.
+    /// All state changes remain confined to the caller-owned transaction copy.
+    private func ladderMove(
+        state: inout SourceWorldWalkState,
+        command: SourceUserCommand
+    ) throws -> Bool {
+        let basis = try viewBasis(for: command.viewAngles, flatten: false)
+        let wishDirection: SourceVector3
+        if state.moveType == .ladder {
+            wishDirection = -state.ladderNormal
+        } else {
+            guard command.forwardMove != 0 || command.sideMove != 0 else {
+                return false
+            }
+            let wishVelocity = basis.forward * command.forwardMove +
+                basis.right * command.sideMove
+            try requireFinite(
+                wishVelocity,
+                includingLengthSquared: true,
+                field: "ladder wish velocity"
+            )
+            let wishLength = wishVelocity.length
+            guard wishLength.isFinite else {
+                throw SourceWorldWalkError.nonFinite("ladder wish speed")
+            }
+            guard wishLength > 0 else { return false }
+            wishDirection = wishVelocity / wishLength
+        }
+        try requireFinite(
+            wishDirection,
+            includingLengthSquared: true,
+            field: "ladder wish direction"
+        )
+
+        let trace = try traceHull(
+            start: state.origin,
+            end: state.origin + wishDirection * Self.ladderDistance,
+            mask: Self.ladderMask
+        )
+        guard trace.fraction < 1, trace.contents.contains(.ladder) else {
+            return false
+        }
+
+        state.moveType = .ladder
+        state.ladderNormal = trace.plane.normal
+
+        let floorContents = try collisionProvider.worldWalkPointContents(
+            at: state.origin + SourceVector3(0, 0, Self.standingHullMins.z - 1),
+            mask: SourceMasks.all
+        )
+        let onFloor = floorContents == .solid || state.isOnGround
+
+        var forwardSpeed: Float = 0
+        var rightSpeed: Float = 0
+        if command.buttons.contains(.back) {
+            forwardSpeed -= Self.maximumClimbSpeed
+        }
+        if command.buttons.contains(.forward) {
+            forwardSpeed += Self.maximumClimbSpeed
+        }
+        if command.buttons.contains(.moveLeft) {
+            rightSpeed -= Self.maximumClimbSpeed
+        }
+        if command.buttons.contains(.moveRight) {
+            rightSpeed += Self.maximumClimbSpeed
+        }
+
+        if command.buttons.contains(.jump) {
+            state.moveType = .walk
+            state.velocity = trace.plane.normal * Self.ladderJumpOffSpeed
+            return true
+        }
+
+        guard forwardSpeed != 0 || rightSpeed != 0 else {
+            state.velocity = .zero
+            return true
+        }
+
+        let intendedVelocity = basis.forward * forwardSpeed +
+            basis.right * rightSpeed
+        let verticalAxis = SourceVector3(0, 0, 1)
+        var perpendicular = cross(verticalAxis, trace.plane.normal)
+        let perpendicularLength = perpendicular.length
+        if perpendicularLength > 0 {
+            perpendicular = perpendicular / perpendicularLength
+        }
+        let normalSpeed = intendedVelocity.dot(trace.plane.normal)
+        let intoFace = trace.plane.normal * normalSpeed
+        let lateral = intendedVelocity - intoFace
+        let ladderUp = cross(trace.plane.normal, perpendicular)
+        state.velocity = lateral - ladderUp * normalSpeed
+        if onFloor, normalSpeed > 0 {
+            state.velocity += trace.plane.normal * Self.maximumClimbSpeed
+        }
+        try requireFinite(
+            state.velocity,
+            includingLengthSquared: true,
+            field: "ladder velocity"
+        )
+        return true
     }
 
     private func groundMove(
@@ -609,7 +746,8 @@ public struct SourceWorldWalkSolver: Sendable {
 
     private func traceHull(
         start: SourceVector3,
-        end: SourceVector3
+        end: SourceVector3,
+        mask: SourceContents = Self.playerMask
     ) throws -> SourceGameTrace {
         let delta = end - start
         let centerOffset = (Self.standingHullMins + Self.standingHullMaxs) * Float(0.5)
@@ -634,7 +772,7 @@ public struct SourceWorldWalkSolver: Sendable {
         )
         let trace = try collisionProvider.traceWorldWalk(
             ray,
-            mask: Self.playerMask
+            mask: mask
         )
         try validate(trace: trace, ray: ray)
         return trace
@@ -718,9 +856,6 @@ public struct SourceWorldWalkSolver: Sendable {
             )
             if !contents.intersection([.water, .slime]).isEmpty {
                 waterLevel = index + 1
-            }
-            if contents.contains(.ladder) {
-                throw SourceWorldWalkError.unsupported(.ladder)
             }
         }
         return waterLevel
@@ -890,6 +1025,9 @@ public struct SourceWorldWalkSolver: Sendable {
             ("state view pitch", state.viewAngles.pitch),
             ("state view yaw", state.viewAngles.yaw),
             ("state view roll", state.viewAngles.roll),
+            ("state ladderNormal.x", state.ladderNormal.x),
+            ("state ladderNormal.y", state.ladderNormal.y),
+            ("state ladderNormal.z", state.ladderNormal.z),
         ] where !value.isFinite {
             throw SourceWorldWalkError.nonFinite(name)
         }
@@ -911,6 +1049,16 @@ public struct SourceWorldWalkSolver: Sendable {
             includingLengthSquared: true,
             field: "state outputWishVelocity"
         )
+        try requireFinite(
+            state.ladderNormal,
+            includingLengthSquared: true,
+            field: "state ladderNormal"
+        )
+        if state.moveType == .ladder {
+            guard abs(state.ladderNormal.lengthSquared - 1) <= Float(0.001) else {
+                throw SourceWorldWalkError.inconsistentTrace("state ladder normal")
+            }
+        }
         let centeredOrigin = move.origin + SourceVector3(0, 0, 36)
         try requireFinite(
             centeredOrigin,
@@ -936,7 +1084,7 @@ public struct SourceWorldWalkSolver: Sendable {
         _ state: SourceWorldWalkState,
         command: SourceUserCommand
     ) throws {
-        guard state.moveType == .walk else {
+        guard state.moveType == .walk || state.moveType == .ladder else {
             let feature: SourceWorldWalkUnsupportedFeature =
                 state.moveType == .vPhysics ? .vPhysics : .nonWalkMoveType
             throw SourceWorldWalkError.unsupported(feature)
@@ -947,7 +1095,7 @@ public struct SourceWorldWalkSolver: Sendable {
         if command.buttons.contains(.duck) {
             throw SourceWorldWalkError.unsupported(.duck)
         }
-        if command.upMove != 0 {
+        if command.upMove != 0, state.moveType != .ladder {
             throw SourceWorldWalkError.unsupported(.verticalMove)
         }
         if state.movement.waterJumpTime != 0 {
