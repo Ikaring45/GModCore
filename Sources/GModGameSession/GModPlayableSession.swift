@@ -439,6 +439,8 @@ public final class GModPlayableSession {
         SourceCanonicalWeldConstraintGLuaBridge
     public let serverRopeConstraintBridge:
         SourceCanonicalRopeConstraintGLuaBridge
+    public let serverNoCollideConstraintBridge:
+        SourceCanonicalNoCollideConstraintGLuaBridge
     public let serverDuplicatorBridge: SourceCanonicalDuplicatorGLuaBridge
 
     let serverFileSystem: GMLuaMountedFileSystem
@@ -1123,6 +1125,14 @@ public final class GModPlayableSession {
                     constraintGraph: toolConstraintGraph,
                     worldPhysicsBodyID: loadedStaticWorldPhysicsScene.bodyID
                 )
+            let loadedServerNoCollideConstraintBridge = try
+                SourceCanonicalNoCollideConstraintGLuaBridge.install(
+                    into: server,
+                    entityHost: sourceAdapter,
+                    physicsHost: sourceAdapter,
+                    commandQueue: session.netTransport,
+                    constraintGraph: toolConstraintGraph
+                )
             let loadedServerDuplicatorBridge = try
                 SourceCanonicalDuplicatorGLuaBridge.install(
                     into: server,
@@ -1285,6 +1295,8 @@ public final class GModPlayableSession {
             clientToolActionBridge = loadedClientToolActionBridge
             serverWeldConstraintBridge = loadedServerWeldConstraintBridge
             serverRopeConstraintBridge = loadedServerRopeConstraintBridge
+            serverNoCollideConstraintBridge =
+                loadedServerNoCollideConstraintBridge
             serverDuplicatorBridge = loadedServerDuplicatorBridge
             serverRopeConstraintCommandQueue =
                 loadedServerRopeConstraintCommandQueue
