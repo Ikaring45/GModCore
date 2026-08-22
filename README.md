@@ -36,6 +36,8 @@ stock Sandbox prop and world-Weapon creation, pickup/drop, full-EHANDLE creator
 ownership, asset-backed OBB bounds, replicated dynamic models, and Metal scene
 projection. Canonical No-Collide and Thruster tool slices now own their real
 constraint/body commands, undo, cleanup, snapshots, and replay ordering.
+The Physgun slice owns pickup/drop, distance/rotation, shadow-motion targets,
+freeze/unfreeze hooks, stale-handle cleanup, and replicated hold display state.
 `PhysObj` reads authoritative body state and uses an independently attested
 surface-material name/index catalog; missing model, PHY, or material evidence
 continues to fail closed.

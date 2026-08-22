@@ -21,6 +21,9 @@ claim of complete Garry's Mod or VPhysics compatibility.
   including solver filtering, lifecycle, snapshots, replay, undo, and cleanup.
 - Adds the canonical Thruster tool path with real entity ownership, force and
   torque commands, wake/toggle state, effects, undo, and cleanup.
+- Adds a canonical Physgun interaction slice for authoritative pickup/drop,
+  held distance and rotation, shadow-motion targets, freeze/unfreeze hooks,
+  stale-handle cleanup, and replicated CLIENT hold display state.
 - Expands `PhysObj` over authoritative body state and binds independently
   attested surface-property names/indices; missing material evidence remains
   unavailable rather than being guessed.
