@@ -13,6 +13,12 @@ Swift UI.
 
 ## Current milestone
 
+0.1.57 is a focused iPad hotfix for regressions observed in 0.1.56. It accepts
+the small displacement-alpha overshoot authored in the bundled `gm_construct`
+BSP while retaining non-finite rejection, repairs the live VGUI/Hint path, and
+removes the post-Hint work that could delay movement input. The detailed test
+boundary is recorded in `RELEASE_NOTES_0.1.57.md`.
+
 The pure-Swift `GModLua` runtime now runs the Lua 5.1 official basic test corpus
 through `final OK !!!` and all cleanup collections. The passing Windows run
 executes the real `gc.lua`, including weak tables, userdata finalizers,

@@ -13,7 +13,7 @@ The checked-in defaults are intentionally generic:
 
 - iPad only, with an iPadOS 16.0 deployment floor;
 - bundle identifier `org.example.GarrysPAD`;
-- marketing version `0.1.56`, build `56`;
+- marketing version `0.1.57`, build `57`;
 - Automatic signing in the project; and
 - an accent-color catalog while final App Store icon artwork remains a release
   asset.
