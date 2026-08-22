@@ -734,8 +734,16 @@ public struct GModMetalView:
             static let maximumResourceCount = 1
             static let maximumByteCount = 16 * 1_024 * 1_024
 
-            private(set) var remainingResourceCount = maximumResourceCount
-            private(set) var remainingByteCount = maximumByteCount
+            private(set) var remainingResourceCount: Int
+            private(set) var remainingByteCount: Int
+
+            init(
+                maximumResourceCount: Int = Self.maximumResourceCount,
+                maximumByteCount: Int = Self.maximumByteCount
+            ) {
+                remainingResourceCount = maximumResourceCount
+                remainingByteCount = maximumByteCount
+            }
 
             mutating func reserve(byteCount: Int) -> Bool {
                 guard byteCount >= 0, remainingResourceCount > 0 else {
@@ -1910,7 +1918,19 @@ public struct GModMetalView:
                     return
                 }
                 if active.resource.id != scene.resource.id {
-                    resetFirstPersonViewModelCaches()
+                    // A new authored frame replaces only immutable geometry.
+                    // Material bitmaps are appearance-owned and remain valid
+                    // across sequence/frame updates for the same Studio
+                    // model/body/skin/LOD.
+                    cachedFirstPersonViewModelGeometry = nil
+                    if !GModMetalStudioGeometryCacheContract.hasSameAppearance(
+                        active.resource.id,
+                        scene.resource.id
+                    ) {
+                        cachedFirstPersonViewModelTextures.removeAll(
+                            keepingCapacity: true
+                        )
+                    }
                 }
             } else {
                 resetFirstPersonViewModelCaches()
@@ -4739,7 +4759,15 @@ public struct GModMetalView:
             encoder: MTLRenderCommandEncoder
         ) {
             let resource = scene.resource
-            if cachedFirstPersonViewModelGeometry?.resourceID != resource.id {
+            if let cached = cachedFirstPersonViewModelGeometry,
+               !GModMetalStudioGeometryCacheContract.canReuseGeometry(
+                   cachedID: cached.resourceID,
+                   cachedVertexCount: cached.vertexCount,
+                   cachedIndexCount: cached.indexCount,
+                   publishedID: resource.id,
+                   publishedVertexCount: resource.vertices.count,
+                   publishedIndexCount: resource.indices.count
+               ) {
                 cachedFirstPersonViewModelGeometry = nil
             }
             if cachedFirstPersonViewModelGeometry == nil {
@@ -4754,9 +4782,14 @@ public struct GModMetalView:
                 device: device
             )
             guard let geometry = cachedFirstPersonViewModelGeometry,
-                  geometry.resourceID == resource.id,
-                  geometry.vertexCount == resource.vertices.count,
-                  geometry.indexCount == resource.indices.count,
+                  GModMetalStudioGeometryCacheContract.canReuseGeometry(
+                      cachedID: geometry.resourceID,
+                      cachedVertexCount: geometry.vertexCount,
+                      cachedIndexCount: geometry.indexCount,
+                      publishedID: resource.id,
+                      publishedVertexCount: resource.vertices.count,
+                      publishedIndexCount: resource.indices.count
+                  ),
                   let verticalFOV =
                     GModMetalFirstPersonViewModelRenderContract
                         .verticalFieldOfViewRadians(for: scene) else {
@@ -4994,7 +5027,15 @@ public struct GModMetalView:
                         : nil
                 }
             )
-            var geometryUploadBudget = DynamicEntityUploadBudget()
+            let geometryUploadLimits =
+                GModMetalStudioGeometryUploadContract.limits(
+                    for: geometryResourceIDs
+                )
+            var geometryUploadBudget = DynamicEntityUploadBudget(
+                maximumResourceCount:
+                    geometryUploadLimits.maximumResourceCount,
+                maximumByteCount: geometryUploadLimits.maximumByteCount
+            )
             var textureUploadBudget = DynamicEntityUploadBudget()
             uploadNextDynamicEntityGeometry(
                 scene: scene,
@@ -5035,9 +5076,14 @@ public struct GModMetalView:
                           let geometry = cachedDynamicEntityGeometry[
                             instance.resourceID
                           ],
-                          geometry.resourceID == instance.resourceID,
-                          geometry.vertexCount == resource.vertices.count,
-                          geometry.indexCount == resource.indices.count else {
+                          GModMetalStudioGeometryCacheContract.canReuseGeometry(
+                              cachedID: geometry.resourceID,
+                              cachedVertexCount: geometry.vertexCount,
+                              cachedIndexCount: geometry.indexCount,
+                              publishedID: resource.id,
+                              publishedVertexCount: resource.vertices.count,
+                              publishedIndexCount: resource.indices.count
+                          ) else {
                         continue
                     }
 
@@ -5241,7 +5287,6 @@ public struct GModMetalView:
                         indexBuffer: indexBuffer
                     )
                 cachedDynamicEntityGeometryByteCount += totalBytes.partialValue
-                return
             }
         }
 
@@ -5387,8 +5432,18 @@ public struct GModMetalView:
         private static func dynamicEntityResourceLabel(
             _ id: GModMetalDynamicEntityResourceID
         ) -> String {
-            "\(id.normalizedModelPath)#\(id.checksum):" +
-                "body=\(id.bodyValue):skin=\(id.skinFamilyIndex)"
+            let geometry: String
+            switch id.geometryIdentity {
+            case .bindPose:
+                geometry = "bind"
+            case let .animated(sequence, blend, animation, frame):
+                geometry =
+                    "seq=\(sequence):blend=\(blend):anim=\(animation):" +
+                    "frame=\(frame)"
+            }
+            return "\(id.normalizedModelPath)#\(id.checksum):" +
+                "lod=\(id.lodIndex):body=\(id.bodyValue):" +
+                "skin=\(id.skinFamilyIndex):\(geometry)"
         }
 
         private func worldTexture(

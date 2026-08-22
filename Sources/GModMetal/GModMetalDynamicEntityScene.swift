@@ -41,9 +41,53 @@ public struct GModMetalDynamicEntityScenePolicy: Sendable, Equatable {
     )
 }
 
-/// Metal-owned copy of the Studio appearance identity. The App boundary can
-/// map the GameSession value into this type without making GModMetal depend on
-/// the session, filesystem, or Lua targets.
+/// Metal-owned identity for the immutable vertex payload behind one Studio
+/// resource. Bind-pose geometry remains shared by appearance, while an
+/// authored animation frame keeps every discriminator from the CPU-skinned
+/// GameSession resource. A sequence/frame change therefore cannot alias an
+/// already-uploaded bind-pose or prior-frame vertex buffer.
+public enum GModMetalStudioGeometryIdentity:
+    Sendable,
+    Equatable,
+    Hashable,
+    Comparable
+{
+    case bindPose
+    case animated(
+        sequenceIndex: Int,
+        blendIndex: Int,
+        animationIndex: Int,
+        frame: Int
+    )
+
+    public static func < (
+        lhs: GModMetalStudioGeometryIdentity,
+        rhs: GModMetalStudioGeometryIdentity
+    ) -> Bool {
+        switch (lhs, rhs) {
+        case (.bindPose, .bindPose):
+            return false
+        case (.bindPose, .animated):
+            return true
+        case (.animated, .bindPose):
+            return false
+        case let (
+            .animated(lhsSequence, lhsBlend, lhsAnimation, lhsFrame),
+            .animated(rhsSequence, rhsBlend, rhsAnimation, rhsFrame)
+        ):
+            if lhsSequence != rhsSequence { return lhsSequence < rhsSequence }
+            if lhsBlend != rhsBlend { return lhsBlend < rhsBlend }
+            if lhsAnimation != rhsAnimation {
+                return lhsAnimation < rhsAnimation
+            }
+            return lhsFrame < rhsFrame
+        }
+    }
+}
+
+/// Metal-owned copy of the complete Studio geometry identity. The App
+/// boundary can map the GameSession value into this type without making
+/// GModMetal depend on the session, filesystem, or Lua targets.
 public struct GModMetalDynamicEntityResourceID:
     Sendable,
     Equatable,
@@ -52,19 +96,25 @@ public struct GModMetalDynamicEntityResourceID:
 {
     public let normalizedModelPath: String
     public let checksum: Int32
+    public let lodIndex: Int
     public let bodyValue: Int
     public let skinFamilyIndex: Int
+    public let geometryIdentity: GModMetalStudioGeometryIdentity
 
     public init(
         normalizedModelPath: String,
         checksum: Int32,
+        lodIndex: Int = 0,
         bodyValue: Int,
-        skinFamilyIndex: Int
+        skinFamilyIndex: Int,
+        geometryIdentity: GModMetalStudioGeometryIdentity = .bindPose
     ) {
         self.normalizedModelPath = normalizedModelPath
         self.checksum = checksum
+        self.lodIndex = lodIndex
         self.bodyValue = bodyValue
         self.skinFamilyIndex = skinFamilyIndex
+        self.geometryIdentity = geometryIdentity
     }
 
     public static func < (
@@ -75,8 +125,74 @@ public struct GModMetalDynamicEntityResourceID:
             return lhs.normalizedModelPath < rhs.normalizedModelPath
         }
         if lhs.checksum != rhs.checksum { return lhs.checksum < rhs.checksum }
+        if lhs.lodIndex != rhs.lodIndex { return lhs.lodIndex < rhs.lodIndex }
         if lhs.bodyValue != rhs.bodyValue { return lhs.bodyValue < rhs.bodyValue }
-        return lhs.skinFamilyIndex < rhs.skinFamilyIndex
+        if lhs.skinFamilyIndex != rhs.skinFamilyIndex {
+            return lhs.skinFamilyIndex < rhs.skinFamilyIndex
+        }
+        return lhs.geometryIdentity < rhs.geometryIdentity
+    }
+}
+
+/// Pure cache decisions shared by the real Metal renderer and contract tests.
+/// Geometry reuse requires the complete immutable payload identity, not merely
+/// matching array counts. Texture reuse is intentionally appearance-scoped so
+/// a viewmodel animation does not evict unchanged material bitmaps each frame.
+enum GModMetalStudioGeometryCacheContract {
+    static func hasSameAppearance(
+        _ lhs: GModMetalDynamicEntityResourceID,
+        _ rhs: GModMetalDynamicEntityResourceID
+    ) -> Bool {
+        lhs.normalizedModelPath == rhs.normalizedModelPath &&
+            lhs.checksum == rhs.checksum &&
+            lhs.lodIndex == rhs.lodIndex &&
+            lhs.bodyValue == rhs.bodyValue &&
+            lhs.skinFamilyIndex == rhs.skinFamilyIndex
+    }
+
+    static func canReuseGeometry(
+        cachedID: GModMetalDynamicEntityResourceID,
+        cachedVertexCount: Int,
+        cachedIndexCount: Int,
+        publishedID: GModMetalDynamicEntityResourceID,
+        publishedVertexCount: Int,
+        publishedIndexCount: Int
+    ) -> Bool {
+        cachedID == publishedID &&
+            cachedVertexCount == publishedVertexCount &&
+            cachedIndexCount == publishedIndexCount
+    }
+}
+
+struct GModMetalStudioGeometryUploadLimits: Sendable, Equatable {
+    let maximumResourceCount: Int
+    let maximumByteCount: Int
+}
+
+/// Static resource admission keeps the established one-resource/16 MiB frame
+/// pacing. A publication containing animated geometry may attempt every
+/// referenced resource in one bounded callback, up to the already-enforced
+/// 128 MiB scene/cache cap; otherwise continually advancing poses could retire
+/// unuploaded resource IDs before later entities ever receive a vertex buffer.
+enum GModMetalStudioGeometryUploadContract {
+    static let ordinaryMaximumByteCount = 16 * 1_024 * 1_024
+    static let animatedMaximumByteCount = 128 * 1_024 * 1_024
+
+    static func limits(
+        for resourceIDs: Set<GModMetalDynamicEntityResourceID>
+    ) -> GModMetalStudioGeometryUploadLimits {
+        let containsAnimation = resourceIDs.contains {
+            if case .animated = $0.geometryIdentity { return true }
+            return false
+        }
+        return GModMetalStudioGeometryUploadLimits(
+            maximumResourceCount: containsAnimation
+                ? Swift.max(1, resourceIDs.count)
+                : 1,
+            maximumByteCount: containsAnimation
+                ? animatedMaximumByteCount
+                : ordinaryMaximumByteCount
+        )
     }
 }
 
@@ -720,6 +836,13 @@ private extension GModMetalDynamicEntityScene {
                 field: "checksum"
             )
         }
+        guard source.id.lodIndex == source.lodIndex,
+              source.lodIndex >= 0 else {
+            throw GModMetalDynamicEntitySceneError.invalidResourceIdentity(
+                id: source.id,
+                field: "LOD index"
+            )
+        }
         guard source.id.bodyValue == source.bodyValue, source.bodyValue >= 0 else {
             throw GModMetalDynamicEntitySceneError.invalidResourceIdentity(
                 id: source.id,
@@ -733,11 +856,14 @@ private extension GModMetalDynamicEntityScene {
                 field: "skin family"
             )
         }
-        guard source.lodIndex >= 0 else {
-            throw GModMetalDynamicEntitySceneError.invalidResourceIdentity(
-                id: source.id,
-                field: "LOD index"
-            )
+        if case let .animated(sequence, blend, animation, frame) =
+            source.id.geometryIdentity {
+            guard sequence >= 0, blend >= 0, animation >= 0, frame >= 0 else {
+                throw GModMetalDynamicEntitySceneError.invalidResourceIdentity(
+                    id: source.id,
+                    field: "animation geometry identity"
+                )
+            }
         }
         guard !source.modelName.isEmpty,
               !source.modelName.utf8.contains(0) else {
