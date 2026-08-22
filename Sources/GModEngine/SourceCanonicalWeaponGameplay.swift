@@ -582,6 +582,10 @@ public enum SourceCanonicalWeaponGameplayBridge {
             into: runtime,
             host: host
         )
+        try SourceCanonicalWeaponReloadBridge.install(
+            into: runtime,
+            host: host
+        )
         runtime.fireBulletsBridge = try
             SourceCanonicalFireBulletsGLuaBridge.install(
                 into: runtime,
@@ -911,6 +915,13 @@ public final class SourceCanonicalWeaponGameplayController {
             }
             if invocation == .secondaryAttack,
                currentTime < currentWeapon.weaponRuntime.nextSecondaryFire {
+                continue
+            }
+            if invocation == .reload,
+               currentTime < max(
+                   currentWeapon.weaponRuntime.nextPrimaryFire,
+                   currentWeapon.weaponRuntime.nextSecondaryFire
+               ) {
                 continue
             }
             do {

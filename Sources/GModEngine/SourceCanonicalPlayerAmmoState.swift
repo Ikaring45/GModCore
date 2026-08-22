@@ -111,6 +111,27 @@ public struct SourceCanonicalPlayerAmmoState: Equatable, Sendable {
         return added
     }
 
+    /// Removes up to `amount` rounds from one registered Source ammo type.
+    /// Zero-count entries are erased so snapshots retain the same canonical
+    /// compact representation used by `RemoveAllAmmo` and `GiveAmmo`.
+    @discardableResult
+    mutating func consume(
+        _ amount: Int32,
+        of type: SourceCanonicalDefaultAmmoType
+    ) -> Int32 {
+        guard amount > 0,
+              let index = entries.firstIndex(where: {
+                  $0.typeID == type.id
+              }) else { return 0 }
+        let removed = min(amount, entries[index].count)
+        guard removed > 0 else { return 0 }
+        entries[index].count -= removed
+        if entries[index].count == 0 {
+            entries.remove(at: index)
+        }
+        return removed
+    }
+
     @discardableResult
     mutating func removeAll() -> Bool {
         guard !entries.isEmpty else { return false }
