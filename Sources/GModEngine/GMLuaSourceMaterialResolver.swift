@@ -106,15 +106,18 @@ public struct GMLuaSourceWorldVertexTransitionParameters: Sendable, Equatable {
     public let baseTexture2Name: String
     public let baseTextureTransform2: SourceVMTMatrix?
     public let blendModulateTextureName: String?
+    public let blendMaskTransform: SourceVMTMatrix?
 
     public init(
         baseTexture2Name: String,
         baseTextureTransform2: SourceVMTMatrix?,
-        blendModulateTextureName: String?
+        blendModulateTextureName: String?,
+        blendMaskTransform: SourceVMTMatrix? = nil
     ) {
         self.baseTexture2Name = baseTexture2Name
         self.baseTextureTransform2 = baseTextureTransform2
         self.blendModulateTextureName = blendModulateTextureName
+        self.blendMaskTransform = blendMaskTransform
     }
 }
 
@@ -683,7 +686,10 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
             baseTextureTransform2: try document.matrix(
                 named: "$basetexturetransform2"
             ),
-            blendModulateTextureName: blendModulateTextureName
+            blendModulateTextureName: blendModulateTextureName,
+            blendMaskTransform: try document.matrix(
+                named: "$blendmasktransform"
+            )
         )
     }
 

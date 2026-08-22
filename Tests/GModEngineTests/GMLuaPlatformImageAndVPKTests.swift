@@ -395,7 +395,7 @@ final class GMLuaPlatformImageAndVPKTests: XCTestCase {
     func testSourceMaterialResolverRetainsTerrainShaderTextureContracts() throws {
         let files: [String: Data] = [
             "materials/synthetic/terrain.vmt": Data(
-                #""WorldVertexTransition" { "$basetexture" "synthetic/base" "$basetexture2" "synthetic/rock" "$basetexturetransform2" "center .5 .5 scale 1.2 1.3 rotate 30 translate .1 .2" "$blendmodulatetexture" "synthetic/blend" "$detail" "synthetic/clouds" "$detailscale" "0.125" "$detailblendfactor" "0.5" "$detailblendmode" "7" "$detailtexturetransform" "center .5 .5 scale 2 3 rotate 0 translate 0 0" }"#.utf8
+                #""WorldVertexTransition" { "$basetexture" "synthetic/base" "$basetexture2" "synthetic/rock" "$basetexturetransform2" "center .5 .5 scale 1.2 1.3 rotate 30 translate .1 .2" "$blendmodulatetexture" "synthetic/blend" "$blendmasktransform" "center .5 .5 scale 2 3 rotate 0 translate .1 .2" "$detail" "synthetic/clouds" "$detailscale" "0.125" "$detailblendfactor" "0.5" "$detailblendmode" "7" "$detailtexturetransform" "center .5 .5 scale 2 3 rotate 0 translate 0 0" }"#.utf8
             ),
             "materials/synthetic/base.vtf": makeRGBA8888VTF(
                 width: 1,
@@ -428,7 +428,13 @@ final class GMLuaPlatformImageAndVPKTests: XCTestCase {
                 rotationDegrees: 30,
                 translation: .init(x: 0.1, y: 0.2)
             ),
-            blendModulateTextureName: "materials/synthetic/blend.vtf"
+            blendModulateTextureName: "materials/synthetic/blend.vtf",
+            blendMaskTransform: .textureTransform(
+                center: .init(x: 0.5, y: 0.5),
+                scale: .init(x: 2, y: 3),
+                rotationDegrees: 0,
+                translation: .init(x: 0.1, y: 0.2)
+            )
         ))
         XCTAssertEqual(
             material.decodedByteCount,
