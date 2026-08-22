@@ -257,6 +257,16 @@ final class GModWorldRenderMeshTests: XCTestCase {
             bsp.displacementTriangles.count
         )
         XCTAssertGreaterThan(
+            bsp.displacementVertices.map(\.alpha).max() ?? 0,
+            255,
+            "gm_construct contains real VBSP alpha overshoot; retain it until the render boundary"
+        )
+        XCTAssertEqual(
+            mesh.vertices.map(\.sourceDisplacementAlpha).max() ?? 0,
+            bsp.displacementVertices.map(\.alpha).max() ?? 0,
+            "mesh compilation must preserve the authored displacement channel"
+        )
+        XCTAssertGreaterThan(
             bsp.displacementVertices.map {
                 ($0.vector.x * $0.vector.x + $0.vector.y * $0.vector.y +
                     $0.vector.z * $0.vector.z).squareRoot()

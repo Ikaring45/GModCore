@@ -2025,6 +2025,19 @@ enum GModMetalWorldLightmapRenderContract {
     }
 }
 
+/// Converts VBSP's authored displacement transition channel to the saturating
+/// shader input used by Source materials.
+///
+/// Valve-authored BSPs can contain small floating-point overshoots above 255
+/// (gm_construct reaches about 255.003). Preserve that raw field in the scene,
+/// reject only non-finite data, and saturate at this render boundary.
+enum GModMetalDisplacementAlphaContract {
+    static func normalized(_ authoredAlpha: Float) -> Float? {
+        guard authoredAlpha.isFinite else { return nil }
+        return Swift.max(0, Swift.min(1, authoredAlpha / 255))
+    }
+}
+
 /// Immutable renderer input for one static Source world mesh and its camera.
 ///
 /// Source coordinates use +X forward, +Y left, and +Z up. Metal coordinates
@@ -2045,7 +2058,8 @@ public struct GModMetalWorldScene: Sendable, Equatable {
     public let sourceTextureCoordinates: [SIMD2<Float>]
     public let sourceLightmapTextureCoordinates: [SIMD2<Float>]
     /// Raw `CDispVert::m_Alpha` values. Ordinary BSP vertices retain zero;
-    /// displacement vertices retain the authored 0...255 transition input.
+    /// displacement vertices retain the authored transition input, including
+    /// the small range overshoots present in Valve-authored BSPs.
     public let sourceDisplacementAlphas: [Float]
     public let metalPositions: [SIMD3<Float>]
     public let metalNormals: [SIMD3<Float>]

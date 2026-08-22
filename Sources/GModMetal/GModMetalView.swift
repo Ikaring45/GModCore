@@ -880,7 +880,7 @@ public struct GModMetalView:
                 case let .invalidLightmapTextureCoordinate(index):
                     return "lightmap coordinate \(index) is outside finite 0...1"
                 case let .invalidDisplacementAlpha(index):
-                    return "displacement alpha \(index) is outside finite 0...255"
+                    return "displacement alpha \(index) is non-finite"
                 case let .invalidMaterialRange(index):
                     return "material range \(index) is invalid or overlaps the index buffer"
                 case let .invalidTerrainMaterialRange(index):
@@ -2376,13 +2376,9 @@ public struct GModMetalView:
                     uv: scene.sourceTextureCoordinates[index],
                     lightmapUV: scene.sourceLightmapTextureCoordinates[index],
                     sourceParameters: SIMD4<Float>(
-                        Swift.max(
-                            0,
-                            Swift.min(
-                                1,
-                                scene.sourceDisplacementAlphas[index] / 255
-                            )
-                        ),
+                        GModMetalDisplacementAlphaContract.normalized(
+                            scene.sourceDisplacementAlphas[index]
+                        ) ?? 0,
                         0,
                         0,
                         0
@@ -2636,9 +2632,9 @@ public struct GModMetalView:
                     throw WorldSceneError.invalidLightmapTextureCoordinate(index: index)
                 }
                 let displacementAlpha = scene.sourceDisplacementAlphas[index]
-                guard displacementAlpha.isFinite,
-                      displacementAlpha >= 0,
-                      displacementAlpha <= 255 else {
+                guard GModMetalDisplacementAlphaContract.normalized(
+                    displacementAlpha
+                ) != nil else {
                     throw WorldSceneError.invalidDisplacementAlpha(index: index)
                 }
             }

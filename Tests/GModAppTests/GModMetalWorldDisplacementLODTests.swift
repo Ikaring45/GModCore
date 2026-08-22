@@ -7,6 +7,25 @@ import GModGameAssets
 @testable import GModMetal
 
 final class GModMetalWorldDisplacementLODTests: XCTestCase {
+    func testValveAuthoredDisplacementAlphaOvershootSaturatesAtRenderBoundary() {
+        XCTAssertEqual(
+            GModMetalDisplacementAlphaContract.normalized(255.003),
+            1
+        )
+        XCTAssertEqual(
+            GModMetalDisplacementAlphaContract.normalized(-0.001),
+            0
+        )
+        XCTAssertEqual(
+            GModMetalDisplacementAlphaContract.normalized(127.5),
+            0.5
+        )
+        XCTAssertNil(
+            GModMetalDisplacementAlphaContract.normalized(.infinity)
+        )
+        XCTAssertNil(GModMetalDisplacementAlphaContract.normalized(.nan))
+    }
+
     func testDisplacementTerrainUsesAuthoredMipsAndHighQualityFiltering() throws {
         let ordinaryBitmap = try makeMippedBitmap(flags: [])
         let ordinary = GModMetalWorldSamplerConfiguration(
