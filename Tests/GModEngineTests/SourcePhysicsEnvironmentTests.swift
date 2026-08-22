@@ -109,6 +109,53 @@ struct SourcePhysicsEnvironmentTests {
         #expect(valid.mutation == .setDamping(linear: 1.25, angular: 2.5))
     }
 
+    @Test("SetMass accepts only the published VPhysics mass interval")
+    func setMassContractFailsClosed() throws {
+        let bodyID = try SourcePhysicsBodyID(
+            entityIdentity: makeIdentity(entryIndex: 813, serialNumber: 27),
+            solidIndex: 3
+        )
+        #expect(throws: SourcePhysicsContractError.nonFinite(
+            field: "bodyMutation.massKilograms"
+        )) {
+            _ = try SourcePhysicsBodyMutationCommand(
+                bodyID: bodyID,
+                mutation: .setMassKilograms(.nan)
+            )
+        }
+        #expect(throws: SourcePhysicsContractError.massOutsideVPhysicsRange(
+            0.099
+        )) {
+            _ = try SourcePhysicsBodyMutationCommand(
+                bodyID: bodyID,
+                mutation: .setMassKilograms(0.099)
+            )
+        }
+        #expect(throws: SourcePhysicsContractError.massOutsideVPhysicsRange(
+            50_001
+        )) {
+            _ = try SourcePhysicsBodyMutationCommand(
+                bodyID: bodyID,
+                mutation: .setMassKilograms(50_001)
+            )
+        }
+
+        let minimum = try SourcePhysicsBodyMutationCommand(
+            bodyID: bodyID,
+            mutation: .setMassKilograms(
+                SourcePhysicsContract.minimumMassKilograms
+            )
+        )
+        let maximum = try SourcePhysicsBodyMutationCommand(
+            bodyID: bodyID,
+            mutation: .setMassKilograms(
+                SourcePhysicsContract.maximumMassKilograms
+            )
+        )
+        #expect(minimum.mutation == .setMassKilograms(0.1))
+        #expect(maximum.mutation == .setMassKilograms(50_000))
+    }
+
     @Test("shape, mass, inertia, and transforms reject missing or invented values")
     func invalidPhysicalInputsFailClosed() throws {
         #expect(throws: SourcePhysicsContractError.emptyShape) {

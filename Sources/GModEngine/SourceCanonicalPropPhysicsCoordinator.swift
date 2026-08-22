@@ -221,6 +221,7 @@ public enum SourceCanonicalPropPhysicsOperation: Equatable, Sendable {
 /// Solver-authored state to commit back into the canonical entity store.
 public struct SourceCanonicalPropPhysicsMotionSnapshot: Equatable, Sendable {
     public let bodyID: SourcePhysicsBodyID
+    public let massProperties: SourcePhysicsMassProperties
     public let transform: SourceEntityTransform
     public let linearVelocity: SourceVector3
     public let angularVelocity: SourceVector3
@@ -233,6 +234,7 @@ public struct SourceCanonicalPropPhysicsMotionSnapshot: Equatable, Sendable {
 
     public init(body: SourcePhysicsBodySnapshot) {
         bodyID = body.bodyID
+        massProperties = body.massProperties
         transform = body.transform
         linearVelocity = body.linearVelocity
         angularVelocity = body.angularVelocity
@@ -282,6 +284,13 @@ public final class SourceCanonicalPropPhysicsCoordinator {
     private struct CommittedBody {
         let definition: SourceCanonicalPropPhysicsBodyDefinition
         let body: SourcePhysicsBodySnapshot
+    }
+
+    private enum ExpectedMassState {
+        case exact(SourcePhysicsMassProperties)
+        /// SetMass guarantees mass at the public boundary. The backend owns
+        /// its inertia policy until the resulting body snapshot is committed.
+        case backendAuthoredInertia(massKilograms: Float)
     }
 
     private let environment: SourcePhysicsEnvironment
@@ -402,6 +411,7 @@ public final class SourceCanonicalPropPhysicsCoordinator {
         let candidateBodies = try validate(
             environmentSnapshot: environmentSnapshot,
             desiredBodies: desiredBodies,
+            expectedMassStates: expectedMassStates(after: commands),
             deletedBodyIDs: deletions,
             finalCommandSequence: sequences[commandIndex],
             simulationTick: simulationTick
@@ -553,6 +563,7 @@ public final class SourceCanonicalPropPhysicsCoordinator {
     private func validate(
         environmentSnapshot: SourcePhysicsEnvironmentSnapshot,
         desiredBodies: [SourcePhysicsBodyID: DesiredBody],
+        expectedMassStates: [SourcePhysicsBodyID: ExpectedMassState],
         deletedBodyIDs: [SourcePhysicsBodyID],
         finalCommandSequence: UInt64,
         simulationTick: UInt64
@@ -599,9 +610,24 @@ public final class SourceCanonicalPropPhysicsCoordinator {
                         received: body.simulationTick
                     )
             }
+            guard let expectedMass = expectedMassStates[bodyID] else {
+                throw SourceCanonicalPropPhysicsCoordinatorError
+                    .environmentBodyConfigurationMismatch(bodyID)
+            }
+            switch expectedMass {
+            case let .exact(properties):
+                guard body.massProperties == properties else {
+                    throw SourceCanonicalPropPhysicsCoordinatorError
+                        .environmentBodyConfigurationMismatch(bodyID)
+                }
+            case let .backendAuthoredInertia(massKilograms):
+                guard body.massProperties.massKilograms == massKilograms else {
+                    throw SourceCanonicalPropPhysicsCoordinatorError
+                        .environmentBodyConfigurationMismatch(bodyID)
+                }
+            }
             guard
                 body.shape == desired.definition.shape,
-                body.massProperties == desired.definition.massProperties,
                 body.motionType == desired.definition.motionType,
                 body.materialIndex == desired.definition.materialIndex
             else {
@@ -614,6 +640,31 @@ public final class SourceCanonicalPropPhysicsCoordinator {
             )
         }
         return candidate
+    }
+
+    private func expectedMassStates(
+        after commands: [SourcePhysicsCommand]
+    ) -> [SourcePhysicsBodyID: ExpectedMassState] {
+        var states = committedBodies.mapValues {
+            ExpectedMassState.exact($0.body.massProperties)
+        }
+        for command in commands {
+            switch command.payload {
+            case let .createBody(creation):
+                states[creation.bodyID] = .exact(creation.massProperties)
+            case let .deleteBody(deletion):
+                states.removeValue(forKey: deletion.bodyID)
+            case let .mutateBody(command):
+                if case let .setMassKilograms(massKilograms) = command.mutation {
+                    states[command.bodyID] = .backendAuthoredInertia(
+                        massKilograms: massKilograms
+                    )
+                }
+            case .simulate, .query:
+                break
+            }
+        }
+        return states
     }
 
     private func makeOperations(

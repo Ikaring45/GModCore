@@ -596,7 +596,7 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
                 bodySnapshots[motion.bodyID] = try SourcePhysicsBodySnapshot(
                     bodyID: motion.bodyID,
                     shape: definition.shape,
-                    massProperties: definition.massProperties,
+                    massProperties: motion.massProperties,
                     transform: motion.transform,
                     linearVelocity: motion.linearVelocity,
                     angularVelocity: motion.angularVelocity,

@@ -391,6 +391,13 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
                 ))
             )
         }
+        try setPhysicsMutationMethod("SetMass") { arguments in
+            .setMassKilograms(Float(try self.requiredNumber(
+                arguments,
+                at: 1,
+                function: "PhysObj:SetMass"
+            )))
+        }
     }
 
     private func setPhysicsMutationMethod(

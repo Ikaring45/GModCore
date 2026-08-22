@@ -68,7 +68,7 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
 
             assert(phys.GetMassCenter == nil)
             assert(phys:IsMotionEnabled() == true)
-            assert(phys.SetMass == nil)
+            assert(type(phys.SetMass) == "function")
 
             phys:Wake()
             phys:Sleep()
@@ -80,6 +80,23 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
             phys:SetAngleVelocity(Vector(40, 50, 60))
             phys:AddAngleVelocity(Vector(4, 5, 6))
             phys:SetDamping(1.25, 2.5)
+            phys:SetMass(24)
+            local massOK, massMessage = pcall(function()
+                phys:SetMass(0.09)
+            end)
+            assert(massOK == false and massMessage ~= nil)
+            massOK, massMessage = pcall(function()
+                phys:SetMass(50001)
+            end)
+            assert(massOK == false and massMessage ~= nil)
+            massOK, massMessage = pcall(function()
+                phys:SetMass(math.huge)
+            end)
+            assert(massOK == false and massMessage ~= nil)
+            massOK, massMessage = pcall(function()
+                phys:SetMass(0 / 0)
+            end)
+            assert(massOK == false and massMessage ~= nil)
             local dampingOK, dampingMessage = pcall(function()
                 phys:SetDamping(-1, 2)
             end)
@@ -174,6 +191,10 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
             ),
             SourcePhysicsBodyMutationCommand(
                 bodyID: pending.bodyID,
+                mutation: .setMassKilograms(24)
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
                 mutation: .applyCenterForce(SourceVector3(100, 200, 300))
             ),
             SourcePhysicsBodyMutationCommand(
@@ -198,6 +219,8 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
             linearVelocity: SourceVector3(14, 15, 16),
             angularVelocity: SourceVector3(17, 18, 19),
             damping: SourcePhysicsDamping(linear: 1.25, angular: 2.5),
+            massKilograms: 24,
+            principalInertia: SourceVector3(4, 6, 8),
             isCollisionEnabled: true,
             isSleeping: false
         )
@@ -214,6 +237,7 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
             assert(pos.x == 40 and pos.y == 50 and pos.z == 60)
             assert(current:IsCollisionEnabled() == true)
             assert(current:IsAsleep() == false)
+            assert(current:GetMass() == 24)
             local speedDamping, rotDamping = current:GetDamping()
             assert(speedDamping == 1.25 and rotDamping == 2.5)
             assert(current:GetSpeedDamping() == 1.25)
@@ -448,6 +472,8 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
         linearVelocity: SourceVector3,
         angularVelocity: SourceVector3,
         damping: SourcePhysicsDamping = .zero,
+        massKilograms: Float = 12,
+        principalInertia: SourceVector3 = SourceVector3(2, 3, 4),
         isCollisionEnabled: Bool,
         isSleeping: Bool
     ) throws -> SourcePhysicsBodySnapshot {
@@ -455,8 +481,8 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
             bodyID: bodyID,
             shape: makeShape(),
             massProperties: SourcePhysicsMassProperties(
-                massKilograms: 12,
-                principalInertia: SourceVector3(2, 3, 4)
+                massKilograms: massKilograms,
+                principalInertia: principalInertia
             ),
             transform: transform,
             linearVelocity: linearVelocity,

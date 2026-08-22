@@ -137,6 +137,92 @@ struct SourceDeterministicPhysicsEnvironmentTests {
         #expect(contact.simulationTick == 1)
     }
 
+    @Test("SetMass preserves authored inertia ratio and failed batches roll back")
+    func setMassAndTransactionalRollback() throws {
+        let environment = SourceDeterministicPhysicsEnvironment(
+            configuration: try .init(gravity: .zero)
+        )
+        let bodyID = try makeBodyID(entry: 90, serial: 12)
+        let missingBodyID = try makeBodyID(entry: 91, serial: 12)
+        _ = try environment.execute(SourcePhysicsCommandBatch(commands: [
+            SourcePhysicsCommand(
+                sequence: 1,
+                payload: .createBody(try makeCreation(
+                    bodyID: bodyID,
+                    shape: makeCubeShape(),
+                    origin: .zero,
+                    motionType: .dynamicBody,
+                    mass: 10,
+                    inertia: SourceVector3(2, 4, 6),
+                    material: 1,
+                    gravity: false
+                ))
+            ),
+            SourcePhysicsCommand(
+                sequence: 2,
+                payload: .simulate(SourcePhysicsSimulateCommand(
+                    simulationTick: 1
+                ))
+            ),
+        ]))
+
+        let changed = try environment.execute(SourcePhysicsCommandBatch(commands: [
+            SourcePhysicsCommand(
+                sequence: 3,
+                payload: .mutateBody(try SourcePhysicsBodyMutationCommand(
+                    bodyID: bodyID,
+                    mutation: .setMassKilograms(20)
+                ))
+            ),
+            SourcePhysicsCommand(
+                sequence: 4,
+                payload: .simulate(SourcePhysicsSimulateCommand(
+                    simulationTick: 2
+                ))
+            ),
+        ]))
+        let changedBody = try #require(changed.bodies.first)
+        #expect(changedBody.massProperties.massKilograms == 20)
+        #expect(
+            changedBody.massProperties.principalInertia ==
+                SourceVector3(4, 8, 12)
+        )
+
+        #expect(throws: SourceDeterministicPhysicsEnvironment.Error.missingBody(
+            missingBodyID
+        )) {
+            _ = try environment.execute(SourcePhysicsCommandBatch(commands: [
+                SourcePhysicsCommand(
+                    sequence: 5,
+                    payload: .mutateBody(try SourcePhysicsBodyMutationCommand(
+                        bodyID: bodyID,
+                        mutation: .setMassKilograms(30)
+                    ))
+                ),
+                SourcePhysicsCommand(
+                    sequence: 6,
+                    payload: .mutateBody(try SourcePhysicsBodyMutationCommand(
+                        bodyID: missingBodyID,
+                        mutation: .setMassKilograms(40)
+                    ))
+                ),
+            ]))
+        }
+
+        let afterRollback = try environment.execute(
+            SourcePhysicsCommandBatch(commands: [
+                SourcePhysicsCommand(
+                    sequence: 5,
+                    payload: .simulate(SourcePhysicsSimulateCommand(
+                        simulationTick: 3
+                    ))
+                ),
+            ])
+        )
+        let rolledBackBody = try #require(afterRollback.bodies.first)
+        #expect(rolledBackBody.massProperties == changedBody.massProperties)
+    }
+
     @Test("line and swept hull queries filter exact EHANDLE generations")
     func generationSafeQueries() throws {
         let environment = SourceDeterministicPhysicsEnvironment()

@@ -676,6 +676,7 @@ private final class RecordingPhysicsEnvironment: SourcePhysicsEnvironment {
         var linearVelocity = body.linearVelocity
         var angularVelocity = body.angularVelocity
         var damping = body.damping
+        var massProperties = body.massProperties
         var isMotionEnabled = body.isMotionEnabled
         var isGravityEnabled = body.isGravityEnabled
         var isCollisionEnabled = body.isCollisionEnabled
@@ -720,11 +721,17 @@ private final class RecordingPhysicsEnvironment: SourcePhysicsEnvironment {
                 linear: linear,
                 angular: angular
             )
+        case let .setMassKilograms(massKilograms):
+            let scale = massKilograms / body.massProperties.massKilograms
+            massProperties = try SourcePhysicsMassProperties(
+                massKilograms: massKilograms,
+                principalInertia: body.massProperties.principalInertia * scale
+            )
         }
         return try SourcePhysicsBodySnapshot(
             bodyID: body.bodyID,
             shape: body.shape,
-            massProperties: body.massProperties,
+            massProperties: massProperties,
             transform: body.transform,
             linearVelocity: linearVelocity,
             angularVelocity: angularVelocity,

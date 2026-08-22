@@ -271,6 +271,7 @@ public final class SourceDeterministicPhysicsEnvironment:
 
     private struct BodyState: Equatable {
         let creation: SourcePhysicsBodyCreationCommand
+        var massProperties: SourcePhysicsMassProperties
         var transform: SourceEntityTransform
         var linearVelocity: SourceVector3
         var angularVelocity: SourceVector3
@@ -664,6 +665,7 @@ public final class SourceDeterministicPhysicsEnvironment:
                 }
                 candidateBodies[creation.bodyID] = BodyState(
                     creation: creation,
+                    massProperties: creation.massProperties,
                     transform: creation.transform,
                     linearVelocity: creation.linearVelocity,
                     angularVelocity: creation.angularVelocity,
@@ -850,7 +852,7 @@ public final class SourceDeterministicPhysicsEnvironment:
             try requireEnabledDynamicMotion()
             body.linearVelocity = try checked(
                 body.linearVelocity + impulse /
-                    body.creation.massProperties.massKilograms,
+                    body.massProperties.massKilograms,
                 operation: "applyCenterImpulse"
             )
             wake(&body)
@@ -876,6 +878,19 @@ public final class SourceDeterministicPhysicsEnvironment:
             body.damping = try SourcePhysicsDamping(
                 linear: linear,
                 angular: angular
+            )
+        case let .setMassKilograms(massKilograms):
+            // The public boundary guarantees the authored VPhysics mass. This
+            // proportional inertia update is deliberately a policy of this
+            // deterministic backend, not a claim about undocumented
+            // IPhysicsObject::SetMass internals. The immutable creation ratio
+            // retains the shape-authored principal-inertia proportions and
+            // avoids compounding round-off across repeated mass changes.
+            let authored = body.creation.massProperties
+            let scale = massKilograms / authored.massKilograms
+            body.massProperties = try SourcePhysicsMassProperties(
+                massKilograms: massKilograms,
+                principalInertia: authored.principalInertia * scale
             )
         }
     }
@@ -907,7 +922,7 @@ public final class SourceDeterministicPhysicsEnvironment:
                 if body.accumulatedCenterForce != .zero {
                     let nextVelocity = body.linearVelocity +
                         body.accumulatedCenterForce *
-                        (delta / body.creation.massProperties.massKilograms)
+                        (delta / body.massProperties.massKilograms)
                     guard nextVelocity.x.isFinite,
                           nextVelocity.y.isFinite,
                           nextVelocity.z.isFinite else {
@@ -1650,7 +1665,7 @@ public final class SourceDeterministicPhysicsEnvironment:
 
     private func inverseMass(_ body: BodyState) -> Float {
         guard body.isDynamic else { return 0 }
-        return 1 / body.creation.massProperties.massKilograms
+        return 1 / body.massProperties.massKilograms
     }
 
     private func pointVelocity(
@@ -1703,7 +1718,7 @@ public final class SourceDeterministicPhysicsEnvironment:
             worldVector.dot(localY),
             worldVector.dot(localZ)
         )
-        let inertia = body.creation.massProperties.principalInertia
+        let inertia = body.massProperties.principalInertia
         let scaled = SourceVector3(
             local.x / inertia.x,
             local.y / inertia.y,
@@ -2614,7 +2629,7 @@ public final class SourceDeterministicPhysicsEnvironment:
                 try SourcePhysicsBodySnapshot(
                     bodyID: body.bodyID,
                     shape: body.creation.shape,
-                    massProperties: body.creation.massProperties,
+                    massProperties: body.massProperties,
                     transform: body.transform,
                     linearVelocity: body.linearVelocity,
                     angularVelocity: body.angularVelocity,

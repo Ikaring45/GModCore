@@ -245,7 +245,7 @@ public struct SourcePhysicsReplayFrame: Equatable, Sendable {
 
 /// Decoded value transcript plus its canonical little-endian binary form.
 public struct SourcePhysicsReplayLog: Equatable, Sendable {
-    public static let formatVersion: UInt16 = 5
+    public static let formatVersion: UInt16 = 6
 
     public let fixedTimeStepSeconds: Float
     public let frames: [SourcePhysicsReplayFrame]
@@ -405,6 +405,8 @@ private struct SourcePhysicsReplayPreparedFrame {
 
 private struct SourcePhysicsReplayLiveBody {
     let creation: SourcePhysicsBodyCreationCommand
+    var massProperties: SourcePhysicsMassProperties
+    var pendingMassKilograms: Float?
     var damping: SourcePhysicsDamping
     var isMotionEnabled: Bool
     var isGravityEnabled: Bool
@@ -412,6 +414,8 @@ private struct SourcePhysicsReplayLiveBody {
 
     init(creation: SourcePhysicsBodyCreationCommand) {
         self.creation = creation
+        massProperties = creation.massProperties
+        pendingMassKilograms = nil
         damping = creation.damping
         isMotionEnabled = creation.motionType != .staticBody
         isGravityEnabled = creation.isGravityEnabled
@@ -796,6 +800,11 @@ private struct SourcePhysicsReplayTranscriptValidator {
                 linear: linear,
                 angular: angular
             )
+        case let .setMassKilograms(massKilograms):
+            // The public replay contract fixes the new mass. Principal
+            // inertia after SetMass remains backend-authored until its first
+            // validated snapshot, then becomes exact replay state.
+            body.pendingMassKilograms = massKilograms
         case .setLinearVelocity,
              .addLinearVelocity,
              .setAngularVelocity,
@@ -826,7 +835,7 @@ private struct SourcePhysicsReplayTranscriptValidator {
         retiredHandles.insert(handle)
     }
 
-    private func validateBodySnapshots(
+    private mutating func validateBodySnapshots(
         _ bodies: [SourcePhysicsBodySnapshot],
         simulationTick: UInt64
     ) throws {
@@ -854,15 +863,26 @@ private struct SourcePhysicsReplayTranscriptValidator {
             )
         }
         for body in bodies {
-            guard let liveBody = liveBodies[body.bodyID] else {
+            guard var liveBody = liveBodies[body.bodyID] else {
                 throw SourcePhysicsReplayError.environmentBodySetMismatch(
                     expected: expected,
                     received: received
                 )
             }
+            if let pendingMassKilograms = liveBody.pendingMassKilograms {
+                guard body.massProperties.massKilograms == pendingMassKilograms else {
+                    throw SourcePhysicsReplayError
+                        .environmentBodyDefinitionMismatch(body.bodyID)
+                }
+                liveBody.massProperties = body.massProperties
+                liveBody.pendingMassKilograms = nil
+                liveBodies[body.bodyID] = liveBody
+            } else if body.massProperties != liveBody.massProperties {
+                throw SourcePhysicsReplayError
+                    .environmentBodyDefinitionMismatch(body.bodyID)
+            }
             guard
                 body.shape == liveBody.creation.shape,
-                body.massProperties == liveBody.creation.massProperties,
                 body.motionType == liveBody.creation.motionType,
                 body.materialIndex == liveBody.creation.materialIndex,
                 body.damping == liveBody.damping,
@@ -1232,6 +1252,9 @@ private struct SourcePhysicsReplayEncoder {
             try writeUInt8(13)
             try writeFloat(linear, field: "mutation.linearDamping")
             try writeFloat(angular, field: "mutation.angularDamping")
+        case let .setMassKilograms(massKilograms):
+            try writeUInt8(14)
+            try writeFloat(massKilograms, field: "mutation.massKilograms")
         }
     }
 
@@ -1693,6 +1716,10 @@ private struct SourcePhysicsReplayDecoder {
                 linear: try readFloat(field: "mutation.linearDamping"),
                 angular: try readFloat(field: "mutation.angularDamping")
             )
+        case 14:
+            mutation = .setMassKilograms(try readFloat(
+                field: "mutation.massKilograms"
+            ))
         default:
             throw SourcePhysicsReplayError.invalidTag(
                 field: "bodyMutation",

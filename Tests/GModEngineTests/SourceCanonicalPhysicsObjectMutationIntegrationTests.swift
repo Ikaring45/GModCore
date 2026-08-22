@@ -13,6 +13,88 @@ final class SourceCanonicalPhysicsObjectMutationIntegrationTests: XCTestCase {
     private let phyData = Data("exact mutation phy".utf8)
     private let studioChecksum: Int32 = 91_337
 
+    func testSetMassUsesFullBodyIdentityFIFOAndPublishesCanonicalSnapshot()
+        throws
+    {
+        let setup = try makeSetup()
+        defer { setup.close() }
+
+        let values = try setup.server.executeReturningValues(
+            """
+            local prop = assert(ents.Create("prop_physics"))
+            prop:SetModel("models/props/physics_mutation.mdl")
+            prop:Spawn()
+            prop:Activate()
+            local phys = prop:GetPhysicsObject()
+            assert(IsValid(phys))
+            assert(phys:GetMass() == 19)
+            phys:SetMass(38)
+            MASS_PROP = prop
+            return prop
+            """,
+            sourceName: "=(authoritative PhysObj SetMass FIFO)"
+        )
+        let entity = try XCTUnwrap(
+            setup.server.entityRegistry?.canonicalSnapshot(
+                for: try XCTUnwrap(values.first)
+            )
+        )
+        let bodyID = try SourcePhysicsBodyID(
+            entityIdentity: entity.identity,
+            solidIndex: 0
+        )
+        let pending = setup.transport
+            .preparePendingCanonicalPhysicsBodyCommands()
+        XCTAssertEqual(pending.map(\.sequence), [1, 2])
+        guard case let .createBody(creation) = pending[0].payload,
+              case let .mutateBody(mutation) = pending[1].payload else {
+            return XCTFail("SetMass did not follow body creation in the FIFO")
+        }
+        XCTAssertEqual(creation.bodyID, bodyID)
+        XCTAssertEqual(mutation.bodyID, bodyID)
+        XCTAssertEqual(mutation.mutation, .setMassKilograms(38))
+
+        _ = try setup.adapter.runServerFixedTick()
+        let coordinator = SourceCanonicalPropPhysicsCoordinator(
+            environment: setup.environment,
+            commandSequenceSource: setup.transport
+        )
+        let step = try coordinator.step(
+            inputs: setup.adapter.prepareCanonicalPropPhysicsStep(),
+            simulationTick: UInt64(setup.adapter.serverGlobals.tickCount)
+        )
+        XCTAssertEqual(step.commandSequences, [1, 2, 3])
+        let body = try XCTUnwrap(step.bodies.first)
+        XCTAssertEqual(body.bodyID, bodyID)
+        XCTAssertEqual(body.massProperties.massKilograms, 38)
+        XCTAssertEqual(
+            body.massProperties.principalInertia,
+            SourceVector3(4, 6, 8)
+        )
+        try setup.adapter.commitCanonicalPropPhysicsStep(step)
+
+        _ = try setup.adapter.runServerFixedTick()
+        let nextStep = try coordinator.step(
+            inputs: setup.adapter.prepareCanonicalPropPhysicsStep(),
+            simulationTick: UInt64(setup.adapter.serverGlobals.tickCount)
+        )
+        XCTAssertEqual(nextStep.commandSequences, [4])
+        XCTAssertEqual(nextStep.operations, [])
+        XCTAssertEqual(nextStep.bodies.first?.massProperties, body.massProperties)
+        try setup.adapter.commitCanonicalPropPhysicsStep(nextStep)
+
+        try setup.server.execute(
+            """
+            local phys = MASS_PROP:GetPhysicsObject()
+            assert(IsValid(phys))
+            assert(phys:GetMass() == 38)
+            local inertia = phys:GetInertia()
+            assert(inertia.x == 4 and inertia.y == 6 and inertia.z == 8)
+            """,
+            sourceName: "=(committed PhysObj SetMass snapshot)"
+        )
+    }
+
     func testSpawnWakeAndMutatorsShareGlobalFIFOThenPublishNextTick()
         throws
     {

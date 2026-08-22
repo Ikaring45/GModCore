@@ -335,6 +335,7 @@ public enum SourcePhysicsBodyMutation: Equatable, Sendable {
     /// Valve `AngularImpulse`: HL/world axes, kilograms-degrees/second.
     case applyTorqueCenter(SourceVector3)
     case setDamping(linear: Float, angular: Float)
+    case setMassKilograms(Float)
 }
 
 public struct SourcePhysicsBodyMutationCommand: Equatable, Sendable {
@@ -410,6 +411,20 @@ public struct SourcePhysicsBodyMutationCommand: Equatable, Sendable {
                 throw SourcePhysicsContractError.negative(
                     field: "bodyMutation.angularDamping"
                 )
+            }
+        case let .setMassKilograms(massKilograms):
+            guard massKilograms.isFinite else {
+                throw SourcePhysicsContractError.nonFinite(
+                    field: "bodyMutation.massKilograms"
+                )
+            }
+            guard
+                (SourcePhysicsContract.minimumMassKilograms ...
+                    SourcePhysicsContract.maximumMassKilograms)
+                    .contains(massKilograms)
+            else {
+                throw SourcePhysicsContractError
+                    .massOutsideVPhysicsRange(massKilograms)
             }
         case .wake,
              .sleep,
