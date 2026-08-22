@@ -196,6 +196,8 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
         SourceCanonicalBodyGroupLayoutResolver?
     private let canonicalMaterialOverrideResolver:
         SourceCanonicalMaterialOverrideResolver?
+    private let canonicalModelCollisionPropertyResolver:
+        SourceCanonicalModelCollisionPropertyResolver
     private let canonicalPropPhysicsAssetResolver:
         SourceCanonicalPropPhysicsAssetResolver
     private let mutationLock = NSRecursiveLock()
@@ -254,6 +256,8 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
             SourceCanonicalBodyGroupLayoutResolver? = nil,
         canonicalMaterialOverrideResolver:
             SourceCanonicalMaterialOverrideResolver? = nil,
+        canonicalModelCollisionPropertyResolver:
+            SourceCanonicalModelCollisionPropertyResolver? = nil,
         canonicalPropPhysicsAssetResolver:
             SourceCanonicalPropPhysicsAssetResolver? = nil,
         canonicalNetworkVariableAllocationPolicy:
@@ -268,6 +272,8 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
                 canonicalBodyGroupLayoutResolver,
             canonicalMaterialOverrideResolver:
                 canonicalMaterialOverrideResolver,
+            canonicalModelCollisionPropertyResolver:
+                canonicalModelCollisionPropertyResolver,
             canonicalPropPhysicsAssetResolver:
                 canonicalPropPhysicsAssetResolver,
             canonicalNetworkVariableAllocationPolicy:
@@ -317,6 +323,8 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
             SourceCanonicalBodyGroupLayoutResolver? = nil,
         canonicalMaterialOverrideResolver:
             SourceCanonicalMaterialOverrideResolver? = nil,
+        canonicalModelCollisionPropertyResolver:
+            SourceCanonicalModelCollisionPropertyResolver? = nil,
         canonicalPropPhysicsAssetResolver:
             SourceCanonicalPropPhysicsAssetResolver? = nil,
         canonicalNetworkVariableAllocationPolicy:
@@ -373,6 +381,8 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
             canonicalBodyGroupLayoutResolver
         self.canonicalMaterialOverrideResolver =
             canonicalMaterialOverrideResolver
+        self.canonicalModelCollisionPropertyResolver =
+            canonicalModelCollisionPropertyResolver ?? { _, _ in .unavailable }
         self.canonicalPropPhysicsAssetResolver =
             canonicalPropPhysicsAssetResolver ?? { _ in .unavailable }
         consoleDispatcher.connectForwardedCommandTransactionHost(self)
@@ -799,12 +809,27 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
                     .modelValidationUnavailable(worldModel)
             }
 
+            let collisionProperty: SourceCollisionProperty
+            switch canonicalModelCollisionPropertyResolver(
+                worldModel,
+                .weapon
+            ) {
+            case let .valid(property):
+                collisionProperty = property
+            case .invalid:
+                throw SourceCanonicalEntityError.modelRejected(worldModel)
+            case .unavailable:
+                throw SourceCanonicalEntityError
+                    .modelValidationUnavailable(worldModel)
+            }
+
             try preflightCanonicalMutationJournalLocked(
                 additionalOperations: 1
             )
             var state = SourceCanonicalEntityState.defaults(for: .weapon)
             state.creationTime = kernel.globals.currentTime
             state.model = worldModel
+            state.collisionProperty = collisionProperty
             state.isNotSolid = false
             let snapshot = try canonicalEntities.create(
                 kind: .weapon,

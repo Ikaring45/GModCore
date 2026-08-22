@@ -185,7 +185,9 @@ public final class GModStudioModelRepository: @unchecked Sendable {
         for model: SourceEntityModelReference,
         kind: SourceCanonicalEntityKind
     ) -> SourceCanonicalModelValidation {
-        guard kind == .propPhysics else { return .unavailable }
+        guard kind == .propPhysics || kind == .weapon else {
+            return .unavailable
+        }
         switch renderAsset(for: model) {
         case .loaded:
             return .valid
@@ -196,6 +198,41 @@ public final class GModStudioModelRepository: @unchecked Sendable {
             case .invalidRequest, .readFailed, .byteBudgetExceeded,
                     .totalByteBudgetExceeded:
                 return .unavailable
+            }
+        }
+    }
+
+    /// Resolves the authored `studiohdr_t.hull_min/max` used by Source's
+    /// world-weapon `SOLID_BBOX` path. This is not a guessed render box and it
+    /// is not promoted into a VPhysics shape. A session may prefer a separately
+    /// attested PHY collision property before calling this Studio-backed path.
+    public func collisionPropertyResolution(
+        for model: SourceEntityModelReference,
+        kind: SourceCanonicalEntityKind
+    ) -> SourceCanonicalModelCollisionPropertyResolution {
+        guard kind == .weapon else { return .unavailable }
+        switch renderAsset(for: model) {
+        case let .unavailable(reason):
+            switch reason {
+            case .missing, .malformed:
+                return .invalid
+            case .invalidRequest, .readFailed, .byteBudgetExceeded,
+                    .totalByteBudgetExceeded:
+                return .unavailable
+            }
+        case let .loaded(asset):
+            do {
+                let metadata = try SourceStudioModelSpatialMetadataDecoder
+                    .decode(
+                        asset.renderPayload,
+                        budget: .init(maximumSurfacePropertyBytes: 4_096)
+                    )
+                return .valid(try SourceCollisionProperty(
+                    mins: metadata.hullMinimum,
+                    maxs: metadata.hullMaximum
+                ))
+            } catch {
+                return .invalid
             }
         }
     }

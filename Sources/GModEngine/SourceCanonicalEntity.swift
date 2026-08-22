@@ -1055,6 +1055,24 @@ public typealias SourceCanonicalModelValidator = (
     _ kind: SourceCanonicalEntityKind
 ) -> SourceCanonicalModelValidation
 
+/// Result of resolving the collision-property bounds which Source exposes as
+/// `Entity:OBBMins`/`OBBMaxs` for a validated model. The property must come
+/// from an authoritative PHY contract or the model's authored Studio hull;
+/// omission is preserved as unavailable instead of inventing a box.
+public enum SourceCanonicalModelCollisionPropertyResolution:
+    Equatable,
+    Sendable
+{
+    case valid(SourceCollisionProperty)
+    case invalid
+    case unavailable
+}
+
+public typealias SourceCanonicalModelCollisionPropertyResolver = @Sendable (
+    _ model: SourceEntityModelReference,
+    _ kind: SourceCanonicalEntityKind
+) -> SourceCanonicalModelCollisionPropertyResolution
+
 /// Resolves GLua body-group selections against one already validated Studio
 /// model. The Engine owns the atomic entity-state transaction while the host
 /// supplies filesystem-backed model metadata; omission never implies a

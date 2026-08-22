@@ -67,6 +67,41 @@ final class GModStudioModelRepositoryTests: XCTestCase {
         XCTAssertEqual(recorder.requests.count, 1)
     }
 
+    func testWeaponValidationAndCollisionPropertyUseAuthoredStudioHull() throws {
+        let model = SourceEntityModelReference(
+            "models/weapons/w_authored_test.mdl"
+        )
+        let checksum: Int32 = 207
+        var files = studioFiles([(model.path, checksum)])
+        files[model.path] = makeMDL(
+            path: model.path,
+            checksum: checksum,
+            hullMinimum: SourceVector3(-11, -7, -3),
+            hullMaximum: SourceVector3(13, 8, 9)
+        )
+        let repository = GModStudioModelRepository(
+            reader: CountingStudioAssetReader(files: files),
+            budget: repositoryBudget()
+        )
+
+        XCTAssertEqual(repository.validation(for: model, kind: .weapon), .valid)
+        XCTAssertEqual(
+            repository.collisionPropertyResolution(for: model, kind: .weapon),
+            .valid(try SourceCollisionProperty(
+                mins: SourceVector3(-11, -7, -3),
+                maxs: SourceVector3(13, 8, 9)
+            ))
+        )
+        XCTAssertEqual(
+            repository.collisionPropertyResolution(
+                for: model,
+                kind: .propPhysics
+            ),
+            .unavailable,
+            "Studio hull metadata must not replace an attested prop PHY contract"
+        )
+    }
+
     func testRawAssetCacheEvictsLeastRecentModelWithinExactByteCap() {
         let reader = CountingStudioAssetReader(files: studioFiles([
             ("models/a.mdl", 101),
@@ -222,13 +257,22 @@ final class GModStudioModelRepositoryTests: XCTestCase {
         )
     }
 
-    private func makeMDL(path: String, checksum: Int32) -> Data {
+    private func makeMDL(
+        path: String,
+        checksum: Int32,
+        hullMinimum: SourceVector3 = .zero,
+        hullMaximum: SourceVector3 = .zero
+    ) -> Data {
         var bytes = [UInt8](repeating: 0, count: 408)
         putUInt32(SourceStudioModel.magic, at: 0, into: &bytes)
         putInt32(48, at: 4, into: &bytes)
         putInt32(checksum, at: 8, into: &bytes)
         putCString(path, at: 12, capacity: 64, into: &bytes)
         putInt32(Int32(bytes.count), at: 76, into: &bytes)
+        putVector(hullMinimum, at: 104, into: &bytes)
+        putVector(hullMaximum, at: 116, into: &bytes)
+        putInt32(360, at: 308, into: &bytes)
+        putCString("default", at: 360, capacity: 32, into: &bytes)
         return Data(bytes)
     }
 
@@ -275,6 +319,16 @@ final class GModStudioModelRepositoryTests: XCTestCase {
 
     private func putInt32(_ value: Int32, at offset: Int, into bytes: inout [UInt8]) {
         putUInt32(UInt32(bitPattern: value), at: offset, into: &bytes)
+    }
+
+    private func putVector(
+        _ value: SourceVector3,
+        at offset: Int,
+        into bytes: inout [UInt8]
+    ) {
+        putUInt32(value.x.bitPattern, at: offset, into: &bytes)
+        putUInt32(value.y.bitPattern, at: offset + 4, into: &bytes)
+        putUInt32(value.z.bitPattern, at: offset + 8, into: &bytes)
     }
 
     private func putUInt32(_ value: UInt32, at offset: Int, into bytes: inout [UInt8]) {

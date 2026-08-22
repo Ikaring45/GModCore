@@ -182,6 +182,10 @@ public struct GModPlayableSessionConfiguration: Sendable, Equatable {
     /// content pack. This deliberately remains outside the pack so game
     /// content cannot self-attest its collision geometry or mass properties.
     public let attestedPropPhysicsManifestURL: URL?
+    /// Independently host-validated `IPhysicsSurfaceProps` name/index results.
+    /// Mounted surfaceproperties files remain untrusted until this result is
+    /// rebound to their exact bytes and parsed physics values.
+    public let surfaceMaterialResponseAttestationURL: URL?
     public let languageCode: String
     public let languagePhrases: [String: String]
     public let hostName: String
@@ -195,6 +199,7 @@ public struct GModPlayableSessionConfiguration: Sendable, Equatable {
         initialViewport: GMLuaViewportSize = .logicalDesktopDefault,
         contentPackURL: URL? = nil,
         attestedPropPhysicsManifestURL: URL? = nil,
+        surfaceMaterialResponseAttestationURL: URL? = nil,
         languageCode: String = "en",
         languagePhrases: [String: String] = [:],
         hostName: String = "Garry's PAD"
@@ -208,6 +213,8 @@ public struct GModPlayableSessionConfiguration: Sendable, Equatable {
         self.contentPackURL = contentPackURL
         self.attestedPropPhysicsManifestURL =
             attestedPropPhysicsManifestURL
+        self.surfaceMaterialResponseAttestationURL =
+            surfaceMaterialResponseAttestationURL
         self.languageCode = languageCode
         self.languagePhrases = languagePhrases
         self.hostName = hostName
@@ -344,6 +351,7 @@ public enum GModPlayableSessionError: Error, CustomStringConvertible, Equatable 
     case invalidLanguageCode(String)
     case invalidSinglePlayerMaxPlayers(Int)
     case attestedPropPhysicsManifestRequiresContentPack
+    case surfaceMaterialResponseAttestationRequiresSurfaceProperties
     case missingEntityText(String)
     case missingPlayerStart(String)
     case malformedPlayerStart(String)
@@ -362,6 +370,8 @@ public enum GModPlayableSessionError: Error, CustomStringConvertible, Equatable 
             return "playable single-player sessions require maxPlayers 1, got \(value)"
         case .attestedPropPhysicsManifestRequiresContentPack:
             return "an independently attested prop physics manifest requires a content pack"
+        case .surfaceMaterialResponseAttestationRequiresSurfaceProperties:
+            return "a surface material response attestation requires mounted surfaceproperties"
         case let .missingEntityText(map):
             return "bundled map \(map) has no UTF-8 entity lump"
         case let .missingPlayerStart(map):
@@ -426,6 +436,9 @@ public final class GModPlayableSession {
     /// provenance and are not treated as VPhysics runtime material indices.
     public let surfacePropertiesAttestation:
         SourceSurfacePropertiesAttestation?
+    /// Present only when an independent Source runtime lookup result agrees
+    /// with every mounted surfaceproperties input and parsed physics record.
+    public let physicsMaterialCatalog: SourcePhysicsRuntimeMaterialCatalog?
     public let clientMaterialResolver: GMLuaVPKMaterialPixelResolver
     public let worldMesh: GModWorldRenderMesh
     public let worldIdentity: GMLuaSourceEntityIdentity
@@ -623,6 +636,8 @@ public final class GModPlayableSession {
         worldWalkCollisionProvider:
             (any SourceWorldWalkCollisionProvider)?,
         canonicalModelValidator: SourceCanonicalModelValidator? = nil,
+        canonicalModelCollisionPropertyResolverForTesting:
+            SourceCanonicalModelCollisionPropertyResolver? = nil,
         attestedPropPhysicsAssets: [SourceAttestedPropPhysicsAsset] = [],
         canonicalPropPhysicsAssetResolverForTesting:
             SourceCanonicalPropPhysicsAssetResolver? = nil,
@@ -778,6 +793,27 @@ public final class GModPlayableSession {
             Self.loadSurfacePropertiesAttestationIfPresent(
                 from: loadedSourceGameFileSystem
             )
+        let loadedPhysicsMaterialCatalog:
+            SourcePhysicsRuntimeMaterialCatalog?
+        if let attestationURL =
+            configuration.surfaceMaterialResponseAttestationURL {
+            guard let loadedSurfacePropertiesAttestation else {
+                throw GModPlayableSessionError
+                    .surfaceMaterialResponseAttestationRequiresSurfaceProperties
+            }
+            let data = try Self.readSurfaceMaterialResponseAttestation(
+                at: attestationURL
+            )
+            loadedPhysicsMaterialCatalog = try
+                GModSurfaceMaterialResponseCatalogLoader.load(
+                    independentAttestationData: data,
+                    mountedSurfaceProperties:
+                        loadedSurfacePropertiesAttestation,
+                    fileSystem: loadedSourceGameFileSystem
+                )
+        } else {
+            loadedPhysicsMaterialCatalog = nil
+        }
         progress(.init(stage: .buildingWorldGeometry))
         let loadedWorldMesh = try GModWorldRenderMesh.build(
             from: loadedBSP,
@@ -945,6 +981,27 @@ public final class GModPlayableSession {
                     return resolver.resolve(model).canonicalResolution
                 }
             }
+            let activeModelCollisionPropertyResolver:
+                SourceCanonicalModelCollisionPropertyResolver
+            if let canonicalModelCollisionPropertyResolverForTesting {
+                activeModelCollisionPropertyResolver =
+                    canonicalModelCollisionPropertyResolverForTesting
+            } else {
+                activeModelCollisionPropertyResolver = { model, kind in
+                    // An independently attested PHY contract takes priority
+                    // when the exact model is in that catalog. Ordinary SWEP
+                    // models then use their authored Studio SOLID_BBOX hull.
+                    if case let .valid(asset) =
+                        activePropPhysicsAssetResolver(model) {
+                        return .valid(asset.collisionProperty)
+                    }
+                    guard let loadedStudioModelRepository else {
+                        return .unavailable
+                    }
+                    return loadedStudioModelRepository
+                        .collisionPropertyResolution(for: model, kind: kind)
+                }
+            }
             let activeBodyGroupResolver: SourceCanonicalBodyGroupResolver?
             if let loadedStudioModelRepository {
                 activeBodyGroupResolver = {
@@ -999,6 +1056,8 @@ public final class GModPlayableSession {
                     try loadedClientMaterialResolver.sourceMaterialResolver
                         .resolveEntityMaterialOverride(named: materialName)
                 },
+                canonicalModelCollisionPropertyResolver:
+                    activeModelCollisionPropertyResolver,
                 canonicalPropPhysicsAssetResolver:
                     activePropPhysicsAssetResolver
             )
@@ -1007,7 +1066,9 @@ public final class GModPlayableSession {
                 sourceAdapter?.canonicalEntitySnapshots ?? []
             }
             try sourceAdapter.installCanonicalEntityLuaBridge()
-            try sourceAdapter.installCanonicalPhysicsObjectLuaBridge()
+            try sourceAdapter.installCanonicalPhysicsObjectLuaBridge(
+                materialNames: loadedPhysicsMaterialCatalog?.nameTable
+            )
             try SourceCanonicalWeaponGameplayBridge.install(
                 into: server,
                 host: sourceAdapter,
@@ -1111,6 +1172,14 @@ public final class GModPlayableSession {
                 )
 
             try server.loadFile("lua/includes/init.lua")
+            // The official Entity extension implements this pair in Lua and
+            // would otherwise keep creator ownership in a realm-local field.
+            // Rebind once after init so stock Spawn_Weapon mutates the
+            // canonical full-EHANDLE relationship used by replication.
+            try SourceCanonicalEntityCreatorGLuaBridge.install(
+                into: server,
+                host: sourceAdapter
+            )
             // The bundled constraint module defines the public functions
             // during init. Install the engine-owned fixed-joint subset only
             // after that load so stock weld.lua reaches this SERVER boundary.
@@ -1295,6 +1364,7 @@ public final class GModPlayableSession {
             mapPakFileSystem = loadedMapPakFileSystem
             surfacePropertiesAttestation =
                 loadedSurfacePropertiesAttestation
+            physicsMaterialCatalog = loadedPhysicsMaterialCatalog
             clientMaterialResolver = loadedClientMaterialResolver
             worldMesh = loadedWorldMesh
             worldIdentity = sourceWorldIdentity
@@ -1818,6 +1888,23 @@ public final class GModPlayableSession {
         let data = try handle.read(upToCount: maximum + 1) ?? Data()
         guard data.count <= maximum else {
             throw GModAttestedPropPhysicsManifestError.manifestTooLarge(
+                actual: data.count,
+                maximum: maximum
+            )
+        }
+        return data
+    }
+
+    private static func readSurfaceMaterialResponseAttestation(
+        at url: URL
+    ) throws -> Data {
+        let maximum = GModSurfaceMaterialResponseCatalogLoader.Budget
+            .iPadValidated.maximumAttestationBytes
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let data = try handle.read(upToCount: maximum + 1) ?? Data()
+        guard data.count <= maximum else {
+            throw GModSurfaceMaterialResponseCatalogError.attestationTooLarge(
                 actual: data.count,
                 maximum: maximum
             )

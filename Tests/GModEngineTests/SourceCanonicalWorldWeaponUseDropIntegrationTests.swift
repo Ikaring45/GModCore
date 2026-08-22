@@ -4,11 +4,82 @@ import GModLua
 @testable import GModGameSession
 
 final class SourceCanonicalWorldWeaponUseDropIntegrationTests: XCTestCase {
+    func testStockSpawnWeaponPublishesCanonicalCreatorAndAuthoredOBB() throws {
+        let model = SourceEntityModelReference("models/weapons/w_toolgun.mdl")
+        let authoredWeaponHull = try SourceCollisionProperty(
+            mins: SourceVector3(-11, -7, -3),
+            maxs: SourceVector3(13, 8, 9)
+        )
+        let session = try GModPlayableSession(
+            configuration: .init(),
+            textMeasurer: nil,
+            logger: { _, _ in },
+            worldWalkCollisionProvider: nil,
+            canonicalModelValidator: { candidate, kind in
+                candidate == model && kind == .weapon ? .valid : .invalid
+            },
+            canonicalModelCollisionPropertyResolverForTesting: {
+                candidate,
+                kind in
+                candidate == model && kind == .weapon
+                    ? .valid(authoredWeaponHull)
+                    : .invalid
+            }
+        )
+        defer { _ = try? session.close() }
+
+        try session.serverRuntime.execute(
+            """
+            local ply = Player(1)
+            local tr = {
+                Hit = true,
+                HitPos = Vector(0, 0, 64),
+                HitNormal = Vector(0, 0, 1)
+            }
+            local wep = assert(Spawn_Weapon(ply, "gmod_tool", tr))
+            assert(wep:GetCreator() == ply)
+            local mins = wep:OBBMins()
+            local maxs = wep:OBBMaxs()
+            assert(mins.x == -11 and mins.y == -7 and mins.z == -3)
+            assert(maxs.x == 13 and maxs.y == 8 and maxs.z == 9)
+            STOCK_SPAWNED_WEAPON = wep
+            """,
+            sourceName: "=(stock Sandbox Spawn_Weapon canonical route)"
+        )
+
+        let player = try XCTUnwrap(
+            session.sourceAdapter.canonicalEntitySnapshots.first {
+                $0.kind == .player
+            }
+        )
+        let weapon = try XCTUnwrap(
+            session.sourceAdapter.canonicalEntitySnapshots.first {
+                $0.kind == .weapon && $0.className == "gmod_tool"
+            }
+        )
+        XCTAssertEqual(weapon.creator, player.identity)
+        XCTAssertEqual(weapon.collisionProperty, authoredWeaponHull)
+        XCTAssertEqual(weapon.lifecycle, .spawned)
+
+        let tick = try session.runFixedTick()
+        XCTAssertEqual(tick.actionFailures, [])
+        XCTAssertEqual(
+            session.clientCanonicalEntitySnapshots.first {
+                $0.identity == weapon.identity
+            },
+            session.sourceAdapter.canonicalSnapshot(for: weapon.identity)
+        )
+    }
+
     func testRegisteredWorldWeaponCreateContactPickupDropAndUsePickupKeepFullHandle()
         throws
     {
         let expectedModel = SourceEntityModelReference(
             "models/weapons/w_toolgun.mdl"
+        )
+        let authoredWeaponHull = try SourceCollisionProperty(
+            mins: SourceVector3(-8, -4, -3),
+            maxs: SourceVector3(9, 5, 6)
         )
         let session = try GModPlayableSession(
             configuration: .init(),
@@ -17,6 +88,11 @@ final class SourceCanonicalWorldWeaponUseDropIntegrationTests: XCTestCase {
             worldWalkCollisionProvider: nil,
             canonicalModelValidator: { model, kind in
                 model == expectedModel && kind == .weapon ? .valid : .invalid
+            },
+            canonicalModelCollisionPropertyResolverForTesting: { model, kind in
+                model == expectedModel && kind == .weapon
+                    ? .valid(authoredWeaponHull)
+                    : .invalid
             }
         )
         defer { _ = try? session.close() }
@@ -54,6 +130,7 @@ final class SourceCanonicalWorldWeaponUseDropIntegrationTests: XCTestCase {
             }
         )
         XCTAssertEqual(created.model, expectedModel)
+        XCTAssertEqual(created.collisionProperty, authoredWeaponHull)
         XCTAssertEqual(created.lifecycle, .spawned)
         XCTAssertNil(created.creator)
         XCTAssertEqual(created.transform.origin, SourceVector3(80, 24, 48))
