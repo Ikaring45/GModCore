@@ -245,7 +245,7 @@ public struct SourcePhysicsReplayFrame: Equatable, Sendable {
 
 /// Decoded value transcript plus its canonical little-endian binary form.
 public struct SourcePhysicsReplayLog: Equatable, Sendable {
-    public static let formatVersion: UInt16 = 4
+    public static let formatVersion: UInt16 = 5
 
     public let fixedTimeStepSeconds: Float
     public let frames: [SourcePhysicsReplayFrame]
@@ -405,12 +405,14 @@ private struct SourcePhysicsReplayPreparedFrame {
 
 private struct SourcePhysicsReplayLiveBody {
     let creation: SourcePhysicsBodyCreationCommand
+    var damping: SourcePhysicsDamping
     var isMotionEnabled: Bool
     var isGravityEnabled: Bool
     var isCollisionEnabled: Bool
 
     init(creation: SourcePhysicsBodyCreationCommand) {
         self.creation = creation
+        damping = creation.damping
         isMotionEnabled = creation.motionType != .staticBody
         isGravityEnabled = creation.isGravityEnabled
         isCollisionEnabled = creation.isCollisionEnabled
@@ -789,6 +791,11 @@ private struct SourcePhysicsReplayTranscriptValidator {
             body.isGravityEnabled = enabled
         case let .setCollisionEnabled(enabled):
             body.isCollisionEnabled = enabled
+        case let .setDamping(linear, angular):
+            body.damping = try SourcePhysicsDamping(
+                linear: linear,
+                angular: angular
+            )
         case .setLinearVelocity,
              .addLinearVelocity,
              .setAngularVelocity,
@@ -858,6 +865,7 @@ private struct SourcePhysicsReplayTranscriptValidator {
                 body.massProperties == liveBody.creation.massProperties,
                 body.motionType == liveBody.creation.motionType,
                 body.materialIndex == liveBody.creation.materialIndex,
+                body.damping == liveBody.damping,
                 body.isMotionEnabled == liveBody.isMotionEnabled,
                 body.isGravityEnabled == liveBody.isGravityEnabled,
                 body.isCollisionEnabled == liveBody.isCollisionEnabled
@@ -1220,6 +1228,10 @@ private struct SourcePhysicsReplayEncoder {
         case let .applyTorqueCenter(value):
             try writeUInt8(12)
             try write(value, field: "mutation.centerTorqueImpulse")
+        case let .setDamping(linear, angular):
+            try writeUInt8(13)
+            try writeFloat(linear, field: "mutation.linearDamping")
+            try writeFloat(angular, field: "mutation.angularDamping")
         }
     }
 
@@ -1232,6 +1244,8 @@ private struct SourcePhysicsReplayEncoder {
         try write(creation.transform)
         try write(creation.linearVelocity, field: "linearVelocity")
         try write(creation.angularVelocity, field: "angularVelocity")
+        try writeFloat(creation.damping.linear, field: "linearDamping")
+        try writeFloat(creation.damping.angular, field: "angularDamping")
         try write(creation.motionType)
         try writeNonnegativeInt(
             creation.materialIndex,
@@ -1304,6 +1318,8 @@ private struct SourcePhysicsReplayEncoder {
         try write(body.transform)
         try write(body.linearVelocity, field: "body.linearVelocity")
         try write(body.angularVelocity, field: "body.angularVelocity")
+        try writeFloat(body.damping.linear, field: "body.linearDamping")
+        try writeFloat(body.damping.angular, field: "body.angularDamping")
         try write(body.motionType)
         try writeNonnegativeInt(
             body.materialIndex,
@@ -1672,6 +1688,11 @@ private struct SourcePhysicsReplayDecoder {
             mutation = .applyTorqueCenter(try readVector(
                 field: "mutation.centerTorqueImpulse"
             ))
+        case 13:
+            mutation = .setDamping(
+                linear: try readFloat(field: "mutation.linearDamping"),
+                angular: try readFloat(field: "mutation.angularDamping")
+            )
         default:
             throw SourcePhysicsReplayError.invalidTag(
                 field: "bodyMutation",
@@ -1694,6 +1715,10 @@ private struct SourcePhysicsReplayDecoder {
             transform: readTransform(),
             linearVelocity: readVector(field: "linearVelocity"),
             angularVelocity: readVector(field: "angularVelocity"),
+            damping: SourcePhysicsDamping(
+                linear: readFloat(field: "linearDamping"),
+                angular: readFloat(field: "angularDamping")
+            ),
             motionType: readMotionType(),
             materialIndex: readNonnegativeInt(field: "materialIndex"),
             isGravityEnabled: readBool(field: "isGravityEnabled"),
@@ -1814,6 +1839,10 @@ private struct SourcePhysicsReplayDecoder {
             transform: readTransform(),
             linearVelocity: readVector(field: "body.linearVelocity"),
             angularVelocity: readVector(field: "body.angularVelocity"),
+            damping: SourcePhysicsDamping(
+                linear: readFloat(field: "body.linearDamping"),
+                angular: readFloat(field: "body.angularDamping")
+            ),
             motionType: readMotionType(),
             materialIndex: readNonnegativeInt(field: "body.materialIndex"),
             isMotionEnabled: readBool(field: "body.isMotionEnabled"),

@@ -471,6 +471,7 @@ struct SourceCanonicalPropPhysicsCoordinatorTests {
                 massKilograms: 12,
                 principalInertia: SourceVector3(2, 3, 4)
             ),
+            damping: .zero,
             motionType: .dynamicBody,
             materialIndex: 7,
             isGravityEnabled: true,
@@ -635,6 +636,7 @@ private final class RecordingPhysicsEnvironment: SourcePhysicsEnvironment {
             transform: transform,
             linearVelocity: linearVelocity,
             angularVelocity: angularVelocity,
+            damping: creation.damping,
             motionType: creation.motionType,
             materialIndex: creation.materialIndex,
             isGravityEnabled: creation.isGravityEnabled,
@@ -656,6 +658,7 @@ private final class RecordingPhysicsEnvironment: SourcePhysicsEnvironment {
             transform: transform,
             linearVelocity: body.linearVelocity,
             angularVelocity: body.angularVelocity,
+            damping: body.damping,
             motionType: body.motionType,
             materialIndex: body.materialIndex,
             isMotionEnabled: body.isMotionEnabled,
@@ -672,6 +675,7 @@ private final class RecordingPhysicsEnvironment: SourcePhysicsEnvironment {
     ) throws -> SourcePhysicsBodySnapshot {
         var linearVelocity = body.linearVelocity
         var angularVelocity = body.angularVelocity
+        var damping = body.damping
         var isMotionEnabled = body.isMotionEnabled
         var isGravityEnabled = body.isGravityEnabled
         var isCollisionEnabled = body.isCollisionEnabled
@@ -711,6 +715,11 @@ private final class RecordingPhysicsEnvironment: SourcePhysicsEnvironment {
                 body: body,
                 worldVector: value
             )
+        case let .setDamping(linear, angular):
+            damping = try SourcePhysicsDamping(
+                linear: linear,
+                angular: angular
+            )
         }
         return try SourcePhysicsBodySnapshot(
             bodyID: body.bodyID,
@@ -719,6 +728,7 @@ private final class RecordingPhysicsEnvironment: SourcePhysicsEnvironment {
             transform: body.transform,
             linearVelocity: linearVelocity,
             angularVelocity: angularVelocity,
+            damping: damping,
             motionType: body.motionType,
             materialIndex: body.materialIndex,
             isMotionEnabled: isMotionEnabled,

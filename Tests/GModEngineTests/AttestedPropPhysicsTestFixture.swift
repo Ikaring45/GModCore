@@ -3,6 +3,7 @@ import GModEngine
 func makeAttestedPropPhysicsTestAsset(
     modelPath: String,
     massKilograms: Float = 12,
+    damping: SourcePhysicsDamping = .zero,
     solidIndex: Int = 0,
     mdlSHA256: String = String(repeating: "a", count: 64),
     phySHA256: String = String(repeating: "b", count: 64),
@@ -54,6 +55,7 @@ func makeAttestedPropPhysicsTestAsset(
         materialIndex: materialIndex,
         bodyBehavior: SourceAttestedPropPhysicsBodyBehavior(
             motionType: .dynamicBody,
+            damping: damping,
             isGravityEnabled: true,
             isCollisionEnabled: true,
             startsAwake: true

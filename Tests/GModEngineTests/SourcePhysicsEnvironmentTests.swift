@@ -37,6 +37,7 @@ struct SourcePhysicsEnvironmentTests {
             ),
             linearVelocity: SourceVector3(4, 5, 6),
             angularVelocity: SourceVector3(7, 8, 9),
+            damping: try SourcePhysicsDamping(linear: 0.25, angular: 0.5),
             motionType: .dynamicBody,
             materialIndex: 11,
             isGravityEnabled: true,
@@ -52,8 +53,60 @@ struct SourcePhysicsEnvironmentTests {
         #expect(creation.massProperties == mass)
         #expect(creation.massProperties.massKilograms == 12.5)
         #expect(creation.massProperties.principalInertia == SourceVector3(3, 4, 5))
+        let expectedDamping = try SourcePhysicsDamping(
+            linear: 0.25,
+            angular: 0.5
+        )
+        #expect(creation.damping == expectedDamping)
         #expect(creation.materialIndex == 11)
         #expect(creation.startsAwake == false)
+    }
+
+    @Test("damping coefficients are finite, nonnegative, and FIFO-valid")
+    func dampingContractFailsClosed() throws {
+        #expect(SourcePhysicsDamping.sourceDefault.linear == 0.1)
+        #expect(SourcePhysicsDamping.sourceDefault.angular == 0.1)
+        #expect(SourcePhysicsDamping.zero.linear == 0)
+        #expect(SourcePhysicsDamping.zero.angular == 0)
+
+        #expect(throws: SourcePhysicsContractError.nonFinite(
+            field: "linearDamping"
+        )) {
+            _ = try SourcePhysicsDamping(linear: .nan, angular: 0)
+        }
+        #expect(throws: SourcePhysicsContractError.negative(
+            field: "angularDamping"
+        )) {
+            _ = try SourcePhysicsDamping(linear: 0, angular: -0.001)
+        }
+
+        let bodyID = try SourcePhysicsBodyID(
+            entityIdentity: makeIdentity(entryIndex: 812, serialNumber: 27),
+            solidIndex: 3
+        )
+        #expect(throws: SourcePhysicsContractError.nonFinite(
+            field: "bodyMutation.angularDamping"
+        )) {
+            _ = try SourcePhysicsBodyMutationCommand(
+                bodyID: bodyID,
+                mutation: .setDamping(linear: 1, angular: .infinity)
+            )
+        }
+        #expect(throws: SourcePhysicsContractError.negative(
+            field: "bodyMutation.linearDamping"
+        )) {
+            _ = try SourcePhysicsBodyMutationCommand(
+                bodyID: bodyID,
+                mutation: .setDamping(linear: -1, angular: 2)
+            )
+        }
+
+        let valid = try SourcePhysicsBodyMutationCommand(
+            bodyID: bodyID,
+            mutation: .setDamping(linear: 1.25, angular: 2.5)
+        )
+        #expect(valid.bodyID.entityIdentity.handle == bodyID.entityIdentity.handle)
+        #expect(valid.mutation == .setDamping(linear: 1.25, angular: 2.5))
     }
 
     @Test("shape, mass, inertia, and transforms reject missing or invented values")
@@ -108,6 +161,7 @@ struct SourcePhysicsEnvironmentTests {
                 ),
                 linearVelocity: .zero,
                 angularVelocity: .zero,
+                damping: .sourceDefault,
                 motionType: .dynamicBody,
                 materialIndex: 0,
                 isGravityEnabled: true,
@@ -435,6 +489,7 @@ struct SourcePhysicsEnvironmentTests {
             transform: .identity,
             linearVelocity: .zero,
             angularVelocity: .zero,
+            damping: .zero,
             motionType: .dynamicBody,
             materialIndex: 0,
             isGravityEnabled: true,

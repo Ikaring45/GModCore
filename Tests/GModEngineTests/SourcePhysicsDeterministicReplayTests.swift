@@ -87,7 +87,7 @@ struct SourcePhysicsDeterministicReplayTests {
             commandBatches: [batch],
             using: SourceDeterministicPhysicsEnvironment()
         )
-        #expect(SourcePhysicsReplayLog.formatVersion == 4)
+        #expect(SourcePhysicsReplayLog.formatVersion == 5)
 
         let decoded = try SourcePhysicsReplayLog(
             canonicalBytes: log.canonicalBytes
@@ -144,6 +144,69 @@ struct SourcePhysicsDeterministicReplayTests {
             return
         }
         #expect(decodedMutation == mutation)
+        #expect(decoded == log)
+        _ = try harness.replay(
+            decoded,
+            using: SourceDeterministicPhysicsEnvironment()
+        )
+    }
+
+    @Test("damping creation, mutation, and snapshot round-trip in replay v5")
+    func dampingMutationRoundTrips() throws {
+        let bodyID = try makeBodyID(entryIndex: 44, serialNumber: 9)
+        let creation = try SourcePhysicsBodyCreationCommand(
+            bodyID: bodyID,
+            shape: makeShape(),
+            massProperties: SourcePhysicsMassProperties(
+                massKilograms: 12,
+                principalInertia: SourceVector3(3, 4, 5)
+            ),
+            transform: .identity,
+            linearVelocity: SourceVector3(5, 6, 7),
+            angularVelocity: SourceVector3(8, 9, 10),
+            damping: try SourcePhysicsDamping(linear: 0.1, angular: 0.2),
+            motionType: .dynamicBody,
+            materialIndex: 3,
+            isGravityEnabled: false,
+            isCollisionEnabled: true,
+            startsAwake: true
+        )
+        let mutation = try SourcePhysicsBodyMutationCommand(
+            bodyID: bodyID,
+            mutation: .setDamping(linear: 1.25, angular: 2.5)
+        )
+        let batch = try SourcePhysicsCommandBatch(commands: [
+            SourcePhysicsCommand(sequence: 1, payload: .createBody(creation)),
+            SourcePhysicsCommand(sequence: 2, payload: .mutateBody(mutation)),
+            SourcePhysicsCommand(
+                sequence: 3,
+                payload: .simulate(SourcePhysicsSimulateCommand(
+                    simulationTick: 1
+                ))
+            ),
+        ])
+        let harness = SourcePhysicsDeterministicReplayHarness()
+        let log = try harness.record(
+            commandBatches: [batch],
+            using: SourceDeterministicPhysicsEnvironment()
+        )
+        #expect(SourcePhysicsReplayLog.formatVersion == 5)
+
+        let decoded = try SourcePhysicsReplayLog(canonicalBytes: log.canonicalBytes)
+        guard case let .createBody(decodedCreation) =
+                decoded.frames[0].commandBatch.commands[0].payload,
+              case let .mutateBody(decodedMutation) =
+                decoded.frames[0].commandBatch.commands[1].payload else {
+            Issue.record("decoded replay lost damping commands")
+            return
+        }
+        #expect(decodedCreation.damping == creation.damping)
+        #expect(decodedMutation == mutation)
+        let expectedDamping = try SourcePhysicsDamping(
+            linear: 1.25,
+            angular: 2.5
+        )
+        #expect(decoded.frames[0].bodySnapshots.first?.damping == expectedDamping)
         #expect(decoded == log)
         _ = try harness.replay(
             decoded,
@@ -655,6 +718,7 @@ struct SourcePhysicsDeterministicReplayTests {
             ),
             linearVelocity: .zero,
             angularVelocity: .zero,
+            damping: .zero,
             motionType: .dynamicBody,
             materialIndex: 3,
             isGravityEnabled: true,
@@ -675,6 +739,7 @@ struct SourcePhysicsDeterministicReplayTests {
             transform: transform ?? creation.transform,
             linearVelocity: creation.linearVelocity,
             angularVelocity: creation.angularVelocity,
+            damping: creation.damping,
             motionType: creation.motionType,
             materialIndex: creation.materialIndex,
             isGravityEnabled: creation.isGravityEnabled,

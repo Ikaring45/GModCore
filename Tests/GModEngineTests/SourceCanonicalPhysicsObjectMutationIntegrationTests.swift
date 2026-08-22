@@ -38,6 +38,7 @@ final class SourceCanonicalPhysicsObjectMutationIntegrationTests: XCTestCase {
             phys:AddVelocity(Vector(5, 0, 0))
             phys:SetAngleVelocity(Vector(1, 2, 3))
             phys:AddAngleVelocity(Vector(4, 5, 6))
+            phys:SetDamping(2, 4)
             phys:ApplyForceCenter(Vector(190, 0, 0))
             phys:ApplyTorqueCenter(Vector(8, 0, 0))
             MUTATION_PROP = prop
@@ -55,8 +56,8 @@ final class SourceCanonicalPhysicsObjectMutationIntegrationTests: XCTestCase {
         )
         let pending = setup.transport
             .preparePendingCanonicalPhysicsBodyCommands()
-        XCTAssertEqual(pending.map(\.sequence), Array(2 ... 11).map(UInt64.init))
-        XCTAssertEqual(setup.transport.pendingPhysicsBodyCommandCount, 10)
+        XCTAssertEqual(pending.map(\.sequence), Array(2 ... 12).map(UInt64.init))
+        XCTAssertEqual(setup.transport.pendingPhysicsBodyCommandCount, 11)
         guard case let .createBody(creation) = pending[0].payload else {
             return XCTFail("first pending command was not verified body creation")
         }
@@ -78,7 +79,7 @@ final class SourceCanonicalPhysicsObjectMutationIntegrationTests: XCTestCase {
             inputs: setup.adapter.prepareCanonicalPropPhysicsStep(),
             simulationTick: tick
         )
-        XCTAssertEqual(firstStep.commandSequences, Array(2 ... 12).map(UInt64.init))
+        XCTAssertEqual(firstStep.commandSequences, Array(2 ... 13).map(UInt64.init))
         XCTAssertEqual(firstStep.operations, [.create(bodyID)])
         XCTAssertEqual(setup.transport.pendingPhysicsBodyCommandCount, 0)
         let firstBody = try XCTUnwrap(firstStep.bodies.first)
@@ -87,10 +88,15 @@ final class SourceCanonicalPhysicsObjectMutationIntegrationTests: XCTestCase {
         XCTAssertFalse(firstBody.isGravityEnabled)
         XCTAssertFalse(firstBody.isCollisionEnabled)
         XCTAssertEqual(firstBody.transform.origin.z, 30)
-        XCTAssertEqual(firstBody.linearVelocity.x, 15.15, accuracy: 0.000_01)
-        XCTAssertEqual(firstBody.angularVelocity, SourceVector3(9, 7, 9))
-        XCTAssertEqual(firstBody.transform.origin.x, 10.227_25, accuracy: 0.000_01)
-        XCTAssertEqual(firstBody.transform.angles.pitch, 0.135, accuracy: 0.000_01)
+        XCTAssertEqual(firstBody.damping.linear, 2)
+        XCTAssertEqual(firstBody.damping.angular, 4)
+        XCTAssertEqual(firstBody.linearVelocity.x, 14.6955, accuracy: 0.000_01)
+        XCTAssertEqual(
+            firstBody.angularVelocity,
+            SourceVector3(8.46, 6.58, 8.46)
+        )
+        XCTAssertEqual(firstBody.transform.origin.x, 10.220_432, accuracy: 0.000_01)
+        XCTAssertEqual(firstBody.transform.angles.pitch, 0.1269, accuracy: 0.000_01)
         try setup.adapter.commitCanonicalPropPhysicsStep(firstStep)
 
         try setup.server.execute(
@@ -101,9 +107,15 @@ final class SourceCanonicalPhysicsObjectMutationIntegrationTests: XCTestCase {
             assert(phys:IsGravityEnabled() == false)
             assert(phys:IsCollisionEnabled() == false)
             local velocity = phys:GetVelocity()
-            assert(math.abs(velocity.x - 15.15) < 0.0001)
+            assert(math.abs(velocity.x - 14.6955) < 0.0001)
             local angular = phys:GetAngleVelocity()
-            assert(angular.x == 9 and angular.y == 7 and angular.z == 9)
+            assert(math.abs(angular.x - 8.46) < 0.0001)
+            assert(math.abs(angular.y - 6.58) < 0.0001)
+            assert(math.abs(angular.z - 8.46) < 0.0001)
+            local speedDamping, rotDamping = phys:GetDamping()
+            assert(speedDamping == 2 and rotDamping == 4)
+            assert(phys:GetSpeedDamping() == 2)
+            assert(phys:GetRotDamping() == 4)
             """,
             sourceName: "=(committed PhysObj mutation snapshot)"
         )
@@ -114,7 +126,7 @@ final class SourceCanonicalPhysicsObjectMutationIntegrationTests: XCTestCase {
             inputs: setup.adapter.prepareCanonicalPropPhysicsStep(),
             simulationTick: secondTick
         )
-        XCTAssertEqual(secondStep.commandSequences, [13])
+        XCTAssertEqual(secondStep.commandSequences, [14])
         XCTAssertEqual(secondStep.operations, [])
         XCTAssertFalse(try XCTUnwrap(secondStep.bodies.first).isGravityEnabled)
         try setup.adapter.commitCanonicalPropPhysicsStep(secondStep)

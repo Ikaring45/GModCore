@@ -77,20 +77,25 @@ public struct SourceAttestedPropPhysicsSHA256: Equatable, Hashable, Sendable {
 }
 
 /// Explicit creation behavior recovered and attested alongside the physical
-/// model. None of these values has a default at the asset boundary.
+/// model. Damping uses Valve's fixed `g_PhysDefaultObjectParams` value unless
+/// an attestation supplies the parsed solid's replacement coefficients; the
+/// other values have no default at this boundary.
 public struct SourceAttestedPropPhysicsBodyBehavior: Equatable, Hashable, Sendable {
     public let motionType: SourcePhysicsMotionType
+    public let damping: SourcePhysicsDamping
     public let isGravityEnabled: Bool
     public let isCollisionEnabled: Bool
     public let startsAwake: Bool
 
     public init(
         motionType: SourcePhysicsMotionType,
+        damping: SourcePhysicsDamping = .sourceDefault,
         isGravityEnabled: Bool,
         isCollisionEnabled: Bool,
         startsAwake: Bool
     ) {
         self.motionType = motionType
+        self.damping = damping
         self.isGravityEnabled = isGravityEnabled
         self.isCollisionEnabled = isCollisionEnabled
         self.startsAwake = startsAwake
@@ -194,6 +199,7 @@ public struct SourceAttestedPropPhysicsAsset: Equatable, Sendable {
                 solidIndex: solidIndex,
                 shape: shape,
                 massProperties: massProperties,
+                damping: bodyBehavior.damping,
                 motionType: bodyBehavior.motionType,
                 materialIndex: materialIndex,
                 isGravityEnabled: bodyBehavior.isGravityEnabled,

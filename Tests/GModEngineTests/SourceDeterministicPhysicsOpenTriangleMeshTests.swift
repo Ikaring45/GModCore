@@ -201,6 +201,7 @@ struct SourceDeterministicPhysicsOpenTriangleMeshTests {
             ),
             linearVelocity: SourceVector3(0, 0, -300),
             angularVelocity: .zero,
+            damping: .zero,
             motionType: .dynamicBody,
             materialIndex: 4,
             isGravityEnabled: false,

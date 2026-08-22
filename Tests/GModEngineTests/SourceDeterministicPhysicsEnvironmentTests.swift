@@ -594,6 +594,84 @@ struct SourceDeterministicPhysicsEnvironmentTests {
         #expect(body.simulationTick == 0)
     }
 
+    @Test("fixed-tick damping decays both velocities and rolls back atomically")
+    func dampingUsesFixedTickAndTransactionalFIFO() throws {
+        let environment = SourceDeterministicPhysicsEnvironment()
+        let bodyID = try makeBodyID(entry: 84, serial: 23)
+        let missingID = try makeBodyID(entry: 84, serial: 24)
+        let creation = try makeCreation(
+            bodyID: bodyID,
+            shape: makeCubeShape(),
+            origin: SourceVector3(1, 2, 3),
+            motionType: .dynamicBody,
+            mass: 2,
+            inertia: SourceVector3(2, 4, 8),
+            material: 5,
+            gravity: false,
+            linearVelocity: SourceVector3(10, -4, 2),
+            angularVelocity: SourceVector3(20, -10, 5)
+        )
+        let snapshot = try environment.execute(SourcePhysicsCommandBatch(
+            commands: [
+                SourcePhysicsCommand(
+                    sequence: 1,
+                    payload: .createBody(creation)
+                ),
+                SourcePhysicsCommand(
+                    sequence: 2,
+                    payload: .mutateBody(try SourcePhysicsBodyMutationCommand(
+                        bodyID: bodyID,
+                        mutation: .setDamping(linear: 2, angular: 4)
+                    ))
+                ),
+                SourcePhysicsCommand(
+                    sequence: 3,
+                    payload: .simulate(SourcePhysicsSimulateCommand(
+                        simulationTick: 1
+                    ))
+                ),
+            ]
+        ))
+
+        let body = try #require(snapshot.bodies.first)
+        let linearScale: Float = 1 - 2 *
+            SourcePhysicsContract.fixedTimeStepSeconds
+        let angularScale: Float = 1 - 4 *
+            SourcePhysicsContract.fixedTimeStepSeconds
+        #expect(body.bodyID == bodyID)
+        let expectedDamping = try SourcePhysicsDamping(linear: 2, angular: 4)
+        #expect(body.damping == expectedDamping)
+        #expect(body.linearVelocity == creation.linearVelocity * linearScale)
+        #expect(body.angularVelocity == creation.angularVelocity * angularScale)
+        #expect(
+            body.transform.origin == creation.transform.origin +
+                body.linearVelocity * SourcePhysicsContract.fixedTimeStepSeconds
+        )
+
+        #expect(throws: SourceDeterministicPhysicsEnvironment.Error
+            .missingBody(missingID)) {
+            _ = try environment.execute(SourcePhysicsCommandBatch(commands: [
+                SourcePhysicsCommand(
+                    sequence: 4,
+                    payload: .mutateBody(try SourcePhysicsBodyMutationCommand(
+                        bodyID: bodyID,
+                        mutation: .setDamping(linear: 9, angular: 11)
+                    ))
+                ),
+                SourcePhysicsCommand(
+                    sequence: 5,
+                    payload: .mutateBody(try SourcePhysicsBodyMutationCommand(
+                        bodyID: missingID,
+                        mutation: .setDamping(linear: 1, angular: 1)
+                    ))
+                ),
+            ]))
+        }
+        let unchanged = try environment.execute(SourcePhysicsCommandBatch(commands: []))
+        #expect(unchanged.lastProcessedCommandSequence == 3)
+        #expect(unchanged.bodies.first?.damping == body.damping)
+    }
+
     @Test("a later invalid body mutation rolls back earlier mutations")
     func bodyMutationRollback() throws {
         let environment = SourceDeterministicPhysicsEnvironment()
@@ -710,6 +788,7 @@ struct SourceDeterministicPhysicsEnvironmentTests {
         startsAwake: Bool = true,
         linearVelocity: SourceVector3 = .zero,
         angularVelocity: SourceVector3 = .zero,
+        damping: SourcePhysicsDamping = .zero,
         angles: SourceQAngle = .zero
     ) throws -> SourcePhysicsBodyCreationCommand {
         try SourcePhysicsBodyCreationCommand(
@@ -722,6 +801,7 @@ struct SourceDeterministicPhysicsEnvironmentTests {
             transform: SourceEntityTransform(origin: origin, angles: angles),
             linearVelocity: linearVelocity,
             angularVelocity: angularVelocity,
+            damping: damping,
             motionType: motionType,
             materialIndex: material,
             isGravityEnabled: gravity,

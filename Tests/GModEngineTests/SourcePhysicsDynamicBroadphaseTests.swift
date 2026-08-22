@@ -83,6 +83,7 @@ struct SourcePhysicsDynamicBroadphaseTests {
                     ),
                     linearVelocity: .zero,
                     angularVelocity: .zero,
+                    damping: .zero,
                     motionType: .dynamicBody,
                     materialIndex: 1,
                     isGravityEnabled: false,

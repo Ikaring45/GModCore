@@ -48,6 +48,7 @@ public struct SourceCanonicalPropPhysicsBodyDefinition: Equatable, Sendable {
     public let solidIndex: Int
     public let shape: SourcePhysicsShapeSnapshot
     public let massProperties: SourcePhysicsMassProperties
+    public let damping: SourcePhysicsDamping
     public let motionType: SourcePhysicsMotionType
     public let materialIndex: Int
     public let isGravityEnabled: Bool
@@ -58,6 +59,7 @@ public struct SourceCanonicalPropPhysicsBodyDefinition: Equatable, Sendable {
         solidIndex: Int,
         shape: SourcePhysicsShapeSnapshot,
         massProperties: SourcePhysicsMassProperties,
+        damping: SourcePhysicsDamping,
         motionType: SourcePhysicsMotionType,
         materialIndex: Int,
         isGravityEnabled: Bool,
@@ -76,6 +78,7 @@ public struct SourceCanonicalPropPhysicsBodyDefinition: Equatable, Sendable {
         self.solidIndex = solidIndex
         self.shape = shape
         self.massProperties = massProperties
+        self.damping = damping
         self.motionType = motionType
         self.materialIndex = materialIndex
         self.isGravityEnabled = isGravityEnabled
@@ -221,6 +224,7 @@ public struct SourceCanonicalPropPhysicsMotionSnapshot: Equatable, Sendable {
     public let transform: SourceEntityTransform
     public let linearVelocity: SourceVector3
     public let angularVelocity: SourceVector3
+    public let damping: SourcePhysicsDamping
     public let isMotionEnabled: Bool
     public let isGravityEnabled: Bool
     public let isCollisionEnabled: Bool
@@ -232,6 +236,7 @@ public struct SourceCanonicalPropPhysicsMotionSnapshot: Equatable, Sendable {
         transform = body.transform
         linearVelocity = body.linearVelocity
         angularVelocity = body.angularVelocity
+        damping = body.damping
         isMotionEnabled = body.isMotionEnabled
         isGravityEnabled = body.isGravityEnabled
         isCollisionEnabled = body.isCollisionEnabled
@@ -462,6 +467,7 @@ public final class SourceCanonicalPropPhysicsCoordinator {
                 transform: input.entity.transform,
                 linearVelocity: input.entity.motion.linearVelocity,
                 angularVelocity: input.entity.motion.angularVelocity,
+                damping: definition.damping,
                 motionType: definition.motionType,
                 materialIndex: definition.materialIndex,
                 isGravityEnabled: definition.isGravityEnabled,

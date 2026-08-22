@@ -136,6 +136,7 @@ struct SourceBSPStaticPhysicsBridgeTests {
             ),
             linearVelocity: .zero,
             angularVelocity: .zero,
+            damping: .zero,
             motionType: .dynamicBody,
             materialIndex: 7,
             isGravityEnabled: true,

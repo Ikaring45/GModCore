@@ -274,6 +274,7 @@ public final class SourceDeterministicPhysicsEnvironment:
         var transform: SourceEntityTransform
         var linearVelocity: SourceVector3
         var angularVelocity: SourceVector3
+        var damping: SourcePhysicsDamping
         var accumulatedCenterForce: SourceVector3
         var accumulatedCenterTorque: SourceVector3
         var isMotionEnabled: Bool
@@ -666,6 +667,7 @@ public final class SourceDeterministicPhysicsEnvironment:
                     transform: creation.transform,
                     linearVelocity: creation.linearVelocity,
                     angularVelocity: creation.angularVelocity,
+                    damping: creation.damping,
                     accumulatedCenterForce: .zero,
                     accumulatedCenterTorque: .zero,
                     isMotionEnabled: creation.motionType != .staticBody,
@@ -867,6 +869,14 @@ public final class SourceDeterministicPhysicsEnvironment:
                 operation: "applyTorqueCenter"
             )
             wake(&body)
+        case let .setDamping(linear, angular):
+            // The command constructor has already validated this pair. Build
+            // the value again here so a backend can never retain partially
+            // applied coefficients if the public contract changes.
+            body.damping = try SourcePhysicsDamping(
+                linear: linear,
+                angular: angular
+            )
         }
     }
 
@@ -931,6 +941,15 @@ public final class SourceDeterministicPhysicsEnvironment:
                 if body.isGravityEnabled {
                     body.linearVelocity += configuration.gravity * delta
                 }
+                // VPhysics exposes independent speed and rotational damping
+                // coefficients. This deterministic backend advances them at
+                // the one representable fixed tick using a clamped explicit
+                // decay, preventing a large valid coefficient from reversing
+                // velocity direction.
+                let linearScale = max(0, 1 - body.damping.linear * delta)
+                let angularScale = max(0, 1 - body.damping.angular * delta)
+                body.linearVelocity *= linearScale
+                body.angularVelocity *= angularScale
                 body.transform.origin += body.linearVelocity * delta
                 body.transform.angles = integrating(
                     body.transform.angles,
@@ -2599,6 +2618,7 @@ public final class SourceDeterministicPhysicsEnvironment:
                     transform: body.transform,
                     linearVelocity: body.linearVelocity,
                     angularVelocity: body.angularVelocity,
+                    damping: body.damping,
                     motionType: body.motionType,
                     materialIndex: body.creation.materialIndex,
                     isMotionEnabled: body.isMotionEnabled,

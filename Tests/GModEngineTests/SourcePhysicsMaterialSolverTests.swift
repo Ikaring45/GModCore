@@ -324,6 +324,7 @@ struct SourcePhysicsMaterialSolverTests {
             ),
             linearVelocity: velocity,
             angularVelocity: .zero,
+            damping: .zero,
             motionType: motionType,
             materialIndex: materialIndex,
             isGravityEnabled: false,

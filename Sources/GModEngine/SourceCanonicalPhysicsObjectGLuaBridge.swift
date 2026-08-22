@@ -14,6 +14,7 @@ public struct SourceCanonicalPhysicsObjectSnapshot: Equatable, Sendable {
     public let transform: SourceEntityTransform
     public let linearVelocity: SourceVector3
     public let angularVelocity: SourceVector3
+    public let damping: SourcePhysicsDamping
     public let motionType: SourcePhysicsMotionType
     public let isMotionEnabled: Bool
     public let isGravityEnabled: Bool
@@ -41,6 +42,7 @@ public struct SourceCanonicalPhysicsObjectSnapshot: Equatable, Sendable {
         transform = entity.transform
         linearVelocity = entity.motion.linearVelocity
         angularVelocity = entity.motion.angularVelocity
+        damping = definition.damping
         motionType = definition.motionType
         isMotionEnabled = definition.motionType != .staticBody
         isGravityEnabled = definition.isGravityEnabled
@@ -57,6 +59,7 @@ public struct SourceCanonicalPhysicsObjectSnapshot: Equatable, Sendable {
         transform = body.transform
         linearVelocity = body.linearVelocity
         angularVelocity = body.angularVelocity
+        damping = body.damping
         motionType = body.motionType
         isMotionEnabled = body.isMotionEnabled
         isGravityEnabled = body.isGravityEnabled
@@ -270,6 +273,18 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
         try setPhysicsReadMethod("GetAngleVelocity") { snapshot in
             [try self.vector(snapshot.angularVelocity)]
         }
+        try setPhysicsReadMethod("GetDamping") { snapshot in
+            [
+                .number(Double(snapshot.damping.linear)),
+                .number(Double(snapshot.damping.angular)),
+            ]
+        }
+        try setPhysicsReadMethod("GetSpeedDamping") { snapshot in
+            [.number(Double(snapshot.damping.linear))]
+        }
+        try setPhysicsReadMethod("GetRotDamping") { snapshot in
+            [.number(Double(snapshot.damping.angular))]
+        }
         try setPhysicsReadMethod("IsMotionEnabled") { snapshot in
             [.boolean(snapshot.isMotionEnabled)]
         }
@@ -361,6 +376,20 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
                 at: 1,
                 function: "PhysObj:ApplyTorqueCenter"
             ))
+        }
+        try setPhysicsMutationMethod("SetDamping") { arguments in
+            .setDamping(
+                linear: Float(try self.requiredNumber(
+                    arguments,
+                    at: 1,
+                    function: "PhysObj:SetDamping"
+                )),
+                angular: Float(try self.requiredNumber(
+                    arguments,
+                    at: 2,
+                    function: "PhysObj:SetDamping"
+                ))
+            )
         }
     }
 
@@ -563,5 +592,34 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
             Float(components.1),
             Float(components.2)
         )
+    }
+
+    private func requiredNumber(
+        _ arguments: [LuaValue],
+        at index: Int,
+        function: String
+    ) throws -> Double {
+        guard arguments.indices.contains(index) else {
+            throw LuaError.runtime(
+                "bad argument #\(index) to '\(function)' " +
+                "(number expected, got no value)"
+            )
+        }
+        switch arguments[index] {
+        case let .number(value):
+            return value
+        case let .string(value):
+            if let parsed = Double(
+                value.utf8String.trimmingCharacters(in: .whitespacesAndNewlines)
+            ) {
+                return parsed
+            }
+            fallthrough
+        default:
+            throw LuaError.runtime(
+                "bad argument #\(index) to '\(function)' " +
+                "(number expected, got \(arguments[index].typeName))"
+            )
+        }
     }
 }

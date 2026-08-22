@@ -16,6 +16,7 @@ public enum SourcePhysicsContract {
 public enum SourcePhysicsContractError: Error, Equatable, Sendable {
     case negativeSolidIndex(Int)
     case nonFinite(field: String)
+    case negative(field: String)
     case nonPositive(field: String)
     case massOutsideVPhysicsRange(Float)
     case negativeMaterialIndex(field: String, value: Int)
@@ -196,6 +197,49 @@ public struct SourcePhysicsMassProperties: Equatable, Sendable {
     }
 }
 
+/// Backend-neutral linear and angular damping coefficients carried by one
+/// VPhysics object.
+///
+/// Valve's fixed Source SDK initializes both `objectparams_t::damping` and
+/// `objectparams_t::rotdamping` to `0.1`. Model solid data may replace those
+/// values before body creation, and `IPhysicsObject::SetDamping` may replace
+/// them later. Negative or non-finite coefficients never enter a backend.
+public struct SourcePhysicsDamping: Equatable, Hashable, Sendable {
+    public static let zero = SourcePhysicsDamping(
+        validatedLinear: 0,
+        validatedAngular: 0
+    )
+    public static let sourceDefault = SourcePhysicsDamping(
+        validatedLinear: 0.1,
+        validatedAngular: 0.1
+    )
+
+    public let linear: Float
+    public let angular: Float
+
+    public init(linear: Float, angular: Float) throws {
+        guard linear.isFinite else {
+            throw SourcePhysicsContractError.nonFinite(field: "linearDamping")
+        }
+        guard angular.isFinite else {
+            throw SourcePhysicsContractError.nonFinite(field: "angularDamping")
+        }
+        guard linear >= 0 else {
+            throw SourcePhysicsContractError.negative(field: "linearDamping")
+        }
+        guard angular >= 0 else {
+            throw SourcePhysicsContractError.negative(field: "angularDamping")
+        }
+        self.linear = linear
+        self.angular = angular
+    }
+
+    private init(validatedLinear: Float, validatedAngular: Float) {
+        linear = validatedLinear
+        angular = validatedAngular
+    }
+}
+
 public enum SourcePhysicsMotionType: Equatable, Hashable, Sendable {
     case staticBody
     case dynamicBody
@@ -211,6 +255,7 @@ public struct SourcePhysicsBodyCreationCommand: Equatable, Sendable {
     public let transform: SourceEntityTransform
     public let linearVelocity: SourceVector3
     public let angularVelocity: SourceVector3
+    public let damping: SourcePhysicsDamping
     public let motionType: SourcePhysicsMotionType
     public let materialIndex: Int
     public let isGravityEnabled: Bool
@@ -224,6 +269,7 @@ public struct SourcePhysicsBodyCreationCommand: Equatable, Sendable {
         transform: SourceEntityTransform,
         linearVelocity: SourceVector3,
         angularVelocity: SourceVector3,
+        damping: SourcePhysicsDamping,
         motionType: SourcePhysicsMotionType,
         materialIndex: Int,
         isGravityEnabled: Bool,
@@ -245,6 +291,7 @@ public struct SourcePhysicsBodyCreationCommand: Equatable, Sendable {
         self.transform = transform
         self.linearVelocity = linearVelocity
         self.angularVelocity = angularVelocity
+        self.damping = damping
         self.motionType = motionType
         self.materialIndex = materialIndex
         self.isGravityEnabled = isGravityEnabled
@@ -287,6 +334,7 @@ public enum SourcePhysicsBodyMutation: Equatable, Sendable {
     case applyCenterImpulse(SourceVector3)
     /// Valve `AngularImpulse`: HL/world axes, kilograms-degrees/second.
     case applyTorqueCenter(SourceVector3)
+    case setDamping(linear: Float, angular: Float)
 }
 
 public struct SourcePhysicsBodyMutationCommand: Equatable, Sendable {
@@ -342,6 +390,27 @@ public struct SourcePhysicsBodyMutationCommand: Equatable, Sendable {
                 value,
                 field: "bodyMutation.centerTorqueImpulse"
             )
+        case let .setDamping(linear, angular):
+            guard linear.isFinite else {
+                throw SourcePhysicsContractError.nonFinite(
+                    field: "bodyMutation.linearDamping"
+                )
+            }
+            guard angular.isFinite else {
+                throw SourcePhysicsContractError.nonFinite(
+                    field: "bodyMutation.angularDamping"
+                )
+            }
+            guard linear >= 0 else {
+                throw SourcePhysicsContractError.negative(
+                    field: "bodyMutation.linearDamping"
+                )
+            }
+            guard angular >= 0 else {
+                throw SourcePhysicsContractError.negative(
+                    field: "bodyMutation.angularDamping"
+                )
+            }
         case .wake,
              .sleep,
              .setMotionEnabled,
@@ -496,6 +565,7 @@ public struct SourcePhysicsBodySnapshot: Equatable, Sendable {
     public let transform: SourceEntityTransform
     public let linearVelocity: SourceVector3
     public let angularVelocity: SourceVector3
+    public let damping: SourcePhysicsDamping
     public let motionType: SourcePhysicsMotionType
     public let materialIndex: Int
     public let isMotionEnabled: Bool
@@ -511,6 +581,7 @@ public struct SourcePhysicsBodySnapshot: Equatable, Sendable {
         transform: SourceEntityTransform,
         linearVelocity: SourceVector3,
         angularVelocity: SourceVector3,
+        damping: SourcePhysicsDamping,
         motionType: SourcePhysicsMotionType,
         materialIndex: Int,
         isMotionEnabled: Bool? = nil,
@@ -534,6 +605,7 @@ public struct SourcePhysicsBodySnapshot: Equatable, Sendable {
         self.transform = transform
         self.linearVelocity = linearVelocity
         self.angularVelocity = angularVelocity
+        self.damping = damping
         self.motionType = motionType
         self.materialIndex = materialIndex
         self.isMotionEnabled = isMotionEnabled ?? (motionType != .staticBody)
