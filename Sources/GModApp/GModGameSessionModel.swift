@@ -297,6 +297,8 @@ final class GModGameSessionModel: ObservableObject {
     @Published private(set) var playerOrigin = SourceVector3.zero
     @Published private(set) var movementStatus = "Movement idle"
     @Published private(set) var viewAngles = SourceQAngle.zero
+    @Published private(set) var worldHorizontalFieldOfViewDegrees =
+        GModPlayableWorldFieldOfView.defaultHorizontalDegrees
     @Published private(set) var worldScene: GModMetalWorldScene?
     @Published private(set) var lastRendererFailure:
         GModMetalWorldRendererFailure?
@@ -573,6 +575,8 @@ final class GModGameSessionModel: ObservableObject {
                 playerOrigin = snapshot.playerWalkState.origin
                 movementStatus = "Movement ready"
                 viewAngles = snapshot.playerWalkState.viewAngles
+                worldHorizontalFieldOfViewDegrees =
+                    snapshot.worldHorizontalFieldOfViewDegrees
                 clearHeldWorldInput()
                 publishMovementInput()
                 let textureResolver = surfaceTextureResolver
@@ -586,6 +590,8 @@ final class GModGameSessionModel: ObservableObject {
                         mesh: snapshot.worldMesh,
                         playerOrigin: snapshot.playerWalkState.origin,
                         viewAngles: snapshot.playerWalkState.viewAngles,
+                        worldHorizontalFieldOfViewDegrees:
+                            snapshot.worldHorizontalFieldOfViewDegrees,
                         textureResolver: textureResolver
                     )
                 }.value
@@ -945,6 +951,8 @@ final class GModGameSessionModel: ObservableObject {
         lastDeliveredMessages = 0
         playerOrigin = .zero
         viewAngles = .zero
+        worldHorizontalFieldOfViewDegrees =
+            GModPlayableWorldFieldOfView.defaultHorizontalDegrees
         worldScene = nil
         worldSkyVisibility = nil
         surfaceScene = nil
@@ -1020,6 +1028,8 @@ final class GModGameSessionModel: ObservableObject {
         lastDeliveredMessages = 0
         playerOrigin = .zero
         viewAngles = .zero
+        worldHorizontalFieldOfViewDegrees =
+            GModPlayableWorldFieldOfView.defaultHorizontalDegrees
         worldScene = nil
         worldSkyVisibility = nil
         surfaceScene = nil
@@ -1267,6 +1277,8 @@ final class GModGameSessionModel: ObservableObject {
             fixedTickCount &+= UInt64(report.fixedTicks.count)
             lastDeliveredMessages = report.deliveredMessages
             playerOrigin = report.playerWalkState.origin
+            worldHorizontalFieldOfViewDegrees =
+                report.worldHorizontalFieldOfViewDegrees
             reportMovementResults(report.fixedTicks)
             publishCameraScene()
             for tick in report.fixedTicks {
@@ -2094,6 +2106,11 @@ final class GModGameSessionModel: ObservableObject {
             forward: Self.cameraForward(for: viewAngles),
             up: Self.cameraUp(for: viewAngles),
             skyboxVisibility: skyboxVisibility,
+            verticalFieldOfViewRadians:
+                GModMetalSourceFOVContract.verticalRadians(
+                    baseHorizontalDegrees:
+                        worldHorizontalFieldOfViewDegrees
+                ) ?? GModMetalSourceFOVContract.defaultWorldVerticalRadians,
             sourceFixedTime: Float(fixedTickCount) *
                 SourceGlobalVars.intervalPerTick
         )
@@ -2105,6 +2122,8 @@ final class GModGameSessionModel: ObservableObject {
         mesh: GModWorldRenderMesh,
         playerOrigin: SourceVector3,
         viewAngles: SourceQAngle,
+        worldHorizontalFieldOfViewDegrees: Float =
+            GModPlayableWorldFieldOfView.defaultHorizontalDegrees,
         textureResolver: GModMetalSurfaceSourceMaterialResolver,
         maximumRetainedBitmapByteCount: Int =
             GModMetalWorldBitmapRetentionBudget.defaultMaximumByteCount
@@ -2389,7 +2408,12 @@ final class GModGameSessionModel: ObservableObject {
             ),
             cameraEye: cameraEye(for: playerOrigin),
             cameraForward: cameraForward(for: viewAngles),
-            cameraUp: cameraUp(for: viewAngles)
+            cameraUp: cameraUp(for: viewAngles),
+            verticalFieldOfViewRadians:
+                GModMetalSourceFOVContract.verticalRadians(
+                    baseHorizontalDegrees:
+                        worldHorizontalFieldOfViewDegrees
+                ) ?? GModMetalSourceFOVContract.defaultWorldVerticalRadians
         )
     }
 

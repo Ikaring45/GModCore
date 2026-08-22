@@ -24,6 +24,43 @@ private struct UnsupportedContentsPlayableWalkProvider:
 }
 
 final class GModPlayableSessionTests: XCTestCase {
+    func testWorldFieldOfViewRejectsInvalidConVarValues() {
+        XCTAssertEqual(
+            GModPlayableWorldFieldOfView.resolvedHorizontalDegrees("100"),
+            100
+        )
+        XCTAssertEqual(
+            GModPlayableWorldFieldOfView.resolvedHorizontalDegrees(" 90.5 "),
+            90.5
+        )
+        for value in [nil, "", "nan", "0", "180", "-20"] {
+            XCTAssertEqual(
+                GModPlayableWorldFieldOfView.resolvedHorizontalDegrees(value),
+                GModPlayableWorldFieldOfView.defaultHorizontalDegrees
+            )
+        }
+    }
+
+    func testPlayableSessionPublishesCurrentSourceFieldOfView() throws {
+        let session = try GModPlayableSession(
+            configuration: GModPlayableSessionConfiguration(map: .construct)
+        )
+        defer { _ = try? session.close() }
+
+        XCTAssertEqual(session.clientWorldHorizontalFieldOfViewDegrees, 75)
+        try session.clientRuntime.execute(
+            """
+            local fov = GetConVar("fov_desired")
+            assert(fov ~= nil)
+            assert(fov:IsFlagSet(FCVAR_ARCHIVE))
+            assert(fov:IsFlagSet(FCVAR_USERINFO))
+            fov:SetFloat(100)
+            """,
+            sourceName: "=(playable fov_desired fixture)"
+        )
+        XCTAssertEqual(session.clientWorldHorizontalFieldOfViewDegrees, 100)
+    }
+
     func testTouchActionWordIsReportedAndVisibleToBothRealmPlayers() throws {
         let session = try GModPlayableSession(
             configuration: GModPlayableSessionConfiguration(map: .construct)

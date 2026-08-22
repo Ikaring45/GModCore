@@ -760,6 +760,7 @@ public struct GModMetalView:
             case invalidEnvironmentLighting
             case invalidSunSprite(index: Int)
             case invalidCameraEye
+            case invalidCameraFieldOfView
             case invalidCameraForward
             case zeroCameraForward
             case invalidCameraUp
@@ -811,6 +812,8 @@ public struct GModMetalView:
                     return "env_sun sprite \(index) contains invalid entity-driven values"
                 case .invalidCameraEye:
                     return "camera eye is non-finite"
+                case .invalidCameraFieldOfView:
+                    return "camera vertical field of view is outside (0, pi)"
                 case .invalidCameraForward:
                     return "camera forward is non-finite"
                 case .zeroCameraForward:
@@ -2737,6 +2740,11 @@ public struct GModMetalView:
             guard isFinite(scene.cameraEye), isFinite(scene.metalCameraEye) else {
                 throw WorldSceneError.invalidCameraEye
             }
+            guard scene.verticalFieldOfViewRadians.isFinite,
+                  scene.verticalFieldOfViewRadians > 0,
+                  scene.verticalFieldOfViewRadians < .pi else {
+                throw WorldSceneError.invalidCameraFieldOfView
+            }
             guard
                 isFinite(scene.cameraForward),
                 isFinite(scene.metalCameraForward)
@@ -3469,7 +3477,7 @@ public struct GModMetalView:
             let height = Swift.max(1, viewport.y)
             let sky2DProjection = Self.makePerspectiveMatrix(
                 verticalFieldOfViewRadians:
-                    GModMetalSourceFOVContract.defaultWorldVerticalRadians,
+                    scene.verticalFieldOfViewRadians,
                 aspect: Float(width) / Float(height),
                 near: 1,
                 far: 65_536
@@ -3586,7 +3594,7 @@ public struct GModMetalView:
             )
             let sky3DProjection = Self.makePerspectiveMatrix(
                 verticalFieldOfViewRadians:
-                    GModMetalSourceFOVContract.defaultWorldVerticalRadians,
+                    scene.verticalFieldOfViewRadians,
                 aspect: Float(width) / Float(height),
                 near: clipPlanes.near,
                 far: clipPlanes.far
@@ -3768,7 +3776,7 @@ public struct GModMetalView:
             let height = Swift.max(1, viewport.y)
             let projection = Self.makePerspectiveMatrix(
                 verticalFieldOfViewRadians:
-                    GModMetalSourceFOVContract.defaultWorldVerticalRadians,
+                    scene.verticalFieldOfViewRadians,
                 aspect: Float(width) / Float(height),
                 near: 1,
                 far: 65_536
@@ -3885,7 +3893,7 @@ public struct GModMetalView:
             let aspect = Float(width) / Float(height)
             let projection = Self.makePerspectiveMatrix(
                 verticalFieldOfViewRadians:
-                    GModMetalSourceFOVContract.defaultWorldVerticalRadians,
+                    scene.verticalFieldOfViewRadians,
                 aspect: aspect,
                 near: 1,
                 far: 65_536
@@ -3915,7 +3923,7 @@ public struct GModMetalView:
                     metalCameraForward: metalCameraForward,
                     metalCameraUp: metalCameraUp,
                     verticalFieldOfViewRadians:
-                        GModMetalSourceFOVContract.defaultWorldVerticalRadians,
+                        scene.verticalFieldOfViewRadians,
                     aspectRatio: aspect,
                     nearPlane: 1,
                     farPlane: 65_536
@@ -4277,7 +4285,7 @@ public struct GModMetalView:
             let height = Swift.max(1, viewport.y)
             let projection = Self.makePerspectiveMatrix(
                 verticalFieldOfViewRadians:
-                    GModMetalSourceFOVContract.defaultWorldVerticalRadians,
+                    scene.verticalFieldOfViewRadians,
                 aspect: Float(width) / Float(height),
                 near: 1,
                 far: 65_536

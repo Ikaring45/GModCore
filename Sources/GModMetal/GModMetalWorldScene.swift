@@ -1700,6 +1700,11 @@ public struct GModMetalWorldScene: Sendable, Equatable {
     /// Fixed Source session time. Pause freezes this value, so material
     /// proxies such as TextureScroll freeze with the singleplayer world.
     public let sourceFixedTime: Float
+    /// Vertical projection angle derived from Source's current 4:3-base
+    /// horizontal FOV. Keeping it in the immutable scene makes the ordinary
+    /// world, PVS frustum, 2D/3D sky, sun, water views, and dynamic entities
+    /// consume one camera contract instead of silently retaining 75 degrees.
+    public let verticalFieldOfViewRadians: Float
 
     /// Camera values in Source coordinates.
     public let cameraEye: SIMD3<Float>
@@ -1734,6 +1739,8 @@ public struct GModMetalWorldScene: Sendable, Equatable {
         cameraEye: SIMD3<Float>,
         cameraForward: SIMD3<Float>,
         cameraUp: SIMD3<Float> = SIMD3<Float>(0, 0, 1),
+        verticalFieldOfViewRadians: Float =
+            GModMetalSourceFOVContract.defaultWorldVerticalRadians,
         sourceFixedTime: Float = 0
     ) {
         self.meshIdentifier = meshIdentifier
@@ -1759,6 +1766,7 @@ public struct GModMetalWorldScene: Sendable, Equatable {
         self.worldVisibility = worldVisibility
         self.skyboxVisibility = skyboxVisibility
         self.sourceFixedTime = sourceFixedTime
+        self.verticalFieldOfViewRadians = verticalFieldOfViewRadians
         self.cameraEye = cameraEye
         self.cameraForward = cameraForward
         self.cameraUp = cameraUp
@@ -1774,6 +1782,7 @@ public struct GModMetalWorldScene: Sendable, Equatable {
         forward: SIMD3<Float>,
         up: SIMD3<Float>? = nil,
         skyboxVisibility: GModMetalSkyboxVisibility? = nil,
+        verticalFieldOfViewRadians: Float? = nil,
         sourceFixedTime: Float? = nil
     ) -> Self {
         Self(
@@ -1796,6 +1805,8 @@ public struct GModMetalWorldScene: Sendable, Equatable {
             cameraEye: eye,
             cameraForward: forward,
             cameraUp: up ?? cameraUp,
+            verticalFieldOfViewRadians: verticalFieldOfViewRadians ??
+                self.verticalFieldOfViewRadians,
             sourceFixedTime: sourceFixedTime ?? self.sourceFixedTime
         )
     }
@@ -1828,6 +1839,7 @@ public struct GModMetalWorldScene: Sendable, Equatable {
         cameraEye: SIMD3<Float>,
         cameraForward: SIMD3<Float>,
         cameraUp: SIMD3<Float>,
+        verticalFieldOfViewRadians: Float,
         sourceFixedTime: Float
     ) {
         self.meshIdentifier = meshIdentifier
@@ -1848,6 +1860,7 @@ public struct GModMetalWorldScene: Sendable, Equatable {
         self.worldVisibility = worldVisibility
         self.skyboxVisibility = skyboxVisibility
         self.sourceFixedTime = sourceFixedTime
+        self.verticalFieldOfViewRadians = verticalFieldOfViewRadians
         self.cameraEye = cameraEye
         self.cameraForward = cameraForward
         self.cameraUp = cameraUp

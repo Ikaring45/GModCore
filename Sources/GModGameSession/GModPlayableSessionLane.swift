@@ -9,6 +9,7 @@ public struct GModPlayableSessionSnapshot: Sendable, Equatable {
     public let worldMesh: GModWorldRenderMesh
     public let playerWalkState: SourceWorldWalkState
     public let canonicalEntities: [SourceCanonicalEntitySnapshot]
+    public let worldHorizontalFieldOfViewDegrees: Float
 
     public init(
         generation: UInt64,
@@ -17,7 +18,9 @@ public struct GModPlayableSessionSnapshot: Sendable, Equatable {
         startup: GModPlayableSessionStartupReport,
         worldMesh: GModWorldRenderMesh,
         playerWalkState: SourceWorldWalkState,
-        canonicalEntities: [SourceCanonicalEntitySnapshot]
+        canonicalEntities: [SourceCanonicalEntitySnapshot],
+        worldHorizontalFieldOfViewDegrees: Float =
+            GModPlayableWorldFieldOfView.defaultHorizontalDegrees
     ) {
         self.generation = generation
         self.pointerEpoch = pointerEpoch
@@ -26,6 +29,8 @@ public struct GModPlayableSessionSnapshot: Sendable, Equatable {
         self.worldMesh = worldMesh
         self.playerWalkState = playerWalkState
         self.canonicalEntities = canonicalEntities
+        self.worldHorizontalFieldOfViewDegrees =
+            worldHorizontalFieldOfViewDegrees
     }
 }
 
@@ -106,6 +111,7 @@ public struct GModPlayableHostFrameReport: Sendable, Equatable {
     /// Cheap change token. The entity array is fetched from the lane only when
     /// this value changes, rather than sorted and copied every display frame.
     public let canonicalEntityCursor: SourceEntityReplicationCursor?
+    public let worldHorizontalFieldOfViewDegrees: Float
 
     public init(
         fixedTicks: [GModPlayableFixedTickReport],
@@ -115,7 +121,9 @@ public struct GModPlayableHostFrameReport: Sendable, Equatable {
         clientSurfaceSounds: GMLuaSurfaceSoundRequestReport,
         viewportChanged: Bool,
         playerWalkState: SourceWorldWalkState,
-        canonicalEntityCursor: SourceEntityReplicationCursor?
+        canonicalEntityCursor: SourceEntityReplicationCursor?,
+        worldHorizontalFieldOfViewDegrees: Float =
+            GModPlayableWorldFieldOfView.defaultHorizontalDegrees
     ) {
         self.fixedTicks = fixedTicks
         self.inputButtons = inputButtons
@@ -125,6 +133,8 @@ public struct GModPlayableHostFrameReport: Sendable, Equatable {
         self.viewportChanged = viewportChanged
         self.playerWalkState = playerWalkState
         self.canonicalEntityCursor = canonicalEntityCursor
+        self.worldHorizontalFieldOfViewDegrees =
+            worldHorizontalFieldOfViewDegrees
     }
 
     public var deliveredMessages: Int {
@@ -308,7 +318,9 @@ public actor GModPlayableSessionLane {
             startup: replacement.startupReport,
             worldMesh: replacement.worldMesh,
             playerWalkState: replacement.playerWalkState,
-            canonicalEntities: replacement.clientCanonicalEntitySnapshots
+            canonicalEntities: replacement.clientCanonicalEntitySnapshots,
+            worldHorizontalFieldOfViewDegrees:
+                replacement.clientWorldHorizontalFieldOfViewDegrees
         )
     }
 
@@ -383,7 +395,9 @@ public actor GModPlayableSessionLane {
             clientSurfaceSounds: clientSurfaceSounds,
             viewportChanged: viewportChanged,
             playerWalkState: session.playerWalkState,
-            canonicalEntityCursor: session.clientCanonicalEntityReplicationCursor
+            canonicalEntityCursor: session.clientCanonicalEntityReplicationCursor,
+            worldHorizontalFieldOfViewDegrees:
+                session.clientWorldHorizontalFieldOfViewDegrees
         )
     }
 

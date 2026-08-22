@@ -21,6 +21,25 @@ final class GModMetalWorldSceneTests: XCTestCase {
         XCTAssertNil(GModMetalSourceFOVContract.verticalRadians(
             baseHorizontalDegrees: 180
         ))
+
+        let widened = try XCTUnwrap(
+            GModMetalSourceFOVContract.verticalRadians(
+                baseHorizontalDegrees: 100
+            )
+        )
+        let scene = fixtureScene(materialRanges: []).updatingCamera(
+            eye: SIMD3<Float>(1, 2, 3),
+            forward: SIMD3<Float>(1, 0, 0),
+            verticalFieldOfViewRadians: widened
+        )
+        XCTAssertEqual(scene.verticalFieldOfViewRadians, widened)
+        XCTAssertEqual(
+            scene.updatingCamera(
+                eye: SIMD3<Float>(4, 5, 6),
+                forward: SIMD3<Float>(0, 1, 0)
+            ).verticalFieldOfViewRadians,
+            widened
+        )
     }
 
     func testWorldVisibilityWorkspacePreservesOrderCoalescesAndCachesView() {

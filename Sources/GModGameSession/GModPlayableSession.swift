@@ -823,6 +823,12 @@ public final class GModPlayableSession {
                 name: "gmod_language",
                 defaultValue: configuration.languageCode
             ),
+            GMLuaEngineConVarDescriptor(
+                name: "fov_desired",
+                defaultValue: "75",
+                flags: 640,
+                helpText: "Source horizontal field of view"
+            ),
         ])
         let server = GMLuaRuntime(
             realm: .server,
