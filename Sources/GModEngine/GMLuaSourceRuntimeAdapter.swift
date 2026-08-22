@@ -1463,6 +1463,16 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
         }
     }
 
+    /// Stages Entity delivery and physics commands emitted by one stock
+    /// Duplicator paste. The Duplicator coordinator compensates its fresh
+    /// canonical handles before rethrowing; a thrown body then discards this
+    /// staged transport suffix without touching unrelated FIFO work.
+    public func withCanonicalDuplicatorPasteTransaction(
+        _ body: () throws -> [SourceCanonicalDuplicatorPastedEntity]
+    ) throws -> [SourceCanonicalDuplicatorPastedEntity] {
+        try netTransport.withStagedForwardedConsoleDeliveries(body)
+    }
+
     /// Runs one outer CLIENT-originated SERVER command under the narrow host
     /// transaction used by the stock `gm_spawn` vertical. Lua globals, timers,
     /// hooks, ConVars, undo, and mutations of pre-existing canonical entities
