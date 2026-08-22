@@ -64,7 +64,9 @@ public enum SourceWorldWalkUnsupportedFeature: String, CaseIterable, Equatable, 
     case jump
     case duck
     case verticalMove
-    case water
+    case waterJump
+    case waterCurrent
+    case dynamicWaterVolume
     case ladder
     case displacementCollision
     case dynamicEntityCollision
@@ -74,6 +76,20 @@ public enum SourceWorldWalkUnsupportedFeature: String, CaseIterable, Equatable, 
     case surfaceProperties
     case deadPlayer
     case nonWalkMoveType
+}
+
+/// Numeric water levels shared by `CBasePlayer` and `IMoveHelper` in Source
+/// SDK 2013. Keeping this in the authoritative movement state makes water
+/// entry and exit part of the canonical Player snapshot.
+public enum SourcePlayerWaterLevel: UInt8, CaseIterable, Equatable, Sendable {
+    case notInWater = 0
+    case feet = 1
+    case waist = 2
+    case eyes = 3
+
+    public var isSwimming: Bool {
+        rawValue > Self.feet.rawValue
+    }
 }
 
 /// Value-only classification for capability misses that a host may reject
@@ -153,19 +169,29 @@ public struct SourceWorldWalkConfiguration: Equatable, Sendable {
 
     public var movement: SourceMovementParameters
     public var maximumSpeed: Float
+    /// `WaterMove` uses the separately carried `m_flClientMaxSpeed` for jump
+    /// and upward-look intent. It defaults to the ordinary maximum when the
+    /// host does not author a distinct client limit.
+    public var clientMaximumSpeed: Float
     public var jumpHeight: Float
     public var stepSize: Float
+    /// Standing `CBasePlayer::GetViewOffset().z` sampled by `CheckWater`.
+    public var standingViewOffsetZ: Float
 
     public init(
         movement: SourceMovementParameters = SourceMovementParameters(),
         maximumSpeed: Float = 320,
+        clientMaximumSpeed: Float? = nil,
         jumpHeight: Float = 21,
-        stepSize: Float = 18
+        stepSize: Float = 18,
+        standingViewOffsetZ: Float = 64
     ) {
         self.movement = movement
         self.maximumSpeed = maximumSpeed
+        self.clientMaximumSpeed = clientMaximumSpeed ?? maximumSpeed
         self.jumpHeight = jumpHeight
         self.stepSize = stepSize
+        self.standingViewOffsetZ = standingViewOffsetZ
     }
 }
 
@@ -175,6 +201,7 @@ public struct SourceWorldWalkState: Equatable, Sendable {
     public var movement: SourceMoveData
     public var viewAngles: SourceQAngle
     public var moveType: SourceMoveType
+    public var waterLevel: SourcePlayerWaterLevel
     /// Last world ladder plane selected by `CGameMovement::LadderMove`.
     /// Source retains this vector on the player and uses its negation for the
     /// next contact trace while `MOVETYPE_LADDER` is active.
@@ -184,11 +211,13 @@ public struct SourceWorldWalkState: Equatable, Sendable {
         movement: SourceMoveData = SourceMoveData(),
         viewAngles: SourceQAngle = .zero,
         moveType: SourceMoveType = .walk,
+        waterLevel: SourcePlayerWaterLevel = .notInWater,
         ladderNormal: SourceVector3 = .zero
     ) {
         self.movement = movement
         self.viewAngles = viewAngles
         self.moveType = moveType
+        self.waterLevel = waterLevel
         self.ladderNormal = ladderNormal
     }
 
@@ -205,6 +234,7 @@ public struct SourceWorldWalkState: Equatable, Sendable {
         )
         self.viewAngles = viewAngles
         moveType = .walk
+        waterLevel = .notInWater
         ladderNormal = .zero
     }
 
@@ -279,7 +309,9 @@ public struct SourceWorldWalkSolver: Sendable {
     public static let unsupportedFeatures: [SourceWorldWalkUnsupportedFeature] = [
         .duck,
         .verticalMove,
-        .water,
+        .waterJump,
+        .waterCurrent,
+        .dynamicWaterVolume,
         .dynamicEntityCollision,
         .movingGround,
         .vPhysics,
@@ -289,10 +321,12 @@ public struct SourceWorldWalkSolver: Sendable {
         .nonWalkMoveType,
     ]
 
-    private static let unsupportedContentsMask: SourceContents = [
-        .water, .slime,
-    ]
     private static let nonJumpUpwardVelocity: Float = 140
+    private static let waterSinkSpeed: Float = 60
+    private static let waterJumpSpeed: Float = 100
+    private static let slimeJumpSpeed: Float = 80
+    private static let waterWishSpeedScale: Float = 0.8
+    private static let waterMinimumSpeed: Float = 0.1
 
     public let configuration: SourceWorldWalkConfiguration
     private let collisionProvider: any SourceWorldWalkCollisionProvider
@@ -320,7 +354,8 @@ public struct SourceWorldWalkSolver: Sendable {
         next.viewAngles = command.viewAngles
         next.movement.outputWishVelocity = .zero
 
-        let initialWaterLevel = try environmentLevel(at: next.origin)
+        let initialWater = try waterEnvironment(at: next.origin)
+        next.waterLevel = initialWater.level
         _ = try categorizeGround(move: &next.movement)
 
         var diagnostics = MovementDiagnostics()
@@ -335,32 +370,59 @@ public struct SourceWorldWalkSolver: Sendable {
         }
         if next.moveType == .ladder {
             try slideMove(move: &next.movement, diagnostics: &diagnostics)
-            _ = try environmentLevel(at: next.origin)
+            next.waterLevel = try waterEnvironment(at: next.origin).level
             try validate(state: next)
             return SourceWorldWalkTick(
                 commandNumber: command.commandNumber,
                 state: next,
                 bumpCount: diagnostics.bumpCount,
                 collisionCount: diagnostics.collisionCount,
-                didSnapToGround: false
+                didSnapToGround: false,
+                stepHeight: diagnostics.stepHeight
             )
         }
 
-        if initialWaterLevel >= 2 {
+        if initialWater.level.isSwimming {
+            // Base `CheckJumpButton` detaches from ground and authors the
+            // initial swim-up velocity before `WaterMove` adds jump intent.
+            if command.buttons.contains(.jump) {
+                next.isOnGround = false
+                if initialWater.waterType == .water {
+                    next.velocity.z = Self.waterJumpSpeed
+                } else if initialWater.waterType == .slime {
+                    next.velocity.z = Self.slimeJumpSpeed
+                }
+            }
             try waterMove(
                 move: &next.movement,
                 command: command,
                 diagnostics: &diagnostics
             )
-            _ = try environmentLevel(at: next.origin)
+            _ = try categorizeGround(move: &next.movement)
+            next.waterLevel = try waterEnvironment(at: next.origin).level
+            SourceGameMovement.checkVelocity(
+                move: &next.movement,
+                parameters: configuration.movement
+            )
+            if next.isOnGround {
+                next.velocity.z = 0
+            }
             try validate(state: next)
             return SourceWorldWalkTick(
                 commandNumber: command.commandNumber,
                 state: next,
                 bumpCount: diagnostics.bumpCount,
                 collisionCount: diagnostics.collisionCount,
-                didSnapToGround: false
+                didSnapToGround: diagnostics.didSnapToGround,
+                stepHeight: diagnostics.stepHeight
             )
+        }
+
+        // `m_flUpMove` belongs to WaterMove (and ladder movement). Keeping it
+        // an explicit miss on ordinary WALK prevents noclip-like vertical
+        // movement from leaking into the bounded solver.
+        if command.upMove != 0 {
+            throw SourceWorldWalkError.unsupported(.verticalMove)
         }
 
         // CGameMovement applies a ground jump before the split gravity step.
@@ -410,15 +472,18 @@ public struct SourceWorldWalkSolver: Sendable {
             move: &next.movement,
             parameters: configuration.movement
         )
-        SourceGameMovement.finishGravity(
-            move: &next.movement,
-            parameters: configuration.movement
-        )
+        let finalWater = try waterEnvironment(at: next.origin)
+        next.waterLevel = finalWater.level
+        if !finalWater.level.isSwimming {
+            SourceGameMovement.finishGravity(
+                move: &next.movement,
+                parameters: configuration.movement
+            )
+        }
         if next.isOnGround {
             next.velocity.z = 0
         }
 
-        _ = try environmentLevel(at: next.origin)
         try validate(state: next)
 
         return SourceWorldWalkTick(
@@ -668,9 +733,9 @@ public struct SourceWorldWalkSolver: Sendable {
         try slideMove(move: &move, diagnostics: &diagnostics)
     }
 
-    /// A bounded world-brush water path. It intentionally omits currents,
-    /// water-jumps, and dynamic volumes, but it keeps ordinary map water from
-    /// becoming a permanent input rejection on iPad.
+    /// Source SDK 2013 `CGameMovement::WaterMove`, bounded to BSP world
+    /// collision. Water-jump ledge probing, currents, and dynamic volumes stay
+    /// explicit capability misses rather than being approximated.
     private func waterMove(
         move: inout SourceMoveData,
         command: SourceUserCommand,
@@ -680,9 +745,17 @@ public struct SourceWorldWalkSolver: Sendable {
         var wishVelocity = basis.forward * command.forwardMove +
             basis.right * command.sideMove
         if command.buttons.contains(.jump) {
-            wishVelocity.z += configuration.maximumSpeed
-        } else if command.forwardMove == 0, command.sideMove == 0 {
-            wishVelocity.z -= 60
+            wishVelocity.z += configuration.clientMaximumSpeed
+        } else if command.forwardMove == 0,
+                  command.sideMove == 0,
+                  command.upMove == 0 {
+            wishVelocity.z -= Self.waterSinkSpeed
+        } else {
+            let upwardMovement = min(
+                max(command.forwardMove * basis.forward.z * Float(2), 0),
+                configuration.clientMaximumSpeed
+            )
+            wishVelocity.z += command.upMove + upwardMovement
         }
         try requireFinite(
             wishVelocity,
@@ -691,28 +764,88 @@ public struct SourceWorldWalkSolver: Sendable {
         )
 
         let rawWishSpeed = wishVelocity.length
-        let maximumWaterSpeed = configuration.maximumSpeed * Float(0.8)
-        let wishSpeed = min(rawWishSpeed, maximumWaterSpeed)
+        let cappedWishSpeed = min(rawWishSpeed, configuration.maximumSpeed)
+        let wishSpeed = cappedWishSpeed * Self.waterWishSpeedScale
         let wishDirection = rawWishSpeed > 0 ? wishVelocity / rawWishSpeed : .zero
 
         let speed = move.velocity.length
+        let newSpeed: Float
         if speed > 0 {
-            let retained = max(
-                Float(0),
-                Float(1) - configuration.movement.friction *
-                    configuration.movement.frameTime
-            )
-            move.velocity *= retained
+            var candidate = speed - configuration.movement.frameTime * speed *
+                configuration.movement.friction * move.surfaceFriction
+            if candidate < Self.waterMinimumSpeed { candidate = 0 }
+            newSpeed = candidate
+            move.velocity *= candidate / speed
+        } else {
+            newSpeed = 0
         }
-        SourceGameMovement.accelerate(
+
+        // WaterMove predates the general Accelerate helper: its `addspeed`
+        // compares against total post-friction speed, not the wish-direction
+        // dot product. Preserve that operation order and output delta.
+        if wishSpeed >= Self.waterMinimumSpeed {
+            let addSpeed = wishSpeed - newSpeed
+            if addSpeed > 0 {
+                var accelerationSpeed = configuration.movement.acceleration *
+                    wishSpeed * configuration.movement.frameTime *
+                    move.surfaceFriction
+                if accelerationSpeed > addSpeed { accelerationSpeed = addSpeed }
+                let addedVelocity = wishDirection * accelerationSpeed
+                move.velocity += addedVelocity
+                move.outputWishVelocity += addedVelocity
+            }
+        }
+
+        let destination = move.origin +
+            move.velocity * configuration.movement.frameTime
+        let directTrace = try traceHull(start: move.origin, end: destination)
+        if directTrace.fraction == 1 {
+            // WaterMove first reaches the intended point, then presses down
+            // from one unit above the configured step height.
+            let downwardStart = destination + SourceVector3(
+                0,
+                0,
+                configuration.stepSize + Float(1)
+            )
+            let downwardTrace = try traceHull(
+                start: downwardStart,
+                end: destination,
+                allowEmbedded: true
+            )
+            diagnostics.bumpCount += 1
+            if !downwardTrace.startSolid, !downwardTrace.allSolid {
+                diagnostics.bumpCount += 1
+                diagnostics.stepHeight +=
+                    downwardTrace.endPosition.z - move.origin.z
+                move.origin = downwardTrace.endPosition
+                return
+            }
+
+            try slideMove(
+                move: &move,
+                diagnostics: &diagnostics,
+                firstDestination: destination,
+                firstTrace: directTrace
+            )
+            return
+        }
+
+        if !move.isOnGround {
+            try slideMove(
+                move: &move,
+                diagnostics: &diagnostics,
+                firstDestination: destination,
+                firstTrace: directTrace
+            )
+            return
+        }
+
+        try stepMove(
             move: &move,
-            wishDirection: wishDirection,
-            wishSpeed: wishSpeed,
-            parameters: configuration.movement
+            destination: destination,
+            directTrace: directTrace,
+            diagnostics: &diagnostics
         )
-        move.outputWishVelocity += wishDirection * wishSpeed
-        move.isOnGround = false
-        try slideMove(move: &move, diagnostics: &diagnostics)
     }
 
     private func slideMove(
@@ -966,18 +1099,73 @@ public struct SourceWorldWalkSolver: Sendable {
         }
     }
 
-    private func environmentLevel(at origin: SourceVector3) throws -> Int {
-        var waterLevel = 0
-        for (index, height) in [Float(1), Float(36), Float(71)].enumerated() {
-            let contents = try collisionProvider.worldWalkPointContents(
-                at: origin + SourceVector3(0, 0, height),
-                mask: Self.unsupportedContentsMask
+    /// Source SDK 2013 `CheckWater`: feet must be wet before waist is sampled,
+    /// and waist must be wet before the actual standing eye offset is sampled.
+    /// The provider is world-only, so dynamic `func_water_analog` entities are
+    /// deliberately absent from this result.
+    private func waterEnvironment(at origin: SourceVector3) throws
+        -> WaterEnvironment
+    {
+        let center = (Self.standingHullMins + Self.standingHullMaxs) * Float(0.5)
+        let feetPoint = SourceVector3(
+            origin.x + center.x,
+            origin.y + center.y,
+            origin.z + Self.standingHullMins.z + Float(1)
+        )
+        let feetContents = try collisionProvider.worldWalkPointContents(
+            at: feetPoint,
+            mask: SourceMasks.water
+        )
+        guard !feetContents.intersection(SourceMasks.water).isEmpty else {
+            return WaterEnvironment(level: .notInWater, waterType: .empty)
+        }
+
+        var level = SourcePlayerWaterLevel.feet
+        var lastContents = feetContents
+        let waistPoint = SourceVector3(
+            feetPoint.x,
+            feetPoint.y,
+            origin.z + center.z
+        )
+        let waistContents = try collisionProvider.worldWalkPointContents(
+            at: waistPoint,
+            mask: SourceMasks.water
+        )
+        if !waistContents.intersection(SourceMasks.water).isEmpty {
+            level = .waist
+            lastContents = waistContents
+            let eyeContents = try collisionProvider.worldWalkPointContents(
+                at: SourceVector3(
+                    feetPoint.x,
+                    feetPoint.y,
+                    origin.z + configuration.standingViewOffsetZ
+                ),
+                mask: SourceMasks.water
             )
-            if !contents.intersection([.water, .slime]).isEmpty {
-                waterLevel = index + 1
+            if !eyeContents.intersection(SourceMasks.water).isEmpty {
+                level = .eyes
+                lastContents = eyeContents
             }
         }
-        return waterLevel
+
+        // Source applies brush currents through base velocity. This bounded
+        // solver rejects them transactionally until that persistent path is
+        // connected instead of silently dropping authored map motion.
+        if !lastContents.intersection(SourceMasks.current).isEmpty {
+            throw SourceWorldWalkError.unsupported(.waterCurrent)
+        }
+        // The BSP/provider returns the complete leaf OptionSet. Source stores
+        // the sampled liquid kind for CheckJumpButton, so normalize away
+        // unrelated leaf flags while preserving slime's distinct 80 u/s path.
+        let waterType: SourceContents
+        if feetContents.contains(.slime) {
+            waterType = .slime
+        } else if feetContents.contains(.water) {
+            waterType = .water
+        } else {
+            waterType = feetContents
+        }
+        return WaterEnvironment(level: level, waterType: waterType)
     }
 
     private func wishMove(
@@ -1092,8 +1280,10 @@ public struct SourceWorldWalkSolver: Sendable {
             ("airAcceleration", parameters.airAcceleration),
             ("airSpeedCap", parameters.airSpeedCap),
             ("maximumSpeed", configuration.maximumSpeed),
+            ("clientMaximumSpeed", configuration.clientMaximumSpeed),
             ("jumpHeight", configuration.jumpHeight),
             ("stepSize", configuration.stepSize),
+            ("standingViewOffsetZ", configuration.standingViewOffsetZ),
         ] {
             guard value.isFinite else {
                 throw SourceWorldWalkError.nonFinite("configuration \(name)")
@@ -1219,11 +1409,8 @@ public struct SourceWorldWalkSolver: Sendable {
         if command.buttons.contains(.duck) {
             throw SourceWorldWalkError.unsupported(.duck)
         }
-        if command.upMove != 0, state.moveType != .ladder {
-            throw SourceWorldWalkError.unsupported(.verticalMove)
-        }
         if state.movement.waterJumpTime != 0 {
-            throw SourceWorldWalkError.unsupported(.water)
+            throw SourceWorldWalkError.unsupported(.waterJump)
         }
         if state.movement.baseVelocity != .zero {
             throw SourceWorldWalkError.unsupported(.movingGround)
@@ -1265,5 +1452,10 @@ public struct SourceWorldWalkSolver: Sendable {
             didSnapToGround = didSnapToGround || other.didSnapToGround
             stepHeight += other.stepHeight
         }
+    }
+
+    private struct WaterEnvironment {
+        let level: SourcePlayerWaterLevel
+        let waterType: SourceContents
     }
 }

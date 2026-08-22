@@ -101,6 +101,7 @@ final class GModPlayableSessionTests: XCTestCase {
         }
         XCTAssertEqual(tick.commandNumber, 1)
         XCTAssertNotEqual(tick.state, stateBeforeTick)
+        XCTAssertEqual(tick.state.waterLevel, .eyes)
         XCTAssertEqual(report.movement.state, tick.state)
         XCTAssertEqual(session.playerWalkState, tick.state)
         XCTAssertEqual(report.server.kind, .serverFixedTick)
@@ -116,6 +117,39 @@ final class GModPlayableSessionTests: XCTestCase {
             clientTimeBefore + oneTick
         )
         XCTAssertFalse(session.isClosed)
+    }
+
+    func testWaterUpMovePersistsThroughCanonicalPlayerState() throws {
+        let session = try GModPlayableSession(
+            configuration: GModPlayableSessionConfiguration(map: .construct),
+            textMeasurer: nil,
+            logger: { _, _ in },
+            worldWalkCollisionProvider:
+                UnsupportedContentsPlayableWalkProvider(contents: .water)
+        )
+        defer { _ = try? session.close() }
+
+        let report = try session.runFixedTick(
+            movementInput: GModPlayableMovementInput(upMove: 50)
+        )
+        guard case let .advanced(tick) = report.movement else {
+            return XCTFail("water upMove was rejected")
+        }
+        XCTAssertEqual(tick.state.waterLevel, .eyes)
+        XCTAssertGreaterThan(tick.state.velocity.z, 0)
+        XCTAssertEqual(session.playerWalkState.waterLevel, .eyes)
+        XCTAssertEqual(
+            session.sourceAdapter.canonicalEntitySnapshots.first {
+                $0.kind == .player
+            }?.motion.waterLevel,
+            .eyes
+        )
+        XCTAssertEqual(
+            session.clientRuntime.entityRegistry?.canonicalEntitySnapshots.first {
+                $0.kind == .player
+            }?.motion.waterLevel,
+            .eyes
+        )
     }
 
     func testNonFiniteMovementRemainsFatalAfterWaterMovement() throws {

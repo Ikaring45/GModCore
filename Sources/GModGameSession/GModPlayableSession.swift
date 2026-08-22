@@ -304,17 +304,20 @@ public struct GModPlayableMovementInput: Equatable, Sendable {
     public let viewAngles: SourceQAngle?
     public let forwardMove: Float
     public let sideMove: Float
+    public let upMove: Float
     public let buttons: SourceInputButtons
 
     public init(
         viewAngles: SourceQAngle? = nil,
         forwardMove: Float = 0,
         sideMove: Float = 0,
+        upMove: Float = 0,
         buttons: SourceInputButtons = []
     ) {
         self.viewAngles = viewAngles
         self.forwardMove = forwardMove
         self.sideMove = sideMove
+        self.upMove = upMove
         self.buttons = buttons
     }
 
@@ -1010,7 +1013,10 @@ public final class GModPlayableSession {
             propPhysicsCoordinator = loadedPropPhysicsCoordinator
             weaponGameplayController = loadedWeaponGameplayController
             worldWalkSolver = SourceWorldWalkSolver(
-                collisionProvider: loadedWorldWalkCollisionProvider
+                collisionProvider: loadedWorldWalkCollisionProvider,
+                configuration: SourceWorldWalkConfiguration(
+                    standingViewOffsetZ: sourcePlayer.viewOffset.z
+                )
             )
             playerIdentity = sourcePlayer.identity
             serverFileSystem = serverFiles
@@ -1147,6 +1153,7 @@ public final class GModPlayableSession {
             viewAngles: movementInput.viewAngles ?? stateBeforeMovement.viewAngles,
             forwardMove: movementInput.forwardMove,
             sideMove: movementInput.sideMove,
+            upMove: movementInput.upMove,
             buttons: movementInput.buttons
         )
         let movement: GModPlayableMovementResult

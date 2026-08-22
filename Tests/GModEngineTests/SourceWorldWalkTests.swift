@@ -498,7 +498,11 @@ final class SourceWorldWalkTests: XCTestCase {
         XCTAssertFalse(SourceWorldWalkSolver.unsupportedFeatures.contains(.stepUp))
         XCTAssertFalse(SourceWorldWalkSolver.unsupportedFeatures.contains(.jump))
         XCTAssertTrue(SourceWorldWalkSolver.unsupportedFeatures.contains(.duck))
-        XCTAssertTrue(SourceWorldWalkSolver.unsupportedFeatures.contains(.water))
+        XCTAssertTrue(SourceWorldWalkSolver.unsupportedFeatures.contains(.waterJump))
+        XCTAssertTrue(SourceWorldWalkSolver.unsupportedFeatures.contains(.waterCurrent))
+        XCTAssertTrue(
+            SourceWorldWalkSolver.unsupportedFeatures.contains(.dynamicWaterVolume)
+        )
         XCTAssertFalse(SourceWorldWalkSolver.unsupportedFeatures.contains(.ladder))
         XCTAssertFalse(
             SourceWorldWalkSolver.unsupportedFeatures.contains(.displacementCollision)
@@ -544,17 +548,11 @@ final class SourceWorldWalkTests: XCTestCase {
     }
 
     func testWaterMovesAndJumpSwims() throws {
-        var waterWorld = floorWorld()
-        waterWorld.addAxisAlignedBox(
-            SourceAABBCollider(
-                mins: SourceVector3(-100, -100, -10),
-                maxs: SourceVector3(100, 100, 100),
-                contents: .water,
-                entityHandle: worldHandle
-            )
+        let waterSolver = makeSolver(
+            world: waterWorld(contents: .water),
+            maximumSpeed: 200
         )
-        let waterSolver = makeSolver(world: waterWorld, maximumSpeed: 200)
-        let state = SourceWorldWalkState(origin: SourceVector3(0, 0, 1))
+        let state = SourceWorldWalkState(origin: SourceVector3(0, 0, 0))
         let swimming = try waterSolver.simulate(
             state: state,
             command: SourceUserCommand(
@@ -566,6 +564,183 @@ final class SourceWorldWalkTests: XCTestCase {
         XCTAssertGreaterThan(swimming.state.origin.x, state.origin.x)
         XCTAssertGreaterThan(swimming.state.origin.z, state.origin.z)
         XCTAssertFalse(swimming.state.isOnGround)
+        XCTAssertEqual(swimming.state.waterLevel, .eyes)
+        XCTAssertEqual(swimming.state.velocity.x, 16.970_562, accuracy: 0.000_01)
+        XCTAssertEqual(swimming.state.velocity.z, 110.970_56, accuracy: 0.000_01)
+    }
+
+    func testWaterLevelSamplesFeetWaistAndStandingEyeOffset() throws {
+        let expectations: [(maximumZ: Float, level: SourcePlayerWaterLevel)] = [
+            (20, .feet),
+            (50, .waist),
+            // The standing eye is at z + 64 in the Source player state. This
+            // volume deliberately ends below the old hull-top approximation.
+            (65, .eyes),
+        ]
+
+        for expectation in expectations {
+            let solver = makeSolver(
+                world: waterWorld(maximumZ: expectation.maximumZ),
+                maximumSpeed: 200
+            )
+            let tick = try solver.simulate(
+                state: SourceWorldWalkState(origin: .zero),
+                command: SourceUserCommand(commandNumber: 1)
+            )
+            XCTAssertEqual(
+                tick.state.waterLevel,
+                expectation.level,
+                "water top z=\(expectation.maximumZ)"
+            )
+        }
+    }
+
+    func testWaterMoveUsesSDKFrictionAccelerationSinkAndUpInput() throws {
+        let solver = makeSolver(world: waterWorld(), maximumSpeed: 200)
+        let state = SourceWorldWalkState(origin: .zero)
+
+        let accelerated = try solver.simulate(
+            state: state,
+            command: SourceUserCommand(commandNumber: 1, forwardMove: 100)
+        ).state
+        XCTAssertEqual(accelerated.velocity.x, 12, accuracy: 0.000_01)
+        XCTAssertEqual(accelerated.origin.x, 0.18, accuracy: 0.000_01)
+        XCTAssertEqual(
+            accelerated.movement.outputWishVelocity.x,
+            12,
+            accuracy: 0.000_01
+        )
+
+        let sinking = try solver.simulate(
+            state: state,
+            command: SourceUserCommand(commandNumber: 2)
+        ).state
+        XCTAssertEqual(sinking.velocity.z, -7.2, accuracy: 0.000_01)
+        XCTAssertEqual(sinking.origin.z, -0.108, accuracy: 0.000_01)
+
+        let rising = try solver.simulate(
+            state: state,
+            command: SourceUserCommand(commandNumber: 3, upMove: 50)
+        ).state
+        XCTAssertEqual(rising.velocity.z, 6, accuracy: 0.000_01)
+        XCTAssertEqual(rising.origin.z, 0.09, accuracy: 0.000_01)
+
+        let frictionState = SourceWorldWalkState(
+            origin: .zero,
+            velocity: SourceVector3(100, 0, 0)
+        )
+        let friction = try solver.simulate(
+            state: frictionState,
+            command: SourceUserCommand(commandNumber: 4)
+        ).state
+        XCTAssertEqual(friction.velocity.x, 94, accuracy: 0.000_01)
+        XCTAssertEqual(friction.velocity.z, 0, accuracy: 0.000_01)
+    }
+
+    func testWaterAndSlimeJumpAuthorExactSDKVerticalSpeeds() throws {
+        let state = SourceWorldWalkState(origin: .zero)
+        let command = SourceUserCommand(commandNumber: 1, buttons: [.jump])
+
+        let water = try makeSolver(
+            world: waterWorld(contents: [.water, .detail]),
+            maximumSpeed: 200
+        ).simulate(state: state, command: command).state
+        XCTAssertEqual(water.velocity.z, 118, accuracy: 0.000_01)
+
+        let slime = try makeSolver(
+            world: waterWorld(contents: [.water, .slime, .detail]),
+            maximumSpeed: 200
+        ).simulate(state: state, command: command).state
+        XCTAssertEqual(slime.velocity.z, 99.2, accuracy: 0.000_01)
+    }
+
+    func testEnteringWaistWaterSuppressesSecondHalfGravity() throws {
+        let world = SourceCollisionWorld(
+            primitives: [
+                .axisAlignedBox(
+                    SourceAABBCollider(
+                        mins: SourceVector3(0, -100, -100),
+                        maxs: SourceVector3(100, 100, 100),
+                        contents: .water,
+                        entityHandle: worldHandle
+                    )
+                ),
+            ]
+        )
+        let tick = try makeSolver(world: world, maximumSpeed: 200).simulate(
+            state: SourceWorldWalkState(origin: SourceVector3(-0.1, 0, 0)),
+            command: SourceUserCommand(commandNumber: 1, forwardMove: 200)
+        )
+
+        XCTAssertEqual(tick.state.waterLevel, .eyes)
+        XCTAssertEqual(tick.state.velocity.z, -6, accuracy: 0.000_01)
+    }
+
+    func testWaterCurrentRemainsAnExplicitTransactionalCapabilityMiss() throws {
+        let solver = makeSolver(
+            world: waterWorld(contents: [.water, .current0]),
+            maximumSpeed: 200
+        )
+        let state = SourceWorldWalkState(origin: .zero)
+
+        XCTAssertThrowsError(try solver.simulate(
+            state: state,
+            command: SourceUserCommand(commandNumber: 1)
+        )) {
+            XCTAssertEqual(
+                $0 as? SourceWorldWalkError,
+                .unsupported(.waterCurrent)
+            )
+        }
+        XCTAssertEqual(state, SourceWorldWalkState(origin: .zero))
+    }
+
+    func testBundledConstructWaterLeafDrivesWorldOnlySwimming() throws {
+        let bsp = try SourceBSP(data: GModGameAssets.data(for: .construct, kind: .bsp))
+        let waterOrigins = bsp.faces.compactMap { face -> SourceVector3? in
+            guard face.textureInfoIndex >= 0 else { return nil }
+            let textureInfo = bsp.textureInfo[Int(face.textureInfoIndex)]
+            guard let materialName = bsp.textureName(
+                forTextureDataIndex: Int(textureInfo.textureDataIndex)
+            ), materialName.contains("water_13"),
+               !materialName.contains("water_13_beneath") else { return nil }
+
+            let firstEdge = Int(face.firstSurfaceEdge)
+            let points = (0..<Int(face.surfaceEdgeCount)).map { offset in
+                let signedEdge = bsp.surfaceEdges[firstEdge + offset]
+                let edge = bsp.edges[Int(abs(Int64(signedEdge)))]
+                let vertexIndex = signedEdge >= 0
+                    ? Int(edge.firstVertex)
+                    : Int(edge.secondVertex)
+                return bsp.vertices[vertexIndex].point
+            }
+            guard !points.isEmpty else { return nil }
+            let center = points.reduce(SourceVector3.zero) { partial, point in
+                partial + SourceVector3(point.x, point.y, point.z)
+            } / Float(points.count)
+            return center - SourceVector3(0, 0, 65)
+        }
+        let origin = try XCTUnwrap(waterOrigins.first { candidate in
+            let sampleOffsets: [Float] = [1, 36, 64]
+            return sampleOffsets.allSatisfy { offset in
+                guard let contents = try? bsp.worldPointContents(
+                    at: candidate + SourceVector3(0, 0, offset),
+                    mask: SourceMasks.water
+                ) else { return false }
+                return !contents.intersection(SourceMasks.water).isEmpty
+            }
+        }, "expected an authored gm_construct water leaf")
+        let solver = SourceWorldWalkSolver(
+            collisionProvider: SourceBSPWorldWalkCollisionProvider(bsp: bsp),
+            configuration: SourceWorldWalkConfiguration(maximumSpeed: 200)
+        )
+
+        let tick = try solver.simulate(
+            state: SourceWorldWalkState(origin: origin),
+            command: SourceUserCommand(commandNumber: 1)
+        )
+        XCTAssertEqual(tick.state.waterLevel, .eyes)
+        XCTAssertLessThan(tick.state.velocity.z, 0)
     }
 
     func testConstructRealLadderContentsPlaneClimbDescendJumpAndContactLoss() throws {
@@ -934,6 +1109,24 @@ final class SourceWorldWalkTests: XCTestCase {
                         mins: SourceVector3(-1_000, -1_000, -100),
                         maxs: SourceVector3(1_000, 1_000, 0),
                         contents: .solid,
+                        entityHandle: worldHandle
+                    )
+                ),
+            ]
+        )
+    }
+
+    private func waterWorld(
+        maximumZ: Float = 100,
+        contents: SourceContents = .water
+    ) -> SourceCollisionWorld {
+        SourceCollisionWorld(
+            primitives: [
+                .axisAlignedBox(
+                    SourceAABBCollider(
+                        mins: SourceVector3(-100, -100, -100),
+                        maxs: SourceVector3(100, 100, maximumZ),
+                        contents: contents,
                         entityHandle: worldHandle
                     )
                 ),

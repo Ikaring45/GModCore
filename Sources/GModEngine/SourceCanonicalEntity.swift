@@ -69,6 +69,7 @@ public struct SourceEntityMotionState: Equatable, Sendable {
     public var entityGravity: Float
     public var surfaceFriction: Float
     public var waterJumpTime: Float
+    public var waterLevel: SourcePlayerWaterLevel
     /// Last world ladder plane retained by Source player movement while
     /// `MOVETYPE_LADDER` is active. This lives in the canonical Player motion
     /// snapshot so the next fixed tick does not depend on a host-side mirror.
@@ -84,6 +85,7 @@ public struct SourceEntityMotionState: Equatable, Sendable {
         entityGravity: Float = 0,
         surfaceFriction: Float = 1,
         waterJumpTime: Float = 0,
+        waterLevel: SourcePlayerWaterLevel = .notInWater,
         ladderNormal: SourceVector3 = .zero,
         isAlive: Bool = true
     ) {
@@ -95,6 +97,7 @@ public struct SourceEntityMotionState: Equatable, Sendable {
         self.entityGravity = entityGravity
         self.surfaceFriction = surfaceFriction
         self.waterJumpTime = waterJumpTime
+        self.waterLevel = waterLevel
         self.ladderNormal = ladderNormal
         self.isAlive = isAlive
     }
@@ -739,6 +742,7 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
             ),
             viewAngles: transform.angles,
             moveType: moveType,
+            waterLevel: motion.waterLevel,
             ladderNormal: motion.ladderNormal
         )
     }
@@ -756,6 +760,7 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
         motion.entityGravity = walkState.movement.entityGravity
         motion.surfaceFriction = walkState.movement.surfaceFriction
         motion.waterJumpTime = walkState.movement.waterJumpTime
+        motion.waterLevel = walkState.waterLevel
         motion.ladderNormal = walkState.ladderNormal
         motion.isAlive = !walkState.movement.isDead
         moveType = walkState.moveType
