@@ -23,6 +23,132 @@ final class GModMetalWorldSceneTests: XCTestCase {
         ))
     }
 
+    func testWorldVisibilityWorkspacePreservesOrderCoalescesAndCachesView() {
+        let visibility = fixtureWorldVisibility(
+            potentialVisibility: GModMetalWorldPotentialVisibility(
+                clusterCount: 2,
+                encodedBytes: [0b0000_0001],
+                pvsOffsets: [0, 0]
+            )
+        )
+        let scene = fixtureVisibilityScene(visibility: visibility)
+        let workspace = GModMetalWorldVisibilityWorkspace()
+
+        XCTAssertTrue(workspace.update(
+            scene: scene,
+            sourceCameraEye: SIMD3<Float>(1, 0, 0),
+            metalCameraEye: SIMD3<Float>(0, 0, -1),
+            metalCameraForward: SIMD3<Float>(0, 0, -1),
+            metalCameraUp: SIMD3<Float>(0, 1, 0),
+            verticalFieldOfViewRadians:
+                GModMetalSourceFOVContract.defaultWorldVerticalRadians,
+            aspectRatio: 4.0 / 3.0,
+            nearPlane: 1,
+            farPlane: 65_536
+        ))
+        XCTAssertEqual(workspace.metrics, GModMetalWorldVisibilityMetrics(
+            sourceSpanCount: 4,
+            sourceIndexCount: 12,
+            visibleSpanCount: 2,
+            visibleIndexCount: 6,
+            drawSpanCount: 1
+        ))
+        XCTAssertEqual(workspace.visibleDrawSpans, [
+            GModMetalWorldVisibleIndexSpan(
+                materialRangeIndex: 0,
+                firstIndex: 0,
+                indexCount: 6
+            ),
+        ])
+        XCTAssertEqual(workspace.rebuildCount, 1)
+
+        XCTAssertTrue(workspace.update(
+            scene: scene,
+            sourceCameraEye: SIMD3<Float>(1, 0, 0),
+            metalCameraEye: SIMD3<Float>(0, 0, -1),
+            metalCameraForward: SIMD3<Float>(0, 0, -1),
+            metalCameraUp: SIMD3<Float>(0, 1, 0),
+            verticalFieldOfViewRadians:
+                GModMetalSourceFOVContract.defaultWorldVerticalRadians,
+            aspectRatio: 4.0 / 3.0,
+            nearPlane: 1,
+            farPlane: 65_536
+        ))
+        XCTAssertEqual(workspace.rebuildCount, 1)
+        XCTAssertEqual(
+            scene.updatingCamera(
+                eye: SIMD3<Float>(2, 0, 0),
+                forward: SIMD3<Float>(1, 0, 0)
+            ).worldVisibility,
+            visibility
+        )
+    }
+
+    func testWorldVisibilityWorkspaceFailsOpenWithoutUsablePVS() {
+        let workspace = GModMetalWorldVisibilityWorkspace()
+        let missingPVS = fixtureVisibilityScene(
+            visibility: fixtureWorldVisibility(potentialVisibility: nil)
+        )
+        XCTAssertFalse(workspace.update(
+            scene: missingPVS,
+            sourceCameraEye: SIMD3<Float>(1, 0, 0),
+            metalCameraEye: SIMD3<Float>(0, 0, -1),
+            metalCameraForward: SIMD3<Float>(0, 0, -1),
+            metalCameraUp: SIMD3<Float>(0, 1, 0),
+            verticalFieldOfViewRadians:
+                GModMetalSourceFOVContract.defaultWorldVerticalRadians,
+            aspectRatio: 4.0 / 3.0,
+            nearPlane: 1,
+            farPlane: 65_536
+        ))
+        XCTAssertNil(workspace.metrics)
+        XCTAssertTrue(workspace.visibleDrawSpans.isEmpty)
+        XCTAssertEqual(workspace.rebuildCount, 1)
+        XCTAssertFalse(workspace.update(
+            scene: missingPVS,
+            sourceCameraEye: SIMD3<Float>(1, 0, 0),
+            metalCameraEye: SIMD3<Float>(0, 0, -1),
+            metalCameraForward: SIMD3<Float>(0, 0, -1),
+            metalCameraUp: SIMD3<Float>(0, 1, 0),
+            verticalFieldOfViewRadians:
+                GModMetalSourceFOVContract.defaultWorldVerticalRadians,
+            aspectRatio: 4.0 / 3.0,
+            nearPlane: 1,
+            farPlane: 65_536
+        ))
+        XCTAssertEqual(workspace.rebuildCount, 1)
+
+        let invalidLeaf = GModMetalWorldVisibility(
+            headNode: 4,
+            planes: missingPVS.worldVisibility?.planes ?? [],
+            nodes: missingPVS.worldVisibility?.nodes ?? [],
+            leafClusters: missingPVS.worldVisibility?.leafClusters ?? [],
+            potentialVisibility: GModMetalWorldPotentialVisibility(
+                clusterCount: 2,
+                encodedBytes: [1],
+                pvsOffsets: [0, 0]
+            ),
+            spans: missingPVS.worldVisibility?.spans ?? [],
+            spanClusters: missingPVS.worldVisibility?.spanClusters ?? []
+        )
+        workspace.reset()
+        XCTAssertFalse(workspace.update(
+            scene: fixtureVisibilityScene(visibility: invalidLeaf),
+            sourceCameraEye: SIMD3<Float>(1, 0, 0),
+            metalCameraEye: SIMD3<Float>(0, 0, -1),
+            metalCameraForward: SIMD3<Float>(0, 0, -1),
+            metalCameraUp: SIMD3<Float>(0, 1, 0),
+            verticalFieldOfViewRadians:
+                GModMetalSourceFOVContract.defaultWorldVerticalRadians,
+            aspectRatio: 4.0 / 3.0,
+            nearPlane: 1,
+            farPlane: 65_536
+        ))
+        XCTAssertEqual(workspace.rebuildCount, 2)
+        XCTAssertNil(workspace.metrics)
+        XCTAssertTrue(workspace.visibleDrawSpans.isEmpty)
+    }
+
     func testEnvSunDirectionAndGlowContractSurviveCameraUpdates() throws {
         let bitmap = try fixtureBitmap(named: "sun-core")
         let layer = GModMetalWorldSunSpriteLayer(
@@ -885,7 +1011,8 @@ final class GModMetalWorldSceneTests: XCTestCase {
         lightmapAtlas: GModMetalWorldLightmapAtlas? = nil,
         lightmapDiagnostics: GModMetalWorldLightmapDiagnostics = .init(),
         environmentLighting: GModMetalWorldEnvironmentLighting? = nil,
-        sunSprites: [GModMetalWorldSunSprite] = []
+        sunSprites: [GModMetalWorldSunSprite] = [],
+        worldVisibility: GModMetalWorldVisibility? = nil
     ) -> GModMetalWorldScene {
         GModMetalWorldScene(
             meshIdentifier: "sky-contract",
@@ -907,8 +1034,105 @@ final class GModMetalWorldSceneTests: XCTestCase {
             lightmapDiagnostics: lightmapDiagnostics,
             environmentLighting: environmentLighting,
             sunSprites: sunSprites,
+            worldVisibility: worldVisibility,
             cameraEye: SIMD3<Float>(0, 0, 64),
             cameraForward: SIMD3<Float>(1, 0, 0)
+        )
+    }
+
+    private func fixtureVisibilityScene(
+        visibility: GModMetalWorldVisibility
+    ) -> GModMetalWorldScene {
+        GModMetalWorldScene(
+            meshIdentifier: "world-visibility",
+            sourcePositions: [
+                SIMD3<Float>(1, 0, 0),
+                SIMD3<Float>(1, 1, 0),
+                SIMD3<Float>(1, 0, 1),
+            ],
+            sourceNormals: Array(
+                repeating: SIMD3<Float>(-1, 0, 0),
+                count: 3
+            ),
+            indices: [
+                0, 1, 2, 0, 1, 2,
+                0, 1, 2, 0, 1, 2,
+            ],
+            materialRanges: [
+                GModMetalWorldMaterialRange(
+                    materialName: "world/first",
+                    firstIndex: 0,
+                    indexCount: 6,
+                    bitmap: nil
+                ),
+                GModMetalWorldMaterialRange(
+                    materialName: "world/second",
+                    firstIndex: 6,
+                    indexCount: 6,
+                    bitmap: nil
+                ),
+            ],
+            worldVisibility: visibility,
+            cameraEye: SIMD3<Float>(1, 0, 0),
+            cameraForward: SIMD3<Float>(1, 0, 0)
+        )
+    }
+
+    private func fixtureWorldVisibility(
+        potentialVisibility: GModMetalWorldPotentialVisibility?
+    ) -> GModMetalWorldVisibility {
+        GModMetalWorldVisibility(
+            headNode: 0,
+            planes: [GModMetalWorldVisibilityPlane(
+                sourceNormal: SIMD3<Float>(1, 0, 0),
+                distance: 0
+            )],
+            nodes: [GModMetalWorldVisibilityNode(
+                planeIndex: 0,
+                frontChild: -1,
+                backChild: -2
+            )],
+            leafClusters: [0, 1],
+            potentialVisibility: potentialVisibility,
+            spans: [
+                GModMetalWorldVisibilitySpan(
+                    materialRangeIndex: 0,
+                    firstIndex: 0,
+                    indexCount: 3,
+                    metalMinimum: SIMD3<Float>(-1, -1, -10),
+                    metalMaximum: SIMD3<Float>(1, 1, -9),
+                    clusterStartIndex: 0,
+                    clusterCount: 1
+                ),
+                GModMetalWorldVisibilitySpan(
+                    materialRangeIndex: 0,
+                    firstIndex: 3,
+                    indexCount: 3,
+                    metalMinimum: SIMD3<Float>(-1, -1, -11),
+                    metalMaximum: SIMD3<Float>(1, 1, -10),
+                    clusterStartIndex: 1,
+                    clusterCount: 1
+                ),
+                GModMetalWorldVisibilitySpan(
+                    materialRangeIndex: 1,
+                    firstIndex: 6,
+                    indexCount: 3,
+                    metalMinimum: SIMD3<Float>(-1, -1, -12),
+                    metalMaximum: SIMD3<Float>(1, 1, -11),
+                    clusterStartIndex: 2,
+                    clusterCount: 1
+                ),
+                GModMetalWorldVisibilitySpan(
+                    materialRangeIndex: 1,
+                    firstIndex: 9,
+                    indexCount: 3,
+                    metalMinimum: SIMD3<Float>(-1, -1, 9),
+                    metalMaximum: SIMD3<Float>(1, 1, 10),
+                    clusterStartIndex: 3,
+                    clusterCount: 1
+                ),
+            ],
+            spanClusters: [0, 0, 1, 0]
         )
     }
 

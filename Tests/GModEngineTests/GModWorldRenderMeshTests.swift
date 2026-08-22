@@ -420,6 +420,129 @@ final class GModWorldRenderMeshTests: XCTestCase {
         )
     }
 
+    func testBundledWorldVisibilityMetadataCoversEveryOrdinaryNonWaterIndex()
+        throws
+    {
+        let expectations: [(map: GModBundledMap, indexCount: Int)] = [
+            (.construct, 120_162),
+            (.flatgrass, 36_042),
+        ]
+        for expectation in expectations {
+            let bsp = try SourceBSP(
+                data: GModGameAssets.data(for: expectation.map, kind: .bsp)
+            )
+            let mesh = try GModWorldRenderMesh.build(from: bsp)
+            let visibility = try XCTUnwrap(mesh.worldVisibility)
+            XCTAssertNotNil(visibility.potentialVisibility)
+            XCTAssertEqual(
+                visibility.spans.reduce(0) { $0 + $1.indexCount },
+                expectation.indexCount
+            )
+            XCTAssertEqual(
+                mesh.materialRanges.filter {
+                    $0.renderLayer == .world && $0.waterSurface == nil
+                }.reduce(0) { $0 + $1.indexCount },
+                expectation.indexCount
+            )
+
+            var previousRange = -1
+            var previousEnd = 0
+            for span in visibility.spans {
+                XCTAssertTrue(mesh.materialRanges.indices.contains(
+                    span.materialRangeIndex
+                ))
+                let range = mesh.materialRanges[span.materialRangeIndex]
+                XCTAssertEqual(range.renderLayer, .world)
+                XCTAssertNil(range.waterSurface)
+                XCTAssertGreaterThan(span.indexCount, 0)
+                XCTAssertEqual(span.indexCount % 3, 0)
+                XCTAssertGreaterThanOrEqual(span.firstIndex, range.firstIndex)
+                XCTAssertLessThanOrEqual(
+                    span.firstIndex + span.indexCount,
+                    range.firstIndex + range.indexCount
+                )
+                XCTAssertGreaterThanOrEqual(
+                    span.materialRangeIndex,
+                    previousRange
+                )
+                if span.materialRangeIndex == previousRange {
+                    XCTAssertGreaterThanOrEqual(span.firstIndex, previousEnd)
+                }
+                let clusterEnd = span.clusterStartIndex + span.clusterCount
+                XCTAssertLessThanOrEqual(
+                    clusterEnd,
+                    visibility.spanClusters.count
+                )
+                let clusters = Array(
+                    visibility.spanClusters[
+                        span.clusterStartIndex..<clusterEnd
+                    ]
+                )
+                XCTAssertEqual(clusters, Array(Set(clusters)).sorted())
+                XCTAssertLessThanOrEqual(span.minimum.x, span.maximum.x)
+                XCTAssertLessThanOrEqual(span.minimum.y, span.maximum.y)
+                XCTAssertLessThanOrEqual(span.minimum.z, span.maximum.z)
+                previousRange = span.materialRangeIndex
+                previousEnd = span.firstIndex + span.indexCount
+            }
+        }
+    }
+
+    func testBundledSpawnViewsReduceWorldDrawWithPVSAndFrustum() throws {
+        let expectations: [(
+            map: GModBundledMap,
+            sourceSpans: Int,
+            sourceIndices: Int,
+            visibleSpans: Int,
+            visibleIndices: Int,
+            drawSpans: Int
+        )] = [
+            (.construct, 6_421, 120_162, 988, 26_898, 245),
+            (.flatgrass, 1_648, 36_042, 367, 8_862, 46),
+        ]
+        let verticalFOV = 2 * atan(
+            tan(Float(75) * .pi / 360) / (Float(4) / 3)
+        )
+        for expectation in expectations {
+            let bsp = try SourceBSP(
+                data: GModGameAssets.data(for: expectation.map, kind: .bsp)
+            )
+            let mesh = try GModWorldRenderMesh.build(from: bsp)
+            let visibility = try XCTUnwrap(mesh.worldVisibility)
+            let camera = try firstPlayerCamera(in: bsp)
+            let metrics = try XCTUnwrap(visibility.selectionMetrics(
+                cameraEye: camera.eye,
+                cameraForward: camera.angles.sourceBasis.forward,
+                cameraUp: camera.angles.sourceBasis.up,
+                verticalFieldOfViewRadians: verticalFOV,
+                aspectRatio: Float(4) / 3,
+                nearPlane: 1,
+                farPlane: 65_536
+            ))
+
+            XCTAssertEqual(metrics.sourceSpanCount, expectation.sourceSpans)
+            XCTAssertEqual(metrics.sourceIndexCount, expectation.sourceIndices)
+            XCTAssertEqual(metrics.visibleSpanCount, expectation.visibleSpans)
+            XCTAssertEqual(metrics.visibleIndexCount, expectation.visibleIndices)
+            XCTAssertEqual(metrics.drawSpanCount, expectation.drawSpans)
+            XCTAssertGreaterThan(metrics.visibleIndexCount, 0)
+            XCTAssertLessThan(
+                metrics.visibleIndexCount,
+                metrics.sourceIndexCount
+            )
+            XCTAssertGreaterThan(metrics.visibleSpanCount, 0)
+            XCTAssertLessThan(
+                metrics.visibleSpanCount,
+                metrics.sourceSpanCount
+            )
+            XCTAssertGreaterThan(metrics.drawSpanCount, 0)
+            XCTAssertLessThanOrEqual(
+                metrics.drawSpanCount,
+                metrics.visibleSpanCount
+            )
+        }
+    }
+
     private func assertAllIndicesAreInBounds(
         _ mesh: GModWorldRenderMesh,
         file: StaticString = #filePath,
@@ -646,6 +769,46 @@ final class GModWorldRenderMeshTests: XCTestCase {
     private func appendInt32(_ value: Int32, to data: inout Data) {
         var littleEndian = value.littleEndian
         withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
+    }
+
+    private func firstPlayerCamera(
+        in bsp: SourceBSP
+    ) throws -> (eye: SourceVector3, angles: SourceQAngle) {
+        let entity = try XCTUnwrap(
+            bsp.entities.parsedEntities().first {
+                $0.value(forKey: "classname")?
+                    .lowercased()
+                    .hasPrefix("info_player_") == true
+            }
+        )
+        func floats(_ value: String?) -> [Float] {
+            value?.split(whereSeparator: { $0.isWhitespace })
+                .compactMap { Float($0) } ?? []
+        }
+        let origin = floats(entity.value(forKey: "origin"))
+        guard origin.count == 3 else {
+            throw TestFixtureError.invalidPlayerOrigin
+        }
+        let angleValues = floats(entity.value(forKey: "angles"))
+        let angles: SourceQAngle
+        if angleValues.count == 3 {
+            angles = SourceQAngle(
+                pitch: angleValues[0],
+                yaw: angleValues[1],
+                roll: angleValues[2]
+            )
+        } else {
+            let yaw = floats(entity.value(forKey: "angle")).first ?? 0
+            angles = SourceQAngle(pitch: 0, yaw: yaw, roll: 0)
+        }
+        return (
+            SourceVector3(origin[0], origin[1], origin[2] + 64),
+            angles
+        )
+    }
+
+    private enum TestFixtureError: Error {
+        case invalidPlayerOrigin
     }
 
     private func assertVector(

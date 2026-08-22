@@ -917,6 +917,11 @@ public struct GModMetalView:
         private var cachedWorldLightmap:
             CachedWorldLightmap?
 
+        /// Serialized render-callback workspace for ordinary model-zero PVS
+        /// and frustum selection. Its buffers survive camera-only scenes.
+        private let worldVisibilityWorkspace =
+            GModMetalWorldVisibilityWorkspace()
+
         /// Full-resolution Source water views. These are rebuilt only when the
         /// physical drawable or attachment formats change.
         private var cachedWaterRenderTargets:
@@ -961,6 +966,11 @@ public struct GModMetalView:
         private var lastWorldPendingTextureRangeCount = 0
 
         private var lastWorldLightmappedRangeCount = 0
+
+        private var lastWorldVisibilityMetrics:
+            GModMetalWorldVisibilityMetrics?
+
+        private var lastWorldVisibilityWasFailOpen = false
 
         private var lastSkyboxRenderedFaceCount = 0
 
@@ -1838,6 +1848,7 @@ public struct GModMetalView:
             switch pending {
             case .clear:
                 activeWorldScene = nil
+                worldVisibilityWorkspace.reset()
                 cachedWorldTextures.removeAll(keepingCapacity: true)
                 cachedWorldLightmap = nil
                 worldTextureUploadFailureReason = nil
@@ -1845,6 +1856,8 @@ public struct GModMetalView:
                 lastWorldMissingMaterialRangeCount = 0
                 lastWorldPendingTextureRangeCount = 0
                 lastWorldLightmappedRangeCount = 0
+                lastWorldVisibilityMetrics = nil
+                lastWorldVisibilityWasFailOpen = false
                 lastSkyboxRenderedFaceCount = 0
                 lastSkyboxMissingFaceCount = 0
                 lastSkyboxPendingFaceCount = 0
@@ -1865,6 +1878,7 @@ public struct GModMetalView:
                         cachedWorldMesh?.indexCount == scene.indices.count
 
                     if !cacheMatches {
+                        worldVisibilityWorkspace.reset()
                         cachedWorldMesh = try Self.makeCachedWorldMesh(
                             scene,
                             device: device
@@ -2950,6 +2964,7 @@ public struct GModMetalView:
                     clipPlane: mainClipPlane,
                     rendersWater: waterTargets == nil,
                     drawsDynamicEntities: true,
+                    usesWorldVisibility: true,
                     recordsDiagnostics: true,
                     device: device,
                     uploadBudget: &worldUploadBudget,
@@ -3082,6 +3097,7 @@ public struct GModMetalView:
                         ),
                         rendersWater: false,
                         drawsDynamicEntities: true,
+                        usesWorldVisibility: false,
                         recordsDiagnostics: false,
                         device: device,
                         uploadBudget: &worldUploadBudget,
@@ -3197,6 +3213,7 @@ public struct GModMetalView:
                         ),
                         rendersWater: false,
                         drawsDynamicEntities: false,
+                        usesWorldVisibility: false,
                         recordsDiagnostics: false,
                         device: device,
                         uploadBudget: &worldUploadBudget,
@@ -3756,6 +3773,7 @@ public struct GModMetalView:
             clipPlane: SIMD4<Float>,
             rendersWater: Bool,
             drawsDynamicEntities: Bool,
+            usesWorldVisibility: Bool,
             recordsDiagnostics: Bool,
             device: MTLDevice,
             uploadBudget: inout WorldUploadBudget,
@@ -3803,6 +3821,28 @@ public struct GModMetalView:
                     )
                 ]
                 : scene.materialRanges
+            let appliesWorldVisibility = usesWorldVisibility &&
+                scene.worldVisibility != nil &&
+                worldVisibilityWorkspace.update(
+                    scene: scene,
+                    sourceCameraEye: scene.cameraEye,
+                    metalCameraEye: metalCameraEye,
+                    metalCameraForward: metalCameraForward,
+                    metalCameraUp: metalCameraUp,
+                    verticalFieldOfViewRadians:
+                        GModMetalSourceFOVContract.defaultWorldVerticalRadians,
+                    aspectRatio: aspect,
+                    nearPlane: 1,
+                    farPlane: 65_536
+                )
+            if recordsDiagnostics {
+                lastWorldVisibilityMetrics = appliesWorldVisibility
+                    ? worldVisibilityWorkspace.metrics
+                    : nil
+                lastWorldVisibilityWasFailOpen = usesWorldVisibility &&
+                    scene.worldVisibility != nil &&
+                    !appliesWorldVisibility
+            }
 
             func setUniforms(eye: SIMD3<Float>) {
                 let view = Self.makeViewMatrix(
@@ -3845,14 +3885,18 @@ public struct GModMetalView:
                 }
             }
 
-            func draw(_ range: GModMetalWorldMaterialRange) {
+            func draw(firstIndex: Int, indexCount: Int) {
                 encoder.drawIndexedPrimitives(
                     type: .triangle,
-                    indexCount: range.indexCount,
+                    indexCount: indexCount,
                     indexType: .uint32,
                     indexBuffer: mesh.indexBuffer,
-                    indexBufferOffset: range.firstIndex * MemoryLayout<UInt32>.stride
+                    indexBufferOffset: firstIndex * MemoryLayout<UInt32>.stride
                 )
+            }
+
+            func draw(_ range: GModMetalWorldMaterialRange) {
+                draw(firstIndex: range.firstIndex, indexCount: range.indexCount)
             }
 
             setUniforms(eye: metalCameraEye)
@@ -3878,8 +3922,30 @@ public struct GModMetalView:
             var missingRangeCount = 0
             var pendingRangeCount = 0
             var lightmappedRangeCount = 0
-            for range in ranges where
+            var visibleDrawSpanCursor = 0
+            for (materialRangeIndex, range) in ranges.enumerated() where
                 range.renderLayer == .world && range.waterSurface == nil {
+                var firstVisibleDrawSpan = visibleDrawSpanCursor
+                if appliesWorldVisibility {
+                    while visibleDrawSpanCursor <
+                            worldVisibilityWorkspace.visibleDrawSpans.count,
+                          worldVisibilityWorkspace.visibleDrawSpans[
+                            visibleDrawSpanCursor
+                          ].materialRangeIndex < materialRangeIndex {
+                        visibleDrawSpanCursor += 1
+                    }
+                    firstVisibleDrawSpan = visibleDrawSpanCursor
+                    while visibleDrawSpanCursor <
+                            worldVisibilityWorkspace.visibleDrawSpans.count,
+                          worldVisibilityWorkspace.visibleDrawSpans[
+                            visibleDrawSpanCursor
+                          ].materialRangeIndex == materialRangeIndex {
+                        visibleDrawSpanCursor += 1
+                    }
+                    guard firstVisibleDrawSpan < visibleDrawSpanCursor else {
+                        continue
+                    }
+                }
                 if let bitmap = range.bitmap {
                     if let texture = worldTexture(
                         for: bitmap,
@@ -3932,7 +3998,17 @@ public struct GModMetalView:
                         lightmappedRangeCount += 1
                     }
                 }
-                draw(range)
+                if appliesWorldVisibility {
+                    for index in firstVisibleDrawSpan..<visibleDrawSpanCursor {
+                        let span = worldVisibilityWorkspace.visibleDrawSpans[index]
+                        draw(
+                            firstIndex: span.firstIndex,
+                            indexCount: span.indexCount
+                        )
+                    }
+                } else {
+                    draw(range)
+                }
             }
 
             // Source opaque entities share the ordinary-world depth lifetime:
@@ -4068,6 +4144,22 @@ public struct GModMetalView:
             }
 
             let requiredTextures = requiredWorldTextures(for: scene)
+            // PVS-hidden ranges no longer reach the draw loop, but the
+            // established presentation contract still waits for every
+            // retained texture in the immutable scene. Use any remaining
+            // one-texture frame budget to make those uploads progress.
+            for (key, bitmap) in requiredTextures {
+                if let cached = cachedWorldTextures[key],
+                   cached.bitmap == bitmap {
+                    continue
+                }
+                _ = worldTexture(
+                    for: bitmap,
+                    device: device,
+                    uploadBudget: &uploadBudget,
+                    isSRGB: key.hasPrefix("srgb:")
+                )
+            }
             let uploadedTextureCount = requiredTextures.reduce(into: 0) {
                 count, entry in
                 if let cached = cachedWorldTextures[entry.key],
@@ -5354,8 +5446,20 @@ public struct GModMetalView:
                 } else {
                     lightmapSummary = "lightmap unavailable"
                 }
+                let visibilitySummary: String
+                if let metrics = lastWorldVisibilityMetrics {
+                    visibilitySummary =
+                        "PVS/frustum \(metrics.visibleIndexCount / 3)/" +
+                        "\(metrics.sourceIndexCount / 3) triangles in " +
+                        "\(metrics.drawSpanCount) draws"
+                } else if lastWorldVisibilityWasFailOpen {
+                    visibilitySummary = "PVS/frustum fail-open"
+                } else {
+                    visibilitySummary = "PVS/frustum unavailable"
+                }
                 rendererStats =
                     "World: \(scene.meshIdentifier) (\(mesh.indexCount / 3) triangles; " +
+                    "\(visibilitySummary); " +
                     "textures \(lastWorldTexturedRangeCount)/" +
                     "\(opaqueWorldRangeCount), " +
                     "missing \(lastWorldMissingMaterialRangeCount), " +

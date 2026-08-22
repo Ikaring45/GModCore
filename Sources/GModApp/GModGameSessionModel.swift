@@ -2104,6 +2104,58 @@ final class GModGameSessionModel: ObservableObject {
                 renderLayer: renderLayer
             )
         }
+        let worldVisibility = mesh.worldVisibility.map { visibility in
+            GModMetalWorldVisibility(
+                headNode: visibility.headNode,
+                planes: visibility.planes.map {
+                    GModMetalWorldVisibilityPlane(
+                        sourceNormal: SIMD3<Float>(
+                            $0.normal.x,
+                            $0.normal.y,
+                            $0.normal.z
+                        ),
+                        distance: $0.distance
+                    )
+                },
+                nodes: visibility.nodes.map {
+                    GModMetalWorldVisibilityNode(
+                        planeIndex: $0.planeIndex,
+                        frontChild: $0.frontChild,
+                        backChild: $0.backChild
+                    )
+                },
+                leafClusters: visibility.leafClusters,
+                potentialVisibility: visibility.potentialVisibility.map {
+                    GModMetalWorldPotentialVisibility(
+                        clusterCount: $0.clusterCount,
+                        encodedBytes: $0.encodedBytes,
+                        pvsOffsets: $0.pvsOffsets
+                    )
+                },
+                spans: visibility.spans.map { span in
+                    // The Source-to-Metal basis permutes and negates axes, so
+                    // transform the AABB extrema rather than only its corners.
+                    GModMetalWorldVisibilitySpan(
+                        materialRangeIndex: span.materialRangeIndex,
+                        firstIndex: span.firstIndex,
+                        indexCount: span.indexCount,
+                        metalMinimum: SIMD3<Float>(
+                            -span.maximum.y,
+                            span.minimum.z,
+                            -span.maximum.x
+                        ),
+                        metalMaximum: SIMD3<Float>(
+                            -span.minimum.y,
+                            span.maximum.z,
+                            -span.minimum.x
+                        ),
+                        clusterStartIndex: span.clusterStartIndex,
+                        clusterCount: span.clusterCount
+                    )
+                },
+                spanClusters: visibility.spanClusters
+            )
+        }
         let environmentLighting = mesh.environmentLighting.map {
             GModMetalWorldEnvironmentLighting(
                 sourceDirectionFromLight: SIMD3<Float>(
@@ -2226,6 +2278,7 @@ final class GModGameSessionModel: ObservableObject {
                     fog: metalSky3DFog($0.fogStatus)
                 )
             },
+            worldVisibility: worldVisibility,
             skyboxVisibility: metalSkyboxVisibility(
                 mesh.skyVisibility?.visibility(
                     at: SourceVector3(

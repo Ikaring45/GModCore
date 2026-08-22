@@ -7,6 +7,104 @@ import GModMetal
 @testable import GModGameSession
 
 final class GModWorldSceneAdapterTests: XCTestCase {
+    func testMakeWorldSceneBridgesImmutableBSPVisibilityAndMetalBounds() throws {
+        var visibilityData = Data()
+        func appendInt32(_ value: Int32) {
+            var littleEndian = value.littleEndian
+            withUnsafeBytes(of: &littleEndian) {
+                visibilityData.append(contentsOf: $0)
+            }
+        }
+        appendInt32(1)
+        appendInt32(12)
+        appendInt32(12)
+        visibilityData.append(0b0000_0001)
+        let potentialVisibility = try XCTUnwrap(
+            GModWorldPotentialVisibility(data: visibilityData)
+        )
+        let sourceVisibility = GModWorldVisibility(
+            headNode: 0,
+            planes: [GModWorldSkyVisibilityPlane(
+                normal: SourceVector3(1, 0, 0),
+                distance: 8
+            )],
+            nodes: [GModWorldSkyVisibilityNode(
+                planeIndex: 0,
+                frontChild: -1,
+                backChild: -1
+            )],
+            leafClusters: [0],
+            potentialVisibility: potentialVisibility,
+            spans: [GModWorldVisibilitySpan(
+                materialRangeIndex: 0,
+                firstIndex: 0,
+                indexCount: 3,
+                minimum: SourceVector3(-4, -2, -3),
+                maximum: SourceVector3(5, 7, 11),
+                clusterStartIndex: 0,
+                clusterCount: 1
+            )],
+            spanClusters: [0]
+        )
+        let mesh = GModWorldRenderMesh(
+            vertices: [
+                GModWorldRenderVertex(
+                    position: SourceVector3(0, 0, 0),
+                    normal: SourceVector3(0, 0, 1)
+                ),
+                GModWorldRenderVertex(
+                    position: SourceVector3(1, 0, 0),
+                    normal: SourceVector3(0, 0, 1)
+                ),
+                GModWorldRenderVertex(
+                    position: SourceVector3(0, 1, 0),
+                    normal: SourceVector3(0, 0, 1)
+                ),
+            ],
+            indices: [0, 1, 2],
+            minimum: .zero,
+            maximum: SourceVector3(1, 1, 0),
+            materialRanges: [GModWorldMaterialRange(
+                materialName: "world/test",
+                firstIndex: 0,
+                indexCount: 3
+            )],
+            worldVisibility: sourceVisibility,
+            diagnostics: GModWorldRenderMeshDiagnostics(
+                sourceFaceCount: 1,
+                emittedFaceCount: 1,
+                degenerateFaceCount: 0,
+                displacementBaseFaceCount: 0
+            )
+        )
+
+        let scene = try GModGameSessionModel.makeWorldScene(
+            map: .construct,
+            sessionGeneration: 20,
+            mesh: mesh,
+            playerOrigin: .zero,
+            viewAngles: .zero,
+            textureResolver: GModMetalSurfaceSourceMaterialResolver { _ in nil }
+        )
+        let metalVisibility = try XCTUnwrap(scene.worldVisibility)
+        XCTAssertEqual(metalVisibility.headNode, 0)
+        XCTAssertEqual(
+            metalVisibility.planes.first?.sourceNormal,
+            SIMD3<Float>(1, 0, 0)
+        )
+        XCTAssertEqual(
+            metalVisibility.potentialVisibility?.encodedBytes,
+            potentialVisibility.encodedBytes
+        )
+        let span = try XCTUnwrap(metalVisibility.spans.first)
+        XCTAssertEqual(span.materialRangeIndex, 0)
+        XCTAssertEqual(span.firstIndex, 0)
+        XCTAssertEqual(span.indexCount, 3)
+        XCTAssertEqual(span.metalMinimum, SIMD3<Float>(-7, -3, -5))
+        XCTAssertEqual(span.metalMaximum, SIMD3<Float>(2, 11, 4))
+        XCTAssertEqual(metalVisibility.spanClusters, [0])
+    }
+
     func testMakeWorldSceneCarriesValidatedSkyCameraFogIntoMetal() throws {
         let sourceFog = GModWorldSky3DFog(
             blendsColors: true,

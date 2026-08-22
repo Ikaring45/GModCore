@@ -944,6 +944,548 @@ public struct GModMetalWorldMaterialRange: Sendable, Equatable {
     }
 }
 
+/// Immutable model-zero BSP traversal data used to locate the camera leaf.
+/// Normals and distances remain in Source coordinates; only face bounds are
+/// converted to Metal space for the renderer's view-frustum test.
+public struct GModMetalWorldVisibilityPlane: Sendable, Equatable {
+    public let sourceNormal: SIMD3<Float>
+    public let distance: Float
+
+    public init(sourceNormal: SIMD3<Float>, distance: Float) {
+        self.sourceNormal = sourceNormal
+        self.distance = distance
+    }
+}
+
+public struct GModMetalWorldVisibilityNode: Sendable, Equatable {
+    public let planeIndex: Int
+    public let frontChild: Int32
+    public let backChild: Int32
+
+    public init(planeIndex: Int, frontChild: Int32, backChild: Int32) {
+        self.planeIndex = planeIndex
+        self.frontChild = frontChild
+        self.backChild = backChild
+    }
+}
+
+/// Source LUMP_VISIBILITY bytes retained verbatim. Runtime decoding writes one
+/// row into caller-owned storage instead of allocating a Set every frame.
+public struct GModMetalWorldPotentialVisibility: Sendable, Equatable {
+    public let clusterCount: Int
+    public let encodedBytes: [UInt8]
+    public let pvsOffsets: [Int]
+
+    public init(
+        clusterCount: Int,
+        encodedBytes: [UInt8],
+        pvsOffsets: [Int]
+    ) {
+        self.clusterCount = clusterCount
+        self.encodedBytes = encodedBytes
+        self.pvsOffsets = pvsOffsets
+    }
+
+    func decodeRow(from cluster: Int, into row: inout [UInt8]) -> Bool {
+        guard clusterCount > 0,
+              pvsOffsets.count == clusterCount,
+              pvsOffsets.indices.contains(cluster) else { return false }
+        let rowByteCount = (clusterCount + 7) / 8
+        if row.count != rowByteCount {
+            row = [UInt8](repeating: 0, count: rowByteCount)
+        }
+        var output = 0
+        var cursor = pvsOffsets[cluster]
+        while output < rowByteCount {
+            guard encodedBytes.indices.contains(cursor) else { return false }
+            let value = encodedBytes[cursor]
+            cursor += 1
+            if value != 0 {
+                row[output] = value
+                output += 1
+                continue
+            }
+            guard encodedBytes.indices.contains(cursor) else { return false }
+            let runLength = Int(encodedBytes[cursor])
+            cursor += 1
+            guard runLength > 0,
+                  runLength <= rowByteCount - output else { return false }
+            for index in output..<(output + runLength) {
+                row[index] = 0
+            }
+            output += runLength
+        }
+        return true
+    }
+
+    func contains(_ cluster: Int, inDecodedRow row: [UInt8]) -> Bool {
+        cluster >= 0 && cluster < clusterCount &&
+            row.count == (clusterCount + 7) / 8 &&
+            row[cluster >> 3] & (1 << UInt8(cluster & 7)) != 0
+    }
+}
+
+public struct GModMetalWorldVisibilitySpan: Sendable, Equatable {
+    public let materialRangeIndex: Int
+    public let firstIndex: Int
+    public let indexCount: Int
+    public let metalMinimum: SIMD3<Float>
+    public let metalMaximum: SIMD3<Float>
+    public let clusterStartIndex: Int
+    public let clusterCount: Int
+
+    public init(
+        materialRangeIndex: Int,
+        firstIndex: Int,
+        indexCount: Int,
+        metalMinimum: SIMD3<Float>,
+        metalMaximum: SIMD3<Float>,
+        clusterStartIndex: Int,
+        clusterCount: Int
+    ) {
+        self.materialRangeIndex = materialRangeIndex
+        self.firstIndex = firstIndex
+        self.indexCount = indexCount
+        self.metalMinimum = metalMinimum
+        self.metalMaximum = metalMaximum
+        self.clusterStartIndex = clusterStartIndex
+        self.clusterCount = clusterCount
+    }
+}
+
+public struct GModMetalWorldVisibility: Sendable, Equatable {
+    public let headNode: Int32
+    public let planes: [GModMetalWorldVisibilityPlane]
+    public let nodes: [GModMetalWorldVisibilityNode]
+    public let leafClusters: [Int16]
+    public let potentialVisibility: GModMetalWorldPotentialVisibility?
+    public let spans: [GModMetalWorldVisibilitySpan]
+    public let spanClusters: [Int16]
+
+    public init(
+        headNode: Int32,
+        planes: [GModMetalWorldVisibilityPlane],
+        nodes: [GModMetalWorldVisibilityNode],
+        leafClusters: [Int16],
+        potentialVisibility: GModMetalWorldPotentialVisibility?,
+        spans: [GModMetalWorldVisibilitySpan],
+        spanClusters: [Int16]
+    ) {
+        self.headNode = headNode
+        self.planes = planes
+        self.nodes = nodes
+        self.leafClusters = leafClusters
+        self.potentialVisibility = potentialVisibility
+        self.spans = spans
+        self.spanClusters = spanClusters
+    }
+
+    func cameraCluster(at sourcePoint: SIMD3<Float>) -> Int16? {
+        guard Self.finite(sourcePoint) else { return nil }
+        var child = headNode
+        var remainingSteps = nodes.count + 1
+        while child >= 0, remainingSteps > 0 {
+            remainingSteps -= 1
+            let nodeIndex = Int(child)
+            guard nodes.indices.contains(nodeIndex) else { return nil }
+            let node = nodes[nodeIndex]
+            guard planes.indices.contains(node.planeIndex) else { return nil }
+            let plane = planes[node.planeIndex]
+            guard Self.finite(plane.sourceNormal),
+                  plane.distance.isFinite else { return nil }
+            let distance = Self.dot(plane.sourceNormal, sourcePoint) -
+                plane.distance
+            child = distance >= 0 ? node.frontChild : node.backChild
+        }
+        guard child < 0, remainingSteps > 0 else { return nil }
+        let leafIndex64 = -1 - Int64(child)
+        guard leafIndex64 >= 0,
+              leafIndex64 < Int64(leafClusters.count) else { return nil }
+        return leafClusters[Int(leafIndex64)]
+    }
+
+    private static func dot(
+        _ lhs: SIMD3<Float>,
+        _ rhs: SIMD3<Float>
+    ) -> Float {
+        lhs.x * rhs.x + lhs.y * rhs.y + lhs.z * rhs.z
+    }
+
+    private static func finite(_ value: SIMD3<Float>) -> Bool {
+        value.x.isFinite && value.y.isFinite && value.z.isFinite
+    }
+}
+
+struct GModMetalWorldVisibleIndexSpan: Sendable, Equatable {
+    let materialRangeIndex: Int
+    let firstIndex: Int
+    let indexCount: Int
+}
+
+public struct GModMetalWorldVisibilityMetrics: Sendable, Equatable {
+    public let sourceSpanCount: Int
+    public let sourceIndexCount: Int
+    public let visibleSpanCount: Int
+    public let visibleIndexCount: Int
+    public let drawSpanCount: Int
+}
+
+/// Reusable per-view Source world-list workspace. The immutable scene owns all
+/// BSP metadata; this object retains just one decoded PVS row and one bounded
+/// coalesced span array across frames. Unknown or malformed visibility inputs
+/// return false so the renderer draws the original complete material ranges.
+final class GModMetalWorldVisibilityWorkspace {
+    private struct ViewKey: Equatable {
+        let meshIdentifier: String
+        let sourceCameraEye: SIMD3<Float>
+        let metalCameraEye: SIMD3<Float>
+        let metalCameraForward: SIMD3<Float>
+        let metalCameraUp: SIMD3<Float>
+        let verticalFieldOfViewRadians: Float
+        let aspectRatio: Float
+        let nearPlane: Float
+        let farPlane: Float
+    }
+
+    private(set) var visibleDrawSpans: [GModMetalWorldVisibleIndexSpan] = []
+    private(set) var metrics: GModMetalWorldVisibilityMetrics?
+    private(set) var rebuildCount = 0
+    private var decodedPVSRow: [UInt8] = []
+    private var cachedViewKey: ViewKey?
+    private var cachedSelectionIsUsable = false
+
+    func reset() {
+        cachedViewKey = nil
+        cachedSelectionIsUsable = false
+        metrics = nil
+        visibleDrawSpans.removeAll(keepingCapacity: true)
+    }
+
+    @discardableResult
+    func update(
+        scene: GModMetalWorldScene,
+        sourceCameraEye: SIMD3<Float>,
+        metalCameraEye: SIMD3<Float>,
+        metalCameraForward: SIMD3<Float>,
+        metalCameraUp: SIMD3<Float>,
+        verticalFieldOfViewRadians: Float,
+        aspectRatio: Float,
+        nearPlane: Float,
+        farPlane: Float
+    ) -> Bool {
+        let viewKey = ViewKey(
+            meshIdentifier: scene.meshIdentifier,
+            sourceCameraEye: sourceCameraEye,
+            metalCameraEye: metalCameraEye,
+            metalCameraForward: metalCameraForward,
+            metalCameraUp: metalCameraUp,
+            verticalFieldOfViewRadians: verticalFieldOfViewRadians,
+            aspectRatio: aspectRatio,
+            nearPlane: nearPlane,
+            farPlane: farPlane
+        )
+        if cachedViewKey == viewKey {
+            return cachedSelectionIsUsable
+        }
+
+        rebuildCount &+= 1
+        cachedViewKey = nil
+        cachedSelectionIsUsable = false
+        metrics = nil
+        visibleDrawSpans.removeAll(keepingCapacity: true)
+
+        guard let visibility = scene.worldVisibility,
+              let pvs = visibility.potentialVisibility,
+              let cameraCluster = visibility.cameraCluster(
+                at: sourceCameraEye
+              ), cameraCluster >= 0,
+              pvs.decodeRow(
+                from: Int(cameraCluster),
+                into: &decodedPVSRow
+              ),
+              let basis = Self.cameraBasis(
+                forward: metalCameraForward,
+                up: metalCameraUp
+              ),
+              let frustum = Self.frustum(
+                verticalFieldOfViewRadians: verticalFieldOfViewRadians,
+                aspectRatio: aspectRatio,
+                nearPlane: nearPlane,
+                farPlane: farPlane
+              ), Self.finite(metalCameraEye) else {
+            return failOpen(for: viewKey)
+        }
+
+        var sourceIndexCount = 0
+        var previousMaterialRangeIndex = -1
+        var previousSpanEnd = 0
+        for span in visibility.spans {
+            guard scene.materialRanges.indices.contains(
+                span.materialRangeIndex
+            ) else { return failOpen(for: viewKey) }
+            let materialRange = scene.materialRanges[span.materialRangeIndex]
+            let (spanEnd, spanOverflow) = span.firstIndex
+                .addingReportingOverflow(span.indexCount)
+            let (rangeEnd, rangeOverflow) = materialRange.firstIndex
+                .addingReportingOverflow(materialRange.indexCount)
+            let (clusterEnd, clusterOverflow) = span.clusterStartIndex
+                .addingReportingOverflow(span.clusterCount)
+            guard span.indexCount > 0,
+                  span.clusterCount >= 0,
+                  !spanOverflow,
+                  !rangeOverflow,
+                  !clusterOverflow,
+                  span.firstIndex >= materialRange.firstIndex,
+                  spanEnd <= rangeEnd,
+                  spanEnd <= scene.indices.count,
+                  span.clusterStartIndex >= 0,
+                  clusterEnd <= visibility.spanClusters.count,
+                  materialRange.renderLayer == .world,
+                  materialRange.waterSurface == nil,
+                  materialRange.waterMaterial == nil,
+                  Self.validBounds(
+                    minimum: span.metalMinimum,
+                    maximum: span.metalMaximum
+                  ),
+                    span.materialRangeIndex >= previousMaterialRangeIndex,
+                  span.materialRangeIndex != previousMaterialRangeIndex ||
+                    span.firstIndex >= previousSpanEnd else {
+                return failOpen(for: viewKey)
+            }
+            for index in span.clusterStartIndex..<clusterEnd {
+                let cluster = Int(visibility.spanClusters[index])
+                guard cluster >= 0, cluster < pvs.clusterCount else {
+                    return failOpen(for: viewKey)
+                }
+            }
+            let (nextIndexCount, countOverflow) = sourceIndexCount
+                .addingReportingOverflow(span.indexCount)
+            guard !countOverflow else { return failOpen(for: viewKey) }
+            sourceIndexCount = nextIndexCount
+            previousMaterialRangeIndex = span.materialRangeIndex
+            previousSpanEnd = spanEnd
+        }
+        guard !visibility.spans.isEmpty else {
+            return failOpen(for: viewKey)
+        }
+        var expectedIndexCount = 0
+        for range in scene.materialRanges where
+            range.renderLayer == .world &&
+            range.waterSurface == nil &&
+            range.waterMaterial == nil {
+            let (nextExpectedCount, overflow) = expectedIndexCount
+                .addingReportingOverflow(range.indexCount)
+            guard !overflow else { return failOpen(for: viewKey) }
+            expectedIndexCount = nextExpectedCount
+        }
+        guard sourceIndexCount == expectedIndexCount else {
+            return failOpen(for: viewKey)
+        }
+
+        visibleDrawSpans.reserveCapacity(visibility.spans.count)
+        var visibleSpanCount = 0
+        var visibleIndexCount = 0
+        for span in visibility.spans {
+            let clusterEnd = span.clusterStartIndex + span.clusterCount
+            let pvsVisible: Bool
+            if span.clusterCount == 0 {
+                // A face not referenced by a leaf is not evidence of hiding.
+                pvsVisible = true
+            } else {
+                pvsVisible = (span.clusterStartIndex..<clusterEnd).contains {
+                    pvs.contains(
+                        Int(visibility.spanClusters[$0]),
+                        inDecodedRow: decodedPVSRow
+                    )
+                }
+            }
+            guard pvsVisible,
+                  Self.intersectsFrustum(
+                    minimum: span.metalMinimum,
+                    maximum: span.metalMaximum,
+                    eye: metalCameraEye,
+                    forward: basis.forward,
+                    right: basis.right,
+                    up: basis.up,
+                    verticalTangent: frustum.verticalTangent,
+                    horizontalTangent: frustum.horizontalTangent,
+                    nearPlane: nearPlane,
+                    farPlane: farPlane
+                  ) else { continue }
+
+            visibleSpanCount += 1
+            visibleIndexCount += span.indexCount
+            if let last = visibleDrawSpans.last,
+               last.materialRangeIndex == span.materialRangeIndex,
+               last.firstIndex + last.indexCount == span.firstIndex {
+                visibleDrawSpans[visibleDrawSpans.count - 1] =
+                    GModMetalWorldVisibleIndexSpan(
+                        materialRangeIndex: last.materialRangeIndex,
+                        firstIndex: last.firstIndex,
+                        indexCount: last.indexCount + span.indexCount
+                    )
+            } else {
+                visibleDrawSpans.append(GModMetalWorldVisibleIndexSpan(
+                    materialRangeIndex: span.materialRangeIndex,
+                    firstIndex: span.firstIndex,
+                    indexCount: span.indexCount
+                ))
+            }
+        }
+        metrics = GModMetalWorldVisibilityMetrics(
+            sourceSpanCount: visibility.spans.count,
+            sourceIndexCount: sourceIndexCount,
+            visibleSpanCount: visibleSpanCount,
+            visibleIndexCount: visibleIndexCount,
+            drawSpanCount: visibleDrawSpans.count
+        )
+        cachedViewKey = viewKey
+        cachedSelectionIsUsable = true
+        return true
+    }
+
+    private func failOpen(for viewKey: ViewKey) -> Bool {
+        cachedViewKey = viewKey
+        cachedSelectionIsUsable = false
+        metrics = nil
+        visibleDrawSpans.removeAll(keepingCapacity: true)
+        return false
+    }
+
+    private static func cameraBasis(
+        forward: SIMD3<Float>,
+        up: SIMD3<Float>
+    ) -> (forward: SIMD3<Float>, right: SIMD3<Float>, up: SIMD3<Float>)? {
+        guard let forward = normalized(forward) else { return nil }
+        let projectedUp = up - forward * dot(up, forward)
+        guard let projectedUp = normalized(projectedUp),
+              let right = normalized(cross(forward, projectedUp)),
+              let correctedUp = normalized(cross(right, forward)) else {
+            return nil
+        }
+        return (forward, right, correctedUp)
+    }
+
+    private static func frustum(
+        verticalFieldOfViewRadians: Float,
+        aspectRatio: Float,
+        nearPlane: Float,
+        farPlane: Float
+    ) -> (verticalTangent: Float, horizontalTangent: Float)? {
+        guard verticalFieldOfViewRadians.isFinite,
+              verticalFieldOfViewRadians > 0,
+              verticalFieldOfViewRadians < .pi,
+              aspectRatio.isFinite,
+              aspectRatio > 0,
+              nearPlane.isFinite,
+              nearPlane > 0,
+              farPlane.isFinite,
+              farPlane > nearPlane else { return nil }
+        let verticalTangent = tan(verticalFieldOfViewRadians * 0.5)
+        let horizontalTangent = verticalTangent * aspectRatio
+        guard verticalTangent.isFinite, verticalTangent > 0,
+              horizontalTangent.isFinite, horizontalTangent > 0 else {
+            return nil
+        }
+        return (verticalTangent, horizontalTangent)
+    }
+
+    private static func intersectsFrustum(
+        minimum: SIMD3<Float>,
+        maximum: SIMD3<Float>,
+        eye: SIMD3<Float>,
+        forward: SIMD3<Float>,
+        right: SIMD3<Float>,
+        up: SIMD3<Float>,
+        verticalTangent: Float,
+        horizontalTangent: Float,
+        nearPlane: Float,
+        farPlane: Float
+    ) -> Bool {
+        let center = (minimum + maximum) * 0.5
+        let extents = (maximum - minimum) * 0.5
+        let relativeCenter = center - eye
+        let forwardCenter = dot(relativeCenter, forward)
+        let forwardRadius = dot(extents, absolute(forward))
+        guard forwardCenter + forwardRadius >= nearPlane,
+              forwardCenter - forwardRadius <= farPlane else { return false }
+
+        let left = forward * horizontalTangent + right
+        let rightPlane = forward * horizontalTangent - right
+        let bottom = forward * verticalTangent + up
+        let top = forward * verticalTangent - up
+        return retains(
+            relativeCenter: relativeCenter,
+            extents: extents,
+            inwardNormal: left
+        ) && retains(
+            relativeCenter: relativeCenter,
+            extents: extents,
+            inwardNormal: rightPlane
+        ) && retains(
+            relativeCenter: relativeCenter,
+            extents: extents,
+            inwardNormal: bottom
+        ) && retains(
+            relativeCenter: relativeCenter,
+            extents: extents,
+            inwardNormal: top
+        )
+    }
+
+    private static func retains(
+        relativeCenter: SIMD3<Float>,
+        extents: SIMD3<Float>,
+        inwardNormal: SIMD3<Float>
+    ) -> Bool {
+        dot(relativeCenter, inwardNormal) +
+            dot(extents, absolute(inwardNormal)) >= 0
+    }
+
+    private static func validBounds(
+        minimum: SIMD3<Float>,
+        maximum: SIMD3<Float>
+    ) -> Bool {
+        finite(minimum) && finite(maximum) &&
+            minimum.x <= maximum.x &&
+            minimum.y <= maximum.y &&
+            minimum.z <= maximum.z
+    }
+
+    private static func absolute(_ value: SIMD3<Float>) -> SIMD3<Float> {
+        SIMD3<Float>(Swift.abs(value.x), Swift.abs(value.y), Swift.abs(value.z))
+    }
+
+    private static func finite(_ value: SIMD3<Float>) -> Bool {
+        value.x.isFinite && value.y.isFinite && value.z.isFinite
+    }
+
+    private static func dot(
+        _ lhs: SIMD3<Float>,
+        _ rhs: SIMD3<Float>
+    ) -> Float {
+        lhs.x * rhs.x + lhs.y * rhs.y + lhs.z * rhs.z
+    }
+
+    private static func cross(
+        _ lhs: SIMD3<Float>,
+        _ rhs: SIMD3<Float>
+    ) -> SIMD3<Float> {
+        SIMD3<Float>(
+            lhs.y * rhs.z - lhs.z * rhs.y,
+            lhs.z * rhs.x - lhs.x * rhs.z,
+            lhs.x * rhs.y - lhs.y * rhs.x
+        )
+    }
+
+    private static func normalized(_ value: SIMD3<Float>) -> SIMD3<Float>? {
+        guard finite(value) else { return nil }
+        let lengthSquared = dot(value, value)
+        guard lengthSquared > Float.ulpOfOne else { return nil }
+        return value / lengthSquared.squareRoot()
+    }
+}
+
 public struct GModMetalWorldMaterialDiagnostics: Sendable, Equatable {
     public let worldMaterialRangeCount: Int
     public let resolvedWorldMaterialRangeCount: Int
@@ -1153,6 +1695,7 @@ public struct GModMetalWorldScene: Sendable, Equatable {
     public let environmentLighting: GModMetalWorldEnvironmentLighting?
     public let sunSprites: [GModMetalWorldSunSprite]
     public let sky3D: GModMetalWorldSky3D?
+    public let worldVisibility: GModMetalWorldVisibility?
     public let skyboxVisibility: GModMetalSkyboxVisibility
     /// Fixed Source session time. Pause freezes this value, so material
     /// proxies such as TextureScroll freeze with the singleplayer world.
@@ -1186,6 +1729,7 @@ public struct GModMetalWorldScene: Sendable, Equatable {
         environmentLighting: GModMetalWorldEnvironmentLighting? = nil,
         sunSprites: [GModMetalWorldSunSprite] = [],
         sky3D: GModMetalWorldSky3D? = nil,
+        worldVisibility: GModMetalWorldVisibility? = nil,
         skyboxVisibility: GModMetalSkyboxVisibility = .notVisible,
         cameraEye: SIMD3<Float>,
         cameraForward: SIMD3<Float>,
@@ -1212,6 +1756,7 @@ public struct GModMetalWorldScene: Sendable, Equatable {
         self.environmentLighting = environmentLighting
         self.sunSprites = sunSprites
         self.sky3D = sky3D
+        self.worldVisibility = worldVisibility
         self.skyboxVisibility = skyboxVisibility
         self.sourceFixedTime = sourceFixedTime
         self.cameraEye = cameraEye
@@ -1246,6 +1791,7 @@ public struct GModMetalWorldScene: Sendable, Equatable {
             environmentLighting: environmentLighting,
             sunSprites: sunSprites,
             sky3D: sky3D,
+            worldVisibility: worldVisibility,
             skyboxVisibility: skyboxVisibility ?? self.skyboxVisibility,
             cameraEye: eye,
             cameraForward: forward,
@@ -1277,6 +1823,7 @@ public struct GModMetalWorldScene: Sendable, Equatable {
         environmentLighting: GModMetalWorldEnvironmentLighting?,
         sunSprites: [GModMetalWorldSunSprite],
         sky3D: GModMetalWorldSky3D?,
+        worldVisibility: GModMetalWorldVisibility?,
         skyboxVisibility: GModMetalSkyboxVisibility,
         cameraEye: SIMD3<Float>,
         cameraForward: SIMD3<Float>,
@@ -1298,6 +1845,7 @@ public struct GModMetalWorldScene: Sendable, Equatable {
         self.environmentLighting = environmentLighting
         self.sunSprites = sunSprites
         self.sky3D = sky3D
+        self.worldVisibility = worldVisibility
         self.skyboxVisibility = skyboxVisibility
         self.sourceFixedTime = sourceFixedTime
         self.cameraEye = cameraEye
