@@ -103,6 +103,7 @@ final class GMLuaNotificationVGUIFrameTests: XCTestCase {
         try runtime.loadFile("lua/vgui/dlabel.lua")
         try runtime.loadFile("lua/vgui/dimage.lua")
         try runtime.loadFile("lua/includes/modules/notification.lua")
+        try runtime.loadFile("lua/skins/default.lua")
 
         let registry = try XCTUnwrap(runtime.vguiRegistry)
         let surface = try XCTUnwrap(runtime.surfaceCommandState)
@@ -169,7 +170,7 @@ final class GMLuaNotificationVGUIFrameTests: XCTestCase {
             rootURL: GModGameAssets.clientContentRootURL(),
             writable: false
         )
-        return GMLuaRuntime(
+        let runtime = GMLuaRuntime(
             realm: .client,
             logger: { _ in },
             virtualFileSystem: fileSystem,
@@ -177,6 +178,13 @@ final class GMLuaNotificationVGUIFrameTests: XCTestCase {
             initialViewport: GMLuaViewportSize(width: 320, height: 180),
             systemTimeSource: clock
         )
+        runtime.resourceRegistry?.setMaterialPixelResolver(
+            GMLuaVPKMaterialPixelResolver(
+                looseFileSystem: fileSystem,
+                archivesInPriorityOrder: []
+            )
+        )
+        return runtime
     }
 }
 

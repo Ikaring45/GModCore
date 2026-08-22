@@ -3087,13 +3087,19 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     }
 
     fileprivate func invalidateLayout(identifier: Int, layoutNow: Bool) throws {
-        if identifier == Self.worldPanelIdentifier {
-            // WorldPanel is an engine-owned viewport root rather than an item
-            // in the script-created panel map. Stock Panel:GetSkin invalidates
-            // it while inheriting the default skin; accept that operation
-            // without trying to dispatch a Lua PerformLayout on the viewport.
+        if identifier == Self.worldPanelIdentifier ||
+            identifier == Self.overlayPanelIdentifier {
+            // WorldPanel and OverlayPanel are engine-owned viewport roots
+            // rather than entries in the script-created panel map. Stock
+            // Panel:GetSkin walks through either root and invalidates it while
+            // caching the inherited skin; retain that real root state without
+            // dispatching a Lua PerformLayout on the viewport itself.
             lock.lock()
-            worldPanelDescriptor.isLayoutInvalidated = true
+            if identifier == Self.worldPanelIdentifier {
+                worldPanelDescriptor.isLayoutInvalidated = true
+            } else {
+                overlayPanelDescriptor.isLayoutInvalidated = true
+            }
             lock.unlock()
             return
         }
