@@ -45,6 +45,10 @@ public final class GMLuaRuntime {
     public private(set) var netTransport: GMLuaNetTransport?
     public private(set) var netEndpoint: GMLuaNetEndpoint?
     public private(set) var traceBridge: GMLuaTraceBridge?
+    /// Pending framebuffer captures requested by the stock `gmod_camera`
+    /// `jpeg` command, exposed for the app renderer to drain at a frame boundary.
+    public internal(set) var cameraCaptureRequests:
+        SourceCanonicalCameraCaptureRequestState?
     public private(set) var systemTimeSource: (any GMLuaSystemTimeSource)?
     private let logger: (String) -> Void
     private let fileLoader: ((String) throws -> String)?

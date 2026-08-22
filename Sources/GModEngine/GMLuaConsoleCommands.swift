@@ -182,6 +182,7 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
     private var blockPredicate: GMLuaConsoleCommandBlockPredicate?
     private var registeredNamesByKey: [String: String] = [:]
     private var registeredKeysInOrder: [String] = []
+    private var engineHandlersByKey: [String: GMLuaConsoleCommandHostHandler] = [:]
     private var playerConsoleCommandRequests: [GMLuaPlayerConsoleCommandRequest] = []
     private var attemptedPlayerConsoleCommandRequestCount = 0
     private var droppedPlayerConsoleCommandRequestCount = 0
@@ -207,8 +208,9 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
         )
     }
 
-    /// Commands registered through the native `AddConsoleCommand` ABI, in
-    /// first-registration order. Names are matched case-insensitively.
+    /// Commands registered through the native `AddConsoleCommand` ABI or an
+    /// engine-owned handler, in first-registration order. Names are matched
+    /// case-insensitively.
     public var registeredCommands: [String] {
         lock.lock()
         defer { lock.unlock() }
@@ -288,6 +290,37 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
     public func disconnectHost() {
         lock.lock()
         hostHandler = nil
+        lock.unlock()
+    }
+
+    /// Registers an engine-owned command that remains available before the
+    /// Lua `concommand` module is bootstrapped. The embedding host still gets
+    /// first refusal; this handler owns the command only when that host reports
+    /// it unhandled.
+    public func registerEngineCommand(
+        _ name: String,
+        handler: @escaping GMLuaConsoleCommandHostHandler
+    ) throws {
+        let parsed = try Self.parseConsoleCommandLine(
+            name,
+            function: "registerEngineCommand"
+        )
+        guard parsed.count == 1,
+              parsed[0].command == name,
+              parsed[0].arguments.isEmpty,
+              !name.isEmpty,
+              !conVars.contains(name) else {
+            throw LuaError.runtime(
+                "registerEngineCommand requires one non-ConVar command name"
+            )
+        }
+        let key = normalizedName(name)
+        lock.lock()
+        if registeredNamesByKey[key] == nil {
+            registeredKeysInOrder.append(key)
+            registeredNamesByKey[key] = name
+        }
+        engineHandlersByKey[key] = handler
         lock.unlock()
     }
 
@@ -582,6 +615,30 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
             case let .rejected(reason):
                 throw LuaError.runtime(
                     "RunConsoleCommand host rejected command '\(command)': \(reason)"
+                )
+            }
+        }
+
+        let engineHandler: GMLuaConsoleCommandHostHandler? = {
+            lock.lock()
+            defer { lock.unlock() }
+            return engineHandlersByKey[normalizedName(command)]
+        }()
+        if let engineHandler {
+            let disposition: GMLuaConsoleCommandHostDisposition
+            do {
+                disposition = try engineHandler(invocation)
+            } catch {
+                throw nestedFatalError(error)
+            }
+            switch disposition {
+            case .handled:
+                return []
+            case .unhandled:
+                break
+            case let .rejected(reason):
+                throw LuaError.runtime(
+                    "RunConsoleCommand engine rejected command '\(command)': \(reason)"
                 )
             }
         }

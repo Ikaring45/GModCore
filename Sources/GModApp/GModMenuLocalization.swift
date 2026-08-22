@@ -322,6 +322,8 @@ enum GModAppLocalizedTextKey: String, CaseIterable, Sendable {
     case fireButton = "garryspad.control.fire"
     case alternateFireButton = "garryspad.control.alt-fire"
     case useButton = "garryspad.control.use"
+    case reloadButton = "garryspad.control.reload"
+    case dropWeaponButton = "garryspad.control.drop-weapon"
     case spawnMenuButton = "garryspad.control.spawn-menu"
     case closeSpawnMenuButton = "garryspad.control.close-spawn-menu"
     case contextMenuButton = "garryspad.control.context-menu"

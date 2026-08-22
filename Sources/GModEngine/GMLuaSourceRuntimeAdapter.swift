@@ -49,6 +49,9 @@ public enum GMLuaSourceRuntimeAdapterError: Error, CustomStringConvertible {
     case canonicalBodyGroupResolverUnavailable
     case canonicalBodyGroupModelMissing(SourceCanonicalEntityIdentity)
     case canonicalPhysicsBodyAlreadyRegistered(SourcePhysicsBodyID)
+    case canonicalPhysicsBodyMissing(SourcePhysicsBodyID)
+    case canonicalPhysicsBodySetMismatch
+    case canonicalPhysicsTickMismatch(expected: UInt64, received: UInt64)
     case forwardedConsoleCommandTransactionOutsidePump
     case forwardedConsoleCommandTransactionCheckpointChanged
 
@@ -86,6 +89,12 @@ public enum GMLuaSourceRuntimeAdapterError: Error, CustomStringConvertible {
             return "Source entity EHANDLE \(identity.handle.rawValue) has no Studio model for body-group resolution"
         case let .canonicalPhysicsBodyAlreadyRegistered(bodyID):
             return "canonical physics body \(bodyID.entityIdentity.handle.rawValue):\(bodyID.solidIndex) is already registered"
+        case let .canonicalPhysicsBodyMissing(bodyID):
+            return "canonical physics body \(bodyID.entityIdentity.handle.rawValue):\(bodyID.solidIndex) is unavailable"
+        case .canonicalPhysicsBodySetMismatch:
+            return "solver physics body set does not match the authoritative canonical prop set"
+        case let .canonicalPhysicsTickMismatch(expected, received):
+            return "solver physics tick \(received) does not match SERVER tick \(expected)"
         case .forwardedConsoleCommandTransactionOutsidePump:
             return "forwarded console command transaction requires the active transport pump boundary"
         case .forwardedConsoleCommandTransactionCheckpointChanged:
@@ -100,6 +109,7 @@ private struct GMLuaForwardedConsoleCommandCheckpoint {
     let canonicalPhysicsBodyPrefix: [
         SourcePhysicsBodyID: SourceCanonicalPropPhysicsBodyDefinition
     ]
+    let canonicalPhysicsQueuedCreationPrefix: Set<SourcePhysicsBodyID>
     let cleanupJournalReservations: Int
 }
 
@@ -189,6 +199,10 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
     private var canonicalPhysicsBodySnapshots: [
         SourcePhysicsBodyID: SourcePhysicsBodySnapshot
     ] = [:]
+    /// Bodies whose verified creation command already precedes queued PhysObj
+    /// mutations in the shared global FIFO, but has not reached a fixed step.
+    private var canonicalPhysicsQueuedCreationBodyIDs =
+        Set<SourcePhysicsBodyID>()
     private var canonicalPhysicsObjectLuaBridge:
         SourceCanonicalPhysicsObjectGLuaBridge?
     /// Slots reserved for final `.remove` records at cleanup phases in the
@@ -431,6 +445,192 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
             defer { mutationLock.unlock() }
             guard !isClosedStorage, !serverRuntime.isClosed else { return nil }
             return canonicalPhysicsObjectLocked(for: bodyID)
+        }
+    }
+
+    public func enqueueCanonicalPhysicsObjectMutation(
+        _ command: SourcePhysicsBodyMutationCommand
+    ) throws {
+        try withMutationBoundary {
+            let bodyID = command.bodyID
+            guard let definition = canonicalPhysicsBodyDefinitions[bodyID],
+                  let entity = canonicalEntities.snapshot(
+                      for: bodyID.entityIdentity
+                  ),
+                  entity.kind == .propPhysics,
+                  entity.lifecycle == .spawned || entity.lifecycle == .active
+            else {
+                throw GMLuaSourceRuntimeAdapterError
+                    .canonicalPhysicsBodyMissing(bodyID)
+            }
+
+            var queued: [SourceCanonicalQueuedPhysicsBodyCommand] = []
+            let needsCreation = canonicalPhysicsBodySnapshots[bodyID] == nil &&
+                !canonicalPhysicsQueuedCreationBodyIDs.contains(bodyID)
+            if needsCreation {
+                queued.append(.create(try SourcePhysicsBodyCreationCommand(
+                    bodyID: bodyID,
+                    shape: definition.shape,
+                    massProperties: definition.massProperties,
+                    transform: entity.transform,
+                    linearVelocity: entity.motion.linearVelocity,
+                    angularVelocity: entity.motion.angularVelocity,
+                    motionType: definition.motionType,
+                    materialIndex: definition.materialIndex,
+                    isGravityEnabled: definition.isGravityEnabled,
+                    isCollisionEnabled: definition.isCollisionEnabled,
+                    startsAwake: definition.startsAwake
+                )))
+            }
+            queued.append(.mutate(command))
+            _ = try netTransport.enqueueCanonicalPhysicsBodyCommands(queued)
+            if needsCreation {
+                canonicalPhysicsQueuedCreationBodyIDs.insert(bodyID)
+            }
+        }
+    }
+
+    /// Captures the exact authoritative prop set for one solver step.
+    ///
+    /// The mutation journal is preflighted for the worst case (every live body
+    /// moves) before the environment advances. This prevents an already-
+    /// committed rigid-body step from discovering that its Entity snapshots
+    /// cannot be queued for CLIENT replication.
+    public func prepareCanonicalPropPhysicsStep() throws
+        -> [SourceCanonicalPropPhysicsInput]
+    {
+        try withMutationBoundary {
+            var inputs: [SourceCanonicalPropPhysicsInput] = []
+            inputs.reserveCapacity(canonicalPhysicsBodyDefinitions.count)
+            var liveBodyCount = 0
+            for rawHandle in canonicalEntityHandleOrder {
+                let identity = SourceCanonicalEntityIdentity(
+                    handle: SourceBaseHandle.unsafeFromIndex(rawHandle)
+                )
+                guard let entity = canonicalEntities.snapshot(for: identity),
+                      entity.kind == .propPhysics else { continue }
+                let definitionEntry = canonicalPhysicsBodyDefinitions
+                    .filter { $0.key.entityIdentity == identity }
+                    .min { $0.key.solidIndex < $1.key.solidIndex }
+                let definition: SourceCanonicalPropPhysicsBodyDefinition?
+                switch entity.lifecycle {
+                case .spawned, .active:
+                    guard let definitionEntry else {
+                        throw GMLuaSourceRuntimeAdapterError
+                            .canonicalPhysicsBodyMissing(try SourcePhysicsBodyID(
+                                entityIdentity: identity,
+                                solidIndex: 0
+                            ))
+                    }
+                    if entity.moveType == .none, entity.isNotSolid {
+                        // Stock remover keeps the Entity alive for its effect
+                        // timer, but it must leave neither a traceable nor a
+                        // simulated rigid body during that interval.
+                        definition = nil
+                    } else {
+                        definition = try effectiveCanonicalPhysicsDefinition(
+                            definitionEntry.value,
+                            for: entity
+                        )
+                        liveBodyCount += 1
+                    }
+                case .created, .pendingRemoval, .removed:
+                    definition = nil
+                }
+                inputs.append(try SourceCanonicalPropPhysicsInput(
+                    entity: entity,
+                    bodyDefinition: definition
+                ))
+            }
+            try preflightCanonicalMutationJournalLocked(
+                additionalOperations: liveBodyCount
+            )
+            return inputs
+        }
+    }
+
+    /// Commits one validated solver result back to canonical Entity state.
+    /// Only solver-authored pose/velocity fields change; identical sleeping
+    /// bodies do not consume revisions or replication operations.
+    public func commitCanonicalPropPhysicsStep(
+        _ step: SourceCanonicalPropPhysicsStepSnapshot
+    ) throws {
+        try withMutationBoundary {
+            let expectedTick = UInt64(max(kernel.globals.tickCount, 0))
+            guard step.simulationTick == expectedTick else {
+                throw GMLuaSourceRuntimeAdapterError.canonicalPhysicsTickMismatch(
+                    expected: expectedTick,
+                    received: step.simulationTick
+                )
+            }
+
+            let expectedBodyIDs = Set(canonicalPhysicsBodyDefinitions.keys.filter {
+                bodyID in
+                guard let entity = canonicalEntities.snapshot(
+                    for: bodyID.entityIdentity
+                ), entity.kind == .propPhysics,
+                   entity.lifecycle == .spawned || entity.lifecycle == .active
+                else { return false }
+                return entity.moveType == .vPhysics
+            })
+            let receivedBodyIDs = Set(step.bodies.map(\.bodyID))
+            guard expectedBodyIDs == receivedBodyIDs else {
+                throw GMLuaSourceRuntimeAdapterError
+                    .canonicalPhysicsBodySetMismatch
+            }
+
+            var bodySnapshots: [SourcePhysicsBodyID: SourcePhysicsBodySnapshot] = [:]
+            bodySnapshots.reserveCapacity(step.bodies.count)
+            var changedMotions: [SourceCanonicalPropPhysicsMotionSnapshot] = []
+            changedMotions.reserveCapacity(step.bodies.count)
+            for motion in step.bodies {
+                guard let definition = canonicalPhysicsBodyDefinitions[motion.bodyID],
+                      let entity = canonicalEntities.snapshot(
+                        for: motion.bodyID.entityIdentity
+                      ), entity.kind == .propPhysics,
+                      entity.lifecycle == .spawned || entity.lifecycle == .active else {
+                    throw GMLuaSourceRuntimeAdapterError
+                        .canonicalPhysicsBodyMissing(motion.bodyID)
+                }
+                bodySnapshots[motion.bodyID] = try SourcePhysicsBodySnapshot(
+                    bodyID: motion.bodyID,
+                    shape: definition.shape,
+                    massProperties: definition.massProperties,
+                    transform: motion.transform,
+                    linearVelocity: motion.linearVelocity,
+                    angularVelocity: motion.angularVelocity,
+                    motionType: definition.motionType,
+                    materialIndex: definition.materialIndex,
+                    isMotionEnabled: motion.isMotionEnabled,
+                    isGravityEnabled: motion.isGravityEnabled,
+                    isCollisionEnabled: motion.isCollisionEnabled,
+                    isSleeping: motion.isSleeping,
+                    simulationTick: motion.simulationTick
+                )
+                if entity.transform != motion.transform ||
+                    entity.motion.linearVelocity != motion.linearVelocity ||
+                    entity.motion.angularVelocity != motion.angularVelocity {
+                    changedMotions.append(motion)
+                }
+            }
+            try preflightCanonicalMutationJournalLocked(
+                additionalOperations: changedMotions.count
+            )
+            for motion in changedMotions {
+                _ = try canonicalEntities.update(
+                    motion.bodyID.entityIdentity,
+                    { state in motion.apply(to: &state) },
+                    publishing: { [unowned self] snapshot in
+                        _ = try self.requiredServerRegistryLocked()
+                            .applyAuthoritativeSnapshot(snapshot)
+                        self.canonicalMutationJournal.append(.update(snapshot))
+                    }
+                )
+            }
+            canonicalPhysicsBodySnapshots = bodySnapshots
+            canonicalPhysicsQueuedCreationBodyIDs.removeAll(
+                keepingCapacity: true
+            )
         }
     }
 
@@ -1559,6 +1759,8 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
             journalPrefix: canonicalMutationJournal,
             canonicalHandlePrefix: canonicalEntityHandleOrder,
             canonicalPhysicsBodyPrefix: canonicalPhysicsBodyDefinitions,
+            canonicalPhysicsQueuedCreationPrefix:
+                canonicalPhysicsQueuedCreationBodyIDs,
             cleanupJournalReservations: canonicalCleanupJournalReservations
         )
     }
@@ -1597,6 +1799,9 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
             canonicalPhysicsBodyDefinitions[$0.key] == $0.value
         }), canonicalPhysicsBodyDefinitions.allSatisfy({ bodyID, definition in
             checkpoint.canonicalPhysicsBodyPrefix[bodyID] == definition ||
+                newHandleSet.contains(bodyID.entityIdentity.handle.rawValue)
+        }), canonicalPhysicsQueuedCreationBodyIDs.allSatisfy({ bodyID in
+            checkpoint.canonicalPhysicsQueuedCreationPrefix.contains(bodyID) ||
                 newHandleSet.contains(bodyID.entityIdentity.handle.rawValue)
         }) else {
             throw GMLuaSourceRuntimeAdapterError
@@ -1655,6 +1860,8 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
             throw GMLuaSourceRuntimeAdapterError
                 .forwardedConsoleCommandTransactionCheckpointChanged
         }
+        canonicalPhysicsQueuedCreationBodyIDs =
+            checkpoint.canonicalPhysicsQueuedCreationPrefix
     }
 
     private func preflightCanonicalMutationJournalLocked(
@@ -1717,9 +1924,37 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
         if let solver = canonicalPhysicsBodySnapshots[bodyID] {
             return try? SourceCanonicalPhysicsObjectSnapshot(body: solver)
         }
+        let effectiveDefinition = try? effectiveCanonicalPhysicsDefinition(
+            definition,
+            for: entity
+        )
+        guard let effectiveDefinition else { return nil }
         return try? SourceCanonicalPhysicsObjectSnapshot(
             pendingEntity: entity,
-            definition: definition
+            definition: effectiveDefinition
+        )
+    }
+
+    /// Applies authoritative Entity solid flags without changing the trusted
+    /// shape, mass, inertia, or material extracted from the attested asset.
+    private func effectiveCanonicalPhysicsDefinition(
+        _ definition: SourceCanonicalPropPhysicsBodyDefinition,
+        for entity: SourceCanonicalEntitySnapshot
+    ) throws -> SourceCanonicalPropPhysicsBodyDefinition {
+        let collisionEnabled = definition.isCollisionEnabled &&
+            !entity.isNotSolid
+        guard collisionEnabled != definition.isCollisionEnabled else {
+            return definition
+        }
+        return try SourceCanonicalPropPhysicsBodyDefinition(
+            solidIndex: definition.solidIndex,
+            shape: definition.shape,
+            massProperties: definition.massProperties,
+            motionType: definition.motionType,
+            materialIndex: definition.materialIndex,
+            isGravityEnabled: definition.isGravityEnabled,
+            isCollisionEnabled: collisionEnabled,
+            startsAwake: definition.startsAwake
         )
     }
 
@@ -1929,6 +2164,27 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
         additionalRuntimes: [GMLuaRuntime] = [],
         _ body: () throws -> T
     ) throws -> T {
+        // SERVER timer/Think callbacks execute inside `runServerFixedTick` while
+        // this adapter already owns both lifecycle locks and runtime execution
+        // markers. Source permits those callbacks to mutate entities. Reusing
+        // the established boundary avoids recursively locking NSLock while the
+        // ordinary mutation-to-mutation reentrancy guard remains intact.
+        if isRunActiveOnCurrentThread {
+            precondition(isAdapterOperationActiveOnCurrentThread)
+            guard !isInlineRunMutationActiveOnCurrentThread else {
+                throw GMLuaSourceRuntimeAdapterError
+                    .reentrantRun("entity mutation")
+            }
+            try ensureOpenLocked()
+            let threadDictionary = Thread.current.threadDictionary
+            threadDictionary[inlineRunMutationThreadMarkerKey] = true
+            defer {
+                threadDictionary.removeObject(
+                    forKey: inlineRunMutationThreadMarkerKey
+                )
+            }
+            return try body()
+        }
         guard !isAdapterOperationActiveOnCurrentThread else {
             throw GMLuaSourceRuntimeAdapterError.reentrantRun("entity mutation")
         }
@@ -2041,6 +2297,7 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
         canonicalMutationJournal.removeAll(keepingCapacity: false)
         canonicalPhysicsBodyDefinitions.removeAll(keepingCapacity: false)
         canonicalPhysicsBodySnapshots.removeAll(keepingCapacity: false)
+        canonicalPhysicsQueuedCreationBodyIDs.removeAll(keepingCapacity: false)
         canonicalPhysicsObjectLuaBridge = nil
         canonicalCleanupJournalReservations = 0
         isRunningCanonicalServerTick = false
@@ -2101,12 +2358,25 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
         (Thread.current.threadDictionary[operationThreadMarkerKey] as? Int ?? 0) > 0
     }
 
+    private var isRunActiveOnCurrentThread: Bool {
+        Thread.current.threadDictionary[runThreadMarkerKey] as? Bool == true
+    }
+
+    private var isInlineRunMutationActiveOnCurrentThread: Bool {
+        Thread.current.threadDictionary[inlineRunMutationThreadMarkerKey]
+            as? Bool == true
+    }
+
     private var operationThreadMarkerKey: String {
         "GMLuaSourceRuntimeAdapter.operation.\(ObjectIdentifier(self))"
     }
 
     private var runThreadMarkerKey: String {
         "GMLuaSourceRuntimeAdapter.run.\(ObjectIdentifier(self))"
+    }
+
+    private var inlineRunMutationThreadMarkerKey: String {
+        "GMLuaSourceRuntimeAdapter.inlineMutation.\(ObjectIdentifier(self))"
     }
 }
 

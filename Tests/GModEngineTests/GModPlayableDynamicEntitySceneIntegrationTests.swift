@@ -122,9 +122,13 @@ final class GModPlayableDynamicEntitySceneIntegrationTests: XCTestCase {
         XCTAssertEqual(created.resources.count, 1)
         XCTAssertEqual(created.instances.count, 1)
         XCTAssertTrue(created.issues.isEmpty)
+        XCTAssertEqual(created.instances[0].transform.origin.x, 10)
+        XCTAssertEqual(created.instances[0].transform.origin.y, 20)
         XCTAssertEqual(
-            created.instances[0].transform.origin,
-            SourceVector3(10, 20, 30)
+            created.instances[0].transform.origin.z,
+            29.82,
+            accuracy: 0.000_1,
+            "the rendered CLIENT transform must include the authoritative gravity step"
         )
         XCTAssertEqual(probe.callCount, 1)
         XCTAssertEqual(cache.cachedEntryCount, 1)
@@ -157,9 +161,13 @@ final class GModPlayableDynamicEntitySceneIntegrationTests: XCTestCase {
         XCTAssertGreaterThan(moved.revision, created.revision)
         XCTAssertEqual(moved.resources, created.resources)
         XCTAssertEqual(moved.instances.count, 1)
+        XCTAssertEqual(moved.instances[0].transform.origin.x, 40)
+        XCTAssertEqual(moved.instances[0].transform.origin.y, 50)
         XCTAssertEqual(
-            moved.instances[0].transform.origin,
-            SourceVector3(40, 50, 60)
+            moved.instances[0].transform.origin.z,
+            59.64,
+            accuracy: 0.000_1,
+            "SetPos preserves velocity, so the next fixed physics tick must still advance the body"
         )
         XCTAssertEqual(
             probe.callCount,

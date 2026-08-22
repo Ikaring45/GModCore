@@ -462,6 +462,79 @@ public struct SourceCanonicalWeaponRecord: Equatable, Sendable {
     }
 }
 
+/// Damageable state owned by the canonical Entity. Source keeps health on
+/// `CBaseEntity`, so props and future NPCs use the same representation as a
+/// Player instead of a weapon-specific side table.
+public struct SourceCanonicalCombatState: Equatable, Sendable {
+    public var health: Int32
+    public var maximumHealth: Int32
+    public var takeDamageMode: Int32
+    public var isBot: Bool
+    public var isLagCompensationEnabled: Bool
+
+    public init(
+        health: Int32 = 0,
+        maximumHealth: Int32 = 0,
+        takeDamageMode: Int32 = 0,
+        isBot: Bool = false,
+        isLagCompensationEnabled: Bool = false
+    ) {
+        self.health = health
+        self.maximumHealth = maximumHealth
+        self.takeDamageMode = takeDamageMode
+        self.isBot = isBot
+        self.isLagCompensationEnabled = isLagCompensationEnabled
+    }
+
+    public static let player = SourceCanonicalCombatState(
+        health: 100,
+        maximumHealth: 100,
+        takeDamageMode: 2
+    )
+}
+
+/// Native Weapon fields used by ItemPostFrame and generated data-table
+/// accessors. Values are copied in the same full-EHANDLE snapshot as the
+/// Weapon; neither realm owns an independent clip/cooldown mirror.
+public struct SourceCanonicalWeaponRuntimeState: Equatable, Sendable {
+    public var clip1: Int32
+    public var clip2: Int32
+    public var nextPrimaryFire: Float
+    public var nextSecondaryFire: Float
+    public var floatNetworkVariables: [Float?]
+    public var intNetworkVariables: [Int32?]
+    public var animationSequence: Int32
+    public var animationSequenceName: String
+    public var animationPlaybackRate: Float
+    /// Zero is the real unavailable-duration result while no decoded Studio
+    /// sequence metadata is mounted. It is not promoted to a guessed duration.
+    public var animationSequenceDuration: Float
+
+    public init(
+        clip1: Int32 = 0,
+        clip2: Int32 = 0,
+        nextPrimaryFire: Float = 0,
+        nextSecondaryFire: Float = 0,
+        floatNetworkVariables: [Float?] = [],
+        intNetworkVariables: [Int32?] = [],
+        animationSequence: Int32 = -1,
+        animationSequenceName: String = "",
+        animationPlaybackRate: Float = 1,
+        animationSequenceDuration: Float = 0
+    ) {
+        self.clip1 = clip1
+        self.clip2 = clip2
+        self.nextPrimaryFire = nextPrimaryFire
+        self.nextSecondaryFire = nextSecondaryFire
+        self.floatNetworkVariables = floatNetworkVariables
+        self.intNetworkVariables = intNetworkVariables
+        self.animationSequence = animationSequence
+        self.animationSequenceName = animationSequenceName
+        self.animationPlaybackRate = animationPlaybackRate
+        self.animationSequenceDuration = animationSequenceDuration
+    }
+}
+
 /// Ordered, engine-owned Player inventory carried by canonical snapshots.
 /// Realm registries resolve these immutable identities to their own userdata;
 /// Lua never owns or directly mirrors this state.
@@ -504,6 +577,23 @@ public struct SourceCanonicalWeaponInventory: Equatable, Sendable {
         activeWeapon = weapon.identity
         return true
     }
+
+    /// Removes only the exact full EHANDLE from this ordered inventory. If the
+    /// active Weapon is dropped, Source immediately falls back to the first
+    /// remaining owned Weapon (or NULL when the inventory became empty).
+    @discardableResult
+    public mutating func remove(
+        identity: SourceCanonicalEntityIdentity
+    ) -> SourceCanonicalWeaponRecord? {
+        guard let index = weapons.firstIndex(where: {
+            $0.identity == identity
+        }) else { return nil }
+        let removed = weapons.remove(at: index)
+        if activeWeapon == identity {
+            activeWeapon = weapons.first?.identity
+        }
+        return removed
+    }
 }
 
 /// Mutable state used by one atomic engine-owned update transaction.
@@ -519,6 +609,17 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
     /// physics asset. A missing property is preserved as unavailable instead
     /// of falling back to Studio render bounds.
     public var collisionProperty: SourceCollisionProperty?
+    /// Source collision-group number consumed by game-rules filtering. Zero is
+    /// `COLLISION_GROUP_NONE`; negative values are invalid engine state.
+    public var collisionGroup: Int32
+    /// Source's `FSOLID_NOT_SOLID` state. This is intentionally independent
+    /// from `solidType`: `Entity:SetNotSolid` toggles a solid flag without
+    /// rewriting the entity's authored collision representation.
+    public var isNotSolid: Bool
+    /// Engine-owned `EF_NODRAW` state consumed by realm snapshots and the
+    /// renderer. Keeping it canonical prevents a SERVER removal transition
+    /// from becoming a realm-local visual side table.
+    public var isNoDraw: Bool
     public var solidType: SourceEntitySolidType
     public var moveType: SourceMoveType
     /// Studio skin-family selection. Range validation against the loaded MDL
@@ -556,12 +657,22 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
     /// engine-owned and replicated with the same full-EHANDLE snapshot as the
     /// Weapon instead of living in one realm's scripted table.
     public var weaponHoldType: String?
+    /// Weapon `NetworkVar("Entity", slot, name)` values. The declarations and
+    /// generated Lua accessors belong to each realm's resolved SWEP table; the
+    /// full-EHANDLE values themselves are authoritative engine state and ride
+    /// the ordinary canonical snapshot FIFO.
+    public var weaponEntityNetworkVariables: [SourceCanonicalEntityIdentity?]
+    public var combat: SourceCanonicalCombatState
+    public var weaponRuntime: SourceCanonicalWeaponRuntimeState
 
     public init(
         transform: SourceEntityTransform = .identity,
         motion: SourceEntityMotionState = SourceEntityMotionState(),
         model: SourceEntityModelReference? = nil,
         collisionProperty: SourceCollisionProperty? = nil,
+        collisionGroup: Int32 = 0,
+        isNotSolid: Bool = false,
+        isNoDraw: Bool = false,
         solidType: SourceEntitySolidType = .none,
         moveType: SourceMoveType = .none,
         skin: Int = 0,
@@ -574,12 +685,18 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
         spawnEffect: Bool = false,
         networkVariables: SourceEntityNetworkVariables = .init(),
         weaponInventory: SourceCanonicalWeaponInventory = .init(),
-        weaponHoldType: String? = nil
+        weaponHoldType: String? = nil,
+        weaponEntityNetworkVariables: [SourceCanonicalEntityIdentity?] = [],
+        combat: SourceCanonicalCombatState = .init(),
+        weaponRuntime: SourceCanonicalWeaponRuntimeState = .init()
     ) {
         self.transform = transform
         self.motion = motion
         self.model = model
         self.collisionProperty = collisionProperty
+        self.collisionGroup = collisionGroup
+        self.isNotSolid = isNotSolid
+        self.isNoDraw = isNoDraw
         self.solidType = solidType
         self.moveType = moveType
         self.skin = skin
@@ -593,6 +710,9 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
         self.networkVariables = networkVariables
         self.weaponInventory = weaponInventory
         self.weaponHoldType = weaponHoldType
+        self.weaponEntityNetworkVariables = weaponEntityNetworkVariables
+        self.combat = combat
+        self.weaponRuntime = weaponRuntime
     }
 
     /// Converts the canonical Player state into the existing movement core's
@@ -647,7 +767,8 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
                 solidType: .boundingBox,
                 moveType: .walk,
                 viewOffset: SourceVector3(0, 0, 64),
-                playerDisplayName: "Player"
+                playerDisplayName: "Player",
+                combat: .player
             )
         case .propPhysics:
             return Self(solidType: .vPhysics, moveType: .vPhysics)
@@ -690,6 +811,9 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
     public let motion: SourceEntityMotionState
     public let model: SourceEntityModelReference?
     public let collisionProperty: SourceCollisionProperty?
+    public let collisionGroup: Int32
+    public let isNotSolid: Bool
+    public let isNoDraw: Bool
     public let solidType: SourceEntitySolidType
     public let moveType: SourceMoveType
     public let skin: Int
@@ -703,6 +827,9 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
     public let networkVariables: SourceEntityNetworkVariables
     public let weaponInventory: SourceCanonicalWeaponInventory
     public let weaponHoldType: String?
+    public let weaponEntityNetworkVariables: [SourceCanonicalEntityIdentity?]
+    public let combat: SourceCanonicalCombatState
+    public let weaponRuntime: SourceCanonicalWeaponRuntimeState
     public let lifecycle: SourceCanonicalEntityLifecycle
     public let isNetworkable: Bool
     public let revision: UInt64
@@ -715,6 +842,9 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         motion: SourceEntityMotionState,
         model: SourceEntityModelReference?,
         collisionProperty: SourceCollisionProperty? = nil,
+        collisionGroup: Int32 = 0,
+        isNotSolid: Bool = false,
+        isNoDraw: Bool = false,
         solidType: SourceEntitySolidType,
         moveType: SourceMoveType,
         lifecycle: SourceCanonicalEntityLifecycle,
@@ -730,7 +860,10 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         spawnEffect: Bool = false,
         networkVariables: SourceEntityNetworkVariables = .init(),
         weaponInventory: SourceCanonicalWeaponInventory = .init(),
-        weaponHoldType: String? = nil
+        weaponHoldType: String? = nil,
+        weaponEntityNetworkVariables: [SourceCanonicalEntityIdentity?] = [],
+        combat: SourceCanonicalCombatState = .init(),
+        weaponRuntime: SourceCanonicalWeaponRuntimeState = .init()
     ) {
         self.identity = identity
         self.kind = kind
@@ -739,6 +872,9 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         self.motion = motion
         self.model = model
         self.collisionProperty = collisionProperty
+        self.collisionGroup = collisionGroup
+        self.isNotSolid = isNotSolid
+        self.isNoDraw = isNoDraw
         self.solidType = solidType
         self.moveType = moveType
         self.skin = skin
@@ -752,6 +888,9 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         self.networkVariables = networkVariables
         self.weaponInventory = weaponInventory
         self.weaponHoldType = weaponHoldType
+        self.weaponEntityNetworkVariables = weaponEntityNetworkVariables
+        self.combat = combat
+        self.weaponRuntime = weaponRuntime
         self.lifecycle = lifecycle
         self.isNetworkable = isNetworkable
         self.revision = revision
@@ -795,7 +934,14 @@ public enum SourceCanonicalEntityError: Error, Equatable, CustomStringConvertibl
     case invalidWeaponInventory(String)
     case weaponHoldTypeRequired
     case weaponHoldTypeRequiresWeapon
+    case weaponDataTableRequiresWeapon
+    case weaponEntityNetworkVariableLimitExceeded(Int)
+    case weaponNumericNetworkVariableLimitExceeded(type: String, count: Int)
+    case weaponRuntimeRequiresWeapon
+    case invalidWeaponRuntime(String)
+    case playerCombatFlagRequiresPlayer(String)
     case invalidWeaponHoldType(String)
+    case invalidCollisionGroup(Int32)
     case playerDisplayNameRequired
     case playerDisplayNameRequiresPlayer
     case invalidModelPath(String)
@@ -837,8 +983,22 @@ public enum SourceCanonicalEntityError: Error, Equatable, CustomStringConvertibl
             return "canonical Weapon requires an engine-owned hold type"
         case .weaponHoldTypeRequiresWeapon:
             return "canonical Weapon hold type is only valid on a Weapon"
+        case .weaponDataTableRequiresWeapon:
+            return "canonical Weapon data-table values are only valid on a Weapon"
+        case let .weaponEntityNetworkVariableLimitExceeded(count):
+            return "canonical Weapon Entity NetworkVar count exceeds 32 slots: \(count)"
+        case let .weaponNumericNetworkVariableLimitExceeded(type, count):
+            return "canonical Weapon \(type) NetworkVar count exceeds 32 slots: \(count)"
+        case .weaponRuntimeRequiresWeapon:
+            return "canonical Weapon runtime state is only valid on a Weapon"
+        case let .invalidWeaponRuntime(field):
+            return "canonical Weapon runtime field is invalid: \(field)"
+        case let .playerCombatFlagRequiresPlayer(field):
+            return "canonical combat flag \(field) is only valid on a Player"
         case let .invalidWeaponHoldType(value):
             return "canonical Weapon hold type is invalid: \(value)"
+        case let .invalidCollisionGroup(value):
+            return "canonical Entity collision group must be nonnegative: \(value)"
         case .playerDisplayNameRequired:
             return "canonical Player requires a host-owned display name"
         case .playerDisplayNameRequiresPlayer:
@@ -923,6 +1083,9 @@ public final class SourceCanonicalEntity: SourceEntity {
             motion: state.motion,
             model: state.model,
             collisionProperty: state.collisionProperty,
+            collisionGroup: state.collisionGroup,
+            isNotSolid: state.isNotSolid,
+            isNoDraw: state.isNoDraw,
             solidType: state.solidType,
             moveType: state.moveType,
             lifecycle: overrideLifecycle ?? lifecycle,
@@ -938,7 +1101,10 @@ public final class SourceCanonicalEntity: SourceEntity {
             spawnEffect: state.spawnEffect,
             networkVariables: state.networkVariables,
             weaponInventory: state.weaponInventory,
-            weaponHoldType: state.weaponHoldType
+            weaponHoldType: state.weaponHoldType,
+            weaponEntityNetworkVariables: state.weaponEntityNetworkVariables,
+            combat: state.combat,
+            weaponRuntime: state.weaponRuntime
         )
     }
 }
@@ -1394,6 +1560,11 @@ public final class SourceCanonicalEntityStore {
         guard state.transform.isFinite else {
             throw SourceCanonicalEntityError.invalidTransform
         }
+        guard state.collisionGroup >= 0 else {
+            throw SourceCanonicalEntityError.invalidCollisionGroup(
+                state.collisionGroup
+            )
+        }
         guard state.motion.isFinite else {
             throw SourceCanonicalEntityError.invalidMotion
         }
@@ -1435,6 +1606,74 @@ public final class SourceCanonicalEntityStore {
             }
         } else if state.weaponHoldType != nil {
             throw SourceCanonicalEntityError.weaponHoldTypeRequiresWeapon
+        }
+        if kind != .weapon, !state.weaponEntityNetworkVariables.isEmpty {
+            throw SourceCanonicalEntityError.weaponDataTableRequiresWeapon
+        }
+        guard state.weaponEntityNetworkVariables.count <= 32 else {
+            throw SourceCanonicalEntityError.weaponEntityNetworkVariableLimitExceeded(
+                state.weaponEntityNetworkVariables.count
+            )
+        }
+        guard state.weaponRuntime.floatNetworkVariables.count <= 32 else {
+            throw SourceCanonicalEntityError
+                .weaponNumericNetworkVariableLimitExceeded(
+                    type: "Float",
+                    count: state.weaponRuntime.floatNetworkVariables.count
+                )
+        }
+        guard state.weaponRuntime.intNetworkVariables.count <= 32 else {
+            throw SourceCanonicalEntityError
+                .weaponNumericNetworkVariableLimitExceeded(
+                    type: "Int",
+                    count: state.weaponRuntime.intNetworkVariables.count
+                )
+        }
+        if kind != .weapon, state.weaponRuntime != .init() {
+            throw SourceCanonicalEntityError.weaponRuntimeRequiresWeapon
+        }
+        let weaponRuntime = state.weaponRuntime
+        guard weaponRuntime.nextPrimaryFire.isFinite else {
+            throw SourceCanonicalEntityError.invalidWeaponRuntime(
+                "nextPrimaryFire"
+            )
+        }
+        guard weaponRuntime.nextSecondaryFire.isFinite else {
+            throw SourceCanonicalEntityError.invalidWeaponRuntime(
+                "nextSecondaryFire"
+            )
+        }
+        guard weaponRuntime.floatNetworkVariables.allSatisfy({
+            $0?.isFinite ?? true
+        }) else {
+            throw SourceCanonicalEntityError.invalidWeaponRuntime(
+                "Float NetworkVar"
+            )
+        }
+        guard weaponRuntime.animationSequence >= -1,
+              !weaponRuntime.animationSequenceName.contains("\0"),
+              weaponRuntime.animationSequenceName.utf8.count <= 256,
+              weaponRuntime.animationPlaybackRate.isFinite,
+              weaponRuntime.animationPlaybackRate >= 0,
+              weaponRuntime.animationSequenceDuration.isFinite,
+              weaponRuntime.animationSequenceDuration >= 0 else {
+            throw SourceCanonicalEntityError.invalidWeaponRuntime("animation")
+        }
+        guard state.combat.maximumHealth >= 0,
+              (0...3).contains(state.combat.takeDamageMode) else {
+            throw SourceCanonicalEntityError.invalidWeaponRuntime(
+                "combat state"
+            )
+        }
+        if kind != .player, state.combat.isBot {
+            throw SourceCanonicalEntityError.playerCombatFlagRequiresPlayer(
+                "isBot"
+            )
+        }
+        if kind != .player, state.combat.isLagCompensationEnabled {
+            throw SourceCanonicalEntityError.playerCombatFlagRequiresPlayer(
+                "lag compensation"
+            )
         }
         if kind == .player {
             guard state.playerDisplayName != nil else {

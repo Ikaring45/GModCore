@@ -108,12 +108,14 @@ enum GModGameWorldActionButton: Sendable, Equatable {
     case attack
     case attack2
     case use
+    case reload
 
     var sourceButton: SourceInputButtons {
         switch self {
         case .attack: return .attack
         case .attack2: return .attack2
         case .use: return .use
+        case .reload: return .reload
         }
     }
 }

@@ -1,0 +1,248 @@
+import Foundation
+import XCTest
+@testable import GModEngine
+@testable import GModGameSession
+import GModGameAssets
+import GModLua
+
+final class SourceCanonicalPhysicsObjectMutationIntegrationTests: XCTestCase {
+    private let model = SourceEntityModelReference(
+        "models/props/physics_mutation.mdl"
+    )
+    private let mdlData = Data("exact mutation mdl".utf8)
+    private let phyData = Data("exact mutation phy".utf8)
+    private let studioChecksum: Int32 = 91_337
+
+    func testSpawnWakeAndMutatorsShareGlobalFIFOThenPublishNextTick()
+        throws
+    {
+        let setup = try makeSetup()
+        defer { setup.close() }
+        let skippedSequence = try setup.transport
+            .reservePhysicsCommandSequences(count: 1)
+        XCTAssertEqual(skippedSequence, [1])
+
+        let values = try setup.server.executeReturningValues(
+            """
+            local prop = assert(ents.Create("prop_physics"))
+            prop:SetModel("models/props/physics_mutation.mdl")
+            prop:SetPos(Vector(10, 20, 30))
+            prop:Spawn()
+            prop:Activate()
+            local phys = prop:GetPhysicsObject()
+            assert(IsValid(phys))
+            phys:Wake()
+            phys:EnableGravity(false)
+            phys:EnableCollisions(false)
+            phys:SetVelocity(Vector(10, 0, 0))
+            phys:AddVelocity(Vector(5, 0, 0))
+            phys:ApplyForceCenter(Vector(190, 0, 0))
+            MUTATION_PROP = prop
+            return prop
+            """,
+            sourceName: "=(authoritative PhysObj mutation FIFO)"
+        )
+        let prop = try XCTUnwrap(values.first)
+        let entity = try XCTUnwrap(
+            setup.server.entityRegistry?.canonicalSnapshot(for: prop)
+        )
+        let bodyID = try SourcePhysicsBodyID(
+            entityIdentity: entity.identity,
+            solidIndex: 0
+        )
+        let pending = setup.transport
+            .preparePendingCanonicalPhysicsBodyCommands()
+        XCTAssertEqual(pending.map(\.sequence), Array(2 ... 8).map(UInt64.init))
+        XCTAssertEqual(setup.transport.pendingPhysicsBodyCommandCount, 7)
+        guard case let .createBody(creation) = pending[0].payload else {
+            return XCTFail("first pending command was not verified body creation")
+        }
+        XCTAssertEqual(creation.bodyID, bodyID)
+        for command in pending.dropFirst() {
+            guard case let .mutateBody(mutation) = command.payload else {
+                return XCTFail("non-mutation followed queued creation")
+            }
+            XCTAssertEqual(mutation.bodyID, bodyID)
+        }
+
+        _ = try setup.adapter.runServerFixedTick()
+        let coordinator = SourceCanonicalPropPhysicsCoordinator(
+            environment: setup.environment,
+            commandSequenceSource: setup.transport
+        )
+        let tick = UInt64(setup.adapter.serverGlobals.tickCount)
+        let firstStep = try coordinator.step(
+            inputs: setup.adapter.prepareCanonicalPropPhysicsStep(),
+            simulationTick: tick
+        )
+        XCTAssertEqual(firstStep.commandSequences, Array(2 ... 9).map(UInt64.init))
+        XCTAssertEqual(firstStep.operations, [.create(bodyID)])
+        XCTAssertEqual(setup.transport.pendingPhysicsBodyCommandCount, 0)
+        let firstBody = try XCTUnwrap(firstStep.bodies.first)
+        XCTAssertEqual(firstBody.bodyID, bodyID)
+        XCTAssertTrue(firstBody.isMotionEnabled)
+        XCTAssertFalse(firstBody.isGravityEnabled)
+        XCTAssertFalse(firstBody.isCollisionEnabled)
+        XCTAssertEqual(firstBody.transform.origin.z, 30)
+        XCTAssertEqual(firstBody.linearVelocity.x, 15.15, accuracy: 0.000_01)
+        XCTAssertEqual(firstBody.transform.origin.x, 10.227_25, accuracy: 0.000_01)
+        try setup.adapter.commitCanonicalPropPhysicsStep(firstStep)
+
+        try setup.server.execute(
+            """
+            local phys = MUTATION_PROP:GetPhysicsObject()
+            assert(IsValid(phys))
+            assert(phys:IsMotionEnabled())
+            assert(phys:IsGravityEnabled() == false)
+            assert(phys:IsCollisionEnabled() == false)
+            local velocity = phys:GetVelocity()
+            assert(math.abs(velocity.x - 15.15) < 0.0001)
+            """,
+            sourceName: "=(committed PhysObj mutation snapshot)"
+        )
+
+        _ = try setup.adapter.runServerFixedTick()
+        let secondTick = UInt64(setup.adapter.serverGlobals.tickCount)
+        let secondStep = try coordinator.step(
+            inputs: setup.adapter.prepareCanonicalPropPhysicsStep(),
+            simulationTick: secondTick
+        )
+        XCTAssertEqual(secondStep.commandSequences, [10])
+        XCTAssertEqual(secondStep.operations, [])
+        XCTAssertFalse(try XCTUnwrap(secondStep.bodies.first).isGravityEnabled)
+        try setup.adapter.commitCanonicalPropPhysicsStep(secondStep)
+    }
+
+    func testEnvironmentFailureRetainsPreparedPrefixForExactRetry() throws {
+        let setup = try makeSetup()
+        defer { setup.close() }
+        _ = try setup.server.executeReturningValues(
+            """
+            local prop = assert(ents.Create("prop_physics"))
+            prop:SetModel("models/props/physics_mutation.mdl")
+            prop:Spawn()
+            local phys = prop:GetPhysicsObject()
+            phys:SetVelocity(Vector(25, 0, 0))
+            return prop
+            """,
+            sourceName: "=(retryable PhysObj mutation)"
+        )
+        _ = try setup.adapter.runServerFixedTick()
+        let inputs = try setup.adapter.prepareCanonicalPropPhysicsStep()
+        let failing = FailingOncePhysicsEnvironment(delegate: setup.environment)
+        let coordinator = SourceCanonicalPropPhysicsCoordinator(
+            environment: failing,
+            commandSequenceSource: setup.transport
+        )
+        let tick = UInt64(setup.adapter.serverGlobals.tickCount)
+
+        XCTAssertThrowsError(try coordinator.step(
+            inputs: inputs,
+            simulationTick: tick
+        )) { error in
+            XCTAssertEqual(
+                error as? FailingOncePhysicsEnvironment.Failure,
+                .injected
+            )
+        }
+        XCTAssertEqual(setup.transport.pendingPhysicsBodyCommandCount, 2)
+        XCTAssertNil(coordinator.committedSimulationTick)
+        XCTAssertEqual(setup.environment.latestContacts, [])
+
+        let retried = try coordinator.step(
+            inputs: inputs,
+            simulationTick: tick
+        )
+        XCTAssertEqual(retried.commandSequences, [1, 2, 4])
+        XCTAssertEqual(setup.transport.pendingPhysicsBodyCommandCount, 0)
+        XCTAssertEqual(retried.bodies.first?.linearVelocity.x, 25)
+        try setup.adapter.commitCanonicalPropPhysicsStep(retried)
+    }
+}
+
+private extension SourceCanonicalPhysicsObjectMutationIntegrationTests {
+    struct Setup {
+        let transport: GMLuaNetTransport
+        let server: GMLuaRuntime
+        let adapter: GMLuaSourceRuntimeAdapter
+        let environment: SourceDeterministicPhysicsEnvironment
+
+        func close() {
+            try? adapter.close()
+            _ = server.close()
+        }
+    }
+
+    func makeSetup() throws -> Setup {
+        let asset = try makeAttestedPropPhysicsTestAsset(
+            modelPath: model.path,
+            massKilograms: 19,
+            mdlSHA256: digest(mdlData),
+            phySHA256: digest(phyData),
+            studioChecksum: studioChecksum
+        )
+        let resolver = try GModAttestedPropPhysicsAssetResolver(
+            attestedAssets: [asset],
+            loadObservedAsset: { [mdlData, phyData, studioChecksum] candidate in
+                .loaded(GModObservedPropPhysicsAsset(
+                    normalizedModelPath: candidate.path,
+                    mdlData: mdlData,
+                    phyData: phyData,
+                    studioChecksum: studioChecksum
+                ))
+            }
+        )
+        let transport = GMLuaNetTransport()
+        let server = GMLuaRuntime(
+            realm: .server,
+            logger: { _ in },
+            netTransport: transport
+        )
+        try XCTUnwrap(server.typeSystem).installFallbackUtilities()
+        let adapter = try GMLuaSourceRuntimeAdapter(
+            serverRuntime: server,
+            initialEntitySerialNumber: 47,
+            canonicalModelValidator: { [model] candidate, kind in
+                candidate == model && kind == .propPhysics ? .valid : .invalid
+            },
+            canonicalPropPhysicsAssetResolver: { candidate in
+                resolver.resolve(candidate).canonicalResolution
+            }
+        )
+        try adapter.installCanonicalEntityLuaBridge()
+        try adapter.installCanonicalPhysicsObjectLuaBridge()
+        return Setup(
+            transport: transport,
+            server: server,
+            adapter: adapter,
+            environment: SourceDeterministicPhysicsEnvironment()
+        )
+    }
+
+    func digest(_ data: Data) -> String {
+        var hasher = GModContentSHA256()
+        hasher.update(data)
+        return hasher.hexadecimalDigest()
+    }
+}
+
+private final class FailingOncePhysicsEnvironment: SourcePhysicsEnvironment {
+    enum Failure: Error, Equatable { case injected }
+
+    let delegate: SourcePhysicsEnvironment
+    private var shouldFail = true
+
+    init(delegate: SourcePhysicsEnvironment) {
+        self.delegate = delegate
+    }
+
+    func execute(
+        _ batch: SourcePhysicsCommandBatch
+    ) throws -> SourcePhysicsEnvironmentSnapshot {
+        if shouldFail {
+            shouldFail = false
+            throw Failure.injected
+        }
+        return try delegate.execute(batch)
+    }
+}

@@ -120,6 +120,17 @@ private struct GMLuaEntityReplicationDelivery: Sendable {
     let packet: SourceEntityReplicationPacket
 }
 
+/// One SERVER engine gameplay event for one exact CLIENT connection. It uses
+/// the same outer sequence and generation checks as net, console, SendLua, and
+/// canonical Entity replication.
+private struct GMLuaGameplayEventPacket: Sendable {
+    let sequence: UInt64
+    let sourceEndpointID: Int
+    let destinationEndpointID: Int
+    let connectionGeneration: UInt64?
+    let payload: GMLuaGameplayEventPayload
+}
+
 /// One member of an atomic SERVER entity-replication fan-out. SharedSession
 /// builds the complete batch before any destination receives a FIFO entry.
 struct GMLuaEntityReplicationEnqueueRequest: Sendable {
@@ -134,6 +145,7 @@ private enum GMLuaTransportDelivery: Sendable {
     case broadcastConsoleMessage(GMLuaBroadcastConsoleMessagePacket)
     case clientLua(GMLuaClientLuaPacket)
     case entity(GMLuaEntityReplicationDelivery)
+    case gameplayEvent(GMLuaGameplayEventPacket)
 
     var sequence: UInt64 {
         switch self {
@@ -143,6 +155,7 @@ private enum GMLuaTransportDelivery: Sendable {
         case let .broadcastConsoleMessage(packet): return packet.sequence
         case let .clientLua(packet): return packet.sequence
         case let .entity(delivery): return delivery.sequence
+        case let .gameplayEvent(packet): return packet.sequence
         }
     }
 
@@ -154,6 +167,7 @@ private enum GMLuaTransportDelivery: Sendable {
         case let .broadcastConsoleMessage(packet): return packet.sourceEndpointID
         case let .clientLua(packet): return packet.sourceEndpointID
         case let .entity(delivery): return delivery.sourceEndpointID
+        case let .gameplayEvent(packet): return packet.sourceEndpointID
         }
     }
 
@@ -165,6 +179,7 @@ private enum GMLuaTransportDelivery: Sendable {
         case let .broadcastConsoleMessage(packet): return packet.destinationEndpointID
         case let .clientLua(packet): return packet.destinationEndpointID
         case let .entity(delivery): return delivery.destinationEndpointID
+        case let .gameplayEvent(packet): return packet.destinationEndpointID
         }
     }
 }
@@ -178,6 +193,7 @@ enum GMLuaNetTransportDeliveryTransactionError: Error, Equatable, Sendable {
 /// cannot enter the globally visible FIFO until the scope commits.
 private final class GMLuaTransportDeliveryTransactionContext: @unchecked Sendable {
     var deliveries: [GMLuaTransportDelivery] = []
+    var physicsBodyCommands: [SourcePhysicsCommand] = []
     var completedMessageCount: UInt64 = 0
 }
 
@@ -268,6 +284,7 @@ public final class GMLuaNetEndpoint: @unchecked Sendable {
     private var writer: GMLuaNetWriter?
     private var reader: GMLuaNetBitReader?
     private var entityReplicationHandler: GMLuaEntityReplicationHandler?
+    private var gameplayEventHandler: GMLuaGameplayEventHandler?
 
     fileprivate init(
         identifier: Int,
@@ -791,6 +808,20 @@ public final class GMLuaNetEndpoint: @unchecked Sendable {
         try transport.enqueueBroadcastConsoleMessage(message, from: self)
     }
 
+    /// Queues one engine-owned gameplay event for all current CLIENT
+    /// connections. No destination realm is entered until the host pumps the
+    /// shared transport FIFO.
+    public func broadcastGameplayEvent(
+        _ payload: GMLuaGameplayEventPayload
+    ) throws {
+        guard realm == .server, let transport else {
+            throw LuaError.runtime(
+                "gameplay event broadcast requires an attached SERVER endpoint"
+            )
+        }
+        try transport.enqueueGameplayEvent(payload, from: self)
+    }
+
     fileprivate func validateCurrentServerPlayer(
         _ player: LuaValue,
         expectedIndex: Int
@@ -824,6 +855,27 @@ public final class GMLuaNetEndpoint: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Connects the CLIENT-owned effect/audio/animation handoff. Replacing the
+    /// handler is explicit and does not execute any queued packet immediately.
+    public func connectGameplayEventHandler(
+        _ handler: @escaping GMLuaGameplayEventHandler
+    ) throws {
+        guard realm == .client else {
+            throw LuaError.runtime(
+                "gameplay event handler destination must be CLIENT"
+            )
+        }
+        lock.lock()
+        gameplayEventHandler = handler
+        lock.unlock()
+    }
+
+    public func disconnectGameplayEventHandler() {
+        lock.lock()
+        gameplayEventHandler = nil
+        lock.unlock()
+    }
+
     fileprivate func detachFromSession() {
         lock.lock()
         writer = nil
@@ -833,6 +885,7 @@ public final class GMLuaNetEndpoint: @unchecked Sendable {
         entityRegistry = nil
         consoleCommandDispatcher = nil
         entityReplicationHandler = nil
+        gameplayEventHandler = nil
         lock.unlock()
     }
 
@@ -952,6 +1005,23 @@ public final class GMLuaNetEndpoint: @unchecked Sendable {
                 rejection: rejection
             )
         }
+    }
+
+    fileprivate func invokeGameplayEvent(
+        _ packet: GMLuaGameplayEventPacket
+    ) throws {
+        lock.lock()
+        let handler = gameplayEventHandler
+        lock.unlock()
+        guard realm == .client, let handler else {
+            throw LuaError.runtime(
+                "gameplay event CLIENT handler is unavailable"
+            )
+        }
+        try handler(GMLuaGameplayEventDelivery(
+            transportSequence: packet.sequence,
+            payload: packet.payload
+        ))
     }
 
     /// Returns only a typed expected user-action failure from the SERVER
@@ -1181,7 +1251,15 @@ public final class GMLuaNetEndpoint: @unchecked Sendable {
 /// safe tick boundary; pump then invokes the destination realm's original Lua
 /// `net.Incoming` function. This prevents send-time Lua re-entry and gives the
 /// renderer/simulation host a deterministic delivery boundary.
-public final class GMLuaNetTransport: @unchecked Sendable {
+public enum GMLuaPhysicsSequenceReservationError: Error, Equatable, Sendable {
+    case negativeCount(Int)
+    case sequenceExhausted
+}
+
+public final class GMLuaNetTransport: @unchecked Sendable,
+    SourceCanonicalPropPhysicsCommandSequenceSource,
+    SourceCanonicalPropPhysicsMutationCommandQueue
+{
     public static let maximumPayloadBytes = 65_533
     public static let maximumPayloadBits = maximumPayloadBytes * 8
     /// Current documented Garry's Mod `Player:SendLua` script limit. Counted
@@ -1209,6 +1287,7 @@ public final class GMLuaNetTransport: @unchecked Sendable {
     private var clientEndpointByPlayerIndex: [Int: Int] = [:]
     private var disconnectHandlers: [Int: @Sendable () -> Void] = [:]
     private var deliveries: [GMLuaTransportDelivery] = []
+    private var pendingPhysicsBodyCommands: [SourcePhysicsCommand] = []
     private var completedMessages: UInt64 = 0
     private var requiresExplicitClientConnections = false
 
@@ -1237,6 +1316,85 @@ public final class GMLuaNetTransport: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return completedMessages
+    }
+
+    public var pendingPhysicsBodyCommandCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return pendingPhysicsBodyCommands.count
+    }
+
+    /// Reserves physics commands from the transport's existing global FIFO.
+    ///
+    /// Physics commands are executed by the authoritative simulation lane and
+    /// therefore do not become transport deliveries, but consuming their
+    /// sequence identities here keeps net, console, Entity replication, and
+    /// rigid-body work in one total order. Gaps in the delivery queue are
+    /// intentional and are permitted by `SourcePhysicsCommandBatch`.
+    public func reservePhysicsCommandSequences(count: Int) throws -> [UInt64] {
+        guard count >= 0 else {
+            throw GMLuaPhysicsSequenceReservationError.negativeCount(count)
+        }
+        guard count > 0 else { return [] }
+
+        lock.lock()
+        defer { lock.unlock() }
+        let requested = UInt64(count)
+        guard requested <= UInt64.max - nextSequence else {
+            throw GMLuaPhysicsSequenceReservationError.sequenceExhausted
+        }
+        let first = nextSequence + 1
+        nextSequence += requested
+        return (0 ..< count).map { first + UInt64($0) }
+    }
+
+    @discardableResult
+    public func enqueueCanonicalPhysicsBodyCommands(
+        _ bodyCommands: [SourceCanonicalQueuedPhysicsBodyCommand]
+    ) throws -> [SourcePhysicsCommand] {
+        guard !bodyCommands.isEmpty else { return [] }
+        let transaction = Thread.current.threadDictionary[
+            deliveryTransactionThreadKey
+        ] as? GMLuaTransportDeliveryTransactionContext
+        lock.lock()
+        defer { lock.unlock() }
+        let requested = UInt64(bodyCommands.count)
+        guard requested <= UInt64.max - nextSequence else {
+            throw GMLuaPhysicsSequenceReservationError.sequenceExhausted
+        }
+        let first = nextSequence + 1
+        nextSequence += requested
+        let commands = bodyCommands.enumerated().map { offset, command in
+            SourcePhysicsCommand(
+                sequence: first + UInt64(offset),
+                payload: command.payload
+            )
+        }
+        if let transaction {
+            transaction.physicsBodyCommands.append(contentsOf: commands)
+        } else {
+            pendingPhysicsBodyCommands.append(contentsOf: commands)
+        }
+        return commands
+    }
+
+    public func preparePendingCanonicalPhysicsBodyCommands()
+        -> [SourcePhysicsCommand]
+    {
+        lock.lock()
+        defer { lock.unlock() }
+        return pendingPhysicsBodyCommands
+    }
+
+    public func commitPendingCanonicalPhysicsBodyCommands(
+        _ commands: [SourcePhysicsCommand]
+    ) {
+        guard !commands.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        precondition(pendingPhysicsBodyCommands.count >= commands.count)
+        precondition(Array(pendingPhysicsBodyCommands.prefix(commands.count)) == commands)
+        pendingPhysicsBodyCommands.removeFirst(commands.count)
     }
 
     /// Stages deliveries enqueued by the current thread until `body` returns.
@@ -1270,6 +1428,12 @@ public final class GMLuaNetTransport: @unchecked Sendable {
                 deliveries,
                 context.deliveries
             )
+        }
+        if !context.physicsBodyCommands.isEmpty {
+            pendingPhysicsBodyCommands.append(
+                contentsOf: context.physicsBodyCommands
+            )
+            pendingPhysicsBodyCommands.sort { $0.sequence < $1.sequence }
         }
         completedMessages &+= context.completedMessageCount
         lock.unlock()
@@ -1696,6 +1860,44 @@ public final class GMLuaNetTransport: @unchecked Sendable {
         }
     }
 
+    /// Fans one engine gameplay event out in stable CLIENT endpoint order.
+    /// Each immutable packet is generation-bound and enters the transport-wide
+    /// FIFO (including any active forwarded-action transaction) exactly once.
+    fileprivate func enqueueGameplayEvent(
+        _ payload: GMLuaGameplayEventPayload,
+        from source: GMLuaNetEndpoint
+    ) throws {
+        guard source.realm == .server else {
+            throw LuaError.runtime("gameplay event broadcast requires SERVER")
+        }
+
+        lock.lock()
+        defer { lock.unlock() }
+        guard serverEndpointID == source.identifier,
+              endpoints[source.identifier] === source,
+              endpoints[source.identifier]?.state != nil else {
+            throw LuaError.runtime("gameplay event SERVER endpoint is detached")
+        }
+        let destinations = endpoints.values
+            .filter {
+                $0.realm == .client && $0.state != nil &&
+                    (!requiresExplicitClientConnections ||
+                        clientConnectionsByEndpoint[$0.identifier] != nil)
+            }
+            .sorted { $0.identifier < $1.identifier }
+        for destination in destinations {
+            nextSequence &+= 1
+            appendDeliveryLocked(.gameplayEvent(GMLuaGameplayEventPacket(
+                sequence: nextSequence,
+                sourceEndpointID: source.identifier,
+                destinationEndpointID: destination.identifier,
+                connectionGeneration:
+                    clientConnectionsByEndpoint[destination.identifier]?.generation,
+                payload: payload
+            )))
+        }
+    }
+
     /// Queues one generation-bound SERVER `Player:SendLua` delivery for the
     /// exact connected Player. It shares the net/console/entity FIFO and the
     /// current forwarded-command staging scope; no CLIENT Lua executes here.
@@ -2024,6 +2226,13 @@ public final class GMLuaNetTransport: @unchecked Sendable {
                 )
                 try endpoint.invokeEntityReplication(entityDelivery)
                 successful += 1
+            case let .gameplayEvent(packet):
+                try validateGameplayEventConnection(
+                    endpoint: endpoint,
+                    packet: packet
+                )
+                try endpoint.invokeGameplayEvent(packet)
+                successful += 1
             }
             if case .net = delivery { successful += 1 }
             processed += 1
@@ -2119,6 +2328,35 @@ public final class GMLuaNetTransport: @unchecked Sendable {
               connection.generation == packet.connectionGeneration else {
             throw LuaError.runtime(
                 "queued MsgAll delivery belongs to a stale player connection generation"
+            )
+        }
+    }
+
+    private func validateGameplayEventConnection(
+        endpoint: GMLuaNetEndpoint,
+        packet: GMLuaGameplayEventPacket
+    ) throws {
+        lock.lock()
+        let sourceIsCurrentServer = serverEndpointID == packet.sourceEndpointID &&
+            endpoints[packet.sourceEndpointID]?.state != nil
+        let connection = clientConnectionsByEndpoint[endpoint.identifier]
+        let standaloneBroadcast = !requiresExplicitClientConnections &&
+            connection == nil && packet.connectionGeneration == nil
+        lock.unlock()
+
+        guard sourceIsCurrentServer,
+              endpoint.realm == .client,
+              endpoint.identifier == packet.destinationEndpointID else {
+            throw LuaError.runtime(
+                "queued gameplay event belongs to a detached SERVER or CLIENT"
+            )
+        }
+        if standaloneBroadcast { return }
+        guard let connection,
+              connection.endpointID == packet.destinationEndpointID,
+              connection.generation == packet.connectionGeneration else {
+            throw LuaError.runtime(
+                "queued gameplay event belongs to a stale player connection generation"
             )
         }
     }

@@ -61,11 +61,18 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
             assert(phys:IsCollisionEnabled() == false)
             assert(phys:IsAsleep() == true)
 
-            -- The current contract cannot truthfully implement these yet.
             assert(phys.GetMassCenter == nil)
-            assert(phys.IsMotionEnabled == nil)
+            assert(phys:IsMotionEnabled() == true)
             assert(phys.SetMass == nil)
-            assert(phys.Wake == nil)
+
+            phys:Wake()
+            phys:Sleep()
+            phys:EnableMotion(false)
+            phys:EnableGravity(false)
+            phys:EnableCollisions(true)
+            phys:SetVelocity(Vector(10, 20, 30))
+            phys:AddVelocity(Vector(1, 2, 3))
+            phys:ApplyForceCenter(Vector(100, 200, 300))
 
             function FixInvalidPhysicsObject(prop)
                 local PhysObj = prop:GetPhysicsObject()
@@ -87,6 +94,41 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
             """#,
             sourceName: "=(canonical pending PhysObj)"
         )
+
+        XCTAssertEqual(host.mutations, try [
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .wake
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .sleep
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .setMotionEnabled(false)
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .setGravityEnabled(false)
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .setCollisionEnabled(true)
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .setLinearVelocity(SourceVector3(10, 20, 30))
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .addLinearVelocity(SourceVector3(1, 2, 3))
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .applyCenterForce(SourceVector3(100, 200, 300))
+            ),
+        ])
 
         let simulated = try makeBodySnapshot(
             bodyID: pending.bodyID,
@@ -347,6 +389,7 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
 private final class RecordingCanonicalPhysicsObjectHost:
     SourceCanonicalPhysicsObjectLuaHost
 {
+    private(set) var mutations: [SourcePhysicsBodyMutationCommand] = []
     private var bodies: [
         SourcePhysicsBodyID: SourceCanonicalPhysicsObjectSnapshot
     ] = [:]
@@ -386,5 +429,15 @@ private final class RecordingCanonicalPhysicsObjectHost:
         for bodyID: SourcePhysicsBodyID
     ) -> SourceCanonicalPhysicsObjectSnapshot? {
         bodies[bodyID]
+    }
+
+    func enqueueCanonicalPhysicsObjectMutation(
+        _ command: SourcePhysicsBodyMutationCommand
+    ) throws {
+        guard bodies[command.bodyID] != nil else {
+            throw SourceDeterministicPhysicsEnvironment.Error
+                .missingBody(command.bodyID)
+        }
+        mutations.append(command)
     }
 }

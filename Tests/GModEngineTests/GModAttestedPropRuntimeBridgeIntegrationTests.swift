@@ -247,6 +247,154 @@ final class GModAttestedPropRuntimeBridgeIntegrationTests: XCTestCase {
             1
         )
     }
+
+    func testDeterministicSolverCommitsGravityBackToCanonicalPropAndPhysObj()
+        throws
+    {
+        let asset = try makeExactAsset()
+        let resolver = try makeResolver(asset: asset) { [self] model in
+            .loaded(GModObservedPropPhysicsAsset(
+                normalizedModelPath: model.path,
+                mdlData: mdlData,
+                phyData: phyData,
+                studioChecksum: studioChecksum
+            ))
+        }
+        let transport = GMLuaNetTransport()
+        let server = makeRuntime(.server, transport: transport)
+        let adapter = try makeAdapter(server: server, resolver: resolver)
+        defer { close(adapter: adapter, runtimes: [server]) }
+        try adapter.installCanonicalEntityLuaBridge()
+        try adapter.installCanonicalPhysicsObjectLuaBridge()
+
+        let values = try server.executeReturningValues(
+            """
+            local prop = assert(ents.Create("prop_physics"))
+            prop:SetModel("models/props/attested_runtime.mdl")
+            prop:SetPos(Vector(10, 20, 30))
+            prop:Spawn()
+            prop:Activate()
+            return prop
+            """,
+            sourceName: "=(deterministic prop physics integration)"
+        )
+        let propValue = try XCTUnwrap(values.first)
+        let before = try XCTUnwrap(
+            server.entityRegistry?.canonicalSnapshot(for: propValue)
+        )
+        XCTAssertEqual(before.transform.origin.z, 30)
+
+        _ = try adapter.runServerFixedTick()
+        let inputs = try adapter.prepareCanonicalPropPhysicsStep()
+        let environment = SourceDeterministicPhysicsEnvironment()
+        let coordinator = SourceCanonicalPropPhysicsCoordinator(
+            environment: environment,
+            commandSequenceSource: transport
+        )
+        let tick = UInt64(adapter.serverGlobals.tickCount)
+        let step = try coordinator.step(inputs: inputs, simulationTick: tick)
+        try adapter.commitCanonicalPropPhysicsStep(step)
+
+        let after = try XCTUnwrap(
+            adapter.canonicalSnapshot(for: before.identity)
+        )
+        XCTAssertLessThan(after.transform.origin.z, before.transform.origin.z)
+        XCTAssertLessThan(after.motion.linearVelocity.z, 0)
+        let phys = try XCTUnwrap(
+            adapter.primaryCanonicalPhysicsObject(for: before.identity)
+        )
+        XCTAssertEqual(phys.transform, after.transform)
+        XCTAssertEqual(phys.linearVelocity, after.motion.linearVelocity)
+        XCTAssertEqual(step.simulationTick, tick)
+    }
+
+    func testStockRemoverFlagsDetachSpawnedAttestedPropFromPhysics()
+        throws
+    {
+        let asset = try makeExactAsset()
+        let resolver = try makeResolver(asset: asset) { [self] model in
+            .loaded(GModObservedPropPhysicsAsset(
+                normalizedModelPath: model.path,
+                mdlData: mdlData,
+                phyData: phyData,
+                studioChecksum: studioChecksum
+            ))
+        }
+        let transport = GMLuaNetTransport()
+        let server = makeRuntime(.server, transport: transport)
+        let adapter = try makeAdapter(server: server, resolver: resolver)
+        defer { close(adapter: adapter, runtimes: [server]) }
+        try adapter.installCanonicalEntityLuaBridge()
+        try adapter.installCanonicalPhysicsObjectLuaBridge()
+        _ = try SourceCanonicalToolActionBridge.install(
+            into: server,
+            host: adapter
+        )
+
+        let values = try server.executeReturningValues(
+            """
+            local prop = assert(ents.Create("prop_physics"))
+            prop:SetModel("models/props/attested_runtime.mdl")
+            prop:SetPos(Vector(10, 20, 30))
+            prop:Spawn()
+            prop:Activate()
+            return prop
+            """,
+            sourceName: "=(attested stock remover physics setup)"
+        )
+        let propValue = try XCTUnwrap(values.first)
+        let live = try XCTUnwrap(
+            server.entityRegistry?.canonicalSnapshot(for: propValue)
+        )
+        let environment = SourceDeterministicPhysicsEnvironment()
+        let coordinator = SourceCanonicalPropPhysicsCoordinator(
+            environment: environment,
+            commandSequenceSource: transport
+        )
+
+        _ = try adapter.runServerFixedTick()
+        let initial = try coordinator.step(
+            inputs: adapter.prepareCanonicalPropPhysicsStep(),
+            simulationTick: UInt64(adapter.serverGlobals.tickCount)
+        )
+        try adapter.commitCanonicalPropPhysicsStep(initial)
+        XCTAssertEqual(initial.bodies.count, 1)
+
+        try server.execute(
+            """
+            local prop = Entity(\(live.identity.entryIndex))
+            prop:SetNotSolid(true)
+            prop:SetNoDraw(true)
+            prop:SetMoveType(MOVETYPE_NONE)
+            """,
+            sourceName: "=(stock remover transient flags)"
+        )
+        _ = try adapter.runServerFixedTick()
+        let disabled = try coordinator.step(
+            inputs: adapter.prepareCanonicalPropPhysicsStep(),
+            simulationTick: UInt64(adapter.serverGlobals.tickCount)
+        )
+        try adapter.commitCanonicalPropPhysicsStep(disabled)
+
+        XCTAssertEqual(disabled.operations, [
+            .delete(try SourcePhysicsBodyID(
+                entityIdentity: live.identity,
+                solidIndex: asset.bodyDefinition.solidIndex
+            ))
+        ])
+        XCTAssertTrue(disabled.bodies.isEmpty)
+        XCTAssertTrue(coordinator.committedBodyIDs.isEmpty)
+        let entity = try XCTUnwrap(
+            adapter.canonicalSnapshot(for: live.identity)
+        )
+        XCTAssertEqual(entity.lifecycle, .active)
+        XCTAssertTrue(entity.isNotSolid)
+        XCTAssertTrue(entity.isNoDraw)
+        XCTAssertEqual(entity.moveType, .none)
+        XCTAssertNil(adapter.primaryCanonicalPhysicsObject(
+            for: live.identity
+        ))
+    }
 }
 
 private extension GModAttestedPropRuntimeBridgeIntegrationTests {

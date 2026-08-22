@@ -299,6 +299,58 @@ struct SourceCanonicalPropPhysicsCoordinatorTests {
         #expect(coordinator.committedSimulationTick == 2)
     }
 
+    @Test("stock remover transient deletes the rigid body without deleting Entity")
+    func stockRemoverTransientDisablesBodyUntilDeferredRemoval() throws {
+        let environment = RecordingPhysicsEnvironment()
+        let sequences = RecordingPhysicsSequenceSource(first: 300)
+        let coordinator = SourceCanonicalPropPhysicsCoordinator(
+            environment: environment,
+            commandSequenceSource: sequences
+        )
+        let definition = try makeBodyDefinition()
+        let live = makeProp(
+            entryIndex: 73,
+            serialNumber: 8,
+            lifecycle: .active
+        )
+        let created = try coordinator.step(
+            inputs: [try SourceCanonicalPropPhysicsInput(
+                entity: live,
+                bodyDefinition: definition
+            )],
+            simulationTick: 1
+        )
+        let bodyID = try #require(created.bodies.first?.bodyID)
+
+        let disabled = makeProp(
+            identity: live.identity,
+            lifecycle: .active,
+            moveType: .none,
+            isNotSolid: true
+        )
+        let removedFromSolver = try coordinator.step(
+            inputs: [try SourceCanonicalPropPhysicsInput(
+                entity: disabled,
+                bodyDefinition: nil
+            )],
+            simulationTick: 2
+        )
+
+        #expect(removedFromSolver.operations == [.delete(bodyID)])
+        #expect(removedFromSolver.bodies.isEmpty)
+        #expect(environment.bodies.isEmpty)
+        #expect(coordinator.committedBodyIDs.isEmpty)
+        #expect(
+            throws: SourceCanonicalPropPhysicsCoordinatorError
+                .bodyDefinitionForDisabledEntity(live.identity)
+        ) {
+            _ = try SourceCanonicalPropPhysicsInput(
+                entity: disabled,
+                bodyDefinition: definition
+            )
+        }
+    }
+
     @Test("invalid inputs and invalid environment output never commit")
     func validationIsFailClosedAndTransactional() throws {
         let definition = try makeBodyDefinition()
@@ -386,7 +438,9 @@ struct SourceCanonicalPropPhysicsCoordinatorTests {
         lifecycle: SourceCanonicalEntityLifecycle,
         transform: SourceEntityTransform = .identity,
         linearVelocity: SourceVector3 = .zero,
-        angularVelocity: SourceVector3 = .zero
+        angularVelocity: SourceVector3 = .zero,
+        moveType: SourceMoveType = .vPhysics,
+        isNotSolid: Bool = false
     ) -> SourceCanonicalEntitySnapshot {
         var motion = SourceEntityMotionState()
         motion.linearVelocity = linearVelocity
@@ -398,8 +452,9 @@ struct SourceCanonicalPropPhysicsCoordinatorTests {
             transform: transform,
             motion: motion,
             model: SourceEntityModelReference("models/props_c17/oildrum001.mdl"),
+            isNotSolid: isNotSolid,
             solidType: .vPhysics,
-            moveType: .vPhysics,
+            moveType: moveType,
             lifecycle: lifecycle,
             isNetworkable: true,
             revision: 1
@@ -525,6 +580,14 @@ private final class RecordingPhysicsEnvironment: SourcePhysicsEnvironment {
                 guard candidateBodies.removeValue(forKey: deletion.bodyID) != nil else {
                     throw Failure.missingBody(deletion.bodyID)
                 }
+            case let .mutateBody(mutation):
+                guard let body = candidateBodies[mutation.bodyID] else {
+                    throw Failure.missingBody(mutation.bodyID)
+                }
+                candidateBodies[mutation.bodyID] = try mutatedBody(
+                    body,
+                    by: mutation.mutation
+                )
             case let .simulate(simulate):
                 candidateTick = simulate.simulationTick
                 for (bodyID, body) in candidateBodies {
@@ -595,10 +658,69 @@ private final class RecordingPhysicsEnvironment: SourcePhysicsEnvironment {
             angularVelocity: body.angularVelocity,
             motionType: body.motionType,
             materialIndex: body.materialIndex,
+            isMotionEnabled: body.isMotionEnabled,
             isGravityEnabled: body.isGravityEnabled,
             isCollisionEnabled: body.isCollisionEnabled,
             isSleeping: body.isSleeping,
             simulationTick: simulationTick
+        )
+    }
+
+    private func mutatedBody(
+        _ body: SourcePhysicsBodySnapshot,
+        by mutation: SourcePhysicsBodyMutation
+    ) throws -> SourcePhysicsBodySnapshot {
+        var linearVelocity = body.linearVelocity
+        var angularVelocity = body.angularVelocity
+        var isMotionEnabled = body.isMotionEnabled
+        var isGravityEnabled = body.isGravityEnabled
+        var isCollisionEnabled = body.isCollisionEnabled
+        var isSleeping = body.isSleeping
+        switch mutation {
+        case .wake:
+            isSleeping = false
+        case .sleep:
+            isSleeping = true
+            linearVelocity = .zero
+            angularVelocity = .zero
+        case let .setMotionEnabled(enabled):
+            isMotionEnabled = enabled
+            isSleeping = !enabled
+            if !enabled {
+                linearVelocity = .zero
+                angularVelocity = .zero
+            }
+        case let .setGravityEnabled(enabled):
+            isGravityEnabled = enabled
+        case let .setCollisionEnabled(enabled):
+            isCollisionEnabled = enabled
+        case let .setLinearVelocity(value):
+            linearVelocity = value
+        case let .addLinearVelocity(value):
+            linearVelocity += value
+        case let .setAngularVelocity(value):
+            angularVelocity = value
+        case let .addAngularVelocity(value):
+            angularVelocity += value
+        case .applyCenterForce:
+            break
+        case let .applyCenterImpulse(value):
+            linearVelocity += value / body.massProperties.massKilograms
+        }
+        return try SourcePhysicsBodySnapshot(
+            bodyID: body.bodyID,
+            shape: body.shape,
+            massProperties: body.massProperties,
+            transform: body.transform,
+            linearVelocity: linearVelocity,
+            angularVelocity: angularVelocity,
+            motionType: body.motionType,
+            materialIndex: body.materialIndex,
+            isMotionEnabled: isMotionEnabled,
+            isGravityEnabled: isGravityEnabled,
+            isCollisionEnabled: isCollisionEnabled,
+            isSleeping: isSleeping,
+            simulationTick: body.simulationTick
         )
     }
 

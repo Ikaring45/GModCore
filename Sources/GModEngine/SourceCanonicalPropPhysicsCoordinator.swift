@@ -7,6 +7,38 @@ public protocol SourceCanonicalPropPhysicsCommandSequenceSource: AnyObject {
     func reservePhysicsCommandSequences(count: Int) throws -> [UInt64]
 }
 
+/// The only body commands that may wait for the next authoritative fixed
+/// step. Simulation and queries remain coordinator-owned barriers.
+public enum SourceCanonicalQueuedPhysicsBodyCommand: Equatable, Sendable {
+    case create(SourcePhysicsBodyCreationCommand)
+    case mutate(SourcePhysicsBodyMutationCommand)
+
+    var payload: SourcePhysicsCommandPayload {
+        switch self {
+        case let .create(command): .createBody(command)
+        case let .mutate(command): .mutateBody(command)
+        }
+    }
+}
+
+/// Transactional pending-command seam implemented by the same host object
+/// that owns the global net/console/entity/physics sequence clock.
+public protocol SourceCanonicalPropPhysicsMutationCommandQueue: AnyObject {
+    @discardableResult
+    func enqueueCanonicalPhysicsBodyCommands(
+        _ commands: [SourceCanonicalQueuedPhysicsBodyCommand]
+    ) throws -> [SourcePhysicsCommand]
+
+    func preparePendingCanonicalPhysicsBodyCommands()
+        -> [SourcePhysicsCommand]
+
+    /// Removes exactly the prepared prefix. This is called only after the
+    /// environment and coordinator validation succeed; throws retain it.
+    func commitPendingCanonicalPhysicsBodyCommands(
+        _ commands: [SourcePhysicsCommand]
+    )
+}
+
 /// Verified physical data for one canonical `prop_physics` body.
 ///
 /// Shape, mass, and principal inertia have already passed the validation in
@@ -69,6 +101,7 @@ public enum SourceCanonicalPropPhysicsCoordinatorError: Error, Equatable, Sendab
         received: SourceMoveType
     )
     case missingBodyDefinition(SourceCanonicalEntityIdentity)
+    case bodyDefinitionForDisabledEntity(SourceCanonicalEntityIdentity)
     case bodyDefinitionForInactiveEntity(
         identity: SourceCanonicalEntityIdentity,
         lifecycle: SourceCanonicalEntityLifecycle
@@ -79,6 +112,13 @@ public enum SourceCanonicalPropPhysicsCoordinatorError: Error, Equatable, Sendab
     case wrongReservedSequenceCount(expected: Int, received: Int)
     case environmentSimulationTickMismatch(expected: UInt64, received: UInt64)
     case environmentCommandSequenceMismatch(expected: UInt64, received: UInt64?)
+    case pendingCommandSequenceNotBeforeStep(
+        pending: UInt64,
+        reserved: UInt64
+    )
+    case unsupportedPendingCommand(UInt64)
+    case pendingCreationMismatch(SourcePhysicsBodyID)
+    case pendingMutationBodyUnavailable(SourcePhysicsBodyID)
     case environmentMissingBody(SourcePhysicsBodyID)
     case environmentRetainedDeletedBody(SourcePhysicsBodyID)
     case environmentBodyConfigurationMismatch(SourcePhysicsBodyID)
@@ -92,9 +132,11 @@ public enum SourceCanonicalPropPhysicsCoordinatorError: Error, Equatable, Sendab
 /// One canonical entity plus its verified physical definition.
 ///
 /// Created, pending-removal, and removed entities must not carry a body.
-/// Spawned and active props must carry real extracted physical data. This is
-/// the fail-closed boundary that prevents a placeholder AABB or dummy mass
-/// from becoming a successful `prop_physics`.
+/// Spawned and active props normally carry real extracted physical data. The
+/// stock remover's exact transient state (`FSOLID_NOT_SOLID` plus
+/// `MOVETYPE_NONE`) deliberately carries no live solver body while the
+/// canonical Entity remains available to its delayed removal timer. This is
+/// still fail-closed: no other move type and no unattested body is accepted.
 public struct SourceCanonicalPropPhysicsInput: Equatable, Sendable {
     public let entity: SourceCanonicalEntitySnapshot
     public let bodyDefinition: SourceCanonicalPropPhysicsBodyDefinition?
@@ -132,15 +174,21 @@ public struct SourceCanonicalPropPhysicsInput: Equatable, Sendable {
                     received: entity.solidType
                 )
             }
-            guard entity.moveType == .vPhysics else {
+            if entity.moveType == .none, entity.isNotSolid {
+                guard bodyDefinition == nil else {
+                    throw SourceCanonicalPropPhysicsCoordinatorError
+                        .bodyDefinitionForDisabledEntity(entity.identity)
+                }
+            } else if entity.moveType == .vPhysics {
+                guard bodyDefinition != nil else {
+                    throw SourceCanonicalPropPhysicsCoordinatorError
+                        .missingBodyDefinition(entity.identity)
+                }
+            } else {
                 throw SourceCanonicalPropPhysicsCoordinatorError.wrongMoveType(
                     identity: entity.identity,
                     received: entity.moveType
                 )
-            }
-            guard bodyDefinition != nil else {
-                throw SourceCanonicalPropPhysicsCoordinatorError
-                    .missingBodyDefinition(entity.identity)
             }
         case .created, .pendingRemoval, .removed:
             guard bodyDefinition == nil else {
@@ -173,6 +221,9 @@ public struct SourceCanonicalPropPhysicsMotionSnapshot: Equatable, Sendable {
     public let transform: SourceEntityTransform
     public let linearVelocity: SourceVector3
     public let angularVelocity: SourceVector3
+    public let isMotionEnabled: Bool
+    public let isGravityEnabled: Bool
+    public let isCollisionEnabled: Bool
     public let isSleeping: Bool
     public let simulationTick: UInt64
 
@@ -181,6 +232,9 @@ public struct SourceCanonicalPropPhysicsMotionSnapshot: Equatable, Sendable {
         transform = body.transform
         linearVelocity = body.linearVelocity
         angularVelocity = body.angularVelocity
+        isMotionEnabled = body.isMotionEnabled
+        isGravityEnabled = body.isGravityEnabled
+        isCollisionEnabled = body.isCollisionEnabled
         isSleeping = body.isSleeping
         simulationTick = body.simulationTick
     }
@@ -273,7 +327,24 @@ public final class SourceCanonicalPropPhysicsCoordinator {
 
         let desiredBodies = try makeDesiredBodies(inputs: inputs)
         let plan = makePlan(desiredBodies: desiredBodies)
-        let commandCount = plan.deletions.count + plan.creations.count + 1
+        let mutationQueue = commandSequenceSource as?
+            any SourceCanonicalPropPhysicsMutationCommandQueue
+        let pendingCommands = mutationQueue?
+            .preparePendingCanonicalPhysicsBodyCommands() ?? []
+        let pendingCreationIDs = try validatePendingCommands(
+            pendingCommands,
+            desiredBodies: desiredBodies
+        )
+        var deletionSet = Set(plan.deletions)
+        for bodyID in pendingCreationIDs where desiredBodies[bodyID] == nil {
+            deletionSet.insert(bodyID)
+        }
+        let deletions = deletionSet.sorted(by: Self.bodyIDPrecedes)
+        let pendingCreationSet = Set(pendingCreationIDs)
+        let creations = plan.creations.filter {
+            !pendingCreationSet.contains($0)
+        }
+        let commandCount = deletions.count + creations.count + 1
         let sequences = try commandSequenceSource
             .reservePhysicsCommandSequences(count: commandCount)
         guard sequences.count == commandCount else {
@@ -285,16 +356,26 @@ public final class SourceCanonicalPropPhysicsCoordinator {
         }
 
         var commandIndex = 0
-        var commands: [SourcePhysicsCommand] = []
-        commands.reserveCapacity(commandCount)
-        for bodyID in plan.deletions {
+        if let pendingSequence = pendingCommands.last?.sequence,
+           let reservedSequence = sequences.first,
+           pendingSequence >= reservedSequence {
+            throw SourceCanonicalPropPhysicsCoordinatorError
+                .pendingCommandSequenceNotBeforeStep(
+                    pending: pendingSequence,
+                    reserved: reservedSequence
+                )
+        }
+
+        var commands = pendingCommands
+        commands.reserveCapacity(pendingCommands.count + commandCount)
+        for bodyID in deletions {
             commands.append(SourcePhysicsCommand(
                 sequence: sequences[commandIndex],
                 payload: .deleteBody(SourcePhysicsBodyDeletionCommand(bodyID: bodyID))
             ))
             commandIndex += 1
         }
-        for bodyID in plan.creations {
+        for bodyID in creations {
             guard let desiredBody = desiredBodies[bodyID] else {
                 preconditionFailure("prop physics plan lost a desired body")
             }
@@ -316,14 +397,18 @@ public final class SourceCanonicalPropPhysicsCoordinator {
         let candidateBodies = try validate(
             environmentSnapshot: environmentSnapshot,
             desiredBodies: desiredBodies,
-            deletedBodyIDs: plan.deletions,
+            deletedBodyIDs: deletions,
             finalCommandSequence: sequences[commandIndex],
             simulationTick: simulationTick
         )
 
+        let reportedPendingCreations = pendingCreationIDs.filter {
+            desiredBodies[$0] != nil
+        }
         let operations = makeOperations(
-            deletedBodyIDs: plan.deletions,
-            createdBodyIDs: plan.creations,
+            deletedBodyIDs: deletions,
+            createdBodyIDs: (creations + reportedPendingCreations)
+                .sorted(by: Self.bodyIDPrecedes),
             desiredBodies: desiredBodies
         )
         let motionSnapshots = candidateBodies.values
@@ -332,11 +417,14 @@ public final class SourceCanonicalPropPhysicsCoordinator {
             .map(SourceCanonicalPropPhysicsMotionSnapshot.init(body:))
         let result = SourceCanonicalPropPhysicsStepSnapshot(
             simulationTick: simulationTick,
-            commandSequences: sequences,
+            commandSequences: commands.map(\.sequence),
             operations: operations,
             bodies: motionSnapshots
         )
 
+        mutationQueue?.commitPendingCanonicalPhysicsBodyCommands(
+            pendingCommands
+        )
         committedBodies = candidateBodies
         committedSimulationTickStorage = simulationTick
         latestStepSnapshot = result
@@ -413,6 +501,39 @@ public final class SourceCanonicalPropPhysicsCoordinator {
         )
     }
 
+    private func validatePendingCommands(
+        _ commands: [SourcePhysicsCommand],
+        desiredBodies: [SourcePhysicsBodyID: DesiredBody]
+    ) throws -> [SourcePhysicsBodyID] {
+        var liveBodyIDs = Set(committedBodies.keys)
+        var createdBodyIDs: [SourcePhysicsBodyID] = []
+        for command in commands {
+            switch command.payload {
+            case let .createBody(creation):
+                guard !liveBodyIDs.contains(creation.bodyID) else {
+                    throw SourceCanonicalPropPhysicsCoordinatorError
+                        .pendingCreationMismatch(creation.bodyID)
+                }
+                if let desired = desiredBodies[creation.bodyID],
+                   desired.creation != creation {
+                    throw SourceCanonicalPropPhysicsCoordinatorError
+                        .pendingCreationMismatch(creation.bodyID)
+                }
+                liveBodyIDs.insert(creation.bodyID)
+                createdBodyIDs.append(creation.bodyID)
+            case let .mutateBody(mutation):
+                guard liveBodyIDs.contains(mutation.bodyID) else {
+                    throw SourceCanonicalPropPhysicsCoordinatorError
+                        .pendingMutationBodyUnavailable(mutation.bodyID)
+                }
+            case .deleteBody, .simulate, .query:
+                throw SourceCanonicalPropPhysicsCoordinatorError
+                    .unsupportedPendingCommand(command.sequence)
+            }
+        }
+        return createdBodyIDs
+    }
+
     private func requiresReplacement(
         committed: CommittedBody,
         desired: DesiredBody
@@ -476,9 +597,7 @@ public final class SourceCanonicalPropPhysicsCoordinator {
                 body.shape == desired.definition.shape,
                 body.massProperties == desired.definition.massProperties,
                 body.motionType == desired.definition.motionType,
-                body.materialIndex == desired.definition.materialIndex,
-                body.isGravityEnabled == desired.definition.isGravityEnabled,
-                body.isCollisionEnabled == desired.definition.isCollisionEnabled
+                body.materialIndex == desired.definition.materialIndex
             else {
                 throw SourceCanonicalPropPhysicsCoordinatorError
                     .environmentBodyConfigurationMismatch(bodyID)

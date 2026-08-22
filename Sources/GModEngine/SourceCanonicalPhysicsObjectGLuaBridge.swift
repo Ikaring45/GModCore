@@ -15,6 +15,7 @@ public struct SourceCanonicalPhysicsObjectSnapshot: Equatable, Sendable {
     public let linearVelocity: SourceVector3
     public let angularVelocity: SourceVector3
     public let motionType: SourcePhysicsMotionType
+    public let isMotionEnabled: Bool
     public let isGravityEnabled: Bool
     public let isCollisionEnabled: Bool
     public let isSleeping: Bool
@@ -41,6 +42,7 @@ public struct SourceCanonicalPhysicsObjectSnapshot: Equatable, Sendable {
         linearVelocity = entity.motion.linearVelocity
         angularVelocity = entity.motion.angularVelocity
         motionType = definition.motionType
+        isMotionEnabled = definition.motionType != .staticBody
         isGravityEnabled = definition.isGravityEnabled
         isCollisionEnabled = definition.isCollisionEnabled
         isSleeping = !definition.startsAwake
@@ -56,6 +58,7 @@ public struct SourceCanonicalPhysicsObjectSnapshot: Equatable, Sendable {
         linearVelocity = body.linearVelocity
         angularVelocity = body.angularVelocity
         motionType = body.motionType
+        isMotionEnabled = body.isMotionEnabled
         isGravityEnabled = body.isGravityEnabled
         isCollisionEnabled = body.isCollisionEnabled
         isSleeping = body.isSleeping
@@ -101,6 +104,10 @@ public protocol SourceCanonicalPhysicsObjectLuaHost: AnyObject {
     func canonicalPhysicsObject(
         for bodyID: SourcePhysicsBodyID
     ) -> SourceCanonicalPhysicsObjectSnapshot?
+
+    func enqueueCanonicalPhysicsObjectMutation(
+        _ command: SourcePhysicsBodyMutationCommand
+    ) throws
 }
 
 public enum SourceCanonicalPhysicsObjectGLuaBridgeError:
@@ -142,11 +149,9 @@ private final class SourceCanonicalPhysicsObjectLuaOwner: @unchecked Sendable {}
 
 /// Installs a realm-local cache of full-identity `PhysObj` userdata.
 ///
-/// This bridge intentionally installs no mutators. The current backend-neutral
-/// body snapshot has no transactional mutation operation, and its motion type
-/// does not distinguish a dynamic object pinned with `EnableMotion(false)`.
-/// Therefore `SetMass`, `Wake`, `EnableMotion`, and even `IsMotionEnabled` stay
-/// absent until the authoritative host can implement their real semantics.
+/// Mutators enqueue validated commands on the authoritative SERVER host. They
+/// never edit the read snapshot locally; the next fixed physics tick publishes
+/// the solver result back through the same complete body identity.
 public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
     private let state: LuaState
     private let typeSystem: GMLuaTypeSystem
@@ -265,6 +270,9 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
         try setPhysicsReadMethod("GetAngleVelocity") { snapshot in
             [try self.vector(snapshot.angularVelocity)]
         }
+        try setPhysicsReadMethod("IsMotionEnabled") { snapshot in
+            [.boolean(snapshot.isMotionEnabled)]
+        }
         try setPhysicsReadMethod("IsGravityEnabled") { snapshot in
             [.boolean(snapshot.isGravityEnabled)]
         }
@@ -273,6 +281,79 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
         }
         try setPhysicsReadMethod("IsAsleep") { snapshot in
             [.boolean(snapshot.isSleeping)]
+        }
+
+        try setPhysicsMutationMethod("Wake") { _ in .wake }
+        try setPhysicsMutationMethod("Sleep") { _ in .sleep }
+        try setPhysicsMutationMethod("EnableMotion") { arguments in
+            .setMotionEnabled(try self.requiredBoolean(
+                arguments,
+                at: 1,
+                function: "PhysObj:EnableMotion"
+            ))
+        }
+        try setPhysicsMutationMethod("EnableGravity") { arguments in
+            .setGravityEnabled(try self.requiredBoolean(
+                arguments,
+                at: 1,
+                function: "PhysObj:EnableGravity"
+            ))
+        }
+        try setPhysicsMutationMethod("EnableCollisions") { arguments in
+            .setCollisionEnabled(try self.requiredBoolean(
+                arguments,
+                at: 1,
+                function: "PhysObj:EnableCollisions"
+            ))
+        }
+        try setPhysicsMutationMethod("SetVelocity") { arguments in
+            .setLinearVelocity(try self.requiredVector(
+                arguments,
+                at: 1,
+                function: "PhysObj:SetVelocity"
+            ))
+        }
+        try setPhysicsMutationMethod("AddVelocity") { arguments in
+            .addLinearVelocity(try self.requiredVector(
+                arguments,
+                at: 1,
+                function: "PhysObj:AddVelocity"
+            ))
+        }
+        try setPhysicsMutationMethod("ApplyForceCenter") { arguments in
+            .applyCenterForce(try self.requiredVector(
+                arguments,
+                at: 1,
+                function: "PhysObj:ApplyForceCenter"
+            ))
+        }
+    }
+
+    private func setPhysicsMutationMethod(
+        _ name: String,
+        mutation: @escaping ([LuaValue]) throws -> SourcePhysicsBodyMutation
+    ) throws {
+        guard let metatable = typeSystem.metatable(named: "PhysObj") else {
+            throw SourceCanonicalPhysicsObjectGLuaBridgeError
+                .missingRuntimeSurface("PhysObj metatable")
+        }
+        try setMethod("PhysObj:\(name)", on: metatable) { arguments in
+            let snapshot = try self.requiredSnapshot(
+                arguments.first,
+                function: "PhysObj:\(name)"
+            )
+            guard let host = self.host.value else {
+                throw LuaError.runtime(
+                    "PhysObj:\(name) authoritative SERVER host is unavailable"
+                )
+            }
+            try host.enqueueCanonicalPhysicsObjectMutation(
+                SourcePhysicsBodyMutationCommand(
+                    bodyID: snapshot.bodyID,
+                    mutation: try mutation(arguments)
+                )
+            )
+            return []
         }
     }
 
@@ -406,6 +487,46 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
             Double(value.yaw),
             Double(value.roll),
             typeSystem: typeSystem
+        )
+    }
+
+    private func requiredBoolean(
+        _ arguments: [LuaValue],
+        at index: Int,
+        function: String
+    ) throws -> Bool {
+        guard arguments.indices.contains(index),
+              case let .boolean(value) = arguments[index] else {
+            let actual = arguments.indices.contains(index)
+                ? arguments[index].typeName
+                : "no value"
+            throw LuaError.runtime(
+                "bad argument #\(index) to '\(function)' " +
+                "(boolean expected, got \(actual))"
+            )
+        }
+        return value
+    }
+
+    private func requiredVector(
+        _ arguments: [LuaValue],
+        at index: Int,
+        function: String
+    ) throws -> SourceVector3 {
+        guard arguments.indices.contains(index) else {
+            throw LuaError.runtime(
+                "bad argument #\(index) to '\(function)' " +
+                "(Vector expected, got no value)"
+            )
+        }
+        let components = try GMLuaVectorAngle.networkVectorComponents(
+            from: arguments[index],
+            function: function
+        )
+        return SourceVector3(
+            Float(components.0),
+            Float(components.1),
+            Float(components.2)
         )
     }
 }

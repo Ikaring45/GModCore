@@ -68,6 +68,8 @@ public struct GModMetalView:
     @Binding private var stats: String
     private let worldScene: GModMetalWorldScene?
     private let dynamicEntityScene: GModMetalDynamicEntityScene?
+    private let firstPersonViewModelScene:
+        GModMetalFirstPersonViewModelScene?
     private let surfaceScene: GModMetalSurfaceScene?
     private let preferredFramesPerSecond: Int
     private let onFrame: @Sendable (GModMetalFrameRequest) -> Void
@@ -78,6 +80,8 @@ public struct GModMetalView:
         stats: Binding<String>,
         worldScene: GModMetalWorldScene? = nil,
         dynamicEntityScene: GModMetalDynamicEntityScene? = nil,
+        firstPersonViewModelScene:
+            GModMetalFirstPersonViewModelScene? = nil,
         surfaceScene: GModMetalSurfaceScene? = nil,
         preferredFramesPerSecond: Int = 120,
         onFrame: @escaping @Sendable (GModMetalFrameRequest) -> Void = { _ in },
@@ -88,6 +92,7 @@ public struct GModMetalView:
         self._stats = stats
         self.worldScene = worldScene
         self.dynamicEntityScene = dynamicEntityScene
+        self.firstPersonViewModelScene = firstPersonViewModelScene
         self.surfaceScene = surfaceScene
         self.preferredFramesPerSecond = preferredFramesPerSecond <= 60 ? 60 : 120
         self.onFrame = onFrame
@@ -102,6 +107,7 @@ public struct GModMetalView:
             stats: $stats,
             worldScene: worldScene,
             dynamicEntityScene: dynamicEntityScene,
+            firstPersonViewModelScene: firstPersonViewModelScene,
             surfaceScene: surfaceScene,
             onFrame: onFrame,
             onWorldFrameEvent: onWorldFrameEvent,
@@ -197,6 +203,7 @@ public struct GModMetalView:
         context.coordinator.submit(
             worldScene: worldScene,
             dynamicEntityScene: dynamicEntityScene,
+            firstPersonViewModelScene: firstPersonViewModelScene,
             surfaceScene: surfaceScene
         )
     }
@@ -364,6 +371,9 @@ public struct GModMetalView:
         private var dynamicEntityMissingMaterialPipeline:
             MTLRenderPipelineState?
 
+        private var firstPersonViewModelTexturedPipeline:
+            MTLRenderPipelineState?
+
         private var worldSkyboxPipeline:
             MTLRenderPipelineState?
 
@@ -432,6 +442,11 @@ public struct GModMetalView:
 
         private enum PendingDynamicEntityScene {
             case replace(GModMetalDynamicEntityScene)
+            case clear
+        }
+
+        private enum PendingFirstPersonViewModelScene {
+            case replace(GModMetalFirstPersonViewModelScene)
             case clear
         }
 
@@ -800,6 +815,9 @@ public struct GModMetalView:
         private var pendingDynamicEntityScene:
             PendingDynamicEntityScene?
 
+        private var pendingFirstPersonViewModelScene:
+            PendingFirstPersonViewModelScene?
+
         /// Accessed only by MTKView's serialized draw callback.
         private var activeWorldScene:
             GModMetalWorldScene?
@@ -807,6 +825,21 @@ public struct GModMetalView:
         /// Accessed only by MTKView's serialized draw callback.
         private var activeDynamicEntityScene:
             GModMetalDynamicEntityScene?
+
+        /// Source-authored `c_*.mdl` resource rendered in its own camera-space
+        /// depth lifetime after the completed world and before VGUI.
+        private var activeFirstPersonViewModelScene:
+            GModMetalFirstPersonViewModelScene?
+
+        private var cachedFirstPersonViewModelGeometry:
+            CachedDynamicEntityGeometry?
+
+        private var cachedFirstPersonViewModelTextures:
+            [DynamicEntityTextureKey: CachedDynamicEntityTexture] = [:]
+
+        private var firstPersonViewModelIssue: String?
+
+        private var lastFirstPersonViewModelRangeDrawCount = 0
 
         private var cachedDynamicEntityGeometry:
             [GModMetalDynamicEntityResourceID: CachedDynamicEntityGeometry] = [:]
@@ -930,6 +963,8 @@ public struct GModMetalView:
             stats: Binding<String>,
             worldScene: GModMetalWorldScene?,
             dynamicEntityScene: GModMetalDynamicEntityScene? = nil,
+            firstPersonViewModelScene:
+                GModMetalFirstPersonViewModelScene? = nil,
             surfaceScene: GModMetalSurfaceScene? = nil,
             onFrame: @escaping @Sendable (GModMetalFrameRequest) -> Void,
             onWorldFrameEvent: @escaping @Sendable
@@ -956,6 +991,12 @@ public struct GModMetalView:
                 pendingDynamicEntityScene = .replace(dynamicEntityScene)
             } else {
                 pendingDynamicEntityScene = .clear
+            }
+            if let firstPersonViewModelScene {
+                pendingFirstPersonViewModelScene =
+                    .replace(firstPersonViewModelScene)
+            } else {
+                pendingFirstPersonViewModelScene = .clear
             }
         }
 
@@ -1005,6 +1046,11 @@ public struct GModMetalView:
                         library.makeFunction(
                             name:
                                 "dynamicEntityVertexMain"
+                        ),
+
+                    let firstPersonViewModelVertexFunction =
+                        library.makeFunction(
+                            name: "firstPersonViewModelVertexMain"
                         ),
 
                     let worldFragmentFunction =
@@ -1208,6 +1254,21 @@ public struct GModMetalView:
                 dynamicEntityMissingMaterialPipeline =
                     try device.makeRenderPipelineState(
                         descriptor: dynamicEntityMissingDescriptor
+                    )
+
+                let firstPersonViewModelDescriptor =
+                    MTLRenderPipelineDescriptor()
+                firstPersonViewModelDescriptor.vertexFunction =
+                    firstPersonViewModelVertexFunction
+                firstPersonViewModelDescriptor.fragmentFunction =
+                    worldTexturedFragmentFunction
+                firstPersonViewModelDescriptor.colorAttachments[0].pixelFormat =
+                    colorPixelFormat
+                firstPersonViewModelDescriptor.depthAttachmentPixelFormat =
+                    depthPixelFormat
+                firstPersonViewModelTexturedPipeline =
+                    try device.makeRenderPipelineState(
+                        descriptor: firstPersonViewModelDescriptor
                     )
 
                 let worldSkyboxDescriptor = MTLRenderPipelineDescriptor()
@@ -1546,6 +1607,8 @@ public struct GModMetalView:
         func submit(
             worldScene: GModMetalWorldScene?,
             dynamicEntityScene: GModMetalDynamicEntityScene?,
+            firstPersonViewModelScene:
+                GModMetalFirstPersonViewModelScene?,
             surfaceScene: GModMetalSurfaceScene?
         ) {
             pendingSceneLock.lock()
@@ -1564,6 +1627,12 @@ public struct GModMetalView:
             } else {
                 pendingDynamicEntityScene = .clear
             }
+            if let firstPersonViewModelScene {
+                pendingFirstPersonViewModelScene =
+                    .replace(firstPersonViewModelScene)
+            } else {
+                pendingFirstPersonViewModelScene = .clear
+            }
             pendingSceneLock.unlock()
         }
 
@@ -1574,6 +1643,7 @@ public struct GModMetalView:
             submit(
                 worldScene: worldScene,
                 dynamicEntityScene: nil,
+                firstPersonViewModelScene: nil,
                 surfaceScene: surfaceScene
             )
         }
@@ -1593,19 +1663,61 @@ public struct GModMetalView:
         private func takePendingScenes() -> (
             world: PendingWorldScene?,
             dynamicEntity: PendingDynamicEntityScene?,
+            firstPersonViewModel: PendingFirstPersonViewModelScene?,
             surface: PendingSurfaceScene?
         ) {
             pendingSceneLock.lock()
             let result = (
                 pendingWorldScene,
                 pendingDynamicEntityScene,
+                pendingFirstPersonViewModelScene,
                 pendingSurfaceScene
             )
             pendingWorldScene = nil
             pendingDynamicEntityScene = nil
+            pendingFirstPersonViewModelScene = nil
             pendingSurfaceScene = nil
             pendingSceneLock.unlock()
             return result
+        }
+
+        private func applyPendingFirstPersonViewModelScene(
+            _ pending: PendingFirstPersonViewModelScene?
+        ) {
+            guard let pending else { return }
+            guard case let .replace(scene) = pending else {
+                activeFirstPersonViewModelScene = nil
+                resetFirstPersonViewModelCaches()
+                firstPersonViewModelIssue = nil
+                lastFirstPersonViewModelRangeDrawCount = 0
+                return
+            }
+            guard scene.retainedGeometryByteCount <=
+                    DynamicEntityGPUCachePolicy.maximumGeometryByteCount else {
+                firstPersonViewModelIssue =
+                    "viewmodel geometry exceeds 128 MiB renderer cap"
+                return
+            }
+            if let active = activeFirstPersonViewModelScene {
+                if active.generation == scene.generation {
+                    guard scene.revision > active.revision else { return }
+                } else if Self.dynamicEntityGeneration(
+                    scene.generation,
+                    precedes: active.generation
+                ) {
+                    firstPersonViewModelIssue =
+                        "ignored stale first-person viewmodel generation"
+                    return
+                }
+                if active.resource.id != scene.resource.id {
+                    resetFirstPersonViewModelCaches()
+                }
+            } else {
+                resetFirstPersonViewModelCaches()
+            }
+            activeFirstPersonViewModelScene = scene
+            firstPersonViewModelIssue = nil
+            lastFirstPersonViewModelRangeDrawCount = 0
         }
 
         private func applyPendingDynamicEntityScene(
@@ -1839,6 +1951,13 @@ public struct GModMetalView:
             cachedDynamicEntityTextureOrder.removeAll(keepingCapacity: true)
             cachedDynamicEntityTextureByteCount = 0
             dynamicEntityTextureFailures.removeAll(keepingCapacity: true)
+        }
+
+        private func resetFirstPersonViewModelCaches() {
+            cachedFirstPersonViewModelGeometry = nil
+            cachedFirstPersonViewModelTextures.removeAll(
+                keepingCapacity: true
+            )
         }
 
         private func pruneDynamicEntityCaches(
@@ -2510,6 +2629,9 @@ public struct GModMetalView:
             let pendingScenes = takePendingScenes()
             applyPendingWorldScene(pendingScenes.world, device: device)
             applyPendingDynamicEntityScene(pendingScenes.dynamicEntity)
+            applyPendingFirstPersonViewModelScene(
+                pendingScenes.firstPersonViewModel
+            )
             applyPendingSurfaceScene(pendingScenes.surface)
 
             if let scene = activeWorldScene,
@@ -2530,6 +2652,7 @@ public struct GModMetalView:
                 let worldMissingMaterialPipeline,
                 let dynamicEntityTexturedPipeline,
                 let dynamicEntityMissingMaterialPipeline,
+                let firstPersonViewModelTexturedPipeline,
                 let worldSkyboxPipeline,
                 let worldSunSpritePipeline,
                 let worldWaterSolidPipeline,
@@ -2805,22 +2928,6 @@ public struct GModMetalView:
                 }
             }
 
-            if waterTargets == nil {
-                if let surfaceScene = activeSurfaceScene {
-                    lastSurfaceDrawCount = drawSurface(
-                        scene: surfaceScene,
-                        device: device,
-                        solidPipeline: surfaceSolidPipeline,
-                        texturedPipeline: surfaceTexturedPipeline,
-                        depthState: surfaceDepthState,
-                        samplers: surfaceSamplerStates,
-                        encoder: encoder
-                    )
-                } else {
-                    lastSurfaceDrawCount = 0
-                    lastSurfaceDroppedDrawCount = 0
-                }
-            }
             encoder.endEncoding()
 
             if let pair = worldPair,
@@ -2997,22 +3104,58 @@ public struct GModMetalView:
                     worldSampler: worldSamplerState,
                     encoder: compositeEncoder
                 )
-                if let surfaceScene = activeSurfaceScene {
-                    lastSurfaceDrawCount = drawSurface(
-                        scene: surfaceScene,
-                        device: device,
-                        solidPipeline: surfaceSolidPipeline,
-                        texturedPipeline: surfaceTexturedPipeline,
-                        depthState: surfaceDepthState,
-                        samplers: surfaceSamplerStates,
-                        encoder: compositeEncoder
-                    )
-                } else {
-                    lastSurfaceDrawCount = 0
-                    lastSurfaceDroppedDrawCount = 0
-                }
                 compositeEncoder.endEncoding()
             }
+
+            // Viewmodels have a camera-space projection and a fresh depth
+            // lifetime after the completed world/water image. VGUI remains
+            // last and uses its depth-disabled surface contract.
+            let foregroundDescriptor =
+                descriptor.copy() as! MTLRenderPassDescriptor
+            foregroundDescriptor.colorAttachments[0].texture = drawable.texture
+            foregroundDescriptor.colorAttachments[0].loadAction = .load
+            foregroundDescriptor.colorAttachments[0].storeAction = .store
+            foregroundDescriptor.depthAttachment.loadAction = .clear
+            foregroundDescriptor.depthAttachment.storeAction = .dontCare
+            guard let foregroundEncoder =
+                commandBuffer.makeRenderCommandEncoder(
+                    descriptor: foregroundDescriptor
+                ) else {
+                if let meshIdentifier = activeWorldScene?.meshIdentifier {
+                    worldFramePresentationSink.fail(
+                        meshIdentifier: meshIdentifier,
+                        reason: .renderEncoderCreationFailed
+                    )
+                }
+                return
+            }
+            if let viewModel = activeFirstPersonViewModelScene {
+                drawFirstPersonViewModel(
+                    scene: viewModel,
+                    viewport: drawableViewport,
+                    device: device,
+                    texturedPipeline: firstPersonViewModelTexturedPipeline,
+                    depthState: depthState,
+                    encoder: foregroundEncoder
+                )
+            } else {
+                lastFirstPersonViewModelRangeDrawCount = 0
+            }
+            if let surfaceScene = activeSurfaceScene {
+                lastSurfaceDrawCount = drawSurface(
+                    scene: surfaceScene,
+                    device: device,
+                    solidPipeline: surfaceSolidPipeline,
+                    texturedPipeline: surfaceTexturedPipeline,
+                    depthState: surfaceDepthState,
+                    samplers: surfaceSamplerStates,
+                    encoder: foregroundEncoder
+                )
+            } else {
+                lastSurfaceDrawCount = 0
+                lastSurfaceDroppedDrawCount = 0
+            }
+            foregroundEncoder.endEncoding()
 
             if let encodedWorldIdentifier,
                worldFramePresentationSink.reserve(encodedWorldIdentifier) {
@@ -3927,6 +4070,221 @@ public struct GModMetalView:
             lastWaterMissingMaterialRangeCount = missing
             lastWaterPendingNormalRangeCount = pendingNormal
             lastWaterRenderTargetRangeCount = rendered
+        }
+
+        private func drawFirstPersonViewModel(
+            scene: GModMetalFirstPersonViewModelScene,
+            viewport: SIMD2<Int>,
+            device: MTLDevice,
+            texturedPipeline: MTLRenderPipelineState,
+            depthState: MTLDepthStencilState,
+            encoder: MTLRenderCommandEncoder
+        ) {
+            let resource = scene.resource
+            if cachedFirstPersonViewModelGeometry?.resourceID != resource.id {
+                cachedFirstPersonViewModelGeometry = nil
+            }
+            if cachedFirstPersonViewModelGeometry == nil {
+                cachedFirstPersonViewModelGeometry =
+                    makeFirstPersonViewModelGeometry(
+                        resource: resource,
+                        device: device
+                    )
+            }
+            uploadNextFirstPersonViewModelTexture(
+                resource: resource,
+                device: device
+            )
+            guard let geometry = cachedFirstPersonViewModelGeometry,
+                  geometry.resourceID == resource.id,
+                  geometry.vertexCount == resource.vertices.count,
+                  geometry.indexCount == resource.indices.count,
+                  let verticalFOV =
+                    GModMetalFirstPersonViewModelRenderContract
+                        .verticalFieldOfViewRadians(for: scene) else {
+                lastFirstPersonViewModelRangeDrawCount = 0
+                return
+            }
+
+            let width = Swift.max(1, viewport.x)
+            let height = Swift.max(1, viewport.y)
+            let projection = Self.makePerspectiveMatrix(
+                verticalFieldOfViewRadians: verticalFOV,
+                aspect: Float(width) / Float(height),
+                near: 1,
+                far: 65_536
+            )
+            var uniforms = WorldUniforms(
+                viewProjection: projection,
+                lightDirection: .zero,
+                directLinearRGB: .zero,
+                ambientLinearRGB: .zero,
+                clipPlane: GModMetalWaterClipPlaneContract.disabled
+            )
+            withUnsafeBytes(of: &uniforms) { bytes in
+                guard let address = bytes.baseAddress else { return }
+                encoder.setVertexBytes(address, length: bytes.count, index: 1)
+                encoder.setFragmentBytes(address, length: bytes.count, index: 1)
+            }
+            encoder.setVertexBuffer(geometry.vertexBuffer, offset: 0, index: 0)
+            encoder.setDepthStencilState(depthState)
+            encoder.setCullMode(.none)
+
+            var drawnRanges = 0
+            for range in resource.drawRanges {
+                guard case let .resolved(_, bitmap) =
+                        range.materialResolution,
+                      bitmap.alphaRepresentation == .straight else {
+                    // Missing Source materials remain absent. The first-person
+                    // path never substitutes the dynamic-prop checker.
+                    continue
+                }
+                let key = Self.dynamicEntityTextureKey(bitmap: bitmap)
+                guard let cached = cachedFirstPersonViewModelTextures[key],
+                      cached.bitmap == bitmap else { continue }
+                encoder.setRenderPipelineState(texturedPipeline)
+                encoder.setFragmentTexture(cached.texture, index: 0)
+                let sampler = samplerStateForWorldTexture(
+                    for: GModMetalWorldSamplerConfiguration(
+                        bitmap: bitmap,
+                        renderLayer: .world
+                    ),
+                    device: device
+                )
+                encoder.setFragmentSamplerState(sampler, index: 0)
+                encoder.drawIndexedPrimitives(
+                    type: .triangle,
+                    indexCount: range.indexCount,
+                    indexType: .uint32,
+                    indexBuffer: geometry.indexBuffer,
+                    indexBufferOffset:
+                        range.firstIndex * MemoryLayout<UInt32>.stride
+                )
+                drawnRanges += 1
+            }
+            lastFirstPersonViewModelRangeDrawCount = drawnRanges
+        }
+
+        private func makeFirstPersonViewModelGeometry(
+            resource: GModMetalDynamicEntityResource,
+            device: MTLDevice
+        ) -> CachedDynamicEntityGeometry? {
+            let vertices = resource.vertices.map { vertex in
+                DynamicEntityGPUVertex(
+                    position: SIMD4<Float>(vertex.metalLocalPosition, 1),
+                    normal: SIMD4<Float>(vertex.metalLocalNormal, 0),
+                    uv: vertex.textureCoordinate
+                )
+            }
+            let vertexBytes = vertices.count.multipliedReportingOverflow(
+                by: MemoryLayout<DynamicEntityGPUVertex>.stride
+            )
+            let indexBytes = resource.indices.count.multipliedReportingOverflow(
+                by: MemoryLayout<UInt32>.stride
+            )
+            let total = vertexBytes.partialValue.addingReportingOverflow(
+                indexBytes.partialValue
+            )
+            guard !vertexBytes.overflow, !indexBytes.overflow, !total.overflow,
+                  total.partialValue == resource.geometryByteCount,
+                  total.partialValue <=
+                    DynamicEntityGPUCachePolicy.maximumGeometryByteCount else {
+                firstPersonViewModelIssue =
+                    "viewmodel geometry violates the 128 MiB GPU cap"
+                return nil
+            }
+            let vertexBuffer = vertices.withUnsafeBytes { bytes -> MTLBuffer? in
+                guard let address = bytes.baseAddress else { return nil }
+                return device.makeBuffer(
+                    bytes: address,
+                    length: bytes.count,
+                    options: .storageModeShared
+                )
+            }
+            let indexBuffer = resource.indices.withUnsafeBytes {
+                bytes -> MTLBuffer? in
+                guard let address = bytes.baseAddress else { return nil }
+                return device.makeBuffer(
+                    bytes: address,
+                    length: bytes.count,
+                    options: .storageModeShared
+                )
+            }
+            guard let vertexBuffer, let indexBuffer else {
+                firstPersonViewModelIssue =
+                    "viewmodel Metal buffer allocation failed"
+                return nil
+            }
+            let label = Self.dynamicEntityResourceLabel(resource.id)
+            vertexBuffer.label = "First-person viewmodel vertices \(label)"
+            indexBuffer.label = "First-person viewmodel indices \(label)"
+            firstPersonViewModelIssue = nil
+            return CachedDynamicEntityGeometry(
+                resourceID: resource.id,
+                vertexCount: vertices.count,
+                indexCount: resource.indices.count,
+                byteCount: total.partialValue,
+                vertexBuffer: vertexBuffer,
+                indexBuffer: indexBuffer
+            )
+        }
+
+        private func uploadNextFirstPersonViewModelTexture(
+            resource: GModMetalDynamicEntityResource,
+            device: MTLDevice
+        ) {
+            for range in resource.drawRanges {
+                guard case let .resolved(_, bitmap) =
+                        range.materialResolution,
+                      bitmap.alphaRepresentation == .straight else { continue }
+                let key = Self.dynamicEntityTextureKey(bitmap: bitmap)
+                if let cached = cachedFirstPersonViewModelTextures[key],
+                   cached.bitmap == bitmap { continue }
+                guard bitmap.totalByteCount <=
+                        DynamicEntityGPUCachePolicy.maximumTextureByteCount else {
+                    firstPersonViewModelIssue =
+                        "viewmodel texture exceeds 64 MiB GPU cap"
+                    continue
+                }
+                let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                    pixelFormat: .rgba8Unorm_srgb,
+                    width: bitmap.width,
+                    height: bitmap.height,
+                    mipmapped: bitmap.mipLevels.count > 1
+                )
+                descriptor.mipmapLevelCount = bitmap.mipLevels.count
+                descriptor.usage = .shaderRead
+                descriptor.storageMode = .shared
+                guard let texture = device.makeTexture(descriptor: descriptor)
+                else {
+                    firstPersonViewModelIssue =
+                        "viewmodel Metal texture allocation failed"
+                    return
+                }
+                for (level, mip) in bitmap.mipLevels.enumerated() {
+                    mip.premultipliedRGBA8.withUnsafeBytes { bytes in
+                        guard let base = bytes.baseAddress else { return }
+                        texture.replace(
+                            region: MTLRegionMake2D(
+                                0, 0, mip.width, mip.height
+                            ),
+                            mipmapLevel: level,
+                            withBytes: base,
+                            bytesPerRow: mip.width * 4
+                        )
+                    }
+                }
+                texture.label = "First-person viewmodel texture " +
+                    Self.dynamicEntityResourceLabel(resource.id)
+                cachedFirstPersonViewModelTextures[key] =
+                    CachedDynamicEntityTexture(
+                        bitmap: bitmap,
+                        byteCount: bitmap.totalByteCount,
+                        texture: texture
+                    )
+                firstPersonViewModelIssue = nil
+                return
+            }
         }
 
         private func drawDynamicEntities(
@@ -4847,6 +5205,22 @@ public struct GModMetalView:
                 dynamicEntityStats = "Props: no publication"
             }
 
+            let viewModelStats: String
+            if let scene = activeFirstPersonViewModelScene {
+                viewModelStats =
+                    "ViewModel: \(scene.weaponClassName) " +
+                    "\(lastFirstPersonViewModelRangeDrawCount)/" +
+                    "\(scene.resource.drawRanges.count) ranges; Source FOV " +
+                    "\(scene.sourceFieldOfViewDegrees); textures " +
+                    "\(cachedFirstPersonViewModelTextures.count)" +
+                    (firstPersonViewModelIssue.map { "; issue: \($0)" } ?? "")
+            } else if let firstPersonViewModelIssue {
+                viewModelStats =
+                    "ViewModel rejected: \(firstPersonViewModelIssue)"
+            } else {
+                viewModelStats = "ViewModel: none"
+            }
+
             let surfaceStats: String
             if let scene = activeSurfaceScene {
                 let diagnostics = scene.diagnostics
@@ -4881,6 +5255,7 @@ public struct GModMetalView:
                 GPU: \(deviceName)
                 \(rendererStats)
                 \(dynamicEntityStats)
+                \(viewModelStats)
                 \(surfaceStats)
                 \(numericStats)
                 """
@@ -5020,6 +5395,31 @@ public struct GModMetalView:
                 * float4(worldPosition, 1.0);
             output.worldPosition = worldPosition;
             output.normal = worldNormal;
+            output.uv = sourceVertex.uv;
+            output.lightmapUV = float2(0.0);
+            return output;
+        }
+
+        vertex WorldVertexOutput firstPersonViewModelVertexMain(
+            const device DynamicEntityVertex *vertices
+                [[buffer(0)]],
+
+            constant WorldUniforms &uniforms
+                [[buffer(1)]],
+
+            uint vertexID
+                [[vertex_id]]
+        )
+        {
+            // Studio c_*.mdl coordinates are authored in Source camera space.
+            // CPU conversion already maps +X forward/+Y left/+Z up to Metal's
+            // -Z forward/+X right/+Y up, so no world camera/entity transform
+            // belongs in this pass.
+            DynamicEntityVertex sourceVertex = vertices[vertexID];
+            WorldVertexOutput output;
+            output.position = uniforms.viewProjection * sourceVertex.position;
+            output.worldPosition = sourceVertex.position.xyz;
+            output.normal = normalize(sourceVertex.normal.xyz);
             output.uv = sourceVertex.uv;
             output.lightmapUV = float2(0.0);
             return output;

@@ -198,6 +198,14 @@ public struct GModMainView: View {
         localizationSelection.snapshot.appText(.useButton)
     }
 
+    private var localizedReloadButton: String {
+        localizationSelection.snapshot.appText(.reloadButton)
+    }
+
+    private var localizedDropWeaponButton: String {
+        localizationSelection.snapshot.appText(.dropWeaponButton)
+    }
+
     private var localizedContextMenuButton: String {
         localizationSelection.snapshot.appText(
             game.isContextMenuOpen
@@ -292,6 +300,8 @@ public struct GModMainView: View {
                         stats: $stats,
                         worldScene: game.worldScene,
                         dynamicEntityScene: game.dynamicEntityScene,
+                        firstPersonViewModelScene:
+                            game.firstPersonViewModelScene,
                         surfaceScene: game.surfaceScene,
                         preferredFramesPerSecond:
                             inputVideoSettings.preferredFramesPerSecond,
@@ -401,13 +411,36 @@ public struct GModMainView: View {
                                                 }
                                             }
 
-                                            GModTouchActionButton(
-                                                label: localizedJumpButton,
-                                                diameter: layout.jumpDiameter,
-                                                accessibilityIdentifier:
-                                                    "garryspad.control.jump"
-                                            ) { pressed in
-                                                game.setJumpPressed(pressed)
+                                            HStack(spacing: 8) {
+                                                GModTouchActionButton(
+                                                    label: localizedReloadButton,
+                                                    diameter: layout.heldActionDiameter,
+                                                    accessibilityIdentifier:
+                                                        "garryspad.control.reload"
+                                                ) { pressed in
+                                                    game.setWorldActionButton(
+                                                        .reload,
+                                                        pressed: pressed
+                                                    )
+                                                }
+                                                GModTouchActionButton(
+                                                    label: localizedDropWeaponButton,
+                                                    diameter: layout.heldActionDiameter,
+                                                    accessibilityIdentifier:
+                                                        "garryspad.control.drop-weapon"
+                                                ) { pressed in
+                                                    if pressed {
+                                                        game.dropActiveWeapon()
+                                                    }
+                                                }
+                                                GModTouchActionButton(
+                                                    label: localizedJumpButton,
+                                                    diameter: layout.jumpDiameter,
+                                                    accessibilityIdentifier:
+                                                        "garryspad.control.jump"
+                                                ) { pressed in
+                                                    game.setJumpPressed(pressed)
+                                                }
                                             }
 
                                             GModTouchLookPad(

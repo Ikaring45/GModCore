@@ -172,12 +172,18 @@ final class GMLuaConVarTests: XCTestCase {
     }
 
     func testClientConVarAddsDocumentedArchiveAndUserInfoFlags() throws {
+        let catalog = GMLuaEngineConVarCatalog()
         let state = LuaState(output: { _ in })
         let typeSystem = try GMLuaTypeSystem.install(
             into: state,
             utilityLayer: .bundledFallback
         )
-        try GMLuaConVar.install(into: state, typeSystem: typeSystem, realm: .client)
+        try GMLuaConVar.install(
+            into: state,
+            typeSystem: typeSystem,
+            realm: .client,
+            engineCatalog: catalog
+        )
 
         try state.execute(
             """
@@ -190,9 +196,12 @@ final class GMLuaConVarTests: XCTestCase {
             assert(not user:IsFlagSet(FCVAR_ARCHIVE))
             assert(user:IsFlagSet(FCVAR_USERINFO))
             assert(user:IsFlagSet(FCVAR_LUA_CLIENT))
+            user:SetString("remover")
             """,
             sourceName: "@GLuaClientConVarRegression.lua"
         )
+        XCTAssertFalse(catalog.contains("gpad_client_saved"))
+        XCTAssertEqual(catalog.currentValue(for: "GPAD_CLIENT_USER"), "remover")
     }
 
     func testStrictRuntimeInstallsNativeConVarsBeforeOfficialUtilLayer() throws {

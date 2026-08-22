@@ -46,6 +46,7 @@ private final class GMLuaEntityValue: @unchecked Sendable {
     let sourceOwner: GMLuaSourceMirrorOwner?
     var className: String
     var inputButtons: SourceInputButtons = []
+    var previousInputButtons: SourceInputButtons = []
     var luaTable: LuaTable? = LuaTable()
     var canonicalSnapshot: SourceCanonicalEntitySnapshot?
 
@@ -955,6 +956,7 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
               let payload = object.payload as? GMLuaEntityValue,
               payload.kind == .player,
               payload.generation == generation else { return false }
+        payload.previousInputButtons = payload.inputButtons
         payload.inputButtons = buttons
         return true
     }
@@ -962,7 +964,9 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
     /// Reads a button word only when the userdata is still this registry's
     /// canonical Player. Invalidated Player userdata therefore cannot inherit
     /// input from a later generation that reused its EntIndex.
-    private func playerInputButtons(for value: LuaValue) -> SourceInputButtons? {
+    func playerInputButtonState(
+        for value: LuaValue
+    ) -> (current: SourceInputButtons, previous: SourceInputButtons)? {
         guard case let .userdata(userdata) = value,
               let object = GMLuaTypeSystem.typedObject(from: value),
               let payload = object.payload as? GMLuaEntityValue else { return nil }
@@ -973,7 +977,7 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
               payload.kind == .player,
               case let .userdata(canonical)? = values[payload.index],
               canonical === userdata else { return nil }
-        return payload.inputButtons
+        return (payload.inputButtons, payload.previousInputButtons)
     }
 
     /// Reduces a state-local Entity userdata to the engine identity that is
@@ -1043,7 +1047,7 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
         return values.count
     }
 
-    fileprivate func luaTable(for value: LuaValue) -> LuaTable? {
+    func luaTable(for value: LuaValue) -> LuaTable? {
         guard case let .userdata(userdata) = value,
               let object = GMLuaTypeSystem.typedObject(from: value),
               let payload = object.payload as? GMLuaEntityValue else { return nil }
@@ -1080,7 +1084,7 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
     }
 
     @discardableResult
-    fileprivate func replaceLuaTable(
+    func replaceLuaTable(
         for value: LuaValue,
         with replacement: LuaTable
     ) -> Bool {
@@ -1253,7 +1257,7 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
         }
         let playerKeyDown = entityNativeFunction("Player:KeyDown") { arguments in
             guard let receiver = arguments.first,
-                  let current = registry.playerInputButtons(for: receiver) else {
+                  let buttons = registry.playerInputButtonState(for: receiver) else {
                 return [.boolean(false)]
             }
             let mask = try inputButtonMask(
@@ -1261,13 +1265,49 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
                 index: 1,
                 function: "Player:KeyDown"
             )
-            return [.boolean((current.rawValue & mask) != 0)]
+            return [.boolean((buttons.current.rawValue & mask) != 0)]
         }
         try state.setRawTableValue(
             playerKeyDown,
             for: .string("KeyDown"),
             in: playerMetatable
         )
+        for (name, predicate) in [
+            (
+                "KeyPressed",
+                { (current: UInt32, previous: UInt32, mask: UInt32) in
+                    current & mask != 0 && previous & mask == 0
+                }
+            ),
+            (
+                "KeyReleased",
+                { (current: UInt32, previous: UInt32, mask: UInt32) in
+                    current & mask == 0 && previous & mask != 0
+                }
+            ),
+        ] {
+            let function = entityNativeFunction("Player:\(name)") { arguments in
+                guard let receiver = arguments.first,
+                      let buttons = registry.playerInputButtonState(
+                        for: receiver
+                      ) else { return [.boolean(false)] }
+                let mask = try inputButtonMask(
+                    arguments,
+                    index: 1,
+                    function: "Player:\(name)"
+                )
+                return [.boolean(predicate(
+                    buttons.current.rawValue,
+                    buttons.previous.rawValue,
+                    mask
+                ))]
+            }
+            try state.setRawTableValue(
+                function,
+                for: .string(LuaString(name)),
+                in: playerMetatable
+            )
+        }
 
         let getTable = entityNativeFunction("Entity:GetTable") { arguments in
             _ = try descriptor(arguments.first, method: "GetTable")

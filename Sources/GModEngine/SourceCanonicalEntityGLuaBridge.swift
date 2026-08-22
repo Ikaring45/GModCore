@@ -414,6 +414,13 @@ public enum SourceCanonicalEntityGLuaBridge {
             )
             return [.number(Double(snapshot.moveType.rawValue))]
         }
+        try setMethod("Entity:GetCollisionGroup", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Entity:GetCollisionGroup"
+            )
+            return [.number(Double(snapshot.collisionGroup))]
+        }
         try setMethod("Entity:IsConstraint", on: entityMetatable) { arguments in
             let snapshot = try requiredSnapshot(
                 arguments.first,
@@ -731,6 +738,22 @@ public enum SourceCanonicalEntityGLuaBridge {
             let host = try requiredHost("Entity:SetSkin")
             _ = try host.updateCanonicalEntity(snapshot.identity) { candidate in
                 candidate.skin = skin
+            }
+            return []
+        }
+        try setMethod("Entity:SetCollisionGroup", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Entity:SetCollisionGroup"
+            )
+            let value = try requiredInteger(
+                arguments,
+                index: 1,
+                function: "Entity:SetCollisionGroup"
+            )
+            let host = try requiredHost("Entity:SetCollisionGroup")
+            _ = try host.updateCanonicalEntity(snapshot.identity) { candidate in
+                candidate.collisionGroup = Int32(value)
             }
             return []
         }

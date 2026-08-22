@@ -185,6 +185,64 @@ final class GModDynamicEntityRenderSceneTests: XCTestCase {
         XCTAssertEqual(cache.cachedGeometryByteCount, 0)
     }
 
+    func testExplicitRenderableProjectionIncludesDroppedWeaponWorldModel() throws {
+        let cache = try makeCache(probe: RenderableCompileProbe())
+        let projector = try GModDynamicEntityRenderSceneProjector(resolver: cache)
+        let prop = prop(index: 10, revision: 1, x: 4)
+        let weapon = weapon(index: 11, revision: 2, x: 8)
+        let cursor = SourceEntityReplicationCursor(
+            connectionGeneration: SourceEntityReplicationConnectionGeneration(
+                rawValue: 1
+            ),
+            sequence: 3
+        )
+
+        XCTAssertTrue(try projector.updateRenderableEntities(
+            [prop, weapon],
+            cursor: cursor
+        ))
+        let scene = try XCTUnwrap(projector.snapshot(ifChangedFrom: nil))
+        XCTAssertEqual(
+            scene.instances.map(\.identity),
+            [prop.identity, weapon.identity]
+        )
+        XCTAssertEqual(scene.sourceProjectionCursor, cursor)
+    }
+
+    func testNoDrawAndNotSolidFlagsImmediatelyLeaveRenderAndTraceProjections()
+        throws
+    {
+        let probe = RenderableCompileProbe()
+        let cache = try makeCache(probe: probe)
+        let projector = try GModDynamicEntityRenderSceneProjector(resolver: cache)
+        let visible = prop(index: 30, revision: 1, x: 4)
+        XCTAssertTrue(try projector.update(from: projection(
+            sequence: 1,
+            entities: [visible]
+        )))
+        XCTAssertEqual(probe.callCount, 1)
+
+        let removerTransient = prop(
+            index: 30,
+            revision: 2,
+            x: 4,
+            isNotSolid: true,
+            isNoDraw: true
+        )
+        XCTAssertTrue(try projector.update(from: projection(
+            sequence: 2,
+            entities: [removerTransient]
+        )))
+        let hidden = try XCTUnwrap(projector.snapshot(ifChangedFrom: nil))
+        XCTAssertTrue(hidden.instances.isEmpty)
+        XCTAssertTrue(hidden.resources.isEmpty)
+        XCTAssertEqual(probe.callCount, 1)
+        XCTAssertFalse(GModCanonicalDynamicTraceSource.isTraceable(
+            removerTransient
+        ))
+        XCTAssertTrue(GModCanonicalDynamicTraceSource.isTraceable(visible))
+    }
+
     private func makeCache(
         probe: RenderableCompileProbe
     ) throws -> GModStudioRenderableModelCache {
@@ -228,7 +286,9 @@ final class GModDynamicEntityRenderSceneTests: XCTestCase {
         modelPath: String = "models/props/crate.mdl",
         lifecycle: SourceCanonicalEntityLifecycle = .active,
         body: Int = 0,
-        skin: Int = 0
+        skin: Int = 0,
+        isNotSolid: Bool = false,
+        isNoDraw: Bool = false
     ) -> SourceCanonicalEntitySnapshot {
         SourceCanonicalEntitySnapshot(
             identity: SourceCanonicalEntityIdentity(handle: SourceBaseHandle(
@@ -240,6 +300,8 @@ final class GModDynamicEntityRenderSceneTests: XCTestCase {
             transform: SourceEntityTransform(origin: SourceVector3(x, 0, 0)),
             motion: SourceEntityMotionState(),
             model: SourceEntityModelReference(modelPath),
+            isNotSolid: isNotSolid,
+            isNoDraw: isNoDraw,
             solidType: .vPhysics,
             moveType: .vPhysics,
             lifecycle: lifecycle,
@@ -247,6 +309,29 @@ final class GModDynamicEntityRenderSceneTests: XCTestCase {
             revision: revision,
             skin: skin,
             bodyValue: body
+        )
+    }
+
+    private func weapon(
+        index: Int,
+        revision: UInt64,
+        x: Float
+    ) -> SourceCanonicalEntitySnapshot {
+        SourceCanonicalEntitySnapshot(
+            identity: SourceCanonicalEntityIdentity(handle: SourceBaseHandle(
+                entryIndex: index,
+                serialNumber: 1
+            )),
+            kind: .weapon,
+            className: "weapon_pistol",
+            transform: SourceEntityTransform(origin: SourceVector3(x, 0, 0)),
+            motion: SourceEntityMotionState(),
+            model: SourceEntityModelReference("models/weapons/w_pistol.mdl"),
+            solidType: .none,
+            moveType: .none,
+            lifecycle: .active,
+            isNetworkable: true,
+            revision: revision
         )
     }
 }

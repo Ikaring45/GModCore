@@ -19,14 +19,23 @@ public struct GMLuaEffectVector: Sendable, Equatable {
 /// prop-spawn path.
 public struct GMLuaEffectDataSnapshot: Sendable, Equatable {
     public let origin: GMLuaEffectVector
+    public let start: GMLuaEffectVector
+    public let normal: GMLuaEffectVector
     public let entityIdentity: SourceCanonicalEntityIdentity?
+    public let attachment: Int32
 
     public init(
         origin: GMLuaEffectVector,
-        entityIdentity: SourceCanonicalEntityIdentity?
+        entityIdentity: SourceCanonicalEntityIdentity?,
+        start: GMLuaEffectVector = GMLuaEffectVector(x: 0, y: 0, z: 0),
+        normal: GMLuaEffectVector = GMLuaEffectVector(x: 0, y: 0, z: 0),
+        attachment: Int32 = 0
     ) {
         self.origin = origin
+        self.start = start
+        self.normal = normal
         self.entityIdentity = entityIdentity
+        self.attachment = attachment
     }
 }
 
@@ -56,19 +65,25 @@ public struct GMLuaEffectRequest: Sendable, Equatable {
     }
 }
 
-public typealias GMLuaEffectRequestSink = @Sendable (GMLuaEffectRequest) -> Void
+public typealias GMLuaEffectRequestSink = @Sendable (GMLuaEffectRequest) throws -> Void
 
 private final class GMLuaEffectDataPayload: @unchecked Sendable {
     private let lock = NSLock()
     private var originStorage = GMLuaEffectVector(x: 0, y: 0, z: 0)
+    private var startStorage = GMLuaEffectVector(x: 0, y: 0, z: 0)
+    private var normalStorage = GMLuaEffectVector(x: 0, y: 0, z: 0)
     private var entityIdentityStorage: SourceCanonicalEntityIdentity?
+    private var attachmentStorage: Int32 = 0
 
     var snapshot: GMLuaEffectDataSnapshot {
         lock.lock()
         defer { lock.unlock() }
         return GMLuaEffectDataSnapshot(
             origin: originStorage,
-            entityIdentity: entityIdentityStorage
+            entityIdentity: entityIdentityStorage,
+            start: startStorage,
+            normal: normalStorage,
+            attachment: attachmentStorage
         )
     }
 
@@ -78,9 +93,27 @@ private final class GMLuaEffectDataPayload: @unchecked Sendable {
         lock.unlock()
     }
 
+    func setStart(_ start: GMLuaEffectVector) {
+        lock.lock()
+        startStorage = start
+        lock.unlock()
+    }
+
+    func setNormal(_ normal: GMLuaEffectVector) {
+        lock.lock()
+        normalStorage = normal
+        lock.unlock()
+    }
+
     func setEntityIdentity(_ identity: SourceCanonicalEntityIdentity?) {
         lock.lock()
         entityIdentityStorage = identity
+        lock.unlock()
+    }
+
+    func setAttachment(_ attachment: Int32) {
+        lock.lock()
+        attachmentStorage = attachment
         lock.unlock()
     }
 }
@@ -95,6 +128,7 @@ public final class GMLuaEffects: @unchecked Sendable {
     public static let maximumBufferedRequests = 4_096
 
     private let lock = NSLock()
+    public let realm: GMLuaRealm
     private let sharedEffectData: LuaValue
     private var requestStorage: [GMLuaEffectRequest] = []
     private var droppedRequestCountStorage: UInt64 = 0
@@ -102,9 +136,11 @@ public final class GMLuaEffects: @unchecked Sendable {
     private var sinkStorage: GMLuaEffectRequestSink?
 
     private init(
+        realm: GMLuaRealm,
         sharedEffectData: LuaValue,
         requestSink: GMLuaEffectRequestSink?
     ) {
+        self.realm = realm
         self.sharedEffectData = sharedEffectData
         sinkStorage = requestSink
     }
@@ -142,6 +178,21 @@ public final class GMLuaEffects: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Accepts one immutable SERVER effect packet at a CLIENT pump boundary.
+    /// The destination allocates its own local observation sequence while the
+    /// transport retains the cross-realm FIFO sequence independently.
+    public func receiveReplicatedEffect(_ request: GMLuaEffectRequest) throws {
+        guard realm == .client else {
+            throw LuaError.runtime("replicated util.Effect destination must be CLIENT")
+        }
+        try capture(
+            name: request.name,
+            data: request.data,
+            allowOverride: request.allowOverride,
+            ignorePrediction: request.ignorePrediction
+        )
+    }
+
     @discardableResult
     public static func install(
         into state: LuaState,
@@ -150,9 +201,10 @@ public final class GMLuaEffects: @unchecked Sendable {
         entityRegistry: GMLuaEntityRegistry,
         requestSink: GMLuaEffectRequestSink? = nil
     ) throws -> GMLuaEffects? {
-        // SERVER util.Effect requires recipient networking, which this local
-        // renderer handoff deliberately does not pretend to implement.
-        guard realm == .client else { return nil }
+        // MENU has no game recipient set. SERVER installs the same immutable
+        // CEffectData surface and must connect a transport sink before stock
+        // gameplay treats util.Effect as delivered.
+        guard realm != .menu else { return nil }
 
         guard let metatable = typeSystem.metatable(named: "CEffectData") else {
             throw LuaError.runtime("GLua CEffectData metatable was not installed")
@@ -163,6 +215,7 @@ public final class GMLuaEffects: @unchecked Sendable {
             payload: payload
         )
         let bridge = GMLuaEffects(
+            realm: realm,
             sharedEffectData: shared,
             requestSink: requestSink
         )
@@ -217,6 +270,74 @@ public final class GMLuaEffects: @unchecked Sendable {
                 typeSystem: typeSystem
             )]
         }
+        try setMethod("SetStart") { arguments in
+            let receiver = try requiredPayload(
+                arguments.first,
+                function: "CEffectData:SetStart"
+            )
+            guard arguments.indices.contains(1) else {
+                throw LuaError.runtime(
+                    "bad argument #1 to 'SetStart' (Vector expected, got no value)"
+                )
+            }
+            let components = try GMLuaVectorAngle.networkVectorComponents(
+                from: arguments[1],
+                function: "CEffectData:SetStart"
+            )
+            receiver.setStart(GMLuaEffectVector(
+                x: components.0,
+                y: components.1,
+                z: components.2
+            ))
+            return []
+        }
+        try setMethod("GetStart") { arguments in
+            let receiver = try requiredPayload(
+                arguments.first,
+                function: "CEffectData:GetStart"
+            )
+            let start = receiver.snapshot.start
+            return [try GMLuaVectorAngle.makeNetworkVector(
+                start.x,
+                start.y,
+                start.z,
+                typeSystem: typeSystem
+            )]
+        }
+        try setMethod("SetNormal") { arguments in
+            let receiver = try requiredPayload(
+                arguments.first,
+                function: "CEffectData:SetNormal"
+            )
+            guard arguments.indices.contains(1) else {
+                throw LuaError.runtime(
+                    "bad argument #1 to 'SetNormal' (Vector expected, got no value)"
+                )
+            }
+            let components = try GMLuaVectorAngle.networkVectorComponents(
+                from: arguments[1],
+                function: "CEffectData:SetNormal"
+            )
+            receiver.setNormal(GMLuaEffectVector(
+                x: components.0,
+                y: components.1,
+                z: components.2
+            ))
+            return []
+        }
+        try setMethod("GetNormal") { arguments in
+            let receiver = try requiredPayload(
+                arguments.first,
+                function: "CEffectData:GetNormal"
+            )
+            let normal = receiver.snapshot.normal
+            return [try GMLuaVectorAngle.makeNetworkVector(
+                normal.x,
+                normal.y,
+                normal.z,
+                typeSystem: typeSystem
+            )]
+        }
         try setMethod("SetEntity") { arguments in
             let receiver = try requiredPayload(
                 arguments.first,
@@ -254,6 +375,26 @@ public final class GMLuaEffects: @unchecked Sendable {
                 return [state.getGlobal("NULL")]
             }
             return [value]
+        }
+        try setMethod("SetAttachment") { arguments in
+            let receiver = try requiredPayload(
+                arguments.first,
+                function: "CEffectData:SetAttachment"
+            )
+            let attachment = try requiredInt32(
+                arguments,
+                index: 1,
+                function: "CEffectData:SetAttachment"
+            )
+            receiver.setAttachment(attachment)
+            return []
+        }
+        try setMethod("GetAttachment") { arguments in
+            let receiver = try requiredPayload(
+                arguments.first,
+                function: "CEffectData:GetAttachment"
+            )
+            return [.number(Double(receiver.snapshot.attachment))]
         }
 
         let constructor = LuaNativeFunctionBox(
@@ -299,7 +440,7 @@ public final class GMLuaEffects: @unchecked Sendable {
                     index: 3,
                     function: "util.Effect"
                 )
-                bridge.capture(
+                try bridge.capture(
                     name: name,
                     data: data,
                     allowOverride: allowOverride,
@@ -326,7 +467,7 @@ public final class GMLuaEffects: @unchecked Sendable {
         data: GMLuaEffectDataSnapshot,
         allowOverride: Bool,
         ignorePrediction: Bool?
-    ) {
+    ) throws {
         let sink: GMLuaEffectRequestSink?
         let request: GMLuaEffectRequest
         lock.lock()
@@ -338,15 +479,35 @@ public final class GMLuaEffects: @unchecked Sendable {
             ignorePrediction: ignorePrediction
         )
         nextSequence &+= 1
+        sink = sinkStorage
+        lock.unlock()
+        try sink?(request)
+        lock.lock()
         if requestStorage.count < Self.maximumBufferedRequests {
             requestStorage.append(request)
         } else if droppedRequestCountStorage < UInt64.max {
             droppedRequestCountStorage += 1
         }
-        sink = sinkStorage
         lock.unlock()
-        sink?(request)
     }
+}
+
+private func requiredInt32(
+    _ arguments: [LuaValue],
+    index: Int,
+    function: String
+) throws -> Int32 {
+    guard arguments.indices.contains(index),
+          case let .number(value) = arguments[index],
+          value.isFinite,
+          value.rounded(.towardZero) == value,
+          value >= Double(Int32.min),
+          value <= Double(Int32.max) else {
+        throw LuaError.runtime(
+            "bad argument #\(index) to '\(function)' (32-bit integer expected)"
+        )
+    }
+    return Int32(value)
 }
 
 private func requiredPayload(

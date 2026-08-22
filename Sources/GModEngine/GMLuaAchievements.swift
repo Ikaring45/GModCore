@@ -11,6 +11,8 @@ public enum GMLuaAchievementRequest: Sendable, Equatable {
     case spawnMenuOpened
     /// Increment the bundled Sandbox prop-spawn counter once.
     case propSpawned
+    /// Increment the bundled Sandbox remover-tool counter once.
+    case entityRemoved
 }
 
 public typealias GMLuaAchievementRequestSink = @Sendable (
@@ -157,6 +159,20 @@ public final class GMLuaAchievements: @unchecked Sendable {
         try state.setRawTableValue(
             spawnedProp,
             for: .string("SpawnedProp"),
+            in: table
+        )
+        let remover = LuaValue.nativeFunction(
+            LuaNativeFunctionBox(
+                { [bridge] _ in
+                    bridge.capture(.entityRemoved)
+                    return []
+                },
+                debugName: "achievements.Remover"
+            )
+        )
+        try state.setRawTableValue(
+            remover,
+            for: .string("Remover"),
             in: table
         )
         state.setGlobal("achievements", value: .table(table))

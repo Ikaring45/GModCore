@@ -97,34 +97,61 @@ public final class GModDynamicEntityRenderSceneProjector: @unchecked Sendable {
     public func update(
         from projection: SourceCanonicalEntityKindProjection
     ) throws -> Bool {
-        lock.lock()
-        let priorCursor = sourceCursorStorage
-        let capturedEpoch = updateEpoch
-        lock.unlock()
         guard projection.kind == .propPhysics else {
             throw GModDynamicEntityRenderSceneError.wrongProjectionKind(
                 projection.kind
             )
         }
-        guard projection.cursor != priorCursor else { return false }
+        return try update(
+            entities: projection.entities,
+            cursor: projection.cursor,
+            allowedKinds: [.propPhysics]
+        )
+    }
+
+    /// Builds the visible dynamic world from a prefiltered CLIENT snapshot.
+    /// The session uses this for ordinary props plus unowned dropped Weapons;
+    /// held Weapons remain inventory state and are not drawn as world models.
+    @discardableResult
+    public func updateRenderableEntities(
+        _ entities: [SourceCanonicalEntitySnapshot],
+        cursor: SourceEntityReplicationCursor
+    ) throws -> Bool {
+        try update(
+            entities: entities,
+            cursor: cursor,
+            allowedKinds: [.propPhysics, .weapon]
+        )
+    }
+
+    private func update(
+        entities: [SourceCanonicalEntitySnapshot],
+        cursor: SourceEntityReplicationCursor,
+        allowedKinds: Set<SourceCanonicalEntityKind>
+    ) throws -> Bool {
+        lock.lock()
+        let priorCursor = sourceCursorStorage
+        let capturedEpoch = updateEpoch
+        lock.unlock()
+        guard cursor != priorCursor else { return false }
         if let priorCursor {
-            guard projection.cursor.connectionGeneration.rawValue >
+            guard cursor.connectionGeneration.rawValue >
                     priorCursor.connectionGeneration.rawValue ||
                     (
-                        projection.cursor.connectionGeneration ==
+                        cursor.connectionGeneration ==
                             priorCursor.connectionGeneration &&
-                        projection.cursor.sequence > priorCursor.sequence
+                        cursor.sequence > priorCursor.sequence
                     ) else {
                 throw GModDynamicEntityRenderSceneError.sourceCursorNotIncreasing(
                     previous: priorCursor,
-                    received: projection.cursor
+                    received: cursor
                 )
             }
         }
 
         var priorIndex: Int?
-        for entity in projection.entities {
-            guard entity.kind == .propPhysics else {
+        for entity in entities {
+            guard allowedKinds.contains(entity.kind) else {
                 throw GModDynamicEntityRenderSceneError.wrongEntityKind(
                     identity: entity.identity,
                     kind: entity.kind
@@ -138,8 +165,9 @@ public final class GModDynamicEntityRenderSceneProjector: @unchecked Sendable {
             }
             priorIndex = entity.identity.entryIndex
         }
-        let renderable = projection.entities.filter {
+        let renderable = entities.filter {
             $0.isNetworkable &&
+                !$0.isNoDraw &&
                 ($0.lifecycle == .spawned || $0.lifecycle == .active)
         }
         guard renderable.count <= policy.maximumRenderablePropCount else {
@@ -231,16 +259,16 @@ public final class GModDynamicEntityRenderSceneProjector: @unchecked Sendable {
         }
         if let currentCursor = sourceCursorStorage,
            currentCursor != priorCursor {
-            guard projection.cursor.connectionGeneration.rawValue >
+            guard cursor.connectionGeneration.rawValue >
                     currentCursor.connectionGeneration.rawValue ||
                     (
-                        projection.cursor.connectionGeneration ==
+                        cursor.connectionGeneration ==
                             currentCursor.connectionGeneration &&
-                        projection.cursor.sequence > currentCursor.sequence
+                        cursor.sequence > currentCursor.sequence
                     ) else {
                 throw GModDynamicEntityRenderSceneError.sourceCursorNotIncreasing(
                     previous: currentCursor,
-                    received: projection.cursor
+                    received: cursor
                 )
             }
         }
@@ -256,12 +284,12 @@ public final class GModDynamicEntityRenderSceneProjector: @unchecked Sendable {
         }
         let candidate = GModDynamicEntityRenderSceneSnapshot(
             revision: visualStateChanged ? priorRevision + 1 : priorRevision,
-            sourceProjectionCursor: projection.cursor,
+            sourceProjectionCursor: cursor,
             resources: resources,
             instances: instances,
             issues: issues
         )
-        sourceCursorStorage = projection.cursor
+        sourceCursorStorage = cursor
         snapshotStorage = candidate
         return visualStateChanged
     }

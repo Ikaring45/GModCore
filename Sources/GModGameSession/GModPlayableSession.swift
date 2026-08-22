@@ -178,6 +178,10 @@ public struct GModPlayableSessionConfiguration: Sendable, Equatable {
     public let playerUserID: Int
     public let initialViewport: GMLuaViewportSize
     public let contentPackURL: URL?
+    /// Independently trusted physics evidence for exact MDL/PHY bytes in the
+    /// content pack. This deliberately remains outside the pack so game
+    /// content cannot self-attest its collision geometry or mass properties.
+    public let attestedPropPhysicsManifestURL: URL?
     public let languageCode: String
     public let languagePhrases: [String: String]
     public let hostName: String
@@ -190,6 +194,7 @@ public struct GModPlayableSessionConfiguration: Sendable, Equatable {
         playerUserID: Int = 1,
         initialViewport: GMLuaViewportSize = .logicalDesktopDefault,
         contentPackURL: URL? = nil,
+        attestedPropPhysicsManifestURL: URL? = nil,
         languageCode: String = "en",
         languagePhrases: [String: String] = [:],
         hostName: String = "Garry's PAD"
@@ -201,6 +206,8 @@ public struct GModPlayableSessionConfiguration: Sendable, Equatable {
         self.playerUserID = playerUserID
         self.initialViewport = initialViewport
         self.contentPackURL = contentPackURL
+        self.attestedPropPhysicsManifestURL =
+            attestedPropPhysicsManifestURL
         self.languageCode = languageCode
         self.languagePhrases = languagePhrases
         self.hostName = hostName
@@ -285,7 +292,9 @@ public struct GModPlayableInputButtonReport: Equatable, Sendable {
 public struct GModPlayableFixedTickReport: Equatable, Sendable {
     public let movement: GModPlayableMovementResult
     public let inputButtons: GModPlayableInputButtonReport
+    public let weaponGameplay: SourceCanonicalWeaponGameplayTickReport
     public let server: GMLuaSourceRuntimeRunReport
+    public let propPhysics: SourceCanonicalPropPhysicsStepSnapshot
     public let client: GMLuaSourceRuntimeRunReport
     public let deliveredMessages: Int
     public let actionFailures: [GMLuaForwardedConsoleCommandFailure]
@@ -329,6 +338,7 @@ public enum GModPlayableSessionError: Error, CustomStringConvertible, Equatable 
     case invalidGamemodeName(String)
     case invalidLanguageCode(String)
     case invalidSinglePlayerMaxPlayers(Int)
+    case attestedPropPhysicsManifestRequiresContentPack
     case missingEntityText(String)
     case missingPlayerStart(String)
     case malformedPlayerStart(String)
@@ -345,6 +355,8 @@ public enum GModPlayableSessionError: Error, CustomStringConvertible, Equatable 
             return "invalid language code: \(value)"
         case let .invalidSinglePlayerMaxPlayers(value):
             return "playable single-player sessions require maxPlayers 1, got \(value)"
+        case .attestedPropPhysicsManifestRequiresContentPack:
+            return "an independently attested prop physics manifest requires a content pack"
         case let .missingEntityText(map):
             return "bundled map \(map) has no UTF-8 entity lump"
         case let .missingPlayerStart(map):
@@ -384,6 +396,10 @@ public final class GModPlayableSession {
     public let worldIdentity: GMLuaSourceEntityIdentity
     public let spawnPoint: GModMapSpawnPoint
     public let startupReport: GModPlayableSessionStartupReport
+    public let staticWorldPhysicsAsset: SourceBSPAttestedStaticPhysicsAsset
+    public let physicsEnvironment: SourceDeterministicPhysicsEnvironment
+    public let serverToolActionBridge: SourceCanonicalToolActionBridge
+    public let clientToolActionBridge: SourceCanonicalToolActionBridge
 
     private let serverFileSystem: GMLuaMountedFileSystem
     private let clientFileSystem: GMLuaMountedFileSystem
@@ -392,6 +408,10 @@ public final class GModPlayableSession {
     private let studioRenderableModelCache: GModStudioRenderableModelCache?
     private let dynamicEntityRenderSceneProjector:
         GModDynamicEntityRenderSceneProjector?
+    private let firstPersonViewModelSceneProjector:
+        GModFirstPersonViewModelSceneProjector?
+    private let propPhysicsCoordinator: SourceCanonicalPropPhysicsCoordinator
+    private let weaponGameplayController: SourceCanonicalWeaponGameplayController
     private var nextCommandNumber: Int32 = 1
     private var closedStorage = false
 
@@ -418,6 +438,18 @@ public final class GModPlayableSession {
         SourceEntityReplicationCursor?
     {
         clientRuntime.entityRegistry?.canonicalEntityReplicationCursor
+    }
+
+    /// Drops the currently selected canonical Weapon through the same
+    /// `Player:DropWeapon` implementation exposed to original SERVER Lua.
+    /// The full EHANDLE is resolved immediately before dispatch, so a reused
+    /// entity index cannot drop a stale generation.
+    @discardableResult
+    public func dropActiveWeapon() throws -> Bool {
+        try ensureOpen()
+        return try weaponGameplayController.dropActiveWeapon(
+            playerIdentity: playerIdentity
+        )
     }
 
     public convenience init(
@@ -484,27 +516,49 @@ public final class GModPlayableSession {
                 configuration.languageCode
             )
         }
+        guard configuration.attestedPropPhysicsManifestURL == nil ||
+                configuration.contentPackURL != nil else {
+            throw GModPlayableSessionError
+                .attestedPropPhysicsManifestRequiresContentPack
+        }
 
         progress(.init(stage: .readingBSP))
         let mapAllocationPolicy = GModMapAllocationPolicy.iPadValidated
         let bspData: Data
         let loadedStudioModelRepository: GModStudioModelRepository?
+        let loadedContentPackAssetSource: GModContentPackAssetSource?
         if let contentPackURL = configuration.contentPackURL {
             let pack = try GarrysPADContentPack(url: contentPackURL)
+            let contentSource = try GModContentPackAssetSource(pack: pack)
             bspData = try pack.data(
                 for: "garrysmod/maps/\(configuration.map.rawValue).bsp",
                 maximumByteCount:
                     mapAllocationPolicy.maximumBSPEncodedByteCount
             )
             loadedStudioModelRepository = GModStudioModelRepository(
-                reader: try GModContentPackAssetSource(pack: pack)
+                reader: contentSource
             )
+            loadedContentPackAssetSource = contentSource
         } else {
             bspData = try GModGameAssets.data(
                 for: configuration.map,
                 kind: .bsp
             )
             loadedStudioModelRepository = studioModelRepositoryForTesting
+            loadedContentPackAssetSource = nil
+        }
+        var loadedAttestedPropPhysicsAssets = attestedPropPhysicsAssets
+        if let manifestURL = configuration.attestedPropPhysicsManifestURL {
+            let loadedContentPackAssetSource = loadedContentPackAssetSource!
+            let manifestData = try Self.readAttestedPropPhysicsManifest(
+                at: manifestURL
+            )
+            loadedAttestedPropPhysicsAssets.append(contentsOf: try
+                GModAttestedPropPhysicsManifestLoader.load(
+                    independentManifestData: manifestData,
+                    content: loadedContentPackAssetSource
+                )
+            )
         }
         let loadedAttestedPropPhysicsAssetResolver:
             GModAttestedPropPhysicsAssetResolver?
@@ -515,7 +569,7 @@ public final class GModPlayableSession {
             loadedAttestedPropPhysicsAssetResolver = try
                 GModAttestedPropPhysicsAssetResolver(
                     repository: loadedStudioModelRepository,
-                    attestedAssets: attestedPropPhysicsAssets
+                    attestedAssets: loadedAttestedPropPhysicsAssets
                 )
         } else {
             loadedAttestedPropPhysicsAssetResolver = nil
@@ -534,10 +588,14 @@ public final class GModPlayableSession {
         let loadedStudioRenderableModelCache: GModStudioRenderableModelCache?
         let loadedDynamicEntityRenderSceneProjector:
             GModDynamicEntityRenderSceneProjector?
+        let loadedFirstPersonViewModelSceneProjector:
+            GModFirstPersonViewModelSceneProjector?
         if let cache = studioRenderableModelCacheForTesting {
             loadedStudioRenderableModelCache = cache
             loadedDynamicEntityRenderSceneProjector = try
                 GModDynamicEntityRenderSceneProjector(resolver: cache)
+            loadedFirstPersonViewModelSceneProjector =
+                GModFirstPersonViewModelSceneProjector(resolver: cache)
         } else if let loadedStudioModelRepository {
             let cache = try GModStudioRenderableModelCache(
                 repository: loadedStudioModelRepository
@@ -545,14 +603,20 @@ public final class GModPlayableSession {
             loadedStudioRenderableModelCache = cache
             loadedDynamicEntityRenderSceneProjector = try
                 GModDynamicEntityRenderSceneProjector(resolver: cache)
+            loadedFirstPersonViewModelSceneProjector =
+                GModFirstPersonViewModelSceneProjector(resolver: cache)
         } else {
             loadedStudioRenderableModelCache = nil
             loadedDynamicEntityRenderSceneProjector = nil
+            loadedFirstPersonViewModelSceneProjector = nil
         }
         try mapAllocationPolicy.validate(
             .bspEncodedBytes,
             requestedByteCount: UInt64(bspData.count)
         )
+        var bspHasher = GModContentSHA256()
+        bspHasher.update(bspData)
+        let bspSHA256 = bspHasher.hexadecimalDigest()
         progress(.init(stage: .parsingWorld))
         let loadedBSP = try SourceBSP(data: bspData)
         progress(.init(stage: .buildingWorldGeometry))
@@ -561,15 +625,44 @@ public final class GModPlayableSession {
             allocationPolicy: mapAllocationPolicy
         )
         progress(.init(stage: .preparingCollision))
+        let loadedStaticWorldPhysicsAsset = try
+            SourceBSPStaticPhysicsBridge.build(
+                bsp: loadedBSP,
+                bspSHA256: bspSHA256
+            )
         let loadedSpawn = try Self.firstPlayerStart(
             in: loadedBSP,
             mapName: configuration.map.rawValue
         )
-        let traceProvider = GMLuaSourceBSPTraceProvider(bsp: loadedBSP)
-        let loadedWorldWalkCollisionProvider:
-            any SourceWorldWalkCollisionProvider =
-                worldWalkCollisionProvider ??
-                SourceBSPWorldWalkCollisionProvider(bsp: loadedBSP)
+        // SERVER and CLIENT each own their BSP workspace and deterministic
+        // displacement-query FIFO. Sharing one provider would race prediction
+        // against authoritative traces and invalidate monotonic query order.
+        let serverWorldTraceProvider = try
+            SourceBSPDetailedWorldCollisionProvider(
+                bsp: loadedBSP,
+                staticPhysicsAsset: loadedStaticWorldPhysicsAsset
+            )
+        let clientWorldTraceProvider = try
+            SourceBSPDetailedWorldCollisionProvider(
+                bsp: loadedBSP,
+                staticPhysicsAsset: loadedStaticWorldPhysicsAsset
+            )
+        let serverDynamicTraceSource = GModCanonicalDynamicTraceSource(
+            studioRepository: loadedStudioModelRepository,
+            propPhysicsResolver: loadedAttestedPropPhysicsAssetResolver
+        )
+        let clientDynamicTraceSource = GModCanonicalDynamicTraceSource(
+            studioRepository: loadedStudioModelRepository,
+            propPhysicsResolver: loadedAttestedPropPhysicsAssetResolver
+        )
+        let serverTraceProvider = GMLuaCompositeTraceProvider(
+            world: serverWorldTraceProvider,
+            dynamic: serverDynamicTraceSource
+        )
+        let clientTraceProvider = GMLuaCompositeTraceProvider(
+            world: clientWorldTraceProvider,
+            dynamic: clientDynamicTraceSource
+        )
         progress(.init(stage: .startingServerLua))
         let systemTime = GMLuaMonotonicSystemTimeSource()
         let session = GMLuaSharedSession()
@@ -608,7 +701,7 @@ public final class GModPlayableSession {
             engineConfiguration: engine,
             engineConVarCatalog: serverConVars,
             netTransport: session.netTransport,
-            traceProvider: traceProvider,
+            traceProvider: serverTraceProvider,
             systemTimeSource: systemTime,
             inputConfiguration: GMLuaInputConfiguration()
         )
@@ -623,7 +716,7 @@ public final class GModPlayableSession {
             engineConfiguration: engine,
             engineConVarCatalog: clientConVars,
             netTransport: session.netTransport,
-            traceProvider: traceProvider,
+            traceProvider: clientTraceProvider,
             systemTimeSource: systemTime,
             inputConfiguration: GMLuaInputConfiguration(),
             languageConfiguration: GMLuaLanguageConfiguration(
@@ -714,14 +807,41 @@ public final class GModPlayableSession {
                     activePropPhysicsAssetResolver
             )
             adapter = sourceAdapter
+            serverDynamicTraceSource.connect { [weak sourceAdapter] in
+                sourceAdapter?.canonicalEntitySnapshots ?? []
+            }
             try sourceAdapter.installCanonicalEntityLuaBridge()
             try sourceAdapter.installCanonicalPhysicsObjectLuaBridge()
+            try SourceCanonicalWeaponGameplayBridge.install(
+                into: server,
+                host: sourceAdapter,
+                playerInfoResolver: { _, name in
+                    clientConVars.currentValue(for: name)
+                }
+            )
+            let toolConstraintGraph = SourceCanonicalConstraintGraph()
+            let loadedServerToolActionBridge = try
+                SourceCanonicalToolActionBridge.install(
+                    into: server,
+                    host: sourceAdapter,
+                    constraintGraph: toolConstraintGraph
+                )
             try SourceCanonicalSinglePlayerGLuaBridge.install(into: server)
             // This attachment owns only CLIENT Tick/Think clocking. The
             // adapter has no legacy entities in this session, and canonical
             // Entity state reaches CLIENT exclusively through SharedSession's
             // ordered replication FIFO.
             try sourceAdapter.attach(client: client)
+            clientDynamicTraceSource.connect {
+                [weak registry = client.entityRegistry] in
+                registry?.canonicalEntitySnapshots ?? []
+            }
+            try SourceCanonicalWeaponGameplayBridge.install(into: client)
+            let loadedClientToolActionBridge = try
+                SourceCanonicalToolActionBridge.install(
+                    into: client,
+                    constraintGraph: toolConstraintGraph
+                )
             let createdSourceWorld = try sourceAdapter.createCanonicalEntity(
                 kind: .world,
                 at: 0
@@ -733,6 +853,37 @@ public final class GModPlayableSession {
                 createdSourceWorld.identity
             )
             let sourceWorldIdentity = sourceWorld.identity
+            let loadedWorldWalkCollisionProvider:
+                any SourceWorldWalkCollisionProvider
+            if let worldWalkCollisionProvider {
+                loadedWorldWalkCollisionProvider =
+                    worldWalkCollisionProvider
+            } else {
+                loadedWorldWalkCollisionProvider = try
+                    SourceBSPDetailedWorldCollisionProvider(
+                        bsp: loadedBSP,
+                        staticPhysicsAsset: loadedStaticWorldPhysicsAsset,
+                        worldIdentity: sourceWorldIdentity
+                    )
+            }
+            let loadedStaticWorldPhysicsScene = try
+                loadedStaticWorldPhysicsAsset.makeStaticScene(
+                    worldIdentity: sourceWorldIdentity
+                )
+            let loadedPhysicsEnvironment =
+                SourceDeterministicPhysicsEnvironment(
+                    staticCollisionScene: loadedStaticWorldPhysicsScene
+                )
+            let loadedPropPhysicsCoordinator =
+                SourceCanonicalPropPhysicsCoordinator(
+                    environment: loadedPhysicsEnvironment,
+                    commandSequenceSource: session.netTransport
+                )
+            let loadedWeaponGameplayController =
+                SourceCanonicalWeaponGameplayController(
+                    runtime: server,
+                    host: sourceAdapter
+                )
 
             try server.loadFile("lua/includes/init.lua")
             progress(.init(stage: .loadingServerSandbox))
@@ -808,6 +959,12 @@ public final class GModPlayableSession {
             worldMesh = loadedWorldMesh
             worldIdentity = sourceWorldIdentity
             spawnPoint = loadedSpawn
+            staticWorldPhysicsAsset = loadedStaticWorldPhysicsAsset
+            physicsEnvironment = loadedPhysicsEnvironment
+            serverToolActionBridge = loadedServerToolActionBridge
+            clientToolActionBridge = loadedClientToolActionBridge
+            propPhysicsCoordinator = loadedPropPhysicsCoordinator
+            weaponGameplayController = loadedWeaponGameplayController
             worldWalkSolver = SourceWorldWalkSolver(
                 collisionProvider: loadedWorldWalkCollisionProvider
             )
@@ -817,6 +974,8 @@ public final class GModPlayableSession {
             studioRenderableModelCache = loadedStudioRenderableModelCache
             dynamicEntityRenderSceneProjector =
                 loadedDynamicEntityRenderSceneProjector
+            firstPersonViewModelSceneProjector =
+                loadedFirstPersonViewModelSceneProjector
             startupReport = GModPlayableSessionStartupReport(
                 map: configuration.map,
                 spawnPoint: loadedSpawn,
@@ -842,10 +1001,9 @@ public final class GModPlayableSession {
 
     public var isClosed: Bool { closedStorage }
 
-    /// Projects only replicated CLIENT `prop_physics` entities into immutable
-    /// renderer-neutral resources and instances. Player-only packets leave the
-    /// prop cursor unchanged and therefore avoid both an entity-array copy and
-    /// Studio cache work.
+    /// Projects replicated CLIENT props and dropped Weapon world models into
+    /// immutable renderer-neutral resources and instances. An inventory-owned
+    /// Weapon is excluded; the first-person/viewmodel path remains separate.
     public func clientDynamicEntityRenderScene(
         ifChangedFrom revision: UInt64?
     ) throws -> GModDynamicEntityRenderSceneSnapshot? {
@@ -859,11 +1017,54 @@ public final class GModPlayableSession {
                 "entity registry"
             )
         }
-        if let projection = registry.canonicalEntityProjection(
-            for: .propPhysics,
-            ifChangedFrom: projector.sourceProjectionCursor
-        ) {
-            _ = try projector.update(from: projection)
+        if let cursor = registry.canonicalEntityReplicationCursor,
+           cursor != projector.sourceProjectionCursor {
+            let snapshots = registry.canonicalEntitySnapshots
+            let ownedWeapons = Set(snapshots.lazy
+                .filter { $0.kind == .player }
+                .flatMap { $0.weaponInventory.weapons.map(\.identity) })
+            let renderable = snapshots.filter { entity in
+                entity.kind == .propPhysics ||
+                    (entity.kind == .weapon &&
+                        !ownedWeapons.contains(entity.identity))
+            }
+            _ = try projector.updateRenderableEntities(
+                renderable,
+                cursor: cursor
+            )
+        }
+        return projector.snapshot(ifChangedFrom: revision)
+    }
+
+    /// Resolves the replicated local Player's full-EHANDLE active Weapon,
+    /// reads that class's inherited CLIENT SWEP viewmodel fields, and projects
+    /// only a successfully decoded Studio resource. No world model or fallback
+    /// mesh is substituted when the authored viewmodel is unavailable.
+    public func clientFirstPersonViewModelScene(
+        ifChangedFrom revision: UInt64?
+    ) throws -> GModFirstPersonViewModelSceneSnapshot? {
+        try ensureOpen()
+        guard let projector = firstPersonViewModelSceneProjector else {
+            return nil
+        }
+        guard let registry = clientRuntime.entityRegistry else {
+            throw GModPlayableSessionError.missingRuntimeSurface(
+                .client,
+                "entity registry"
+            )
+        }
+        if let cursor = registry.canonicalEntityReplicationCursor,
+           cursor != projector.sourceProjectionCursor {
+            _ = try projector.update(
+                clientEntities: registry.canonicalEntitySnapshots,
+                localPlayerEntryIndex: configuration.playerEntityIndex,
+                cursor: cursor,
+                definitionResolver: { [clientRuntime] className in
+                    try clientRuntime.scriptedWeaponRenderDefinition(
+                        className: className
+                    )
+                }
+            )
         }
         return projector.snapshot(ifChangedFrom: revision)
     }
@@ -932,7 +1133,16 @@ public final class GModPlayableSession {
         let inputButtons = try updateCurrentPlayerInputButtons(
             movementInput.buttons
         )
+        let weaponGameplay = weaponGameplayController.runServerTick(
+            playerIdentity: playerIdentity
+        )
         let serverReport = try sourceAdapter.runServerFixedTick()
+        let physicsInputs = try sourceAdapter.prepareCanonicalPropPhysicsStep()
+        let propPhysics = try propPhysicsCoordinator.step(
+            inputs: physicsInputs,
+            simulationTick: UInt64(sourceAdapter.serverGlobals.tickCount)
+        )
+        try sourceAdapter.commitCanonicalPropPhysicsStep(propPhysics)
         let delivery = try Self.drainReportingForwardedConsoleFailures(
             sharedSession,
             sourceAdapter: sourceAdapter,
@@ -942,7 +1152,9 @@ public final class GModPlayableSession {
         return GModPlayableFixedTickReport(
             movement: movement,
             inputButtons: inputButtons,
+            weaponGameplay: weaponGameplay,
             server: serverReport,
+            propPhysics: propPhysics,
             client: clientReport,
             deliveredMessages: delivery.successfulDeliveries,
             actionFailures: delivery.actionFailures
@@ -1106,6 +1318,7 @@ public final class GModPlayableSession {
             try sharedSession.disconnect(client: clientRuntime)
         }
         _ = try dynamicEntityRenderSceneProjector?.reset()
+        _ = try firstPersonViewModelSceneProjector?.reset()
         studioRenderableModelCache?.removeAll()
         studioModelRepository?.removeAllCachedAssets()
         try sourceAdapter.close()
@@ -1152,6 +1365,23 @@ public final class GModPlayableSession {
     private static func isASCIILetter(_ scalar: Unicode.Scalar) -> Bool {
         (scalar.value >= 65 && scalar.value <= 90) ||
             (scalar.value >= 97 && scalar.value <= 122)
+    }
+
+    private static func readAttestedPropPhysicsManifest(
+        at url: URL
+    ) throws -> Data {
+        let maximum = GModAttestedPropPhysicsManifestLoader.Budget
+            .iPadValidated.maximumManifestBytes
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let data = try handle.read(upToCount: maximum + 1) ?? Data()
+        guard data.count <= maximum else {
+            throw GModAttestedPropPhysicsManifestError.manifestTooLarge(
+                actual: data.count,
+                maximum: maximum
+            )
+        }
+        return data
     }
 
     private static func playerWalkState(

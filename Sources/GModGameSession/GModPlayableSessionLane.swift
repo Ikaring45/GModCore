@@ -344,22 +344,27 @@ public actor GModPlayableSessionLane {
             viewportChanged = false
         }
 
-        // Host-frame input can change on a gesture-only frame with no fixed
-        // tick. Publish the exact supplied digital word before CLIENT Think or
-        // pointer work; do not derive button bits from the analog axes.
-        let inputButtons = try session.updateCurrentPlayerInputButtons(
-            movementInput.buttons
-        )
-
         var fixedTicks: [GModPlayableFixedTickReport] = []
         fixedTicks.reserveCapacity(fixedTickCount)
-        for _ in 0..<fixedTickCount {
-            fixedTicks.append(
-                try session.runFixedTick(
-                    movementInput: movementInput,
-                    maximumDeliveries: maximumDeliveries
-                )
+        let inputButtons: GModPlayableInputButtonReport
+        if fixedTickCount == 0 {
+            // Gesture-only frames still publish the exact word before CLIENT
+            // Think. A fixed-tick frame publishes inside runFixedTick instead;
+            // pre-publishing here would consume KeyPressed/KeyReleased edges
+            // before the active SWEP ItemPostFrame pass observes them.
+            inputButtons = try session.updateCurrentPlayerInputButtons(
+                movementInput.buttons
             )
+        } else {
+            for _ in 0..<fixedTickCount {
+                fixedTicks.append(
+                    try session.runFixedTick(
+                        movementInput: movementInput,
+                        maximumDeliveries: maximumDeliveries
+                    )
+                )
+            }
+            inputButtons = fixedTicks[fixedTicks.count - 1].inputButtons
         }
         let clientFrame = renderClientFrame
             ? try session.runClientFrame()
@@ -410,6 +415,37 @@ public actor GModPlayableSessionLane {
         return try session.clientDynamicEntityRenderScene(
             ifChangedFrom: revision
         )
+    }
+
+    /// Returns the active canonical Weapon's renderer-neutral first-person
+    /// Studio projection only when its visual revision changed.
+    public func clientFirstPersonViewModelScene(
+        ifChangedFrom revision: UInt64?,
+        expectedGeneration: UInt64? = nil
+    ) throws -> GModFirstPersonViewModelSceneSnapshot? {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        return try session.clientFirstPersonViewModelScene(
+            ifChangedFrom: revision
+        )
+    }
+
+    /// Executes the stock SERVER drop path on the lane that owns Lua and the
+    /// canonical entity list. Replication remains queued for the next ordinary
+    /// host-frame drain.
+    @discardableResult
+    public func dropActiveWeapon(
+        expectedGeneration: UInt64? = nil
+    ) throws -> Bool {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        return try session.dropActiveWeapon()
     }
 
     public func renderClientVGUIFrame(

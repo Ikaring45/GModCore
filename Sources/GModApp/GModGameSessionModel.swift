@@ -68,6 +68,19 @@ enum GModDynamicEntitySceneBuildCompletion: Equatable, Sendable {
     }
 }
 
+private struct GModFirstPersonViewModelSceneBuildRequest: Sendable {
+    let snapshot: GModFirstPersonViewModelSceneSnapshot
+    let applicationGeneration: UInt64
+    let laneGeneration: UInt64
+    let buildEpoch: UInt64
+    let requestRevision: UInt64
+}
+
+private struct GModFirstPersonViewModelSceneBuildResult: Sendable {
+    let scene: GModMetalFirstPersonViewModelScene?
+    let failure: String?
+}
+
 struct GModGameFirstWorldFrameGate: Equatable, Sendable {
     private(set) var expectedMeshIdentifier: String?
 
@@ -285,6 +298,8 @@ final class GModGameSessionModel: ObservableObject {
         GModMetalWorldRendererFailure?
     @Published private(set) var dynamicEntityScene:
         GModMetalDynamicEntityScene?
+    @Published private(set) var firstPersonViewModelScene:
+        GModMetalFirstPersonViewModelScene?
     @Published private(set) var surfaceScene: GModMetalSurfaceScene?
     @Published private(set) var surfaceDiagnostics: GModMetalSurfaceDiagnostics?
     @Published private(set) var surfaceStatus = "VGUI surface idle"
@@ -312,6 +327,8 @@ final class GModGameSessionModel: ObservableObject {
         GModMetalCoreTextRasterizer
     private nonisolated let dynamicEntitySceneBuilder:
         GModDynamicEntityMetalSceneBuilder
+    private nonisolated let firstPersonViewModelSceneBuilder:
+        GModFirstPersonViewModelMetalSceneBuilder
     private var forwardAxis: Float = 0
     private var sideAxis: Float = 0
     private var jumpPressed = false
@@ -330,6 +347,12 @@ final class GModGameSessionModel: ObservableObject {
     private var dynamicEntitySceneBuildTask: Task<Void, Never>?
     private var dynamicEntitySceneBuildEpoch: UInt64 = 0
     private var dynamicEntitySceneBuildRevision: UInt64 = 0
+    private var lastFirstPersonViewModelSourceRevision: UInt64?
+    private var pendingFirstPersonViewModelSceneBuild:
+        GModFirstPersonViewModelSceneBuildRequest?
+    private var firstPersonViewModelSceneBuildTask: Task<Void, Never>?
+    private var firstPersonViewModelSceneBuildEpoch: UInt64 = 0
+    private var firstPersonViewModelSceneBuildRevision: UInt64 = 0
     private var inputSuspensionInFlight = false
     private var pauseMenuNotificationPending = false
     private var lastSurfaceFailure: String?
@@ -394,9 +417,13 @@ final class GModGameSessionModel: ObservableObject {
             dynamicEntitySceneBuilder = try GModDynamicEntityMetalSceneBuilder(
                 textureResolver: textureResolver
             )
+            firstPersonViewModelSceneBuilder = try
+                GModFirstPersonViewModelMetalSceneBuilder(
+                    textureResolver: textureResolver
+                )
         } catch {
             preconditionFailure(
-                "invalid built-in dynamic prop scene policy: \(error)"
+                "invalid built-in Studio scene policy: \(error)"
             )
         }
         audioController = GModMenuAudioController(
@@ -437,6 +464,7 @@ final class GModGameSessionModel: ObservableObject {
         audioController.stop(bus: .gameplay)
         invalidateSurfaceRequests()
         invalidateDynamicEntityScene()
+        invalidateFirstPersonViewModelScene()
         isStarting = true
         loadingState = GModPlayableSessionLoadingState()
         startFailure = nil
@@ -446,6 +474,7 @@ final class GModGameSessionModel: ObservableObject {
         worldScene = nil
         worldSkyVisibility = nil
         dynamicEntityScene = nil
+        firstPersonViewModelScene = nil
         lastRendererFailure = nil
         surfaceScene = nil
         surfaceDiagnostics = nil
@@ -660,6 +689,36 @@ final class GModGameSessionModel: ObservableObject {
         publishMovementInput()
     }
 
+    func dropActiveWeapon() {
+        guard acceptsWorldInput,
+              let requestedLaneGeneration = laneGeneration else {
+            rejectLateWorldInput()
+            return
+        }
+        let requestedGeneration = sessionGeneration
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let dropped = try await lane.dropActiveWeapon(
+                    expectedGeneration: requestedLaneGeneration
+                )
+                guard requestedGeneration == sessionGeneration, isReady else {
+                    return
+                }
+                if !dropped {
+                    appendLog("[SERVER][WEAPON] No active weapon to drop")
+                }
+            } catch {
+                if requestedGeneration == sessionGeneration {
+                    appendLog(
+                        "[SERVER][WEAPON] Drop failed: " +
+                            GMLuaRuntime.describe(error)
+                    )
+                }
+            }
+        }
+    }
+
     func adjustLook(deltaX: Float, deltaY: Float) {
         guard acceptsWorldInput else {
             rejectLateWorldInput()
@@ -755,6 +814,7 @@ final class GModGameSessionModel: ObservableObject {
         publishMovementInput()
         invalidateSurfaceRequests()
         invalidateDynamicEntityScene()
+        invalidateFirstPersonViewModelScene()
         frameMailbox.disable()
         pointerMailbox.setEnabled(false)
         firstWorldFrameGate.reset()
@@ -826,6 +886,7 @@ final class GModGameSessionModel: ObservableObject {
         publishMovementInput()
         invalidateSurfaceRequests()
         invalidateDynamicEntityScene()
+        invalidateFirstPersonViewModelScene()
         frameMailbox.disable()
         pointerMailbox.setEnabled(false)
         firstWorldFrameGate.reset()
@@ -1105,6 +1166,10 @@ final class GModGameSessionModel: ObservableObject {
                 applicationGeneration: activeToken.generation.application,
                 laneGeneration: activeToken.generation.lane
             )
+            await refreshFirstPersonViewModelSceneIfNeeded(
+                applicationGeneration: activeToken.generation.application,
+                laneGeneration: activeToken.generation.lane
+            )
             scheduleClientSurfaceRefresh(
                 applicationGeneration: activeToken.generation.application,
                 laneGeneration: activeToken.generation.lane
@@ -1324,6 +1389,106 @@ final class GModGameSessionModel: ObservableObject {
         lastDynamicEntitySourceRevision = nil
         dynamicEntitySceneBuilder.reset()
         dynamicEntityScene = nil
+    }
+
+    private func refreshFirstPersonViewModelSceneIfNeeded(
+        applicationGeneration: UInt64,
+        laneGeneration: UInt64
+    ) async {
+        do {
+            let snapshot = try await lane.clientFirstPersonViewModelScene(
+                ifChangedFrom: lastFirstPersonViewModelSourceRevision,
+                expectedGeneration: laneGeneration
+            )
+            guard sessionGeneration == applicationGeneration,
+                  self.laneGeneration == laneGeneration,
+                  isReady,
+                  let snapshot else { return }
+            scheduleFirstPersonViewModelSceneBuild(
+                snapshot: snapshot,
+                applicationGeneration: applicationGeneration,
+                laneGeneration: laneGeneration
+            )
+        } catch {
+            guard sessionGeneration == applicationGeneration,
+                  self.laneGeneration == laneGeneration,
+                  isReady else { return }
+            appendLog(
+                "[CLIENT][VIEWMODEL] projection unavailable: " +
+                    GMLuaRuntime.describe(error)
+            )
+        }
+    }
+
+    private func scheduleFirstPersonViewModelSceneBuild(
+        snapshot: GModFirstPersonViewModelSceneSnapshot,
+        applicationGeneration: UInt64,
+        laneGeneration: UInt64
+    ) {
+        firstPersonViewModelSceneBuildRevision &+= 1
+        pendingFirstPersonViewModelSceneBuild =
+            GModFirstPersonViewModelSceneBuildRequest(
+                snapshot: snapshot,
+                applicationGeneration: applicationGeneration,
+                laneGeneration: laneGeneration,
+                buildEpoch: firstPersonViewModelSceneBuildEpoch,
+                requestRevision: firstPersonViewModelSceneBuildRevision
+            )
+        guard firstPersonViewModelSceneBuildTask == nil else { return }
+        firstPersonViewModelSceneBuildTask = Task { @MainActor [weak self] in
+            await self?.drainFirstPersonViewModelSceneBuilds()
+        }
+    }
+
+    private func drainFirstPersonViewModelSceneBuilds() async {
+        while let request = pendingFirstPersonViewModelSceneBuild {
+            pendingFirstPersonViewModelSceneBuild = nil
+            let builder = firstPersonViewModelSceneBuilder
+            let result = await Task.detached(priority: .userInitiated) {
+                do {
+                    return GModFirstPersonViewModelSceneBuildResult(
+                        scene: try builder.build(
+                            from: request.snapshot,
+                            applicationGeneration:
+                                request.applicationGeneration,
+                            laneGeneration: request.laneGeneration
+                        ),
+                        failure: nil
+                    )
+                } catch {
+                    return GModFirstPersonViewModelSceneBuildResult(
+                        scene: nil,
+                        failure: GMLuaRuntime.describe(error)
+                    )
+                }
+            }.value
+            guard request.buildEpoch == firstPersonViewModelSceneBuildEpoch,
+                  request.requestRevision ==
+                    firstPersonViewModelSceneBuildRevision,
+                  request.applicationGeneration == sessionGeneration,
+                  request.laneGeneration == laneGeneration,
+                  isReady else { continue }
+            lastFirstPersonViewModelSourceRevision = request.snapshot.revision
+            if let failure = result.failure {
+                appendLog(
+                    "[CLIENT][VIEWMODEL] Metal scene rejected: \(failure)"
+                )
+                firstPersonViewModelSceneBuilder.reset()
+                firstPersonViewModelScene = nil
+            } else {
+                firstPersonViewModelScene = result.scene
+            }
+        }
+        firstPersonViewModelSceneBuildTask = nil
+    }
+
+    private func invalidateFirstPersonViewModelScene() {
+        firstPersonViewModelSceneBuildEpoch &+= 1
+        firstPersonViewModelSceneBuildRevision &+= 1
+        pendingFirstPersonViewModelSceneBuild = nil
+        lastFirstPersonViewModelSourceRevision = nil
+        firstPersonViewModelSceneBuilder.reset()
+        firstPersonViewModelScene = nil
     }
 
     private func scheduleClientSurfaceRefresh(
@@ -1596,6 +1761,7 @@ final class GModGameSessionModel: ObservableObject {
         isReady = false
         invalidateSurfaceRequests()
         invalidateDynamicEntityScene()
+        invalidateFirstPersonViewModelScene()
         frameMailbox.disable()
         pointerMailbox.setEnabled(false)
         pointerEpoch = nil
@@ -1883,6 +2049,53 @@ final class GModGameSessionModel: ObservableObject {
                 renderLayer: renderLayer
             )
         }
+        func sunLayer(
+            _ layer: GModWorldSunSpriteLayer
+        ) -> GModMetalWorldSunSpriteLayer {
+            let materialResolution: GModMetalWorldMaterialResolution
+            do {
+                if let resolved = try textureResolver.resolveWorldTexture(
+                    named: layer.materialName
+                ) {
+                    let requiredByteCount = resolved.totalByteCount
+                    if retentionBudget.retain(resolved) {
+                        materialResolution = .resolved(resolved)
+                    } else {
+                        materialResolution = .retentionCapacityExceeded(
+                            requiredByteCount: requiredByteCount,
+                            retainedByteCount: retentionBudget.retainedByteCount,
+                            maximumByteCount: retentionBudget.maximumByteCount
+                        )
+                    }
+                } else {
+                    materialResolution = .sourceMissing
+                }
+            } catch {
+                materialResolution = .decodeFailed(GMLuaRuntime.describe(error))
+            }
+            return GModMetalWorldSunSpriteLayer(
+                materialName: layer.materialName,
+                displayRGB: SIMD3<Float>(
+                    layer.displayRGB.x,
+                    layer.displayRGB.y,
+                    layer.displayRGB.z
+                ),
+                size: layer.size,
+                materialResolution: materialResolution
+            )
+        }
+        let sunSprites = mesh.sunSprites.map { sun in
+            GModMetalWorldSunSprite(
+                sourceDirectionToSun: SIMD3<Float>(
+                    sun.sourceDirectionToSun.x,
+                    sun.sourceDirectionToSun.y,
+                    sun.sourceDirectionToSun.z
+                ),
+                hdrColorScale: sun.hdrColorScale,
+                core: sunLayer(sun.core),
+                overlay: sunLayer(sun.overlay)
+            )
+        }
         let lightmapAtlas = mesh.lightmapAtlas.map {
             GModMetalWorldLightmapAtlas(
                 identifier: "\(meshIdentifier):lightmap",
@@ -1945,6 +2158,26 @@ final class GModGameSessionModel: ObservableObject {
                     mesh.diagnostics.ignoredBumpLightFaceCount,
                 clampedChannelCount: mesh.lightmapAtlas?.clampedChannelCount ?? 0
             ),
+            environmentLighting: mesh.environmentLighting.map {
+                GModMetalWorldEnvironmentLighting(
+                    sourceDirectionFromLight: SIMD3<Float>(
+                        $0.sourceDirectionFromLight.x,
+                        $0.sourceDirectionFromLight.y,
+                        $0.sourceDirectionFromLight.z
+                    ),
+                    directLinearRGB: SIMD3<Float>(
+                        $0.directLinearRGB.x,
+                        $0.directLinearRGB.y,
+                        $0.directLinearRGB.z
+                    ),
+                    ambientLinearRGB: SIMD3<Float>(
+                        $0.ambientLinearRGB.x,
+                        $0.ambientLinearRGB.y,
+                        $0.ambientLinearRGB.z
+                    )
+                )
+            },
+            sunSprites: sunSprites,
             sky3D: mesh.sky3D.map {
                 GModMetalWorldSky3D(
                     sourceOrigin: SIMD3<Float>(
