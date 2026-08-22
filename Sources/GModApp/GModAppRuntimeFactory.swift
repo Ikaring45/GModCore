@@ -2,6 +2,7 @@ import Foundation
 import GModEngine
 import GModGameAssets
 import GModGameSession
+import GModLua
 import GModMetal
 
 private final class GModMountedContentSource: @unchecked Sendable {
