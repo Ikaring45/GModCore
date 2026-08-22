@@ -135,7 +135,7 @@ public final class GMLuaTraceBridge: @unchecked Sendable {
         lock.unlock()
     }
 
-    fileprivate func trace(
+    func trace(
         _ request: GMLuaTraceRequest,
         shouldHitDynamicEntity: (GMLuaDynamicTraceCandidate) throws -> Bool
     ) throws -> SourceGameTrace {

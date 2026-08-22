@@ -680,7 +680,8 @@ public final class SourceCanonicalToolActionBridge: @unchecked Sendable {
                         )
                     }
                     try sound.receiveEnginePlayEvent(event.clientPlayEvent)
-                case .weaponAnimation, .playerAnimation:
+                case .weaponAnimation, .playerAnimation,
+                     .playerMuzzleFlash, .playerViewPunch, .fireBullets:
                     break
                 }
                 clientState.capture(delivery)

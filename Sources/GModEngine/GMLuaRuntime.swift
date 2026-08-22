@@ -45,6 +45,11 @@ public final class GMLuaRuntime {
     public private(set) var netTransport: GMLuaNetTransport?
     public private(set) var netEndpoint: GMLuaNetEndpoint?
     public private(set) var traceBridge: GMLuaTraceBridge?
+    /// SERVER-owned `Entity:FireBullets` projection. The active user command
+    /// is supplied only while the authoritative ItemPostFrame pass runs, so a
+    /// timer cannot silently inherit an unrelated prediction seed.
+    public internal(set) var fireBulletsBridge:
+        SourceCanonicalFireBulletsGLuaBridge?
     /// Pending framebuffer captures requested by the stock `gmod_camera`
     /// `jpeg` command, exposed for the app renderer to drain at a frame boundary.
     public internal(set) var cameraCaptureRequests:

@@ -582,6 +582,11 @@ public enum SourceCanonicalWeaponGameplayBridge {
             into: runtime,
             host: host
         )
+        runtime.fireBulletsBridge = try
+            SourceCanonicalFireBulletsGLuaBridge.install(
+                into: runtime,
+                host: host
+            )
     }
 }
 
