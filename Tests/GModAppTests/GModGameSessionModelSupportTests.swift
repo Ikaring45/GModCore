@@ -325,7 +325,7 @@ final class GModGameSessionModelSupportTests: XCTestCase {
         XCTAssertTrue(admitted.buttons.contains(.attack))
         XCTAssertTrue(admitted.buttons.contains(.attack2))
         XCTAssertTrue(admitted.buttons.contains(.use))
-        XCTAssertFalse(admitted.buttons.contains(.reload))
+        XCTAssertTrue(admitted.buttons.contains(.reload))
 
         let popupAccepts = GModGameWorldInputPolicy.accepts(
             isReady: true,
@@ -351,7 +351,7 @@ final class GModGameSessionModelSupportTests: XCTestCase {
     func testUnsupportedMovementDiagnosticNeverClaimsSuccess() {
         let water = GModGameMovementDiagnostic(
             commandNumber: 12,
-            reason: .feature(.water)
+            reason: .feature(.waterCurrent)
         )
         XCTAssertTrue(water.status.contains("Movement blocked"))
         XCTAssertTrue(water.status.contains("water"))

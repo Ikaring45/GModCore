@@ -57,7 +57,7 @@ enum GModGameWorldInputPolicy {
         if sideAxis < 0 { buttons.insert(.moveLeft) }
         if jumpPressed { buttons.insert(.jump) }
         buttons.formUnion(
-            heldActionButtons.intersection([.attack, .attack2, .use])
+            heldActionButtons.intersection([.attack, .attack2, .use, .reload])
         )
         return GModPlayableMovementInput(
             viewAngles: viewAngles,
