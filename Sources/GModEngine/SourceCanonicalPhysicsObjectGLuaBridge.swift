@@ -320,6 +320,20 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
                 function: "PhysObj:AddVelocity"
             ))
         }
+        try setPhysicsMutationMethod("SetAngleVelocity") { arguments in
+            .setAngularVelocity(try self.requiredVector(
+                arguments,
+                at: 1,
+                function: "PhysObj:SetAngleVelocity"
+            ))
+        }
+        try setPhysicsMutationMethod("AddAngleVelocity") { arguments in
+            .addAngularVelocity(try self.requiredVector(
+                arguments,
+                at: 1,
+                function: "PhysObj:AddAngleVelocity"
+            ))
+        }
         try setPhysicsMutationMethod("ApplyForceCenter") { arguments in
             .applyCenterForce(try self.requiredVector(
                 arguments,

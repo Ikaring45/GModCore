@@ -72,6 +72,12 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
             phys:EnableCollisions(true)
             phys:SetVelocity(Vector(10, 20, 30))
             phys:AddVelocity(Vector(1, 2, 3))
+            phys:SetAngleVelocity(Vector(40, 50, 60))
+            phys:AddAngleVelocity(Vector(4, 5, 6))
+            local finite, finiteMessage = pcall(function()
+                phys:SetAngleVelocity(Vector(0 / 0, 0, 0))
+            end)
+            assert(finite == false and finiteMessage ~= nil)
             phys:ApplyForceCenter(Vector(100, 200, 300))
 
             function FixInvalidPhysicsObject(prop)
@@ -123,6 +129,14 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
             SourcePhysicsBodyMutationCommand(
                 bodyID: pending.bodyID,
                 mutation: .addLinearVelocity(SourceVector3(1, 2, 3))
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .setAngularVelocity(SourceVector3(40, 50, 60))
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .addAngularVelocity(SourceVector3(4, 5, 6))
             ),
             SourcePhysicsBodyMutationCommand(
                 bodyID: pending.bodyID,
@@ -244,6 +258,11 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
             assert(replacement ~= FIRST_SOLID and replacement ~= SECOND_SOLID)
 
             local ok, message = pcall(function() FIRST_SOLID:GetMass() end)
+            assert(ok == false)
+            assert(string.find(message, "live canonical PhysObj expected", 1, true))
+            ok, message = pcall(function()
+                FIRST_SOLID:AddAngleVelocity(Vector(1, 2, 3))
+            end)
             assert(ok == false)
             assert(string.find(message, "live canonical PhysObj expected", 1, true))
             """#,
