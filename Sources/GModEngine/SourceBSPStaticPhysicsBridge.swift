@@ -45,6 +45,7 @@ public enum SourceBSPStaticPhysicsBridgeError:
     case brushSideBudgetExceeded(brush: Int, actual: Int, limit: Int)
     case brushDoesNotFormClosedVolume(Int)
     case triangleBudgetExceeded(actual: Int, limit: Int)
+    case displacementGeometry(SourceBSPDisplacementPhysicsGeometryError)
     case staticGeometry(SourceDeterministicPhysicsStaticSceneError)
 }
 
@@ -93,8 +94,13 @@ public struct SourceBSPAttestedStaticPhysicsAsset: Equatable, Sendable {
     public let mapRevision: Int32
     public let contents: SourceContents
     public let includedBrushIndices: [Int]
+    public let includedDisplacementFaceIndices: [Int]
     public let skippedBrushes: [SourceBSPStaticPhysicsSkippedBrush]
     public let geometry: SourceDeterministicPhysicsStaticGeometry
+    public let brushTriangleCount: Int
+    public let displacementTriangleCount: Int
+    public let removedDisplacementTriangleCount: Int
+    public let degenerateDisplacementTriangleCount: Int
     public let triangleCount: Int
 
     fileprivate init(
@@ -103,8 +109,13 @@ public struct SourceBSPAttestedStaticPhysicsAsset: Equatable, Sendable {
         mapRevision: Int32,
         contents: SourceContents,
         includedBrushIndices: [Int],
+        includedDisplacementFaceIndices: [Int],
         skippedBrushes: [SourceBSPStaticPhysicsSkippedBrush],
         geometry: SourceDeterministicPhysicsStaticGeometry,
+        brushTriangleCount: Int,
+        displacementTriangleCount: Int,
+        removedDisplacementTriangleCount: Int,
+        degenerateDisplacementTriangleCount: Int,
         triangleCount: Int
     ) {
         self.bspSHA256 = bspSHA256
@@ -112,8 +123,16 @@ public struct SourceBSPAttestedStaticPhysicsAsset: Equatable, Sendable {
         self.mapRevision = mapRevision
         self.contents = contents
         self.includedBrushIndices = includedBrushIndices
+        self.includedDisplacementFaceIndices =
+            includedDisplacementFaceIndices
         self.skippedBrushes = skippedBrushes
         self.geometry = geometry
+        self.brushTriangleCount = brushTriangleCount
+        self.displacementTriangleCount = displacementTriangleCount
+        self.removedDisplacementTriangleCount =
+            removedDisplacementTriangleCount
+        self.degenerateDisplacementTriangleCount =
+            degenerateDisplacementTriangleCount
         self.triangleCount = triangleCount
     }
 
@@ -161,7 +180,7 @@ public enum SourceBSPStaticPhysicsBridge {
         var parts: [SourceDeterministicPhysicsStaticMeshPart] = []
         var totalTriangleCount = 0
         includedBrushIndices.reserveCapacity(bsp.brushes.count)
-        parts.reserveCapacity(bsp.brushes.count)
+        parts.reserveCapacity(bsp.brushes.count + bsp.displacementInfo.count)
 
         // Only leaves reachable from model zero's headnode are worldspawn.
         // Other BSP models share the global leaf/brush tables, but traceWorld
@@ -275,6 +294,42 @@ public enum SourceBSPStaticPhysicsBridge {
             includedBrushIndices.append(brushIndex)
         }
 
+        let brushTriangleCount = totalTriangleCount
+        let remainingTriangleBudget = budget.maximumTriangles -
+            totalTriangleCount
+        let displacementGeometry: SourceBSPDisplacementPhysicsGeometry
+        do {
+            displacementGeometry = try
+                SourceBSPDisplacementPhysicsGeometryBuilder.build(
+                    bsp: bsp,
+                    contentsMask: contentsMask,
+                    maximumTriangles: remainingTriangleBudget
+                )
+        } catch let error as SourceBSPDisplacementPhysicsGeometryError {
+            if case let .triangleBudgetExceeded(actual, _) = error {
+                throw SourceBSPStaticPhysicsBridgeError
+                    .triangleBudgetExceeded(
+                        actual: brushTriangleCount + actual,
+                        limit: budget.maximumTriangles
+                    )
+            }
+            throw SourceBSPStaticPhysicsBridgeError
+                .displacementGeometry(error)
+        }
+        for mesh in displacementGeometry.meshes {
+            do {
+                parts.append(try SourceDeterministicPhysicsStaticMeshPart(
+                    vertices: mesh.vertices,
+                    triangles: mesh.triangles,
+                    topology: .openTriangleMesh,
+                    partIndex: parts.count
+                ))
+            } catch let error as SourceDeterministicPhysicsStaticSceneError {
+                throw SourceBSPStaticPhysicsBridgeError.staticGeometry(error)
+            }
+        }
+        totalTriangleCount += displacementGeometry.triangleCount
+
         guard !parts.isEmpty else {
             throw SourceBSPStaticPhysicsBridgeError.noMatchingWorldBrushes
         }
@@ -290,8 +345,16 @@ public enum SourceBSPStaticPhysicsBridge {
             mapRevision: bsp.header.mapRevision,
             contents: contentsMask,
             includedBrushIndices: includedBrushIndices,
+            includedDisplacementFaceIndices:
+                displacementGeometry.meshes.map(\.faceIndex),
             skippedBrushes: skippedBrushes,
             geometry: geometry,
+            brushTriangleCount: brushTriangleCount,
+            displacementTriangleCount: displacementGeometry.triangleCount,
+            removedDisplacementTriangleCount:
+                displacementGeometry.removedTriangleCount,
+            degenerateDisplacementTriangleCount:
+                displacementGeometry.degenerateTriangleCount,
             triangleCount: totalTriangleCount
         )
     }

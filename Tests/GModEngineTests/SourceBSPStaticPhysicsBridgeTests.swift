@@ -22,8 +22,21 @@ struct SourceBSPStaticPhysicsBridgeTests {
         #expect(asset.bspVersion == bsp.header.version)
         #expect(asset.mapRevision == bsp.header.mapRevision)
         #expect(!asset.includedBrushIndices.isEmpty)
-        #expect(asset.geometry.parts.count == asset.includedBrushIndices.count)
+        #expect(!asset.includedDisplacementFaceIndices.isEmpty)
+        #expect(
+            asset.geometry.parts.count ==
+                asset.includedBrushIndices.count +
+                asset.includedDisplacementFaceIndices.count
+        )
         #expect(asset.triangleCount > 0)
+        #expect(asset.triangleCount == asset.brushTriangleCount +
+            asset.displacementTriangleCount)
+        #expect(asset.displacementTriangleCount > 0)
+        #expect(
+            asset.geometry.parts
+                .suffix(asset.includedDisplacementFaceIndices.count)
+                .allSatisfy { $0.topology == .openTriangleMesh }
+        )
         #expect(asset.skippedBrushes.allSatisfy {
             !asset.includedBrushIndices.contains($0.brushIndex)
         })
@@ -168,6 +181,8 @@ struct SourceBSPStaticPhysicsBridgeTests {
         )
         #expect(!asset.geometry.parts.isEmpty)
         #expect(asset.triangleCount > 0)
+        #expect(asset.displacementTriangleCount > 0)
+        #expect(!asset.includedDisplacementFaceIndices.isEmpty)
 
         let worldIdentity = SourceCanonicalEntityIdentity(
             handle: SourceBaseHandle(entryIndex: 0, serialNumber: 73)
