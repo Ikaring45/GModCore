@@ -70,6 +70,10 @@ public enum GModWorldRenderLayer: String, Sendable, Equatable, Hashable {
 private struct GModWorldMaterialBucketKey: Hashable {
     let material: String
     let renderLayer: GModWorldRenderLayer
+    /// Keeps genuine BSP displacement faces separate from brush faces that
+    /// happen to share the same Source material. Renderer texture LOD policy
+    /// must follow geometry provenance, not a guessed VMT name or shader.
+    let isDisplacement: Bool
 }
 
 private struct GModWorldPendingVisibilitySpan {
@@ -671,6 +675,10 @@ public struct GModWorldMaterialRange: Sendable, Equatable {
     public let sourceMaterialNames: [String]
     public let waterSurface: GModWorldWaterSurface?
     public let renderLayer: GModWorldRenderLayer
+    /// True only when every index in this range was emitted from a BSP
+    /// displacement face. Ranges are split at mesh construction so this never
+    /// reclassifies ordinary brushes, water, or a sky render layer.
+    public let isDisplacement: Bool
 
     public init(
         materialName: String?,
@@ -678,7 +686,8 @@ public struct GModWorldMaterialRange: Sendable, Equatable {
         indexCount: Int,
         sourceMaterialNames: [String] = [],
         waterSurface: GModWorldWaterSurface? = nil,
-        renderLayer: GModWorldRenderLayer = .world
+        renderLayer: GModWorldRenderLayer = .world,
+        isDisplacement: Bool = false
     ) {
         self.materialName = materialName
         self.firstIndex = firstIndex
@@ -686,6 +695,7 @@ public struct GModWorldMaterialRange: Sendable, Equatable {
         self.sourceMaterialNames = sourceMaterialNames
         self.waterSurface = waterSurface
         self.renderLayer = renderLayer
+        self.isDisplacement = isDisplacement
     }
 }
 
@@ -1227,7 +1237,8 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
             }
             let materialKey = GModWorldMaterialBucketKey(
                 material: bucketMaterial,
-                renderLayer: renderLayer
+                renderLayer: renderLayer,
+                isDisplacement: displacement != nil
             )
             if let matchedWaterSurface {
                 waterSurfaces[materialKey] = matchedWaterSurface
@@ -1467,7 +1478,8 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
                 let baseIndex = UInt32(vertices.count)
                 let materialKey = GModWorldMaterialBucketKey(
                     material: face.materialName.lowercased(),
-                    renderLayer: .sky2D
+                    renderLayer: .sky2D,
+                    isDisplacement: false
                 )
                 if materialIndices[materialKey] == nil {
                     materialIndices[materialKey] = []
@@ -1611,7 +1623,8 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
                         $0.lowercased() < $1.lowercased()
                     },
                     waterSurface: waterSurfaces[key],
-                    renderLayer: key.renderLayer
+                    renderLayer: key.renderLayer,
+                    isDisplacement: key.isDisplacement
                 )
             )
             if let faceClusters, waterSurfaces[key] == nil {

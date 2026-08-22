@@ -286,9 +286,20 @@ public enum GModMetalTextureAddressMode: Sendable, Equatable, Hashable {
     case clampToEdge
 }
 
-/// Metal-independent sampler policy derived from the real VTF header. This is
-/// intentionally test-visible so point/no-mip/clamp semantics cannot regress
-/// into a blanket blur workaround.
+/// Selects the Source texture minification path without inferring terrain from
+/// material names. Only BSP displacement ranges in the ordinary world use the
+/// terrain case; sky and water keep their existing sampler contracts.
+public enum GModMetalWorldTextureUsage: Sendable, Equatable, Hashable {
+    case standard
+    case displacementTerrain
+}
+
+/// Metal-independent sampler policy derived from the real VTF header plus a
+/// renderer-selected high-quality displacement policy. VTF trilinear/
+/// anisotropic flags are minimum author constraints in Source; point/no-mip
+/// remain hard limits.
+/// This is test-visible so terrain quality cannot regress into a blanket blur
+/// workaround or silently discard an authored mip chain.
 public struct GModMetalWorldSamplerConfiguration: Sendable, Equatable, Hashable {
     public let minFilter: GModMetalTextureFilter
     public let magFilter: GModMetalTextureFilter
@@ -299,15 +310,22 @@ public struct GModMetalWorldSamplerConfiguration: Sendable, Equatable, Hashable 
 
     public init(
         bitmap: GModMetalSurfaceBitmap,
-        renderLayer: GModMetalWorldRenderLayer
+        renderLayer: GModMetalWorldRenderLayer,
+        usage: GModMetalWorldTextureUsage = .standard
     ) {
         let flags = bitmap.sourceTextureFlags ?? []
         let point = flags.contains(.pointSample)
+        let displacementTerrainFiltering =
+            usage == .displacementTerrain &&
+            renderLayer == .world &&
+            !point
         minFilter = point ? .nearest : .linear
         magFilter = point ? .nearest : .linear
         if bitmap.mipLevels.count <= 1 || flags.contains(.noMip) {
             mipFilter = .notMipmapped
-        } else if flags.contains(.trilinear) || flags.contains(.anisotropic) {
+        } else if displacementTerrainFiltering ||
+                    flags.contains(.trilinear) ||
+                    flags.contains(.anisotropic) {
             mipFilter = .linear
         } else {
             mipFilter = .nearest
@@ -319,7 +337,8 @@ public struct GModMetalWorldSamplerConfiguration: Sendable, Equatable, Hashable 
         tAddressMode = forceSkyClamp || flags.contains(.clampT)
             ? .clampToEdge
             : .repeat
-        maximumAnisotropy = flags.contains(.anisotropic) &&
+        maximumAnisotropy = (flags.contains(.anisotropic) ||
+            displacementTerrainFiltering) &&
             mipFilter != .notMipmapped
                 ? GModMetalSamplerContract.maximumAnisotropy
                 : 1
@@ -609,7 +628,10 @@ enum GModMetalWorldTextureCacheContract {
                 keys.insert(key(for: bitmap, isSRGB: true))
             }
             if let bitmap = range.terrainMaterial?.detail?.bitmap {
-                keys.insert(key(for: bitmap, isSRGB: true))
+                keys.insert(key(
+                    for: bitmap,
+                    isSRGB: range.terrainMaterial?.detail?.samplesAsSRGB == true
+                ))
             }
             if let bitmap = range.terrainMaterial?.vertexTransition?
                 .baseTexture2Bitmap {
@@ -958,6 +980,10 @@ public struct GModMetalWorldDetailMaterial: Sendable, Equatable {
     public let textureTransform: GModMetalWorldUVTransform
     public let blendFactor: Float
     public let blendMode: Int
+    /// For the supported non-SSBump modes, Source LightmappedGeneric enables
+    /// sRGB read for effective detail mode 1 only. The default mode used by
+    /// gm_construct terrain is sampled as linear data.
+    public var samplesAsSRGB: Bool { blendMode == 1 }
 
     public init(
         textureName: String,
@@ -1052,11 +1078,21 @@ public struct GModMetalWorldMaterialRange: Sendable, Equatable {
     public let waterMaterial: GModMetalWorldWaterMaterial?
     public let terrainMaterial: GModMetalWorldTerrainMaterial?
     public let renderLayer: GModMetalWorldRenderLayer
+    public let isDisplacement: Bool
+    /// A real BSP displacement in the normal world is the only range allowed
+    /// onto the derivative terrain minification path. This excludes water and
+    /// both Source sky layers even if their VMT uses a terrain-capable shader.
+    public var textureUsage: GModMetalWorldTextureUsage {
+        isDisplacement && renderLayer == .world && waterSurface == nil
+            ? .displacementTerrain
+            : .standard
+    }
     public var samplerConfiguration: GModMetalWorldSamplerConfiguration? {
         bitmap.map {
             GModMetalWorldSamplerConfiguration(
                 bitmap: $0,
-                renderLayer: renderLayer
+                renderLayer: renderLayer,
+                usage: textureUsage
             )
         }
     }
@@ -1069,7 +1105,8 @@ public struct GModMetalWorldMaterialRange: Sendable, Equatable {
         waterSurface: GModMetalWorldWaterSurface? = nil,
         waterMaterial: GModMetalWorldWaterMaterial? = nil,
         terrainMaterial: GModMetalWorldTerrainMaterial? = nil,
-        renderLayer: GModMetalWorldRenderLayer = .world
+        renderLayer: GModMetalWorldRenderLayer = .world,
+        isDisplacement: Bool = false
     ) {
         self.materialName = materialName
         self.firstIndex = firstIndex
@@ -1078,6 +1115,7 @@ public struct GModMetalWorldMaterialRange: Sendable, Equatable {
         self.waterMaterial = waterMaterial
         self.terrainMaterial = terrainMaterial
         self.renderLayer = renderLayer
+        self.isDisplacement = isDisplacement
         if let bitmap {
             materialResolution = .resolved(bitmap)
         } else if waterSurface != nil || materialName == nil {
@@ -1100,7 +1138,8 @@ public struct GModMetalWorldMaterialRange: Sendable, Equatable {
         waterSurface: GModMetalWorldWaterSurface? = nil,
         waterMaterial: GModMetalWorldWaterMaterial? = nil,
         terrainMaterial: GModMetalWorldTerrainMaterial? = nil,
-        renderLayer: GModMetalWorldRenderLayer = .world
+        renderLayer: GModMetalWorldRenderLayer = .world,
+        isDisplacement: Bool = false
     ) {
         self.materialName = materialName
         self.firstIndex = firstIndex
@@ -1110,6 +1149,7 @@ public struct GModMetalWorldMaterialRange: Sendable, Equatable {
         self.waterMaterial = waterMaterial
         self.terrainMaterial = terrainMaterial
         self.renderLayer = renderLayer
+        self.isDisplacement = isDisplacement
         let skybox = renderLayer == .sky2D
             ? Self.skyboxBinding(for: materialName)
             : nil
