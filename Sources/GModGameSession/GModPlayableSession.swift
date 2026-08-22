@@ -1017,6 +1017,15 @@ public final class GModPlayableSession {
                 )
 
             try server.loadFile("lua/includes/init.lua")
+            // The original extension intentionally defines these two methods
+            // in Lua. Rebind only that pair after include initialization so
+            // PlayerSpawn authors canonical SERVER state rather than a
+            // realm-local `m_bFlashlight` table field.
+            try SourceCanonicalWeaponCombatBridge
+                .installPlayerFlashlightMethods(
+                    into: server,
+                    host: sourceAdapter
+                )
             progress(.init(stage: .loadingServerSandbox))
             let serverStartup = try GMLuaStartupOrchestrator(
                 runtime: server,
@@ -1088,6 +1097,8 @@ public final class GModPlayableSession {
             progress(.init(stage: .startingClientLua))
 
             try client.loadFile("lua/includes/init.lua")
+            try SourceCanonicalWeaponCombatBridge
+                .installPlayerFlashlightMethods(into: client)
             progress(.init(stage: .loadingClientSandbox))
             var playerConnectionDeliveries = 0
             let clientStartup = try GMLuaStartupOrchestrator(

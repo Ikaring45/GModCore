@@ -93,22 +93,55 @@ final class SourceCanonicalPlayerMovementIntegrationTests: XCTestCase {
         let result = try session.serverRuntime.executeReturningValues(
             """
             local ply = Player(70)
-            player_manager.SetPlayerClass(ply, "player_sandbox")
-            assert(player_manager.GetPlayerClass(ply) == "player_sandbox")
-            local ok, message = pcall(player_manager.OnPlayerSpawn, ply, false)
+            player_manager.RegisterClass("player_spawn_fifo_test", {
+                DisplayName = "Spawn FIFO Test",
+                CanUseFlashlight = false,
+                DropWeaponOnDie = true,
+                TeammateNoCollide = false,
+                AvoidPlayers = false,
+                MaxHealth = 150,
+                MaxArmor = 125,
+                StartHealth = 75,
+                StartArmor = 25
+            }, "player_sandbox")
+            player_manager.SetPlayerClass(ply, "player_spawn_fifo_test")
+            assert(player_manager.GetPlayerClass(ply) == "player_spawn_fifo_test")
+            local ok, message = pcall(function()
+                player_manager.OnPlayerSpawn(ply, false)
+                assert(pcall(function() ply:SetMaxHealth(-1) end) == false)
+                assert(pcall(function() ply:SetMaxArmor(-1) end) == false)
+                assert(pcall(function() ply:SetArmor(1.5) end) == false)
+
+                local playerMeta = FindMetaTable("Player")
+                local world = Entity(0)
+                assert(pcall(function() playerMeta.AllowFlashlight(world, true) end) == false)
+                assert(pcall(function() playerMeta.ShouldDropWeapon(world, true) end) == false)
+                assert(pcall(function() playerMeta.SetNoCollideWithTeammates(world, true) end) == false)
+                assert(pcall(function() playerMeta.SetAvoidPlayers(world, true) end) == false)
+                assert(pcall(function() playerMeta.SetMaxArmor(world, 10) end) == false)
+                assert(pcall(function() playerMeta.SetArmor(world, 10) end) == false)
+            end)
             return ok, message
             """,
             sourceName: "=(original player_manager.OnPlayerSpawn)"
         )
-        guard case let .boolean(completed)? = result.first,
-              case let .string(message)? = result.dropFirst().first else {
+        guard case let .boolean(completed)? = result.first else {
             return XCTFail("original player_manager result was malformed")
         }
-        XCTAssertFalse(completed)
-        XCTAssertTrue(
-            message.utf8String.contains("ShouldDropWeapon"),
-            "the original route must stop at its next honest unsupported ABI: \(message.utf8String)"
-        )
+        if !completed,
+           case let .string(message)? = result.dropFirst().first {
+            XCTFail(
+                "original player_manager.OnPlayerSpawn failed: " +
+                message.utf8String
+            )
+        }
+        XCTAssertTrue(completed, "original player_manager.OnPlayerSpawn must finish")
+        if let message = result.dropFirst().first,
+           case .nilValue = message {
+            // Expected: pcall has no error message on success.
+        } else if result.count > 1 {
+            XCTFail("successful original player_manager returned an error value")
+        }
 
         let authoredServer = try XCTUnwrap(
             serverRegistry.canonicalSnapshot(at: configuration.playerEntityIndex)
@@ -125,6 +158,17 @@ final class SourceCanonicalPlayerMovementIntegrationTests: XCTestCase {
         XCTAssertEqual(authored.duckSpeed, 0.1, accuracy: 0.000_001)
         XCTAssertEqual(authored.unDuckSpeed, 0.1, accuracy: 0.000_001)
         XCTAssertEqual(authored.jumpPower, 200)
+        XCTAssertEqual(authoredServer.combat.health, 75)
+        XCTAssertEqual(authoredServer.combat.maximumHealth, 150)
+        let spawnSettings = try XCTUnwrap(
+            authoredServer.combat.playerSpawnSettings
+        )
+        XCTAssertFalse(spawnSettings.allowsFlashlight)
+        XCTAssertTrue(spawnSettings.shouldDropWeaponOnDeath)
+        XCTAssertFalse(spawnSettings.noCollideWithTeammates)
+        XCTAssertFalse(spawnSettings.avoidsPlayers)
+        XCTAssertEqual(spawnSettings.armor, 25)
+        XCTAssertEqual(spawnSettings.maximumArmor, 125)
         XCTAssertEqual(
             clientRegistry.canonicalSnapshot(at: configuration.playerEntityIndex),
             initialClient,
@@ -150,8 +194,14 @@ final class SourceCanonicalPlayerMovementIntegrationTests: XCTestCase {
             assert(math.abs(ply:GetDuckSpeed() - 0.1) < 0.000001)
             assert(math.abs(ply:GetUnDuckSpeed() - 0.1) < 0.000001)
             assert(ply:GetJumpPower() == 200)
+            assert(ply:CanUseFlashlight() == false)
+            assert(ply:GetNoCollideWithTeammates() == false)
+            assert(ply:GetMaxHealth() == 150)
+            assert(ply:Health() == 75)
+            assert(ply:GetMaxArmor() == 125)
+            assert(ply:Armor() == 25)
             """,
-            sourceName: "=(replicated Player movement getters)"
+            sourceName: "=(replicated Player movement/spawn getters)"
         )
 
         let groundedOrigin = session.playerWalkState.origin

@@ -102,6 +102,104 @@ private final class SourceCanonicalUserCommandValue: @unchecked Sendable {
 public enum SourceCanonicalWeaponCombatBridge {
     public static let sourceFixedFrameTime = 0.015
 
+    /// Rebinds the two Lua-defined flashlight accessors after
+    /// `lua/includes/extensions/player.lua` has loaded. The bundled file is
+    /// kept unchanged; its realm-local `m_bFlashlight` field is replaced by
+    /// the canonical full-EHANDLE snapshot/FIFO surface.
+    public static func installPlayerFlashlightMethods(
+        into runtime: GMLuaRuntime,
+        host: (any SourceCanonicalEntityLuaHost)? = nil
+    ) throws {
+        guard runtime.realm != .menu,
+              let typeSystem = runtime.typeSystem,
+              let registry = runtime.entityRegistry,
+              let playerMetatable = typeSystem.metatable(named: "Player")
+        else {
+            throw LuaError.runtime(
+                "canonical Player flashlight requires game native metatables"
+            )
+        }
+        if runtime.realm == .server, host == nil {
+            throw LuaError.runtime(
+                "canonical Player flashlight SERVER requires an authoritative host"
+            )
+        }
+
+        let state = runtime.state
+        let realm = runtime.realm
+        let hostBox = SourceCanonicalWeaponCombatWeakHost(host)
+        let registryBox = SourceCanonicalWeaponCombatWeakRegistry(registry)
+
+        func native(
+            _ name: String,
+            _ body: @escaping LuaNativeFunction
+        ) -> LuaValue {
+            .nativeFunction(LuaNativeFunctionBox(body, debugName: name))
+        }
+        func setMethod(
+            _ name: String,
+            body: @escaping LuaNativeFunction
+        ) throws {
+            let key = name.split(separator: ":").last.map(String.init) ?? name
+            try state.setRawTableValue(
+                native(name, body),
+                for: .string(LuaString(key)),
+                in: playerMetatable
+            )
+        }
+        func player(
+            _ value: LuaValue?,
+            function: String
+        ) throws -> SourceCanonicalEntitySnapshot {
+            guard let value,
+                  let snapshot = registryBox.value?.canonicalSnapshot(for: value),
+                  snapshot.kind == .player,
+                  snapshot.combat.playerSpawnSettings != nil else {
+                throw LuaError.runtime(
+                    "bad self to '\(function)' (live canonical Player expected)"
+                )
+            }
+            return snapshot
+        }
+
+        try setMethod("Player:CanUseFlashlight") { arguments in
+            let snapshot = try player(
+                arguments.first,
+                function: "Player:CanUseFlashlight"
+            )
+            return [.boolean(
+                snapshot.combat.playerSpawnSettings?.allowsFlashlight == true
+            )]
+        }
+        try setMethod("Player:AllowFlashlight") { arguments in
+            let snapshot = try player(
+                arguments.first,
+                function: "Player:AllowFlashlight"
+            )
+            guard arguments.indices.contains(1),
+                  case let .boolean(enabled) = arguments[1] else {
+                throw LuaError.runtime(
+                    "bad argument #1 to 'Player:AllowFlashlight' (boolean expected)"
+                )
+            }
+            guard realm == .server, let host = hostBox.value else {
+                throw LuaError.runtime(
+                    "Player:AllowFlashlight requires SERVER authority"
+                )
+            }
+            _ = try host.updateCanonicalEntity(snapshot.identity) { candidate in
+                guard var settings = candidate.combat.playerSpawnSettings else {
+                    throw LuaError.runtime(
+                        "Player:AllowFlashlight canonical Player spawn state is unavailable"
+                    )
+                }
+                settings.allowsFlashlight = enabled
+                candidate.combat.playerSpawnSettings = settings
+            }
+            return []
+        }
+    }
+
     public static func install(
         into runtime: GMLuaRuntime,
         host: (any SourceCanonicalEntityLuaHost)? = nil
@@ -168,6 +266,18 @@ public enum SourceCanonicalWeaponCombatBridge {
             return result
         }
 
+        func playerSpawnSettings(
+            _ snapshot: SourceCanonicalEntitySnapshot,
+            function: String
+        ) throws -> SourceCanonicalPlayerSpawnSettings {
+            guard let settings = snapshot.combat.playerSpawnSettings else {
+                throw LuaError.runtime(
+                    "\(function) canonical Player spawn state is unavailable"
+                )
+            }
+            return settings
+        }
+
         func requiredHost(
             _ function: String
         ) throws -> any SourceCanonicalEntityLuaHost {
@@ -209,6 +319,57 @@ public enum SourceCanonicalWeaponCombatBridge {
                 )
             }
             return value
+        }
+
+        func nonNegativeInt32(
+            _ arguments: [LuaValue],
+            index: Int,
+            function: String
+        ) throws -> Int32 {
+            let value = try int32(
+                arguments,
+                index: index,
+                function: function
+            )
+            guard value >= 0 else {
+                throw LuaError.runtime(
+                    "bad argument #\(index) to '\(function)' " +
+                    "(nonnegative 32-bit integer expected)"
+                )
+            }
+            return value
+        }
+
+        func boolean(
+            _ arguments: [LuaValue],
+            index: Int,
+            function: String
+        ) throws -> Bool {
+            guard arguments.indices.contains(index),
+                  case let .boolean(value) = arguments[index] else {
+                throw LuaError.runtime(
+                    "bad argument #\(index) to '\(function)' (boolean expected)"
+                )
+            }
+            return value
+        }
+
+        func updatePlayerSpawnSettings(
+            _ player: SourceCanonicalEntitySnapshot,
+            function: String,
+            mutation: (inout SourceCanonicalPlayerSpawnSettings) -> Void
+        ) throws {
+            _ = try requiredHost(function).updateCanonicalEntity(
+                player.identity
+            ) { candidate in
+                guard var settings = candidate.combat.playerSpawnSettings else {
+                    throw LuaError.runtime(
+                        "\(function) canonical Player spawn state is unavailable"
+                    )
+                }
+                mutation(&settings)
+                candidate.combat.playerSpawnSettings = settings
+            }
         }
 
         func sourceFloat(
@@ -436,6 +597,43 @@ public enum SourceCanonicalWeaponCombatBridge {
             ).combat.maximumHealth))]
         }
         try setMethod(
+            "Player:GetNoCollideWithTeammates",
+            on: playerMetatable
+        ) { arguments in
+            let player = try snapshot(
+                arguments.first,
+                function: "Player:GetNoCollideWithTeammates",
+                kind: .player
+            )
+            return [.boolean(try playerSpawnSettings(
+                player,
+                function: "Player:GetNoCollideWithTeammates"
+            ).noCollideWithTeammates)]
+        }
+        try setMethod("Player:GetMaxArmor", on: playerMetatable) { arguments in
+            let player = try snapshot(
+                arguments.first,
+                function: "Player:GetMaxArmor",
+                kind: .player
+            )
+            return [.number(Double(try playerSpawnSettings(
+                player,
+                function: "Player:GetMaxArmor"
+            ).maximumArmor))]
+        }
+        try setMethod("Player:Armor", on: playerMetatable) { arguments in
+            let player = try snapshot(
+                arguments.first,
+                function: "Player:Armor",
+                kind: .player
+            )
+            return [.number(Double(try playerSpawnSettings(
+                player,
+                function: "Player:Armor"
+            ).armor))]
+        }
+
+        try setMethod(
             "Entity:GetInternalVariable",
             on: entityMetatable
         ) { arguments in
@@ -452,6 +650,28 @@ public enum SourceCanonicalWeaponCombatBridge {
             return [.number(Double(entity.combat.takeDamageMode))]
         }
         if realm == .server {
+            // SetMaxHealth is an Entity method in GLua. It remains available
+            // to damageable non-Players; Player-only settings below stay on
+            // the Player metatable and reject non-Player self values.
+            try setMethod(
+                "Entity:SetMaxHealth",
+                on: entityMetatable
+            ) { arguments in
+                let entity = try snapshot(
+                    arguments.first,
+                    function: "Entity:SetMaxHealth"
+                )
+                let maximumHealth = try nonNegativeInt32(
+                    arguments,
+                    index: 1,
+                    function: "Entity:SetMaxHealth"
+                )
+                _ = try requiredHost("Entity:SetMaxHealth")
+                    .updateCanonicalEntity(entity.identity) {
+                        $0.combat.maximumHealth = maximumHealth
+                    }
+                return []
+            }
             try setMethod("Entity:SetHealth", on: entityMetatable) { arguments in
                 let entity = try snapshot(
                     arguments.first,
@@ -469,6 +689,76 @@ public enum SourceCanonicalWeaponCombatBridge {
                             $0.motion.isAlive = health > 0
                         }
                     }
+                return []
+            }
+
+            for (method, field) in [
+                ("ShouldDropWeapon", "drop"),
+                ("SetNoCollideWithTeammates", "noCollide"),
+                ("SetAvoidPlayers", "avoid"),
+            ] {
+                let function = "Player:\(method)"
+                try setMethod(function, on: playerMetatable) { arguments in
+                    let player = try snapshot(
+                        arguments.first,
+                        function: function,
+                        kind: .player
+                    )
+                    let value = try boolean(
+                        arguments,
+                        index: 1,
+                        function: function
+                    )
+                    try updatePlayerSpawnSettings(
+                        player,
+                        function: function
+                    ) { settings in
+                        switch field {
+                        case "drop":
+                            settings.shouldDropWeaponOnDeath = value
+                        case "noCollide":
+                            settings.noCollideWithTeammates = value
+                        default:
+                            settings.avoidsPlayers = value
+                        }
+                    }
+                    return []
+                }
+            }
+
+            try setMethod("Player:SetMaxArmor", on: playerMetatable) {
+                arguments in
+                let player = try snapshot(
+                    arguments.first,
+                    function: "Player:SetMaxArmor",
+                    kind: .player
+                )
+                let value = try nonNegativeInt32(
+                    arguments,
+                    index: 1,
+                    function: "Player:SetMaxArmor"
+                )
+                try updatePlayerSpawnSettings(
+                    player,
+                    function: "Player:SetMaxArmor"
+                ) { $0.maximumArmor = value }
+                return []
+            }
+            try setMethod("Player:SetArmor", on: playerMetatable) { arguments in
+                let player = try snapshot(
+                    arguments.first,
+                    function: "Player:SetArmor",
+                    kind: .player
+                )
+                let value = try int32(
+                    arguments,
+                    index: 1,
+                    function: "Player:SetArmor"
+                )
+                try updatePlayerSpawnSettings(
+                    player,
+                    function: "Player:SetArmor"
+                ) { $0.armor = value }
                 return []
             }
         }
@@ -909,6 +1199,8 @@ public enum SourceCanonicalWeaponCombatBridge {
                 return []
             }
         )
+
+        try installPlayerFlashlightMethods(into: runtime, host: host)
     }
 }
 

@@ -510,25 +510,31 @@ public struct SourceCanonicalCombatState: Equatable, Sendable {
     public var takeDamageMode: Int32
     public var isBot: Bool
     public var isLagCompensationEnabled: Bool
+    /// Present only for a canonical Player. These values travel in the same
+    /// full-EHANDLE snapshot/FIFO as health and lifecycle state.
+    public var playerSpawnSettings: SourceCanonicalPlayerSpawnSettings?
 
     public init(
         health: Int32 = 0,
         maximumHealth: Int32 = 0,
         takeDamageMode: Int32 = 0,
         isBot: Bool = false,
-        isLagCompensationEnabled: Bool = false
+        isLagCompensationEnabled: Bool = false,
+        playerSpawnSettings: SourceCanonicalPlayerSpawnSettings? = nil
     ) {
         self.health = health
         self.maximumHealth = maximumHealth
         self.takeDamageMode = takeDamageMode
         self.isBot = isBot
         self.isLagCompensationEnabled = isLagCompensationEnabled
+        self.playerSpawnSettings = playerSpawnSettings
     }
 
     public static let player = SourceCanonicalCombatState(
         health: 100,
         maximumHealth: 100,
-        takeDamageMode: 2
+        takeDamageMode: 2,
+        playerSpawnSettings: .playerClassDefaults
     )
 }
 
@@ -1002,6 +1008,9 @@ public enum SourceCanonicalEntityError: Error, Equatable, CustomStringConvertibl
     case weaponRuntimeRequiresWeapon
     case invalidWeaponRuntime(String)
     case playerCombatFlagRequiresPlayer(String)
+    case playerSpawnSettingsRequired
+    case playerSpawnSettingsRequiresPlayer
+    case invalidPlayerSpawnSettings(String)
     case invalidWeaponHoldType(String)
     case invalidCollisionGroup(Int32)
     case playerDisplayNameRequired
@@ -1057,6 +1066,12 @@ public enum SourceCanonicalEntityError: Error, Equatable, CustomStringConvertibl
             return "canonical Weapon runtime field is invalid: \(field)"
         case let .playerCombatFlagRequiresPlayer(field):
             return "canonical combat flag \(field) is only valid on a Player"
+        case .playerSpawnSettingsRequired:
+            return "canonical Player requires engine-owned spawn settings"
+        case .playerSpawnSettingsRequiresPlayer:
+            return "canonical Player spawn settings are only valid on a Player"
+        case let .invalidPlayerSpawnSettings(field):
+            return "canonical Player spawn setting is invalid: \(field)"
         case let .invalidWeaponHoldType(value):
             return "canonical Weapon hold type is invalid: \(value)"
         case let .invalidCollisionGroup(value):
@@ -1747,6 +1762,18 @@ public final class SourceCanonicalEntityStore {
             throw SourceCanonicalEntityError.playerCombatFlagRequiresPlayer(
                 "lag compensation"
             )
+        }
+        if kind == .player {
+            guard let settings = state.combat.playerSpawnSettings else {
+                throw SourceCanonicalEntityError.playerSpawnSettingsRequired
+            }
+            guard settings.maximumArmor >= 0 else {
+                throw SourceCanonicalEntityError.invalidPlayerSpawnSettings(
+                    "maximumArmor"
+                )
+            }
+        } else if state.combat.playerSpawnSettings != nil {
+            throw SourceCanonicalEntityError.playerSpawnSettingsRequiresPlayer
         }
         if kind == .player {
             guard state.playerDisplayName != nil else {
