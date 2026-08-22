@@ -525,6 +525,22 @@ public actor GModPlayableSessionLane {
         )
     }
 
+    /// Returns the canonical local Player's renderer-neutral first-person
+    /// Hands projection only when its visual revision changed.
+    public func clientFirstPersonHandsScene(
+        ifChangedFrom revision: UInt64?,
+        expectedGeneration: UInt64? = nil
+    ) throws -> GModFirstPersonHandsSceneSnapshot? {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        return try session.clientFirstPersonHandsScene(
+            ifChangedFrom: revision
+        )
+    }
+
     /// Executes the stock SERVER drop path on the lane that owns Lua and the
     /// canonical entity list. Replication remains queued for the next ordinary
     /// host-frame drain.

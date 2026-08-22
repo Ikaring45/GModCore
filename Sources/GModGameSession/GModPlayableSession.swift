@@ -446,6 +446,8 @@ public final class GModPlayableSession {
         GModDynamicEntityRenderSceneProjector?
     private let firstPersonViewModelSceneProjector:
         GModFirstPersonViewModelSceneProjector?
+    private let firstPersonHandsSceneProjector:
+        GModFirstPersonHandsSceneProjector?
     private let propPhysicsCoordinator: SourceCanonicalPropPhysicsCoordinator
     private let weaponGameplayController: SourceCanonicalWeaponGameplayController
     private let physgunGameplayController:
@@ -709,12 +711,16 @@ public final class GModPlayableSession {
             GModDynamicEntityRenderSceneProjector?
         let loadedFirstPersonViewModelSceneProjector:
             GModFirstPersonViewModelSceneProjector?
+        let loadedFirstPersonHandsSceneProjector:
+            GModFirstPersonHandsSceneProjector?
         if let cache = studioRenderableModelCacheForTesting {
             loadedStudioRenderableModelCache = cache
             loadedDynamicEntityRenderSceneProjector = try
                 GModDynamicEntityRenderSceneProjector(resolver: cache)
             loadedFirstPersonViewModelSceneProjector =
                 GModFirstPersonViewModelSceneProjector(resolver: cache)
+            loadedFirstPersonHandsSceneProjector =
+                GModFirstPersonHandsSceneProjector(resolver: cache)
         } else if let loadedStudioModelRepository {
             let cache = try GModStudioRenderableModelCache(
                 repository: loadedStudioModelRepository
@@ -724,10 +730,13 @@ public final class GModPlayableSession {
                 GModDynamicEntityRenderSceneProjector(resolver: cache)
             loadedFirstPersonViewModelSceneProjector =
                 GModFirstPersonViewModelSceneProjector(resolver: cache)
+            loadedFirstPersonHandsSceneProjector =
+                GModFirstPersonHandsSceneProjector(resolver: cache)
         } else {
             loadedStudioRenderableModelCache = nil
             loadedDynamicEntityRenderSceneProjector = nil
             loadedFirstPersonViewModelSceneProjector = nil
+            loadedFirstPersonHandsSceneProjector = nil
         }
         try mapAllocationPolicy.validate(
             .bspEncodedBytes,
@@ -967,6 +976,10 @@ public final class GModPlayableSession {
                 canonicalBodyGroupResolver: activeBodyGroupResolver,
                 canonicalBodyGroupLayoutResolver:
                     activeBodyGroupLayoutResolver,
+                canonicalMaterialOverrideResolver: { materialName in
+                    try loadedClientMaterialResolver.sourceMaterialResolver
+                        .resolveEntityMaterialOverride(named: materialName)
+                },
                 canonicalPropPhysicsAssetResolver:
                     activePropPhysicsAssetResolver
             )
@@ -1238,6 +1251,8 @@ public final class GModPlayableSession {
                 loadedDynamicEntityRenderSceneProjector
             firstPersonViewModelSceneProjector =
                 loadedFirstPersonViewModelSceneProjector
+            firstPersonHandsSceneProjector =
+                loadedFirstPersonHandsSceneProjector
             startupReport = GModPlayableSessionStartupReport(
                 map: configuration.map,
                 spawnPoint: loadedSpawn,
@@ -1331,6 +1346,34 @@ public final class GModPlayableSession {
         return projector.snapshot(ifChangedFrom: revision)
     }
 
+    /// Resolves the replicated local Player's canonical `gmod_hands` full
+    /// EHANDLE independently of the active Weapon. The same CLIENT entity
+    /// replication cursor advances available and unavailable publications, so
+    /// a removed hands entity cannot remain stale when no SWEP viewmodel exists.
+    public func clientFirstPersonHandsScene(
+        ifChangedFrom revision: UInt64?
+    ) throws -> GModFirstPersonHandsSceneSnapshot? {
+        try ensureOpen()
+        guard let projector = firstPersonHandsSceneProjector else {
+            return nil
+        }
+        guard let registry = clientRuntime.entityRegistry else {
+            throw GModPlayableSessionError.missingRuntimeSurface(
+                .client,
+                "entity registry"
+            )
+        }
+        if let cursor = registry.canonicalEntityReplicationCursor,
+           cursor != projector.sourceProjectionCursor {
+            _ = try projector.update(
+                clientEntities: registry.canonicalEntitySnapshots,
+                localPlayerEntryIndex: configuration.playerEntityIndex,
+                cursor: cursor
+            )
+        }
+        return projector.snapshot(ifChangedFrom: revision)
+    }
+
     /// Publishes the host-selected digital button word to both realm-local
     /// Player mirrors. Analog movement is intentionally not interpreted here.
     @discardableResult
@@ -1410,8 +1453,12 @@ public final class GModPlayableSession {
         let inputButtons = try updateCurrentPlayerInputButtons(
             movementInput.buttons
         )
+        serverRuntime.fireBulletsBridge?.beginAuthoritativeCommand(command)
         let weaponGameplay = weaponGameplayController.runServerTick(
             playerIdentity: playerIdentity
+        )
+        serverRuntime.fireBulletsBridge?.endAuthoritativeCommand(
+            commandNumber: command.commandNumber
         )
         let physgunGameplay = physgunGameplayController.runServerTick(
             playerIdentity: playerIdentity
