@@ -222,6 +222,10 @@ public struct GModMainView: View {
         localizationSelection.snapshot.appText(.undoButton)
     }
 
+    private var localizedNoClipButton: String {
+        localizationSelection.snapshot.appText(.noClipButton)
+    }
+
     private var localizedContextMenuButton: String {
         localizationSelection.snapshot.appText(
             game.isContextMenuOpen
@@ -500,6 +504,16 @@ public struct GModMainView: View {
                                                 ) { pressed in
                                                     if pressed {
                                                         game.undoLastAction()
+                                                    }
+                                                }
+                                                GModTouchActionButton(
+                                                    label: localizedNoClipButton,
+                                                    diameter: layout.heldActionDiameter,
+                                                    accessibilityIdentifier:
+                                                        "garryspad.control.noclip"
+                                                ) { pressed in
+                                                    if pressed {
+                                                        game.toggleNoClip()
                                                     }
                                                 }
                                             }

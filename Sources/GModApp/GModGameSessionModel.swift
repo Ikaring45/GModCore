@@ -810,6 +810,30 @@ final class GModGameSessionModel: ObservableObject {
         }
     }
 
+    func toggleNoClip() {
+        guard acceptsWorldInput,
+              let requestedLaneGeneration = laneGeneration else {
+            rejectLateWorldInput()
+            return
+        }
+        let requestedGeneration = sessionGeneration
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await lane.requestToggleNoClip(
+                    expectedGeneration: requestedLaneGeneration
+                )
+            } catch {
+                if requestedGeneration == sessionGeneration {
+                    appendLog(
+                        "[CLIENT][NOCLIP] Request failed: " +
+                            GMLuaRuntime.describe(error)
+                    )
+                }
+            }
+        }
+    }
+
     func adjustLook(deltaX: Float, deltaY: Float) {
         guard acceptsWorldInput else {
             rejectLateWorldInput()

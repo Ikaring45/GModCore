@@ -121,6 +121,7 @@ final class GModMenuLocalizationTests: XCTestCase {
                 "garryspad.control.pause",
                 "garryspad.control.jump",
                 "garryspad.control.undo",
+                "garryspad.control.noclip",
                 "garryspad.control.spawn-menu",
                 "garryspad.control.close-spawn-menu",
                 "garryspad.control.context-menu",
