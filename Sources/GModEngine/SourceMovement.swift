@@ -273,6 +273,7 @@ public enum SourceMovementFeature: String, CaseIterable, Equatable, Sendable {
     case friction
     case groundAcceleration
     case airAcceleration
+    case noClipMove
     case stepMove
     case waterMove
     case vPhysics
@@ -295,7 +296,8 @@ public enum SourceGameMovement {
         of feature: SourceMovementFeature
     ) -> SourceMovementFeatureStatus {
         switch feature {
-        case .gravitySplit, .friction, .groundAcceleration, .airAcceleration:
+        case .gravitySplit, .friction, .groundAcceleration, .airAcceleration,
+             .noClipMove:
             return .equationCompatible
         case .stepMove, .waterMove, .vPhysics:
             return .unimplemented
