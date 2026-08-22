@@ -91,6 +91,10 @@ public struct GMLuaSoundPlayEvent: Sendable, Equatable {
 
 public typealias GMLuaSoundPlaySink = @Sendable (GMLuaSoundPlayEvent) -> Void
 
+public enum GMLuaSoundDeliveryError: Error, Equatable, Sendable {
+    case realmMismatch(expected: GMLuaRealm, received: GMLuaRealm)
+}
+
 /// Host-owned logical implementation of GLua's shared `sound` registry.
 ///
 /// Registration and play requests are deterministic and headless. The bridge
@@ -162,6 +166,21 @@ public final class GMLuaSound: @unchecked Sendable {
         lock.lock()
         playSink = nil
         lock.unlock()
+    }
+
+    /// Accepts an engine-owned sound event at a realm delivery boundary. This
+    /// is the same logical audio handoff as `sound.Play`; it does not fabricate
+    /// a decoded asset or platform audio device.
+    public func receiveEnginePlayEvent(
+        _ event: GMLuaSoundPlayEvent
+    ) throws {
+        guard event.realm == realm else {
+            throw GMLuaSoundDeliveryError.realmMismatch(
+                expected: realm,
+                received: event.realm
+            )
+        }
+        emit(event)
     }
 
     /// Installs the shared GLua sound surface. The returned object is the

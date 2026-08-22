@@ -184,6 +184,14 @@ final class LuaDebugHookState {
 }
 
 public final class LuaState {
+    /// Successful shared source-parse hits observed by this state. The parsed
+    /// syntax tree is immutable; execution state and closures are never shared.
+    public private(set) var sourceChunkCacheHitCount: UInt64 = 0
+
+    /// Source parses performed by this state because no shared immutable chunk
+    /// was available. Syntax failures count as misses and are never cached.
+    public private(set) var sourceChunkCacheMissCount: UInt64 = 0
+
     let globalTable = LuaTable()
     let registryTable = LuaTable()
     let garbageCollector = LuaGarbageCollector()
@@ -419,8 +427,15 @@ public final class LuaState {
     /// definitive, matching lua_load's pull-based reader contract.
     func parseSourceChunk(_ source: String, sourceName: String) throws -> LuaChunk {
         try ensureOpen()
+        if let cached = LuaSourceChunkCache.shared.chunk(for: source) {
+            sourceChunkCacheHitCount &+= 1
+            return cached
+        }
+        sourceChunkCacheMissCount &+= 1
         do {
-            return try parseRawSourceChunk(source)
+            let chunk = try parseRawSourceChunk(source)
+            LuaSourceChunkCache.shared.insert(chunk, for: source)
+            return chunk
         } catch {
             throw syntaxDiagnostic(
                 for: error,

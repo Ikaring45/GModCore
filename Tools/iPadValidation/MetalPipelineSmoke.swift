@@ -28,9 +28,21 @@ enum MetalPipelineSmoke {
 
             let library = try device.makeLibrary(source: shaderSource, options: nil)
             let worldVertex = try function(named: "worldVertexMain", in: library)
+            let dynamicEntityVertex = try function(
+                named: "dynamicEntityVertexMain",
+                in: library
+            )
             let worldFragment = try function(named: "worldFragmentMain", in: library)
             let worldTextured = try function(
                 named: "worldTexturedFragmentMain",
+                in: library
+            )
+            let dynamicEntityTextured = try function(
+                named: "dynamicEntityTexturedFragmentMain",
+                in: library
+            )
+            let dynamicEntityColor = try function(
+                named: "dynamicEntityColorFragmentMain",
                 in: library
             )
             let worldLightmapped = try function(
@@ -45,8 +57,20 @@ enum MetalPipelineSmoke {
                 named: "worldMissingMaterialFragmentMain",
                 in: library
             )
+            let dynamicEntityMissingMaterial = try function(
+                named: "dynamicEntityMissingMaterialFragmentMain",
+                in: library
+            )
             let worldSkybox = try function(
                 named: "worldSkyboxFragmentMain",
+                in: library
+            )
+            let worldSunSpriteVertex = try function(
+                named: "worldSunSpriteVertexMain",
+                in: library
+            )
+            let worldSunSprite = try function(
+                named: "worldSunSpriteFragmentMain",
                 in: library
             )
             let worldWaterSolid = try function(
@@ -55,6 +79,22 @@ enum MetalPipelineSmoke {
             )
             let worldWaterNormal = try function(
                 named: "worldWaterNormalFragmentMain",
+                in: library
+            )
+            let worldWaterCompositeSolid = try function(
+                named: "worldWaterCompositeSolidFragmentMain",
+                in: library
+            )
+            let worldWaterCompositeNormal = try function(
+                named: "worldWaterCompositeNormalFragmentMain",
+                in: library
+            )
+            let worldSceneCopyVertex = try function(
+                named: "worldSceneCopyVertexMain",
+                in: library
+            )
+            let worldSceneCopy = try function(
+                named: "worldSceneCopyFragmentMain",
                 in: library
             )
             let surfaceVertex = try function(named: "surfaceVertexMain", in: library)
@@ -71,65 +111,121 @@ enum MetalPipelineSmoke {
                 device: device,
                 vertex: worldVertex,
                 fragment: worldFragment,
-                blending: false
+                blendMode: .none
             )
             try makePipeline(
                 device: device,
                 vertex: worldVertex,
                 fragment: worldTextured,
-                blending: false
+                blendMode: .none
             )
             try makePipeline(
                 device: device,
                 vertex: worldVertex,
                 fragment: worldLightmapped,
-                blending: false
+                blendMode: .none
             )
             try makePipeline(
                 device: device,
                 vertex: worldVertex,
                 fragment: worldTexturedLightmapped,
-                blending: false
+                blendMode: .none
             )
             try makePipeline(
                 device: device,
                 vertex: worldVertex,
                 fragment: worldMissingMaterial,
-                blending: false
+                blendMode: .none
+            )
+            try makePipeline(
+                device: device,
+                vertex: dynamicEntityVertex,
+                fragment: dynamicEntityTextured,
+                blendMode: .none
+            )
+            try makePipeline(
+                device: device,
+                vertex: dynamicEntityVertex,
+                fragment: dynamicEntityMissingMaterial,
+                blendMode: .none
+            )
+            for blendMode in [BlendMode.straightAlpha, .straightAdditive] {
+                try makePipeline(
+                    device: device,
+                    vertex: dynamicEntityVertex,
+                    fragment: dynamicEntityTextured,
+                    blendMode: blendMode
+                )
+                try makePipeline(
+                    device: device,
+                    vertex: dynamicEntityVertex,
+                    fragment: dynamicEntityMissingMaterial,
+                    blendMode: blendMode
+                )
+            }
+            try makePipeline(
+                device: device,
+                vertex: dynamicEntityVertex,
+                fragment: dynamicEntityColor,
+                blendMode: .straightAlpha
             )
             try makePipeline(
                 device: device,
                 vertex: worldVertex,
                 fragment: worldSkybox,
-                blending: false
+                blendMode: .none
+            )
+            try makePipeline(
+                device: device,
+                vertex: worldSunSpriteVertex,
+                fragment: worldSunSprite,
+                blendMode: .additive
             )
             try makePipeline(
                 device: device,
                 vertex: worldVertex,
                 fragment: worldWaterSolid,
-                blending: true
+                blendMode: .premultiplied
             )
             try makePipeline(
                 device: device,
                 vertex: worldVertex,
                 fragment: worldWaterNormal,
-                blending: true
+                blendMode: .premultiplied
+            )
+            try makePipeline(
+                device: device,
+                vertex: worldVertex,
+                fragment: worldWaterCompositeSolid,
+                blendMode: .premultiplied
+            )
+            try makePipeline(
+                device: device,
+                vertex: worldVertex,
+                fragment: worldWaterCompositeNormal,
+                blendMode: .premultiplied
+            )
+            try makePipeline(
+                device: device,
+                vertex: worldSceneCopyVertex,
+                fragment: worldSceneCopy,
+                blendMode: .none
             )
             try makePipeline(
                 device: device,
                 vertex: surfaceVertex,
                 fragment: surfaceSolid,
-                blending: true
+                blendMode: .premultiplied
             )
             try makePipeline(
                 device: device,
                 vertex: surfaceVertex,
                 fragment: surfaceTextured,
-                blending: true
+                blendMode: .premultiplied
             )
 
             print(
-                "Runtime Metal library and ten render pipelines passed on "
+                "Runtime Metal library and twenty-one render pipelines passed on "
                     + device.name
             )
         } catch {
@@ -152,7 +248,7 @@ enum MetalPipelineSmoke {
         device: MTLDevice,
         vertex: MTLFunction,
         fragment: MTLFunction,
-        blending: Bool
+        blendMode: BlendMode
     ) throws {
         let descriptor = MTLRenderPipelineDescriptor()
         descriptor.vertexFunction = vertex
@@ -160,20 +256,48 @@ enum MetalPipelineSmoke {
         descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
         descriptor.depthAttachmentPixelFormat = .depth32Float
 
-        if blending {
+        if blendMode != .none {
             guard let color = descriptor.colorAttachments[0] else {
                 throw SmokeError.missingColorAttachment
             }
             color.isBlendingEnabled = true
             color.rgbBlendOperation = .add
             color.alphaBlendOperation = .add
-            color.sourceRGBBlendFactor = .one
-            color.destinationRGBBlendFactor = .oneMinusSourceAlpha
-            color.sourceAlphaBlendFactor = .one
-            color.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            switch blendMode {
+            case .none:
+                preconditionFailure("handled above")
+            case .premultiplied:
+                color.sourceRGBBlendFactor = .one
+                color.destinationRGBBlendFactor = .oneMinusSourceAlpha
+                color.sourceAlphaBlendFactor = .one
+                color.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            case .additive:
+                color.sourceRGBBlendFactor = .one
+                color.destinationRGBBlendFactor = .one
+                color.sourceAlphaBlendFactor = .one
+                color.destinationAlphaBlendFactor = .one
+            case .straightAlpha:
+                color.sourceRGBBlendFactor = .sourceAlpha
+                color.destinationRGBBlendFactor = .oneMinusSourceAlpha
+                color.sourceAlphaBlendFactor = .one
+                color.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            case .straightAdditive:
+                color.sourceRGBBlendFactor = .sourceAlpha
+                color.destinationRGBBlendFactor = .one
+                color.sourceAlphaBlendFactor = .zero
+                color.destinationAlphaBlendFactor = .one
+            }
         }
 
         _ = try device.makeRenderPipelineState(descriptor: descriptor)
+    }
+
+    private enum BlendMode {
+        case none
+        case premultiplied
+        case additive
+        case straightAlpha
+        case straightAdditive
     }
 
     private static func writeStandardError(_ message: String) {

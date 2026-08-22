@@ -1,0 +1,147 @@
+{
+  "schema": 1,
+  "kind": "source-oracle-vphysics-pre-lua-fatal-file-closure",
+  "steam": {
+    "app_id": 4020,
+    "branch": "x86-64",
+    "build_id": "24721267"
+  },
+  "scope": {
+    "boundary": "dedicated bootstrap through CServerGameDLL::DLLInit, before map load, shipped Lua, or the attestation probe",
+    "source_roots": [
+      "sourceengine",
+      "garrysmod"
+    ],
+    "path_classes": [
+      "resource",
+      "scripts",
+      "cfg",
+      "platform"
+    ],
+    "required_file_count": 6,
+    "finding": "The fixed headless bootstrap has six fatal file inputs in this scope. No cfg or platform file has a fatal pre-Lua edge."
+  },
+  "fixed_binaries": [
+    {
+      "source_path": "bin/win64/engine.dll",
+      "byte_count": 5647696,
+      "sha256": "1b430e0823b830f9dd7b82590323c92407fbe7dc79cbfbaa09a5e0d8b31275b1"
+    },
+    {
+      "source_path": "bin/win64/server.dll",
+      "byte_count": 15502672,
+      "sha256": "1e3b4f13c1035f536802b6277303179dab1405a1facd166bf2748d6c90f0b7fe"
+    },
+    {
+      "source_path": "bin/win64/soundemittersystem.dll",
+      "byte_count": 308048,
+      "sha256": "374e8690b850469d500cba18b63ea7604737c8b256463828772a72f82fb15e27"
+    }
+  ],
+  "required_files": [
+    {
+      "source_root": "garrysmod",
+      "source_path": "garrysmod/resource/serverevents.res",
+      "input_path": "oracle_game/resource/serverevents.res",
+      "byte_count": 4874,
+      "sha256": "d5ead67866bc49bd971acfd5dd370b9f708b942de2fdfb55dbf30aa880a612dd",
+      "fatal_stage": "engine event manager bootstrap",
+      "evidence": "Fixed engine.dll xref 0x1801af733 loads resource/serverevents.res and calls tier0!Error through IAT 0x180383a98 when the load returns false. The GAME search order resolves the checked-in GMod override."
+    },
+    {
+      "source_root": "sourceengine",
+      "source_path": "sourceengine/resource/hltvevents.res",
+      "input_path": "server/sourceengine/resource/hltvevents.res",
+      "byte_count": 2923,
+      "sha256": "42009260aabd3d139ca170057a8cdf901c9263e855e0f37f2addb54806aabf52",
+      "fatal_stage": "server game-system initialization",
+      "evidence": "Fixed server.dll contains resource/hltvevents.res. Valve c8f4c635 hltvdirector.cpp:105-108 returns LoadEventsFromFile(...) > 0; gameinterface.cpp:650-664 adds HLTVDirectorSystem and returns false when InitAllSystems fails."
+    },
+    {
+      "source_root": "sourceengine",
+      "source_path": "sourceengine/scripts/game_sounds_manifest.txt",
+      "input_path": "server/sourceengine/scripts/game_sounds_manifest.txt",
+      "byte_count": 3469,
+      "sha256": "77851cb187d6de1f53a9d83a820bdbf2015af7341c4ed21491031efb5487a6e2",
+      "fatal_stage": "sound-emitter base initialization",
+      "evidence": "Fixed soundemittersystem.dll contains scripts/game_sounds_manifest.txt and its failed manifest load calls tier0!Error through IAT 0x18002e2b0. Valve c8f4c635 SoundEmitterSystem.cpp:203-212 returns soundemitterbase->ModInit; gameinterface.cpp:654-664 propagates that game-system failure."
+    },
+    {
+      "source_root": "sourceengine",
+      "source_path": "sourceengine/scripts/surfaceproperties_manifest.txt",
+      "input_path": "server/sourceengine/scripts/surfaceproperties_manifest.txt",
+      "byte_count": 595,
+      "sha256": "d8bead334f07cd9f7cdfa30d691076b242ee469727aa0f0dcb734f3699d92a11",
+      "fatal_stage": "server physics surface bootstrap",
+      "evidence": "Fixed server.dll loads scripts/surfaceproperties_manifest.txt; manifest failure and child surface-file failure reach tier0!Error through IAT 0x180870928 before DLLInit can complete."
+    },
+    {
+      "source_root": "sourceengine",
+      "source_path": "sourceengine/scripts/surfaceproperties.txt",
+      "input_path": "server/sourceengine/scripts/surfaceproperties.txt",
+      "byte_count": 23190,
+      "sha256": "b75f463e4a5b351c0f9a155c100659ae0384003ae910d092a07398e611056e32",
+      "fatal_stage": "server physics surface bootstrap",
+      "evidence": "The exact surfaceproperties_manifest.txt names this file. Fixed server.dll string 'Unable to load surface prop file ...' reaches tier0!Error through IAT 0x180870928 for a missing referenced file."
+    },
+    {
+      "source_root": "sourceengine",
+      "source_path": "sourceengine/scripts/surfaceproperties_hl2.txt",
+      "input_path": "server/sourceengine/scripts/surfaceproperties_hl2.txt",
+      "byte_count": 2800,
+      "sha256": "6eb6c622f9d566515d0909d610c6f7213d327ed69545807696d74162ee3c0280",
+      "fatal_stage": "server physics surface bootstrap",
+      "evidence": "The exact surfaceproperties_manifest.txt names this file. Fixed server.dll string 'Unable to load surface prop file ...' reaches tier0!Error through IAT 0x180870928 for a missing referenced file."
+    }
+  ],
+  "audited_nonfatal": [
+    {
+      "path_class": "resource",
+      "paths": [
+        "logical GAME search: resource/gameevents.res",
+        "logical GAME search: resource/ModEvents.res"
+      ],
+      "evidence": "Valve c8f4c635 gameinterface.cpp:613-614 and 657-658 does not test either LoadEventsFromFile return. They are not fatal members of this pre-Lua closure."
+    },
+    {
+      "path_class": "scripts",
+      "paths": [
+        "logical GAME search: scripts/game_sounds_header.txt",
+        "logical GAME search: scripts/global_actors.txt",
+        "logical GAME search: scripts/propdata.txt",
+        "logical GAME search: particles/particles_manifest.txt",
+        "logical MOD search: modelsounds.cache",
+        "children declared by sourceengine/scripts/game_sounds_manifest.txt"
+      ],
+      "evidence": "Fixed-PE failure edges are optional/warning paths. Valve c8f4c635 props_shared.cpp:198-208 returns after absent propdata, and UtlCachedFileData.h:575-625 treats an absent cache repository as a successful rebuild case."
+    },
+    {
+      "path_class": "cfg",
+      "paths": [
+        "logical GAME search: cfg/trusted_keys_base.txt",
+        "logical GAME search: cfg/pure_server_minimal.txt",
+        "logical GAME search: cfg/pure_server_full.txt",
+        "logical GAME search: cfg/game.cfg",
+        "logical GAME search: cfg/server.cfg",
+        "controlled isolated game: cfg/mount.cfg",
+        "controlled isolated game: cfg/mountdepots.txt"
+      ],
+      "evidence": "Fixed engine.dll failure xrefs for trusted_keys_base and pure_server files call tier0!Warning at IAT 0x180383a80, not tier0!Error. Config exec/mount inputs are optional or deliberately empty in this isolated route."
+    },
+    {
+      "path_class": "platform",
+      "paths": [
+        "platform/*"
+      ],
+      "evidence": "The exact srcds CUI, dedicated, filesystem, engine, server, and sound-emitter PE string audit found only platform path containers, not a concrete platform file with a fatal pre-Lua failure edge."
+    }
+  ],
+  "official_source": {
+    "commit": "c8f4c6351162fbff83bfa5a428d45d1e6eed3824",
+    "gameinterface": "https://github.com/ValveSoftware/source-sdk-2013/blob/c8f4c6351162fbff83bfa5a428d45d1e6eed3824/src/game/server/gameinterface.cpp",
+    "hltvdirector": "https://github.com/ValveSoftware/source-sdk-2013/blob/c8f4c6351162fbff83bfa5a428d45d1e6eed3824/src/game/server/hltvdirector.cpp",
+    "sound_emitter": "https://github.com/ValveSoftware/source-sdk-2013/blob/c8f4c6351162fbff83bfa5a428d45d1e6eed3824/src/game/shared/SoundEmitterSystem.cpp",
+    "prop_data": "https://github.com/ValveSoftware/source-sdk-2013/blob/c8f4c6351162fbff83bfa5a428d45d1e6eed3824/src/game/shared/props_shared.cpp",
+    "cached_file_data": "https://github.com/ValveSoftware/source-sdk-2013/blob/c8f4c6351162fbff83bfa5a428d45d1e6eed3824/src/public/UtlCachedFileData.h"
+  }
+}

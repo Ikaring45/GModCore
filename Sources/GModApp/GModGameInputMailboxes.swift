@@ -57,7 +57,9 @@ enum GModGameWorldInputPolicy {
         if sideAxis < 0 { buttons.insert(.moveLeft) }
         if jumpPressed { buttons.insert(.jump) }
         buttons.formUnion(
-            heldActionButtons.intersection([.attack, .attack2, .use])
+            heldActionButtons.intersection([
+                .attack, .attack2, .use, .reload, .duck, .speed,
+            ])
         )
         return GModPlayableMovementInput(
             viewAngles: viewAngles,
@@ -68,20 +70,30 @@ enum GModGameWorldInputPolicy {
     }
 }
 
-/// The native Surface scene currently represents the foreground Q/C panel
-/// tree. CLIENT Lua continues to tick when neither menu is visible, but there
-/// is no renderer-facing panel capture to rebuild in that state.
+/// The native Surface scene represents either the foreground Q/C tree or the
+/// engine-owned OverlayPanel subtree used by stock notification/hint Lua.
 enum GModGameClientSurfaceCapturePolicy {
     static func shouldCapture(
         activeMenu: GModGameClientMenu?,
-        transitioningMenu: GModGameClientMenu?
+        transitioningMenu: GModGameClientMenu?,
+        hasVisibleOverlayPanels: Bool = false
     ) -> Bool {
-        activeMenu != nil && transitioningMenu == nil
+        transitioningMenu == nil &&
+            (activeMenu != nil || hasVisibleOverlayPanels)
     }
 }
 
 struct GModGameSurfaceRefreshRequest: Sendable, Equatable {
     let generation: GModGameSessionGenerationToken
+    let scope: GMLuaVGUIRenderScope
+
+    init(
+        generation: GModGameSessionGenerationToken,
+        scope: GMLuaVGUIRenderScope = .all
+    ) {
+        self.generation = generation
+        self.scope = scope
+    }
 }
 
 /// One renderer refresh can be expensive while pointer callbacks must remain
@@ -108,12 +120,18 @@ enum GModGameWorldActionButton: Sendable, Equatable {
     case attack
     case attack2
     case use
+    case reload
+    case duck
+    case speed
 
     var sourceButton: SourceInputButtons {
         switch self {
         case .attack: return .attack
         case .attack2: return .attack2
         case .use: return .use
+        case .reload: return .reload
+        case .duck: return .duck
+        case .speed: return .speed
         }
     }
 }

@@ -5,7 +5,7 @@ import GModGameAssets
 import GModLua
 
 final class GMLuaVGUIRegistryTests: XCTestCase {
-    func testStockDFrameBottomRightTouchResizeIsImmediateClampedAndReleasesCapture() throws {
+    func testStockDFrameTouchDragAndBottomRightResizeAreImmediateAndReleaseCapture() throws {
         let fileSystem = try GMLuaHostDirectoryFileSystem(
             rootURL: GModGameAssets.clientContentRootURL(),
             writable: false
@@ -175,6 +175,20 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
         try runtime.execute(
             "assert(FRAME:GetWide() == 200 and FRAME:GetTall() == 160)",
             sourceName: "@GMLuaStockDFrameNonSizableCheckpoint.lua"
+        )
+
+        // Stock title-bar movement, like sizing, is performed by DFrame:Think.
+        // A UIKit move must therefore update position in this dispatch cycle.
+        _ = try dispatch(150, 112, .began, 6.3)
+        _ = try dispatch(210, 160, .moved, 6.4)
+        try runtime.execute(
+            "local x, y = FRAME:GetPos(); assert(x == 160 and y == 148)",
+            sourceName: "@GMLuaStockDFrameImmediateDragCheckpoint.lua"
+        )
+        _ = try dispatch(210, 160, .ended, 6.5)
+        try runtime.execute(
+            "assert(FRAME.Dragging == nil)",
+            sourceName: "@GMLuaStockDFrameDragReleaseCheckpoint.lua"
         )
 
         // Neither cancellation nor the no-op path may steal the next button tap.
@@ -2461,6 +2475,73 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
         XCTAssertFalse(tree.contains(where: { $0.alpha == 0 }))
     }
 
+    func testTopLevelGetParentProjectsLiveWorldPanelForStockCenterHelpers()
+        throws
+    {
+        let runtime = GMLuaRuntime(
+            realm: .menu,
+            logger: { _ in },
+            initialViewport: GMLuaViewportSize(width: 640, height: 480)
+        )
+        defer { _ = runtime.close() }
+
+        try runtime.execute(
+            """
+            local meta = assert(FindMetaTable("Panel"))
+            function meta:GetX()
+                local x = self:GetPos()
+                return x
+            end
+            function meta:GetY()
+                local _, y = self:GetPos()
+                return y
+            end
+            function meta:SetX(x) self:SetPos(x, self:GetY()) end
+            function meta:SetY(y) self:SetPos(self:GetX(), y) end
+            function meta:CenterVertical(fraction)
+                self:SetY(
+                    self:GetParent():GetTall() * (fraction or 0.5)
+                    - self:GetTall() * 0.5
+                )
+            end
+
+            local world = assert(vgui.GetWorldPanel())
+            assert(world:IsValid())
+            assert(world:GetParent() == nil)
+            assert(world:GetWide() == 640 and world:GetTall() == 480)
+
+            ROOT = assert(vgui.Create("Panel"))
+            ROOT:SetSize(100, 40)
+            assert(ROOT:GetParent() == world)
+            assert(ROOT:HasParent(world))
+            assert(world:ChildCount() == 1)
+            local HUD_ROOT = assert(vgui.Create("Panel"))
+            local HUD_CHILD = assert(vgui.Create("Panel", HUD_ROOT))
+            HUD_ROOT:ParentToHUD()
+            assert(HUD_ROOT:GetParent() == nil)
+            assert(not HUD_ROOT:HasParent(world))
+            assert(not HUD_CHILD:HasParent(world))
+            HUD_ROOT:SetParent(world)
+            assert(HUD_ROOT:GetParent() == world)
+            assert(HUD_ROOT:HasParent(world))
+            assert(HUD_CHILD:HasParent(world))
+            ROOT:CenterVertical()
+            assert(ROOT:GetY() == 220)
+            """,
+            sourceName: "@GMLuaWorldPanelCenterRegression.lua"
+        )
+
+        XCTAssertTrue(runtime.updateViewport(width: 800, height: 600))
+        try runtime.execute(
+            """
+            assert(vgui.GetWorldPanel():GetTall() == 600)
+            ROOT:CenterVertical()
+            assert(ROOT:GetY() == 280)
+            """,
+            sourceName: "@GMLuaWorldPanelResizeRegression.lua"
+        )
+    }
+
     func testRenderFrameDocksRootBeforeLuaLayoutAndReappliesAfterLayout() throws {
         let state = LuaState(output: { _ in })
         let typeSystem = try GMLuaTypeSystem.install(
@@ -3106,7 +3187,7 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
         )
         let surface = try GMLuaSurface.install(
             into: state,
-            maximumDrawCommandCount: 1
+            maximumDrawCommandCount: 2
         )
         let registry = try GMLuaVGUI.install(
             into: state,
@@ -3184,13 +3265,23 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
             "TEXT_ENTRY:SetEnabled(true); TEXT_ENTRY:RequestFocus()",
             sourceName: "@GMLuaFocusedTextEntryMissingCaretState.lua"
         )
-        XCTAssertThrowsError(try registry.renderFrame(
+        let focusedFrame = try registry.renderFrame(
             surface: surface,
             viewportWidth: 200,
             viewportHeight: 100
-        )) { error in
-            XCTAssertTrue(String(describing: error).contains("caret and selection state"))
+        )
+        XCTAssertEqual(focusedFrame.captureDiagnostics.attemptedCommandCount, 2)
+        XCTAssertEqual(focusedFrame.captureDiagnostics.droppedCommandCount, 0)
+        XCTAssertEqual(focusedFrame.commands.count, 2)
+        guard case let .rectangle(caretFrame, caretColor, _) = focusedFrame.commands[1] else {
+            return XCTFail("focused TextEntry did not emit a caret rectangle")
         }
+        XCTAssertEqual(caretFrame.width, 1)
+        XCTAssertGreaterThan(caretFrame.height, 0)
+        XCTAssertEqual(
+            caretColor,
+            GMLuaSurfaceColor(red: 111, green: 122, blue: 133, alpha: 51)
+        )
     }
 
     func testExpensiveShadowStoresLabelStateAndEmitsShadowBeforeMainText() throws {
@@ -3420,10 +3511,86 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
 
             PARENT_CHANGE_LOG = {}
             child:SetParent(nil)
-            assert(table.concat(PARENT_CHANGE_LOG, "|") == "new:removed:nil")
-            assert(child:GetParent() == nil)
+            assert(table.concat(PARENT_CHANGE_LOG, "|") ==
+                "new:removed:WorldPanel")
+            assert(child:GetParent() == vgui.GetWorldPanel())
             """,
             sourceName: "@GMLuaPanelParentChangeCallbackRegression.lua"
         )
+    }
+
+    func testOverlayPanelOwnsNoticeHUDAndOverlayCaptureExcludesWorldRoots() throws {
+        let runtime = GMLuaRuntime(
+            realm: .client,
+            logger: { _ in },
+            bootstrapMode: .strict,
+            initialViewport: GMLuaViewportSize(width: 320, height: 180)
+        )
+        defer { _ = runtime.close() }
+        let registry = try XCTUnwrap(runtime.vguiRegistry)
+        let surface = try XCTUnwrap(runtime.surfaceCommandState)
+
+        try runtime.execute(
+            """
+            local overlay = assert(GetOverlayPanel())
+            assert(overlay == GetOverlayPanel())
+            assert(overlay:GetWide() == 320 and overlay:GetTall() == 180)
+
+            WORLD_ROOT = assert(vgui.Create("Panel"))
+            WORLD_ROOT:SetPos(0, 0)
+            WORLD_ROOT:SetSize(40, 40)
+            function WORLD_ROOT:Paint()
+                surface.SetDrawColor(255, 0, 0)
+                surface.DrawRect(0, 0, 40, 40)
+            end
+
+            NOTICE = assert(vgui.Create("Panel", overlay))
+            NOTICE:SetPos(16, 16)
+            NOTICE:SetSize(160, 32)
+            assert(NOTICE:GetParent() == overlay)
+            assert(NOTICE:HasParent(overlay))
+            assert(not NOTICE:HasParent(vgui.GetWorldPanel()))
+            function NOTICE:Paint()
+                surface.SetFont("Default")
+                surface.SetTextColor(255, 255, 255)
+                surface.SetTextPos(0, 0)
+                surface.DrawText("通知ヒント")
+            end
+            """,
+            sourceName: "@GMLuaOverlayPanelCaptureRegression.lua"
+        )
+
+        XCTAssertTrue(registry.hasVisibleOverlayPanels)
+        let overlayFrame = try registry.renderFrame(
+            surface: surface,
+            viewportWidth: 320,
+            viewportHeight: 180,
+            scope: .overlay
+        )
+        XCTAssertEqual(overlayFrame.commands.count, 1)
+        guard case let .text(text, _, _, _, _) = overlayFrame.commands[0] else {
+            return XCTFail("overlay capture did not retain the notice text")
+        }
+        XCTAssertEqual(text, LuaString("通知ヒント"))
+
+        let fullFrame = try registry.renderFrame(
+            surface: surface,
+            viewportWidth: 320,
+            viewportHeight: 180
+        )
+        XCTAssertEqual(fullFrame.commands.count, 2)
+
+        try runtime.execute(
+            "NOTICE:SetVisible(false)",
+            sourceName: "@GMLuaOverlayPanelHiddenRegression.lua"
+        )
+        XCTAssertFalse(registry.hasVisibleOverlayPanels)
+        let hiddenFrame = try registry.renderFrame(
+            surface: surface,
+            viewportWidth: 320,
+            viewportHeight: 180,
+            scope: .overlay
+        )
+        XCTAssertEqual(hiddenFrame.commands, [])
     }
 }

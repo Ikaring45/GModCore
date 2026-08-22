@@ -71,6 +71,25 @@ final class GModTouchInputTests: XCTestCase {
         XCTAssertEqual(secondDelta, GModLookTouchDelta(x: 2, y: 4))
     }
 
+    func testLookIgnoresRepeatedLocationWithoutLosingGestureOrigin() throws {
+        var state = GModLookTouchState()
+
+        XCTAssertNil(state.consume(sample(x: 10, y: 20, phase: .began)))
+        XCTAssertNil(state.consume(sample(x: 10, y: 20, phase: .moved)))
+        XCTAssertTrue(state.isTracking)
+        XCTAssertTrue(state.hasPriorLocation)
+
+        let delta = try XCTUnwrap(
+            state.consume(sample(x: 13, y: 18, phase: .moved))
+        )
+        XCTAssertEqual(delta, GModLookTouchDelta(x: 3, y: -2))
+
+        state.reset()
+        XCTAssertFalse(state.isTracking)
+        XCTAssertFalse(state.hasPriorLocation)
+        XCTAssertNil(state.consume(sample(x: 14, y: 18, phase: .moved)))
+    }
+
     private func sample(
         x: Double,
         y: Double,

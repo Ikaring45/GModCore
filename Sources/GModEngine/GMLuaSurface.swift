@@ -619,18 +619,19 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
         lock.unlock()
     }
 
-    /// Records the glyph portion of native TextEntry painting. Selection and
-    /// caret primitives are deliberately owned by VGUI because this command
-    /// receives only text state that the registry can prove exists.
+    /// Records native TextEntry glyphs and, when focused, the caret derived
+    /// from the registry's exact UTF-8 character boundary. Selection remains
+    /// empty until an input path explicitly creates one.
     func appendTextEntryText(
         value: LuaString,
         fontName: LuaString,
         color: GMLuaPanelColorSnapshot,
         insetX: Int,
         insetY: Int,
-        panelHeight: Double
+        panelHeight: Double,
+        caretPrefix: LuaString?,
+        cursorColor: GMLuaPanelColorSnapshot
     ) throws {
-        guard !value.isEmpty else { return }
         lock.lock()
         guard let context = contexts.last else {
             lock.unlock()
@@ -658,13 +659,39 @@ public final class GMLuaSurfaceCommandState: @unchecked Sendable {
             blue: color.blue,
             alpha: color.alpha
         )
-        appendCommandsWithinBudget([.text(
-            value: value,
-            position: position,
-            font: descriptor,
-            color: multipliedAlpha(textColor, context.alphaMultiplier),
-            clip: effectiveClip(context)
-        )])
+        var commands: [GMLuaSurfaceDrawCommand] = []
+        if !value.isEmpty {
+            commands.append(.text(
+                value: value,
+                position: position,
+                font: descriptor,
+                color: multipliedAlpha(textColor, context.alphaMultiplier),
+                clip: effectiveClip(context)
+            ))
+        }
+        if let caretPrefix {
+            let prefixWidth = textMeasurer.measure(
+                caretPrefix,
+                using: descriptor
+            ).width
+            let caretColor = GMLuaSurfaceColor(
+                red: cursorColor.red,
+                green: cursorColor.green,
+                blue: cursorColor.blue,
+                alpha: cursorColor.alpha
+            )
+            commands.append(.rectangle(
+                frame: GMLuaPanelRect(
+                    x: position.x + Double(prefixWidth),
+                    y: position.y,
+                    width: 1,
+                    height: Double(max(1, measurement.height))
+                ),
+                color: multipliedAlpha(caretColor, context.alphaMultiplier),
+                clip: effectiveClip(context)
+            ))
+        }
+        appendCommandsWithinBudget(commands)
         lock.unlock()
     }
 

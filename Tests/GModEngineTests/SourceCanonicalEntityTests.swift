@@ -144,6 +144,15 @@ final class SourceCanonicalEntityTests: XCTestCase {
 
         XCTAssertThrowsError(
             try store.update(player.identity) { state in
+                state.motion.ladderNormal.z = .nan
+            }
+        ) { error in
+            XCTAssertEqual(error as? SourceCanonicalEntityError, .invalidMotion)
+        }
+        XCTAssertEqual(store.snapshot(for: player.identity), player)
+
+        XCTAssertThrowsError(
+            try store.update(player.identity) { state in
                 state.transform.angles.roll = .infinity
             }
         ) { error in
@@ -151,12 +160,26 @@ final class SourceCanonicalEntityTests: XCTestCase {
         }
         XCTAssertEqual(store.snapshot(for: player.identity), player)
 
+        XCTAssertThrowsError(
+            try store.update(player.identity) { state in
+                state.bodyValue = -1
+            }
+        ) { error in
+            XCTAssertEqual(
+                error as? SourceCanonicalEntityError,
+                .invalidBodyValue(-1)
+            )
+        }
+        XCTAssertEqual(store.snapshot(for: player.identity), player)
+
         let updated = try store.update(player.identity) { state in
             state.transform.origin = SourceVector3(1, 2, 3)
             state.moveType = .noClip
+            state.bodyValue = 3
         }
         XCTAssertEqual(updated.transform.origin, SourceVector3(1, 2, 3))
         XCTAssertEqual(updated.moveType, .noClip)
+        XCTAssertEqual(updated.bodyValue, 3)
         XCTAssertEqual(updated.revision, 1)
     }
 
@@ -174,7 +197,11 @@ final class SourceCanonicalEntityTests: XCTestCase {
                 isDead: false
             ),
             viewAngles: SourceQAngle(pitch: 11, yaw: 22, roll: 3),
-            moveType: .walk
+            moveType: .ladder,
+            waterLevel: .eyes,
+            isDucked: true,
+            viewOffset: SourceVector3(0, 0, 28),
+            ladderNormal: SourceVector3(0, -1, 0)
         )
 
         var canonical = SourceCanonicalEntityState.defaults(for: .player)
@@ -185,6 +212,10 @@ final class SourceCanonicalEntityTests: XCTestCase {
         XCTAssertEqual(canonical.transform.origin, walk.origin)
         XCTAssertEqual(canonical.transform.angles, walk.viewAngles)
         XCTAssertEqual(canonical.motion.linearVelocity, walk.velocity)
+        XCTAssertEqual(canonical.motion.waterLevel, .eyes)
+        XCTAssertTrue(canonical.motion.isDucked)
+        XCTAssertEqual(canonical.viewOffset, SourceVector3(0, 0, 28))
+        XCTAssertEqual(canonical.motion.ladderNormal, walk.ladderNormal)
         XCTAssertEqual(canonical.motion.angularVelocity, SourceVector3(0, 0, 4))
         XCTAssertTrue(canonical.motion.isAlive)
     }

@@ -1,0 +1,14 @@
+{
+  "schema":1,
+  "kind":"standalone-vphysics-collision-attestation",
+  "status":"incomplete",
+  "source_sdk_commit":"c8f4c6351162fbff83bfa5a428d45d1e6eed3824",
+  "interfaces":{"collision":"VPhysicsCollision007","physics":"VPhysics031"},
+  "input":{"app_id":4020,"branch":"x86-64","build_id":"24721267","dll_sha256":"4ebd6149f885dfc518a44dd32dda64cbd6ebb3f938d43bdead70e80771b7e414","dll_architecture":"x86_64","model_path":"models/maxofs2d/button_06.mdl","mdl_bytes":2540,"mdl_sha256":"85dca39870932c39dd1bcd51afbb0fc09aaf8d90fadfeb222e7b49cd784e0f07","phy_bytes":880,"phy_sha256":"8901ecd8be29b5a3e5b688843bdbea13f34c7b76c5a63cb435f9ef1174527ef3","studio_checksum":-1817891700,"solid_index":0},
+  "phy_keyvalues":{"mass_raw":"3.000000","surfaceprop_raw":"plastic","damping_raw":"0.000000","rotdamping_raw":"0.000000","inertia_scale_raw":"1.000000","volume_raw":"296.659119"},
+  "collision":{"complete":false,"solid_count":1,"convex_count":0,"triangle_count":0,"aabb_mins":[-8,-4.00000048,-2.51133247e-06],"aabb_maxs":[8,4,2.54030132],"mass_center":[-2.58716373e-08,-5.88179432e-07,1.17415643],"parts":[]},
+  "object":{"complete":false,"material_index_input":-1,"material_index_note":"surface database intentionally not loaded; raw PHY surfaceprop is authoritative","mass_kg":0,"principal_inertia":[0,0,0],"is_static":false,"is_asleep":false,"is_collision_enabled":false,"is_gravity_enabled":false,"is_motion_enabled":false},
+  "guard":{"abi_call_returned":false,"stage":2,"exception_code":3221225477},
+  "scope":{"gmod_or_srcds_launched":false,"steam_launched":false,"network_used_by_probe":false,"util_is_valid_prop_attested":false,"limitations":["Does not execute Garry's Mod util.IsValidProp","Does not attest entity OBB/collision bounds","Does not resolve the GMod surface database index"]},
+  "elapsed_milliseconds":56
+}

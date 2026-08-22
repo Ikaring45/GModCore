@@ -1,0 +1,377 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://garryspad.invalid/schemas/source-surface-material-response-attestation-v1.schema.json",
+  "title": "Source surface material response attestation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "kind", "status", "provenance", "surface_lookups",
+    "model_route", "world_traces", "controlled_pairs", "collision_samples",
+    "cleanup", "issues"
+  ],
+  "properties": {
+    "schema": { "const": 1 },
+    "kind": { "const": "source-surface-material-response-attestation" },
+    "status": { "enum": ["complete", "partial", "failure"] },
+    "provenance": { "$ref": "#/$defs/provenance" },
+    "surface_lookups": {
+      "type": "array",
+      "maxItems": 16,
+      "items": { "$ref": "#/$defs/surfaceLookup" }
+    },
+    "model_route": {
+      "type": "array",
+      "maxItems": 5,
+      "items": { "$ref": "#/$defs/modelRoute" }
+    },
+    "world_traces": {
+      "type": "array",
+      "maxItems": 8,
+      "items": { "$ref": "#/$defs/worldTrace" }
+    },
+    "controlled_pairs": {
+      "type": "array",
+      "maxItems": 16,
+      "items": { "$ref": "#/$defs/frictionSnapshot" }
+    },
+    "collision_samples": {
+      "type": "array",
+      "maxItems": 4,
+      "items": { "$ref": "#/$defs/collisionSample" }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["spawned_entity_count", "removed_entity_count", "clean"],
+      "properties": {
+        "spawned_entity_count": { "type": "integer", "minimum": 0, "maximum": 2 },
+        "removed_entity_count": { "type": "integer", "minimum": 0, "maximum": 2 },
+        "clean": { "type": "boolean" }
+      }
+    },
+    "issues": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9_.:-]{0,127}$"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "complete" } } },
+      "then": {
+        "properties": {
+          "issues": { "maxItems": 0 },
+          "surface_lookups": {
+            "minItems": 2,
+            "maxItems": 2,
+            "allOf": [
+              {
+                "contains": {
+                  "type": "object",
+                  "properties": { "requested_name": { "const": "plastic" } },
+                  "required": ["requested_name"]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "type": "object",
+                  "properties": { "requested_name": { "const": "rubber" } },
+                  "required": ["requested_name"]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              }
+            ]
+          },
+          "model_route": {
+            "minItems": 5,
+            "maxItems": 5,
+            "allOf": [
+              {
+                "contains": {
+                  "type": "object",
+                  "properties": { "stage": { "const": "mdl_bone" } },
+                  "required": ["stage"]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "type": "object",
+                  "properties": { "stage": { "const": "phy_solid" } },
+                  "required": ["stage"]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "type": "object",
+                  "properties": { "stage": { "const": "physobj" } },
+                  "required": ["stage"]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "type": "object",
+                  "properties": { "stage": { "const": "callback_our" } },
+                  "required": ["stage"]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "type": "object",
+                  "properties": { "stage": { "const": "callback_their" } },
+                  "required": ["stage"]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              }
+            ]
+          },
+          "world_traces": {
+            "minItems": 2,
+            "maxItems": 2,
+            "allOf": [
+              {
+                "contains": {
+                  "type": "object",
+                  "properties": { "id": { "const": "flatgrass-center" } },
+                  "required": ["id"]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "type": "object",
+                  "properties": { "id": { "const": "flatgrass-offset" } },
+                  "required": ["id"]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              }
+            ]
+          },
+          "controlled_pairs": {
+            "minItems": 1,
+            "maxItems": 16,
+            "contains": {
+              "type": "object",
+              "properties": { "pair_id": { "const": "plastic-against-rubber" } },
+              "required": ["pair_id"]
+            },
+            "minContains": 1
+          },
+          "collision_samples": {
+            "minItems": 1,
+            "maxItems": 1,
+            "contains": {
+              "type": "object",
+              "properties": {
+                "sample_id": { "const": "controlled-pair-collision" },
+                "pair_id": { "const": "plastic-against-rubber" }
+              },
+              "required": ["sample_id", "pair_id"]
+            },
+            "minContains": 1,
+            "maxContains": 1
+          },
+          "cleanup": {
+            "properties": {
+              "spawned_entity_count": { "const": 2 },
+              "removed_entity_count": { "const": 2 },
+              "clean": { "const": true }
+            }
+          }
+        }
+      },
+      "else": { "properties": { "issues": { "minItems": 1 } } }
+    }
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "float32g9": {
+      "type": "string",
+      "maxLength": 32,
+      "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?(e[+-][0-9]{2,3})?$"
+    },
+    "floatVector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "z"],
+      "properties": {
+        "x": { "$ref": "#/$defs/float32g9" },
+        "y": { "$ref": "#/$defs/float32g9" },
+        "z": { "$ref": "#/$defs/float32g9" }
+      }
+    },
+    "integerVector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "z"],
+      "properties": {
+        "x": { "type": "integer", "minimum": -32768, "maximum": 32768 },
+        "y": { "type": "integer", "minimum": -32768, "maximum": 32768 },
+        "z": { "type": "integer", "minimum": -32768, "maximum": 32768 }
+      }
+    },
+    "fileHash": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "app_id", "branch", "build_id", "request_id", "vphysics",
+        "surface_inputs", "map"
+      ],
+      "properties": {
+        "app_id": { "const": 4020 },
+        "branch": { "const": "x86-64" },
+        "build_id": { "const": "24721267" },
+        "request_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "vphysics": { "$ref": "#/$defs/fileHash" },
+        "surface_inputs": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/fileHash" }
+        },
+        "map": { "$ref": "#/$defs/fileHash" }
+      }
+    },
+    "surfaceLookup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requested_name", "surface_index", "reverse_name", "data"],
+      "properties": {
+        "requested_name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "surface_index": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "reverse_name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "name", "friction_coefficient", "elasticity", "density",
+            "thickness", "dampening", "material"
+          ],
+          "properties": {
+            "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "friction_coefficient": { "$ref": "#/$defs/float32g9" },
+            "elasticity": { "$ref": "#/$defs/float32g9" },
+            "density": { "$ref": "#/$defs/float32g9" },
+            "thickness": { "$ref": "#/$defs/float32g9" },
+            "dampening": { "$ref": "#/$defs/float32g9" },
+            "material": { "type": "integer", "minimum": 0, "maximum": 255 }
+          }
+        }
+      }
+    },
+    "modelRoute": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "surface_name", "surface_index", "reverse_name"],
+      "properties": {
+        "stage": {
+          "enum": ["mdl_bone", "phy_solid", "physobj", "callback_our", "callback_their"]
+        },
+        "surface_name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "surface_index": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "reverse_name": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "worldTrace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "start", "end", "hit", "hit_world", "hit_position",
+        "fraction", "hit_texture", "surface_index", "reverse_name",
+        "surface_data_name"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "start": { "$ref": "#/$defs/integerVector" },
+        "end": { "$ref": "#/$defs/integerVector" },
+        "hit": { "type": "boolean" },
+        "hit_world": { "type": "boolean" },
+        "hit_position": { "$ref": "#/$defs/floatVector" },
+        "fraction": { "$ref": "#/$defs/float32g9" },
+        "hit_texture": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "surface_index": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "reverse_name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "surface_data_name": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "frictionSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pair_id", "snapshot_ordinal", "material", "material_other",
+        "material_name", "material_other_name", "friction_coefficient",
+        "normal_force", "energy_absorbed", "normal", "contact_point"
+      ],
+      "properties": {
+        "pair_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "snapshot_ordinal": { "type": "integer", "minimum": 0, "maximum": 15 },
+        "material": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "material_other": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "material_name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "material_other_name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "friction_coefficient": { "$ref": "#/$defs/float32g9" },
+        "normal_force": { "$ref": "#/$defs/float32g9" },
+        "energy_absorbed": { "$ref": "#/$defs/float32g9" },
+        "normal": { "$ref": "#/$defs/floatVector" },
+        "contact_point": { "$ref": "#/$defs/floatVector" }
+      }
+    },
+    "collisionSample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sample_id", "pair_id", "our_surface_index", "their_surface_index",
+        "our_surface_name", "their_surface_name", "hit_position", "hit_normal",
+        "hit_speed", "our_old_velocity", "their_old_velocity", "our_new_velocity",
+        "their_new_velocity", "our_old_angular_velocity",
+        "their_old_angular_velocity", "speed", "delta_time"
+      ],
+      "properties": {
+        "sample_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "pair_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "our_surface_index": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "their_surface_index": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "our_surface_name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "their_surface_name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "hit_position": { "$ref": "#/$defs/floatVector" },
+        "hit_normal": { "$ref": "#/$defs/floatVector" },
+        "hit_speed": { "$ref": "#/$defs/floatVector" },
+        "our_old_velocity": { "$ref": "#/$defs/floatVector" },
+        "their_old_velocity": { "$ref": "#/$defs/floatVector" },
+        "our_new_velocity": { "$ref": "#/$defs/floatVector" },
+        "their_new_velocity": { "$ref": "#/$defs/floatVector" },
+        "our_old_angular_velocity": { "$ref": "#/$defs/floatVector" },
+        "their_old_angular_velocity": { "$ref": "#/$defs/floatVector" },
+        "speed": { "$ref": "#/$defs/float32g9" },
+        "delta_time": { "$ref": "#/$defs/float32g9" }
+      }
+    }
+  }
+}

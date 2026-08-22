@@ -117,6 +117,12 @@ struct GModLookTouchState: Sendable, Equatable {
     var isTracking: Bool { lifecycle.isActive }
     var hasPriorLocation: Bool { priorX != nil && priorY != nil }
 
+    mutating func reset() {
+        lifecycle = GModSingleTouchLifecycle()
+        priorX = nil
+        priorY = nil
+    }
+
     mutating func consume(
         _ sample: GModTouchSample
     ) -> GModLookTouchDelta? {
@@ -141,6 +147,7 @@ struct GModLookTouchState: Sendable, Equatable {
             )
             self.priorX = sample.x
             self.priorY = sample.y
+            guard delta.x != 0 || delta.y != 0 else { return nil }
             return delta
         case .ended, .cancelled:
             guard lifecycle.accept(sample.phase) else { return nil }
@@ -310,6 +317,66 @@ final class GModSingleTouchCaptureView: UIView {
         ))
     }
 }
+
+/// Look-specific bridge whose reducer lives in the stable UIKit coordinator.
+/// The former SwiftUI `@State` reducer invalidated the complete game view for
+/// each UITouch move before the angle itself was even submitted.
+@MainActor
+struct GModLookTouchInputBridge: UIViewRepresentable {
+    let onDelta: (_ deltaX: Float, _ deltaY: Float) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onDelta: onDelta)
+    }
+
+    func makeUIView(context: Context) -> GModSingleTouchCaptureView {
+        let view = GModSingleTouchCaptureView()
+        let coordinator = context.coordinator
+        view.onTouch = { [weak coordinator] sample in
+            coordinator?.consume(sample)
+        }
+        return view
+    }
+
+    func updateUIView(
+        _ uiView: GModSingleTouchCaptureView,
+        context: Context
+    ) {
+        context.coordinator.onDelta = onDelta
+    }
+
+    static func dismantleUIView(
+        _ uiView: GModSingleTouchCaptureView,
+        coordinator: Coordinator
+    ) {
+        uiView.cancelActiveTouch(
+            timestamp: ProcessInfo.processInfo.systemUptime
+        )
+        uiView.onTouch = nil
+        coordinator.reset()
+    }
+
+    @MainActor
+    final class Coordinator {
+        var onDelta: (_ deltaX: Float, _ deltaY: Float) -> Void
+        private var state = GModLookTouchState()
+
+        init(
+            onDelta: @escaping (_ deltaX: Float, _ deltaY: Float) -> Void
+        ) {
+            self.onDelta = onDelta
+        }
+
+        func consume(_ sample: GModTouchSample) {
+            guard let delta = state.consume(sample) else { return }
+            onDelta(delta.x, delta.y)
+        }
+
+        func reset() {
+            state.reset()
+        }
+    }
+}
 #elseif canImport(SwiftUI)
 /// Non-UIKit fallback keeps the Swift package usable on macOS. The shipped
 /// iPad target always takes the native UIView path above.
@@ -370,6 +437,19 @@ struct GModTouchInputBridge: View {
             phase: phase,
             timestamp: timestamp
         ))
+    }
+}
+
+@MainActor
+struct GModLookTouchInputBridge: View {
+    let onDelta: (_ deltaX: Float, _ deltaY: Float) -> Void
+    @State private var state = GModLookTouchState()
+
+    var body: some View {
+        GModTouchInputBridge { sample in
+            guard let delta = state.consume(sample) else { return }
+            onDelta(delta.x, delta.y)
+        }
     }
 }
 #endif

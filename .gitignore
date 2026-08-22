@@ -1,5 +1,8 @@
 .build/
 .build-*/
+.b*/
+.codex-build-*/
+.replay-wip/
 .swiftpm/
 .gc-agent-logs/
 .DS_Store

@@ -8,6 +8,8 @@ public struct GModPlayableSessionSnapshot: Sendable, Equatable {
     public let startup: GModPlayableSessionStartupReport
     public let worldMesh: GModWorldRenderMesh
     public let playerWalkState: SourceWorldWalkState
+    public let canonicalEntities: [SourceCanonicalEntitySnapshot]
+    public let worldHorizontalFieldOfViewDegrees: Float
 
     public init(
         generation: UInt64,
@@ -15,7 +17,10 @@ public struct GModPlayableSessionSnapshot: Sendable, Equatable {
         inputEpoch: UInt64,
         startup: GModPlayableSessionStartupReport,
         worldMesh: GModWorldRenderMesh,
-        playerWalkState: SourceWorldWalkState
+        playerWalkState: SourceWorldWalkState,
+        canonicalEntities: [SourceCanonicalEntitySnapshot],
+        worldHorizontalFieldOfViewDegrees: Float =
+            GModPlayableWorldFieldOfView.defaultHorizontalDegrees
     ) {
         self.generation = generation
         self.pointerEpoch = pointerEpoch
@@ -23,6 +28,9 @@ public struct GModPlayableSessionSnapshot: Sendable, Equatable {
         self.startup = startup
         self.worldMesh = worldMesh
         self.playerWalkState = playerWalkState
+        self.canonicalEntities = canonicalEntities
+        self.worldHorizontalFieldOfViewDegrees =
+            worldHorizontalFieldOfViewDegrees
     }
 }
 
@@ -94,29 +102,47 @@ public struct GModPlayableHostFrameReport: Sendable, Equatable {
     public let fixedTicks: [GModPlayableFixedTickReport]
     public let inputButtons: GModPlayableInputButtonReport
     public let clientFrame: GMLuaSourceRuntimeRunReport?
+    /// Renderer-neutral frame projection of the latest generation-bound
+    /// physgun hold. `nil` means this host frame deliberately skipped CLIENT
+    /// rendering; this value does not claim a graphics backend drew effects.
+    public let physgunClientDisplay:
+        SourceCanonicalPhysgunClientDisplaySnapshot?
     public let clientVGUIFrame: GMLuaSurfaceFrameSnapshot?
     /// Ordered, exactly-once handoff of CLIENT `surface.PlaySound` calls made
     /// since the preceding host-frame drain. Repeated paths remain repeated.
     public let clientSurfaceSounds: GMLuaSurfaceSoundRequestReport
     public let viewportChanged: Bool
     public let playerWalkState: SourceWorldWalkState
+    /// Cheap change token. The entity array is fetched from the lane only when
+    /// this value changes, rather than sorted and copied every display frame.
+    public let canonicalEntityCursor: SourceEntityReplicationCursor?
+    public let worldHorizontalFieldOfViewDegrees: Float
 
     public init(
         fixedTicks: [GModPlayableFixedTickReport],
         inputButtons: GModPlayableInputButtonReport,
         clientFrame: GMLuaSourceRuntimeRunReport?,
+        physgunClientDisplay:
+            SourceCanonicalPhysgunClientDisplaySnapshot? = nil,
         clientVGUIFrame: GMLuaSurfaceFrameSnapshot?,
         clientSurfaceSounds: GMLuaSurfaceSoundRequestReport,
         viewportChanged: Bool,
-        playerWalkState: SourceWorldWalkState
+        playerWalkState: SourceWorldWalkState,
+        canonicalEntityCursor: SourceEntityReplicationCursor?,
+        worldHorizontalFieldOfViewDegrees: Float =
+            GModPlayableWorldFieldOfView.defaultHorizontalDegrees
     ) {
         self.fixedTicks = fixedTicks
         self.inputButtons = inputButtons
         self.clientFrame = clientFrame
+        self.physgunClientDisplay = physgunClientDisplay
         self.clientVGUIFrame = clientVGUIFrame
         self.clientSurfaceSounds = clientSurfaceSounds
         self.viewportChanged = viewportChanged
         self.playerWalkState = playerWalkState
+        self.canonicalEntityCursor = canonicalEntityCursor
+        self.worldHorizontalFieldOfViewDegrees =
+            worldHorizontalFieldOfViewDegrees
     }
 
     public var deliveredMessages: Int {
@@ -181,6 +207,13 @@ public actor GModPlayableSessionLane {
     private let textMeasurer: (any GMLuaTextMeasurer)?
     private let worldWalkCollisionProvider:
         (any SourceWorldWalkCollisionProvider)?
+    private let canonicalModelValidatorForTesting:
+        SourceCanonicalModelValidator?
+    private let canonicalPropPhysicsAssetResolverForTesting:
+        SourceCanonicalPropPhysicsAssetResolver?
+    private let studioModelRepositoryForTesting: GModStudioModelRepository?
+    private let studioRenderableModelCacheForTesting:
+        GModStudioRenderableModelCache?
     private let shutdownCleanupObserverForTesting:
         (@Sendable (
             GModPlayableSessionLaneShutdownCleanupObservation
@@ -199,6 +232,10 @@ public actor GModPlayableSessionLane {
     public init(textMeasurer: (any GMLuaTextMeasurer)? = nil) {
         self.textMeasurer = textMeasurer
         worldWalkCollisionProvider = nil
+        canonicalModelValidatorForTesting = nil
+        canonicalPropPhysicsAssetResolverForTesting = nil
+        studioModelRepositoryForTesting = nil
+        studioRenderableModelCacheForTesting = nil
         shutdownCleanupObserverForTesting = nil
     }
 
@@ -207,10 +244,25 @@ public actor GModPlayableSessionLane {
     init(
         textMeasurer: (any GMLuaTextMeasurer)? = nil,
         worldWalkCollisionProvider:
-            any SourceWorldWalkCollisionProvider
+            (any SourceWorldWalkCollisionProvider)?,
+        canonicalModelValidatorForTesting:
+            SourceCanonicalModelValidator? = nil,
+        canonicalPropPhysicsAssetResolverForTesting:
+            SourceCanonicalPropPhysicsAssetResolver? = nil,
+        studioModelRepositoryForTesting:
+            GModStudioModelRepository? = nil,
+        studioRenderableModelCacheForTesting:
+            GModStudioRenderableModelCache? = nil
     ) {
         self.textMeasurer = textMeasurer
         self.worldWalkCollisionProvider = worldWalkCollisionProvider
+        self.canonicalModelValidatorForTesting =
+            canonicalModelValidatorForTesting
+        self.canonicalPropPhysicsAssetResolverForTesting =
+            canonicalPropPhysicsAssetResolverForTesting
+        self.studioModelRepositoryForTesting = studioModelRepositoryForTesting
+        self.studioRenderableModelCacheForTesting =
+            studioRenderableModelCacheForTesting
         shutdownCleanupObserverForTesting = nil
     }
 
@@ -224,6 +276,10 @@ public actor GModPlayableSessionLane {
     ) {
         textMeasurer = nil
         worldWalkCollisionProvider = nil
+        canonicalModelValidatorForTesting = nil
+        canonicalPropPhysicsAssetResolverForTesting = nil
+        studioModelRepositoryForTesting = nil
+        studioRenderableModelCacheForTesting = nil
         self.shutdownCleanupObserverForTesting =
             shutdownCleanupObserverForTesting
     }
@@ -253,7 +309,13 @@ public actor GModPlayableSessionLane {
             textMeasurer: textMeasurer,
             logger: logger,
             progress: progress,
-            worldWalkCollisionProvider: worldWalkCollisionProvider
+            worldWalkCollisionProvider: worldWalkCollisionProvider,
+            canonicalModelValidator: canonicalModelValidatorForTesting,
+            canonicalPropPhysicsAssetResolverForTesting:
+                canonicalPropPhysicsAssetResolverForTesting,
+            studioModelRepositoryForTesting: studioModelRepositoryForTesting,
+            studioRenderableModelCacheForTesting:
+                studioRenderableModelCacheForTesting
         )
         session = replacement
         retainForShutdown(replacement)
@@ -263,7 +325,10 @@ public actor GModPlayableSessionLane {
             inputEpoch: inputEpoch,
             startup: replacement.startupReport,
             worldMesh: replacement.worldMesh,
-            playerWalkState: replacement.playerWalkState
+            playerWalkState: replacement.playerWalkState,
+            canonicalEntities: replacement.clientCanonicalEntitySnapshots,
+            worldHorizontalFieldOfViewDegrees:
+                replacement.clientWorldHorizontalFieldOfViewDegrees
         )
     }
 
@@ -299,25 +364,35 @@ public actor GModPlayableSessionLane {
             viewportChanged = false
         }
 
-        // Host-frame input can change on a gesture-only frame with no fixed
-        // tick. Publish the exact supplied digital word before CLIENT Think or
-        // pointer work; do not derive button bits from the analog axes.
-        let inputButtons = try session.updateCurrentPlayerInputButtons(
-            movementInput.buttons
-        )
-
         var fixedTicks: [GModPlayableFixedTickReport] = []
         fixedTicks.reserveCapacity(fixedTickCount)
-        for _ in 0..<fixedTickCount {
-            fixedTicks.append(
-                try session.runFixedTick(
-                    movementInput: movementInput,
-                    maximumDeliveries: maximumDeliveries
-                )
+        let inputButtons: GModPlayableInputButtonReport
+        if fixedTickCount == 0 {
+            // Gesture-only frames still publish the exact word before CLIENT
+            // Think. A fixed-tick frame publishes inside runFixedTick instead;
+            // pre-publishing here would consume KeyPressed/KeyReleased edges
+            // before the active SWEP ItemPostFrame pass observes them.
+            inputButtons = try session.updateCurrentPlayerInputButtons(
+                movementInput.buttons
             )
+        } else {
+            for tickIndex in 0..<fixedTickCount {
+                fixedTicks.append(
+                    try session.runFixedTick(
+                        movementInput: movementInput.fixedTickInput(
+                            at: tickIndex
+                        ),
+                        maximumDeliveries: maximumDeliveries
+                    )
+                )
+            }
+            inputButtons = fixedTicks[fixedTicks.count - 1].inputButtons
         }
         let clientFrame = renderClientFrame
             ? try session.runClientFrame()
+            : nil
+        let physgunClientDisplay = renderClientFrame
+            ? session.latestClientPhysgunDisplay
             : nil
         let clientVGUIFrame = renderClientVGUIFrame
             ? try session.renderClientVGUIFrame()
@@ -329,14 +404,203 @@ public actor GModPlayableSessionLane {
             fixedTicks: fixedTicks,
             inputButtons: inputButtons,
             clientFrame: clientFrame,
+            physgunClientDisplay: physgunClientDisplay,
             clientVGUIFrame: clientVGUIFrame,
             clientSurfaceSounds: clientSurfaceSounds,
             viewportChanged: viewportChanged,
-            playerWalkState: session.playerWalkState
+            playerWalkState: session.playerWalkState,
+            canonicalEntityCursor: session.clientCanonicalEntityReplicationCursor,
+            worldHorizontalFieldOfViewDegrees:
+                session.clientWorldHorizontalFieldOfViewDegrees
         )
     }
 
+    /// Returns the immutable CLIENT projection only on explicit demand. The
+    /// caller compares the host-frame cursor first and can therefore avoid an
+    /// O(entity count) allocation on unchanged frames.
+    public func clientCanonicalEntitySnapshots(
+        expectedGeneration: UInt64? = nil
+    ) throws -> [SourceCanonicalEntitySnapshot] {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        return session.clientCanonicalEntitySnapshots
+    }
+
+    /// Resolves the current CLIENT-owned Weapon selector state without
+    /// exposing the lane-owned Lua runtime or canonical registry.
+    public func clientOwnedWeaponSelectorCatalog(
+        expectedGeneration: UInt64? = nil
+    ) throws -> SourceOwnedWeaponSelectorCatalog {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        return try session.clientOwnedWeaponSelectorCatalog()
+    }
+
+    /// Queues one exact owned class through CLIENT RunConsoleCommand on the
+    /// same actor lane that owns the session FIFO.
+    @discardableResult
+    public func requestWeaponSelection(
+        className: String,
+        expectedGeneration: UInt64? = nil
+    ) throws -> String {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        return try session.requestWeaponSelection(className: className)
+    }
+
+    @discardableResult
+    public func requestNextWeapon(
+        expectedGeneration: UInt64? = nil
+    ) throws -> String? {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        return try session.requestNextWeapon()
+    }
+
+    @discardableResult
+    public func requestPreviousWeapon(
+        expectedGeneration: UInt64? = nil
+    ) throws -> String? {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        return try session.requestPreviousWeapon()
+    }
+
+    /// Queues one CLIENT noclip toggle on the session-owned command FIFO.
+    public func requestToggleNoClip(
+        expectedGeneration: UInt64? = nil
+    ) throws {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        try session.requestToggleNoClip()
+    }
+
+    /// Dispatches one user-entered Source console line on the actor lane that
+    /// owns CLIENT Lua and the shared CLIENT-to-SERVER command FIFO.
+    @discardableResult
+    public func executeClientConsoleCommandLine(
+        _ source: String,
+        expectedGeneration: UInt64? = nil
+    ) throws -> Int {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        return try session.executeClientConsoleCommandLine(source)
+    }
+
+    /// Shares the session's already-validated, immutable BSP pak index with
+    /// the App renderer. Returning this Sendable read-only object avoids a
+    /// second 40+ MB map read and keeps Lua and Metal on the same GAME layer.
+    public func mapPakFileSystem(
+        expectedGeneration: UInt64? = nil
+    ) throws -> SourceBSPPakFileSystem {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        return session.mapPakFileSystem
+    }
+
+    /// Returns the renderer-neutral dynamic prop scene only when its visual
+    /// revision differs from the caller's last consumed revision.
+    public func clientDynamicEntityRenderScene(
+        ifChangedFrom revision: UInt64?,
+        expectedGeneration: UInt64? = nil
+    ) throws -> GModDynamicEntityRenderSceneSnapshot? {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        return try session.clientDynamicEntityRenderScene(
+            ifChangedFrom: revision
+        )
+    }
+
+    /// Returns the active canonical Weapon's renderer-neutral first-person
+    /// Studio projection only when its visual revision changed.
+    public func clientFirstPersonViewModelScene(
+        ifChangedFrom revision: UInt64?,
+        expectedGeneration: UInt64? = nil
+    ) throws -> GModFirstPersonViewModelSceneSnapshot? {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        return try session.clientFirstPersonViewModelScene(
+            ifChangedFrom: revision
+        )
+    }
+
+    /// Returns the canonical local Player's renderer-neutral first-person
+    /// Hands projection only when its visual revision changed.
+    public func clientFirstPersonHandsScene(
+        ifChangedFrom revision: UInt64?,
+        expectedGeneration: UInt64? = nil
+    ) throws -> GModFirstPersonHandsSceneSnapshot? {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        return try session.clientFirstPersonHandsScene(
+            ifChangedFrom: revision
+        )
+    }
+
+    /// Executes the stock SERVER drop path on the lane that owns Lua and the
+    /// canonical entity list. Replication remains queued for the next ordinary
+    /// host-frame drain.
+    @discardableResult
+    public func dropActiveWeapon(
+        expectedGeneration: UInt64? = nil
+    ) throws -> Bool {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        return try session.dropActiveWeapon()
+    }
+
+    /// Enqueues the fixed stock CLIENT `undo` command on the lane that owns
+    /// both Lua realms. The following ordinary host frame performs SERVER
+    /// dispatch and any resulting canonical deferred removal/replication.
+    public func requestUndo(
+        expectedGeneration: UInt64? = nil
+    ) throws {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        try session.requestUndo()
+    }
+
     public func renderClientVGUIFrame(
+        scope: GMLuaVGUIRenderScope = .all,
         expectedGeneration: UInt64? = nil
     ) throws -> GMLuaSurfaceFrameSnapshot {
         dedicatedExecutor.preconditionIsCurrentWorker()
@@ -344,7 +608,18 @@ public actor GModPlayableSessionLane {
             throw GModPlayableSessionLaneError.notStarted
         }
         try validate(expectedGeneration: expectedGeneration)
-        return try session.renderClientVGUIFrame()
+        return try session.renderClientVGUIFrame(scope: scope)
+    }
+
+    public func hasVisibleClientOverlayPanels(
+        expectedGeneration: UInt64? = nil
+    ) throws -> Bool {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        return try session.hasVisibleClientOverlayPanels()
     }
 
     @discardableResult
@@ -653,6 +928,21 @@ public actor GModPlayableSessionLane {
         case .menu:
             throw GModPlayableSessionLaneError.unsupportedExecutionRealm(realm)
         }
+    }
+
+    /// Returns the thread-safe MENU-facing permission transport only. No Lua
+    /// state, Entity registry, BSP provider, or gameplay endpoint crosses the
+    /// actor boundary; all resulting work is deferred into the lane-owned
+    /// shared-session FIFO.
+    public func permissionSessionTransport(
+        expectedGeneration: UInt64? = nil
+    ) throws -> GMLuaPermissionSessionTransport {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        return session.sharedSession.permissionSessionTransport
     }
 
     @discardableResult

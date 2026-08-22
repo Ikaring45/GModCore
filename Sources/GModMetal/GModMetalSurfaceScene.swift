@@ -318,8 +318,15 @@ public enum GModMetalSurfaceSamplerAxisFilter: Sendable, Equatable, Hashable {
 /// stacks. TEXFILTER.NONE disables the override and therefore resolves to the
 /// same linear default as an empty stack. Hardware anisotropy applies only to
 /// minification; an anisotropic magnification request remains linear.
+enum GModMetalSamplerContract {
+    /// GMod exposes anisotropic filtering as its highest-quality texture
+    /// filter. Metal defines 16 as the highest legal sampler anisotropy.
+    static let maximumAnisotropy = 16
+}
+
 public struct GModMetalSurfaceSamplerConfiguration: Sendable, Equatable, Hashable {
-    public static let defaultMaximumAnisotropy = 8
+    public static let defaultMaximumAnisotropy =
+        GModMetalSamplerContract.maximumAnisotropy
 
     public let minification: GModMetalSurfaceSamplerAxisFilter
     public let magnification: GModMetalSurfaceSamplerAxisFilter

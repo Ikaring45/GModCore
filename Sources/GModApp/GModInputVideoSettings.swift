@@ -105,3 +105,54 @@ enum GModTouchLookPolicy {
         )
     }
 }
+
+/// Keeps high-rate UIKit look samples separate from the camera snapshot that
+/// SwiftUI and Metal consume. Source movement reads `inputAngles` immediately,
+/// while the next host-render frame publishes only the newest accumulated
+/// angle. This prevents every touch sample from copying/re-publishing the
+/// immutable world scene without delaying the user command angle.
+struct GModTouchLookFrameState: Sendable, Equatable {
+    private(set) var inputAngles: SourceQAngle
+    private(set) var presentedAngles: SourceQAngle
+
+    init(angles: SourceQAngle = .zero) {
+        inputAngles = angles
+        presentedAngles = angles
+    }
+
+    var hasPendingPresentation: Bool {
+        inputAngles != presentedAngles
+    }
+
+    mutating func reset(to angles: SourceQAngle) {
+        inputAngles = angles
+        presentedAngles = angles
+    }
+
+    @discardableResult
+    mutating func adjust(
+        deltaX: Float,
+        deltaY: Float,
+        sensitivity: Double,
+        invertY: Bool
+    ) -> Bool {
+        let replacement = GModTouchLookPolicy.adjustedAngles(
+            current: inputAngles,
+            deltaX: deltaX,
+            deltaY: deltaY,
+            sensitivity: sensitivity,
+            invertY: invertY
+        )
+        guard replacement != inputAngles else { return false }
+        inputAngles = replacement
+        return true
+    }
+
+    /// Returns at most one replacement for any number of touch samples since
+    /// the prior host frame.
+    mutating func takePendingPresentation() -> SourceQAngle? {
+        guard hasPendingPresentation else { return nil }
+        presentedAngles = inputAngles
+        return presentedAngles
+    }
+}

@@ -15,26 +15,37 @@ public protocol SourceWorldWalkCollisionProvider: Sendable {
     ) throws -> SourceContents
 }
 
-/// Immutable BSP adapter shared by authoritative and predicted movement.
-/// `SourceBSP` remains asset-bundle agnostic; hosts and tests decide where the
-/// BSP data comes from.
-public struct SourceBSPWorldWalkCollisionProvider: SourceWorldWalkCollisionProvider, Sendable {
+/// Lane-confined BSP adapter for one authoritative or predicted movement
+/// stream. `SourceBSP` remains immutable; the reusable trace workspace belongs
+/// to this provider, not the BSP asset. Construct one provider per simulation
+/// lane rather than sharing a provider between SERVER and CLIENT prediction.
+public final class SourceBSPWorldWalkCollisionProvider:
+    SourceWorldWalkCollisionProvider, @unchecked Sendable
+{
     public let bsp: SourceBSP
     public let tolerance: Float
+    private let workspace: SourceBSPTraceWorkspace
 
     public init(
         bsp: SourceBSP,
-        tolerance: Float = SourceCollisionConstants.distanceEpsilon
+        tolerance: Float = SourceCollisionConstants.distanceEpsilon,
+        workspace: SourceBSPTraceWorkspace = SourceBSPTraceWorkspace()
     ) {
         self.bsp = bsp
         self.tolerance = tolerance
+        self.workspace = workspace
     }
 
     public func traceWorldWalk(
         _ ray: SourceRay,
         mask: SourceContents
     ) throws -> SourceGameTrace {
-        try bsp.traceWorld(ray, mask: mask, tolerance: tolerance)
+        try bsp.traceWorld(
+            ray,
+            mask: mask,
+            tolerance: tolerance,
+            workspace: workspace
+        )
     }
 
     public func worldWalkPointContents(
@@ -51,9 +62,12 @@ public struct SourceBSPWorldWalkCollisionProvider: SourceWorldWalkCollisionProvi
 public enum SourceWorldWalkUnsupportedFeature: String, CaseIterable, Equatable, Sendable {
     case stepUp
     case jump
-    case duck
+    case duckTransition
+    case duckJump
     case verticalMove
-    case water
+    case waterJump
+    case waterCurrent
+    case dynamicWaterVolume
     case ladder
     case displacementCollision
     case dynamicEntityCollision
@@ -63,6 +77,20 @@ public enum SourceWorldWalkUnsupportedFeature: String, CaseIterable, Equatable, 
     case surfaceProperties
     case deadPlayer
     case nonWalkMoveType
+}
+
+/// Numeric water levels shared by `CBasePlayer` and `IMoveHelper` in Source
+/// SDK 2013. Keeping this in the authoritative movement state makes water
+/// entry and exit part of the canonical Player snapshot.
+public enum SourcePlayerWaterLevel: UInt8, CaseIterable, Equatable, Sendable {
+    case notInWater = 0
+    case feet = 1
+    case waist = 2
+    case eyes = 3
+
+    public var isSwimming: Bool {
+        rawValue > Self.feet.rawValue
+    }
 }
 
 /// Value-only classification for capability misses that a host may reject
@@ -122,8 +150,8 @@ public enum SourceWorldWalkError: Error, Equatable, Sendable,
             return "Source world walk has invalid configuration field \(field)"
         case let .embeddedInWorld(allSolid):
             return allSolid
-                ? "Source standing hull is all-solid in the world"
-                : "Source standing hull starts solid in the world"
+                ? "Source player hull is all-solid in the world"
+                : "Source player hull starts solid in the world"
         case .hitMissingWorldIdentity:
             return "Source world walk trace hit without an Entity(0) identity"
         case let .inconsistentTrace(field):
@@ -135,18 +163,48 @@ public enum SourceWorldWalkError: Error, Equatable, Sendable,
 /// Tunables already represented by the equation-compatible movement core plus
 /// the per-player maximum speed supplied by the host/gamemode.
 public struct SourceWorldWalkConfiguration: Equatable, Sendable {
+    /// Source SDK 2013 `movevars_shared.cpp` declares `sv_stepsize` with the
+    /// replicated default `18`; `CBasePlayer::SharedSpawn` copies it into the
+    /// canonical per-player step size used by `StepMove` and `StayOnGround`.
+    public static let sourceSDKDefaultStepSize: Float = 18
+
     public var movement: SourceMovementParameters
     public var maximumSpeed: Float
+    /// `WaterMove` uses the separately carried `m_flClientMaxSpeed` for jump
+    /// and upward-look intent. It defaults to the ordinary maximum when the
+    /// host does not author a distinct client limit.
+    public var clientMaximumSpeed: Float
     public var jumpHeight: Float
+    public var stepSize: Float
+    /// Standing `CBasePlayer::GetViewOffset().z` sampled by `CheckWater`.
+    public var standingViewOffsetZ: Float
+    /// Ducking `CBasePlayer::GetViewOffset().z` sampled by `CheckWater`.
+    public var duckViewOffsetZ: Float
+    /// Source `sv_noclipspeed`, `sv_noclipaccelerate`, `sv_maxspeed`, and
+    /// `sv_friction` values consumed only by `MOVETYPE_NOCLIP`.
+    public var noClipMovement: SourceNoClipMovementParameters
 
     public init(
         movement: SourceMovementParameters = SourceMovementParameters(),
         maximumSpeed: Float = 320,
-        jumpHeight: Float = 21
+        clientMaximumSpeed: Float? = nil,
+        jumpHeight: Float = 21,
+        stepSize: Float = 18,
+        standingViewOffsetZ: Float = 64,
+        duckViewOffsetZ: Float = 28,
+        noClipMovement: SourceNoClipMovementParameters? = nil
     ) {
         self.movement = movement
         self.maximumSpeed = maximumSpeed
+        self.clientMaximumSpeed = clientMaximumSpeed ?? maximumSpeed
         self.jumpHeight = jumpHeight
+        self.stepSize = stepSize
+        self.standingViewOffsetZ = standingViewOffsetZ
+        self.duckViewOffsetZ = duckViewOffsetZ
+        self.noClipMovement = noClipMovement ?? SourceNoClipMovementParameters(
+            frameTime: movement.frameTime,
+            friction: movement.friction
+        )
     }
 }
 
@@ -156,15 +214,39 @@ public struct SourceWorldWalkState: Equatable, Sendable {
     public var movement: SourceMoveData
     public var viewAngles: SourceQAngle
     public var moveType: SourceMoveType
+    public var waterLevel: SourcePlayerWaterLevel
+    /// The current-authored portion of `movement.baseVelocity`. Source water
+    /// currents do not set `FL_BASEVELOCITY`, so the next command transfers
+    /// this value into player velocity before PlayerMove and clears it.
+    public var waterCurrentBaseVelocity: SourceVector3
+    /// Fully-ducked `FL_DUCKING`/`m_bDucked` state. Timed eye interpolation
+    /// and duck-jump timers are deliberately not represented by this slice.
+    public var isDucked: Bool
+    /// Canonical local eye offset selected by the standing or duck view hull.
+    public var viewOffset: SourceVector3
+    /// Last world ladder plane selected by `CGameMovement::LadderMove`.
+    /// Source retains this vector on the player and uses its negation for the
+    /// next contact trace while `MOVETYPE_LADDER` is active.
+    public var ladderNormal: SourceVector3
 
     public init(
         movement: SourceMoveData = SourceMoveData(),
         viewAngles: SourceQAngle = .zero,
-        moveType: SourceMoveType = .walk
+        moveType: SourceMoveType = .walk,
+        waterLevel: SourcePlayerWaterLevel = .notInWater,
+        waterCurrentBaseVelocity: SourceVector3 = .zero,
+        isDucked: Bool = false,
+        viewOffset: SourceVector3 = SourceVector3(0, 0, 64),
+        ladderNormal: SourceVector3 = .zero
     ) {
         self.movement = movement
         self.viewAngles = viewAngles
         self.moveType = moveType
+        self.waterLevel = waterLevel
+        self.waterCurrentBaseVelocity = waterCurrentBaseVelocity
+        self.isDucked = isDucked
+        self.viewOffset = viewOffset
+        self.ladderNormal = ladderNormal
     }
 
     public init(
@@ -180,6 +262,11 @@ public struct SourceWorldWalkState: Equatable, Sendable {
         )
         self.viewAngles = viewAngles
         moveType = .walk
+        waterLevel = .notInWater
+        waterCurrentBaseVelocity = .zero
+        isDucked = false
+        viewOffset = SourceVector3(0, 0, 64)
+        ladderNormal = .zero
     }
 
     public var origin: SourceVector3 {
@@ -206,47 +293,60 @@ public struct SourceWorldWalkTick: Equatable, Sendable {
     public let bumpCount: Int
     public let collisionCount: Int
     public let didSnapToGround: Bool
+    /// Positive `m_outStepHeight` equivalent accumulated by `StepMove`.
+    public let stepHeight: Float
 
     public init(
         commandNumber: Int32,
         state: SourceWorldWalkState,
         bumpCount: Int,
         collisionCount: Int,
-        didSnapToGround: Bool
+        didSnapToGround: Bool,
+        stepHeight: Float = 0
     ) {
         self.commandNumber = commandNumber
         self.state = state
         self.bumpCount = bumpCount
         self.collisionCount = collisionCount
         self.didSnapToGround = didSnapToGround
+        self.stepHeight = stepHeight
     }
 }
 
-/// Minimum honest Source-style walking loop for a standing player against BSP
-/// world brushes. It composes the existing Float movement equations with hull
-/// traces, ground categorization, and four-bump plane clipping.
+/// Minimum honest Source-style standing/duck walking loop against BSP world
+/// brushes. It composes the existing Float movement equations with hull traces,
+/// ground categorization, and four-bump plane clipping.
 ///
 /// The input state is never mutated. Every provider call and validation must
 /// succeed before the returned state becomes observable, so trace failures and
 /// unsupported content cannot leak a partially advanced player.
 public struct SourceWorldWalkSolver: Sendable {
+    /// Fixed Source SDK 2013 `hl2mp_gamerules.cpp` `g_HL2MPViewVectors`.
+    /// Garry's Mod inherits these ordinary HL2MP player hull endpoints.
     public static let standingHullMins = SourceVector3(-16, -16, 0)
     public static let standingHullMaxs = SourceVector3(16, 16, 72)
+    public static let duckHullMins = SourceVector3(-16, -16, 0)
+    public static let duckHullMaxs = SourceVector3(16, 16, 36)
     public static let playerMask = SourceMasks.playerSolidBrushOnly
+    public static let ladderMask = SourceMasks.playerSolid
     public static let groundProbeDistance: Float = 2
     public static let groundSnapUpDistance: Float = 2
-    public static let groundSnapDownDistance: Float = 18
+    public static let groundSnapDownDistance =
+        SourceWorldWalkConfiguration.sourceSDKDefaultStepSize
     public static let walkableNormalZ: Float = 0.7
     public static let maximumBumps = 4
     public static let maximumClipPlanes = 5
+    /// Fixed Source SDK 2013 `CGameMovement` ladder contract.
+    public static let ladderDistance: Float = 2
+    public static let maximumClimbSpeed: Float = 200
+    public static let ladderJumpOffSpeed: Float = 270
 
     public static let unsupportedFeatures: [SourceWorldWalkUnsupportedFeature] = [
-        .stepUp,
-        .duck,
+        .duckTransition,
+        .duckJump,
         .verticalMove,
-        .water,
-        .ladder,
-        .displacementCollision,
+        .waterJump,
+        .dynamicWaterVolume,
         .dynamicEntityCollision,
         .movingGround,
         .vPhysics,
@@ -256,10 +356,13 @@ public struct SourceWorldWalkSolver: Sendable {
         .nonWalkMoveType,
     ]
 
-    private static let unsupportedContentsMask: SourceContents = [
-        .water, .slime, .ladder,
-    ]
     private static let nonJumpUpwardVelocity: Float = 140
+    private static let waterSinkSpeed: Float = 60
+    private static let waterJumpSpeed: Float = 100
+    private static let slimeJumpSpeed: Float = 80
+    private static let waterWishSpeedScale: Float = 0.8
+    private static let waterMinimumSpeed: Float = 0.1
+    private static let duckSpeedScale: Float = 0.333_333_33
 
     public let configuration: SourceWorldWalkConfiguration
     private let collisionProvider: any SourceWorldWalkCollisionProvider
@@ -276,10 +379,64 @@ public struct SourceWorldWalkSolver: Sendable {
         state: SourceWorldWalkState,
         command: SourceUserCommand
     ) throws -> SourceWorldWalkTick {
+        let jumpPower = sqrt(
+            2 * configuration.movement.gravity * configuration.jumpHeight
+        )
+        return try simulateConfigured(
+            state: state,
+            command: command,
+            crouchedWalkSpeed: Self.duckSpeedScale,
+            jumpPower: jumpPower
+        )
+    }
+
+    /// Runs one command with the canonical Player values selected by the
+    /// owning gamemode. The solver remains stateless: the values arrive with
+    /// the exact Player snapshot for this command and do not become a second
+    /// mutable host configuration.
+    public func simulate(
+        state: SourceWorldWalkState,
+        command: SourceUserCommand,
+        maximumSpeed: Float,
+        crouchedWalkSpeed: Float,
+        jumpPower: Float
+    ) throws -> SourceWorldWalkTick {
+        var effectiveConfiguration = configuration
+        effectiveConfiguration.maximumSpeed = maximumSpeed
+        effectiveConfiguration.clientMaximumSpeed = maximumSpeed
+        return try SourceWorldWalkSolver(
+            collisionProvider: collisionProvider,
+            configuration: effectiveConfiguration
+        ).simulateConfigured(
+            state: state,
+            command: command,
+            crouchedWalkSpeed: crouchedWalkSpeed,
+            jumpPower: jumpPower
+        )
+    }
+
+    private func simulateConfigured(
+        state: SourceWorldWalkState,
+        command: SourceUserCommand,
+        crouchedWalkSpeed: Float,
+        jumpPower: Float
+    ) throws -> SourceWorldWalkTick {
+        let configuration = self.configuration
         try validate(configuration: configuration)
+        for (name, value) in [
+            ("Player crouchedWalkSpeed", crouchedWalkSpeed),
+            ("Player jumpPower", jumpPower),
+        ] {
+            guard value.isFinite else {
+                throw SourceWorldWalkError.nonFinite(name)
+            }
+            guard value >= 0 else {
+                throw SourceWorldWalkError.invalidConfiguration(name)
+            }
+        }
         try validate(state: state)
         try validate(command: command)
-        try rejectUnsupportedState(state, command: command)
+        try rejectUnsupportedState(state)
 
         // Work only on this copy. Nothing outside this function can observe it
         // if a later trace or capability check throws.
@@ -287,34 +444,165 @@ public struct SourceWorldWalkSolver: Sendable {
         next.viewAngles = command.viewAngles
         next.movement.outputWishVelocity = .zero
 
-        let initialWaterLevel = try environmentLevel(at: next.origin)
-        _ = try categorizeGround(move: &next.movement)
+        // Prediction/server command setup runs CheckMovingGround before
+        // PlayerMove. BSP currents author base velocity without
+        // FL_BASEVELOCITY, so Source transfers the previous command's current
+        // momentum into absolute velocity with this exact half-frame factor,
+        // then clears base velocity before sampling the new command.
+        if next.waterCurrentBaseVelocity != .zero {
+            next.velocity += next.waterCurrentBaseVelocity * (
+                Float(1) + configuration.movement.frameTime * Float(0.5)
+            )
+            next.movement.baseVelocity = .zero
+            next.waterCurrentBaseVelocity = .zero
+        }
+
+        var activeHull = playerHull(isDucked: next.isDucked)
+        var initialWater = try checkWater(state: &next, hull: activeHull)
+        _ = try categorizeGround(move: &next.movement, hull: activeHull)
+
+        if command.buttons.contains(.jump),
+           (next.isDucked || command.buttons.contains(.duck)),
+           !initialWater.level.isSwimming {
+            throw SourceWorldWalkError.unsupported(.duckJump)
+        }
+
+        // `Duck()` calls `HandleDuckingSpeedCrop` before either FinishDuck or
+        // FinishUnDuck. Preserve that order: a player who began this command
+        // fully ducked and grounded receives the SDK's exact one-third input
+        // crop, including the command that successfully stands up.
+        var movementCommand = command
+        if next.isDucked, next.isOnGround {
+            // Garry's Mod exposes this as a multiplier and documents values
+            // above one as having no effect, so retain the authored value in
+            // the Player snapshot while clamping only its movement effect.
+            let effectiveCrouchedWalkSpeed = min(crouchedWalkSpeed, 1)
+            movementCommand.forwardMove *= effectiveCrouchedWalkSpeed
+            movementCommand.sideMove *= effectiveCrouchedWalkSpeed
+            movementCommand.upMove *= effectiveCrouchedWalkSpeed
+        }
+
+        // This bounded slice commits the fully-ducked endpoints immediately.
+        // It models CanUnduck/FinishDuck/FinishUnDuck, while the SDK's 0.4 s
+        // and 0.2 s spline eye transitions remain an explicit capability miss.
+        if try updateDuckState(
+            state: &next,
+            wantsDuck: command.buttons.contains(.duck)
+        ) {
+            activeHull = playerHull(isDucked: next.isDucked)
+            initialWater = try checkWater(state: &next, hull: activeHull)
+            _ = try categorizeGround(move: &next.movement, hull: activeHull)
+        }
+
+        // Source PlayerMove categorizes the player and runs Duck before the
+        // movement-type switch. LadderMove also runs here but returns false
+        // immediately for MOVETYPE_NOCLIP. FullNoClipMove then advances the
+        // origin without a displacement trace, gravity, or post-move
+        // categorization. Keep that exact boundary: pre-move water/ground and
+        // any duck endpoint traces above are observable, while noclip motion
+        // itself never clips against the BSP.
+        if next.moveType == .noClip {
+            SourceGameMovement.fullNoClipMove(
+                move: &next.movement,
+                command: movementCommand,
+                parameters: configuration.noClipMovement
+            )
+            try validate(state: next)
+            return SourceWorldWalkTick(
+                commandNumber: command.commandNumber,
+                state: next,
+                bumpCount: 0,
+                collisionCount: 0,
+                didSnapToGround: false
+            )
+        }
 
         var diagnostics = MovementDiagnostics()
-        if initialWaterLevel >= 2 {
-            try waterMove(
+
+        // Source SDK 2013 PlayerMove calls LadderMove after its initial
+        // categorization and before dispatching the resulting move type. A
+        // jump can therefore find a ladder and switch straight back to WALK
+        // in this same command with a 270-unit normal impulse.
+        let hasLadderContact = try ladderMove(
+            state: &next,
+            command: movementCommand,
+            hull: activeHull
+        )
+        if !hasLadderContact, next.moveType == .ladder {
+            next.moveType = .walk
+        }
+        if next.moveType == .ladder {
+            try slideMove(
                 move: &next.movement,
-                command: command,
+                hull: activeHull,
                 diagnostics: &diagnostics
             )
-            _ = try environmentLevel(at: next.origin)
+            _ = try checkWater(state: &next, hull: activeHull)
             try validate(state: next)
             return SourceWorldWalkTick(
                 commandNumber: command.commandNumber,
                 state: next,
                 bumpCount: diagnostics.bumpCount,
                 collisionCount: diagnostics.collisionCount,
-                didSnapToGround: false
+                didSnapToGround: false,
+                stepHeight: diagnostics.stepHeight
             )
+        }
+
+        // FullWalkMove performs its own CheckWater after PlayerMove's initial
+        // CategorizePosition. The duplicate sample is observable for currents:
+        // each call adds another 50 * waterLevel directional base velocity.
+        initialWater = try checkWater(state: &next, hull: activeHull)
+
+        if initialWater.level.isSwimming {
+            // Base `CheckJumpButton` detaches from ground and authors the
+            // initial swim-up velocity before `WaterMove` adds jump intent.
+            if movementCommand.buttons.contains(.jump) {
+                next.isOnGround = false
+                if initialWater.waterType == .water {
+                    next.velocity.z = Self.waterJumpSpeed
+                } else if initialWater.waterType == .slime {
+                    next.velocity.z = Self.slimeJumpSpeed
+                }
+            }
+            try waterMove(
+                move: &next.movement,
+                command: movementCommand,
+                hull: activeHull,
+                diagnostics: &diagnostics
+            )
+            _ = try checkWater(state: &next, hull: activeHull)
+            _ = try categorizeGround(move: &next.movement, hull: activeHull)
+            SourceGameMovement.checkVelocity(
+                move: &next.movement,
+                parameters: configuration.movement
+            )
+            if next.isOnGround {
+                next.velocity.z = 0
+            }
+            try validate(state: next)
+            return SourceWorldWalkTick(
+                commandNumber: command.commandNumber,
+                state: next,
+                bumpCount: diagnostics.bumpCount,
+                collisionCount: diagnostics.collisionCount,
+                didSnapToGround: diagnostics.didSnapToGround,
+                stepHeight: diagnostics.stepHeight
+            )
+        }
+
+        // `m_flUpMove` belongs to WaterMove (and ladder movement). Keeping it
+        // an explicit miss on ordinary WALK prevents noclip-like vertical
+        // movement from leaking into the bounded solver.
+        if movementCommand.upMove != 0 {
+            throw SourceWorldWalkError.unsupported(.verticalMove)
         }
 
         // CGameMovement applies a ground jump before the split gravity step.
         // The SDK's default jump height is 21 Source units; deriving the
         // impulse keeps custom gravity values coherent.
-        if command.buttons.contains(.jump), next.isOnGround {
-            next.velocity.z = sqrt(
-                2 * configuration.movement.gravity * configuration.jumpHeight
-            )
+        if movementCommand.buttons.contains(.jump), next.isOnGround {
+            next.velocity.z = jumpPower
             next.isOnGround = false
         }
 
@@ -322,6 +610,7 @@ public struct SourceWorldWalkSolver: Sendable {
             move: &next.movement,
             parameters: configuration.movement
         )
+        next.waterCurrentBaseVelocity.z = 0
 
         if next.isOnGround {
             next.velocity.z = 0
@@ -339,31 +628,36 @@ public struct SourceWorldWalkSolver: Sendable {
         if next.isOnGround {
             try groundMove(
                 move: &next.movement,
-                command: command,
+                command: movementCommand,
+                hull: activeHull,
                 diagnostics: &diagnostics
             )
         } else {
             try airMove(
                 move: &next.movement,
-                command: command,
+                command: movementCommand,
+                hull: activeHull,
                 diagnostics: &diagnostics
             )
         }
 
-        _ = try categorizeGround(move: &next.movement)
+        _ = try checkWater(state: &next, hull: activeHull)
+        _ = try categorizeGround(move: &next.movement, hull: activeHull)
         SourceGameMovement.checkVelocity(
             move: &next.movement,
             parameters: configuration.movement
         )
-        SourceGameMovement.finishGravity(
-            move: &next.movement,
-            parameters: configuration.movement
-        )
+        let finalWater = try checkWater(state: &next, hull: activeHull)
+        if !finalWater.level.isSwimming {
+            SourceGameMovement.finishGravity(
+                move: &next.movement,
+                parameters: configuration.movement
+            )
+        }
         if next.isOnGround {
             next.velocity.z = 0
         }
 
-        _ = try environmentLevel(at: next.origin)
         try validate(state: next)
 
         return SourceWorldWalkTick(
@@ -371,13 +665,181 @@ public struct SourceWorldWalkSolver: Sendable {
             state: next,
             bumpCount: diagnostics.bumpCount,
             collisionCount: diagnostics.collisionCount,
-            didSnapToGround: diagnostics.didSnapToGround
+            didSnapToGround: diagnostics.didSnapToGround,
+            stepHeight: diagnostics.stepHeight
         )
+    }
+
+    /// Fully-ducked endpoints from Source SDK 2013 `FinishDuck`,
+    /// `CanUnduck`, and `FinishUnDuck`. The ordinary ground transition keeps
+    /// the feet fixed; the airborne transition keeps the hull top fixed by
+    /// shifting the origin by the exact standing/duck size delta.
+    @discardableResult
+    private func updateDuckState(
+        state: inout SourceWorldWalkState,
+        wantsDuck: Bool
+    ) throws -> Bool {
+        guard wantsDuck != state.isDucked else { return false }
+
+        let standing = playerHull(isDucked: false)
+        let duck = playerHull(isDucked: true)
+        let standingSize = standing.maxs - standing.mins
+        let duckSize = duck.maxs - duck.mins
+        let hullSizeDelta = standingSize - duckSize
+
+        if wantsDuck {
+            if state.isOnGround {
+                state.origin -= duck.mins - standing.mins
+            } else {
+                state.origin += hullSizeDelta
+            }
+            state.isDucked = true
+            state.viewOffset = SourceVector3(0, 0, configuration.duckViewOffsetZ)
+            return true
+        }
+
+        var standingOrigin = state.origin
+        if state.isOnGround {
+            standingOrigin += duck.mins - standing.mins
+        } else {
+            standingOrigin -= hullSizeDelta
+        }
+
+        // CanUnduck temporarily selects the standing hull and traces from the
+        // current crouched origin to its candidate standing origin. A ceiling
+        // therefore leaves the player fully ducked without partially changing
+        // origin, hull, or view offset.
+        let trace = try traceHull(
+            start: state.origin,
+            end: standingOrigin,
+            hull: standing,
+            allowEmbedded: true
+        )
+        guard !trace.startSolid, trace.fraction == 1 else { return false }
+
+        state.origin = standingOrigin
+        state.isDucked = false
+        state.viewOffset = SourceVector3(0, 0, configuration.standingViewOffsetZ)
+        return true
+    }
+
+    private func playerHull(isDucked: Bool) -> PlayerHull {
+        if isDucked {
+            return PlayerHull(mins: Self.duckHullMins, maxs: Self.duckHullMaxs)
+        }
+        return PlayerHull(mins: Self.standingHullMins, maxs: Self.standingHullMaxs)
+    }
+
+    /// The world-brush `CONTENTS_LADDER` portion of Source SDK 2013
+    /// `CGameMovement::LadderMove`. Surface-property `climbable` and dynamic
+    /// physprop ladders remain outside this world-only collision boundary.
+    /// All state changes remain confined to the caller-owned transaction copy.
+    private func ladderMove(
+        state: inout SourceWorldWalkState,
+        command: SourceUserCommand,
+        hull: PlayerHull
+    ) throws -> Bool {
+        let basis = try viewBasis(for: command.viewAngles, flatten: false)
+        let wishDirection: SourceVector3
+        if state.moveType == .ladder {
+            wishDirection = -state.ladderNormal
+        } else {
+            guard command.forwardMove != 0 || command.sideMove != 0 else {
+                return false
+            }
+            let wishVelocity = basis.forward * command.forwardMove +
+                basis.right * command.sideMove
+            try requireFinite(
+                wishVelocity,
+                includingLengthSquared: true,
+                field: "ladder wish velocity"
+            )
+            let wishLength = wishVelocity.length
+            guard wishLength.isFinite else {
+                throw SourceWorldWalkError.nonFinite("ladder wish speed")
+            }
+            guard wishLength > 0 else { return false }
+            wishDirection = wishVelocity / wishLength
+        }
+        try requireFinite(
+            wishDirection,
+            includingLengthSquared: true,
+            field: "ladder wish direction"
+        )
+
+        let trace = try traceHull(
+            start: state.origin,
+            end: state.origin + wishDirection * Self.ladderDistance,
+            mask: Self.ladderMask,
+            hull: hull
+        )
+        guard trace.fraction < 1, trace.contents.contains(.ladder) else {
+            return false
+        }
+
+        state.moveType = .ladder
+        state.ladderNormal = trace.plane.normal
+
+        let floorContents = try collisionProvider.worldWalkPointContents(
+            at: state.origin + SourceVector3(0, 0, hull.mins.z - 1),
+            mask: SourceMasks.all
+        )
+        let onFloor = floorContents == .solid || state.isOnGround
+
+        var forwardSpeed: Float = 0
+        var rightSpeed: Float = 0
+        if command.buttons.contains(.back) {
+            forwardSpeed -= Self.maximumClimbSpeed
+        }
+        if command.buttons.contains(.forward) {
+            forwardSpeed += Self.maximumClimbSpeed
+        }
+        if command.buttons.contains(.moveLeft) {
+            rightSpeed -= Self.maximumClimbSpeed
+        }
+        if command.buttons.contains(.moveRight) {
+            rightSpeed += Self.maximumClimbSpeed
+        }
+
+        if command.buttons.contains(.jump) {
+            state.moveType = .walk
+            state.velocity = trace.plane.normal * Self.ladderJumpOffSpeed
+            return true
+        }
+
+        guard forwardSpeed != 0 || rightSpeed != 0 else {
+            state.velocity = .zero
+            return true
+        }
+
+        let intendedVelocity = basis.forward * forwardSpeed +
+            basis.right * rightSpeed
+        let verticalAxis = SourceVector3(0, 0, 1)
+        var perpendicular = cross(verticalAxis, trace.plane.normal)
+        let perpendicularLength = perpendicular.length
+        if perpendicularLength > 0 {
+            perpendicular = perpendicular / perpendicularLength
+        }
+        let normalSpeed = intendedVelocity.dot(trace.plane.normal)
+        let intoFace = trace.plane.normal * normalSpeed
+        let lateral = intendedVelocity - intoFace
+        let ladderUp = cross(trace.plane.normal, perpendicular)
+        state.velocity = lateral - ladderUp * normalSpeed
+        if onFloor, normalSpeed > 0 {
+            state.velocity += trace.plane.normal * Self.maximumClimbSpeed
+        }
+        try requireFinite(
+            state.velocity,
+            includingLengthSquared: true,
+            field: "ladder velocity"
+        )
+        return true
     }
 
     private func groundMove(
         move: inout SourceMoveData,
         command: SourceUserCommand,
+        hull: PlayerHull,
         diagnostics: inout MovementDiagnostics
     ) throws {
         let wish = try wishMove(command: command)
@@ -391,21 +853,130 @@ public struct SourceWorldWalkSolver: Sendable {
         move.velocity.z = 0
         move.outputWishVelocity += wish.direction * wish.speed
 
+        // Source WalkMove performs acceleration in player-relative velocity,
+        // then adds base velocity only for the displacement. It removes the
+        // same value before StayOnGround and before returning.
+        let baseVelocity = move.baseVelocity
+        move.velocity += baseVelocity
+
         // Source WalkMove stops before tracing at sub-unit speed. Retaining
         // that cutoff also avoids noisy zero-length hull work while idle.
         guard move.velocity.length >= 1 else {
             move.velocity = .zero
-            try stayOnGround(move: &move, diagnostics: &diagnostics)
+            move.velocity -= baseVelocity
+            try stayOnGround(move: &move, hull: hull, diagnostics: &diagnostics)
             return
         }
 
-        try slideMove(move: &move, diagnostics: &diagnostics)
-        try stayOnGround(move: &move, diagnostics: &diagnostics)
+        let destination = move.origin +
+            move.velocity * configuration.movement.frameTime
+        let directTrace = try traceHull(
+            start: move.origin,
+            end: destination,
+            hull: hull
+        )
+        if directTrace.fraction == 1 {
+            move.origin = directTrace.endPosition
+            diagnostics.bumpCount += 1
+            move.velocity -= baseVelocity
+            try stayOnGround(move: &move, hull: hull, diagnostics: &diagnostics)
+            return
+        }
+
+        try stepMove(
+            move: &move,
+            destination: destination,
+            directTrace: directTrace,
+            hull: hull,
+            diagnostics: &diagnostics
+        )
+        move.velocity -= baseVelocity
+        try stayOnGround(move: &move, hull: hull, diagnostics: &diagnostics)
+    }
+
+    /// Source SDK 2013 `CGameMovement::StepMove`: evaluate the ordinary and
+    /// raised slides as value transactions, then commit the branch that moved
+    /// farther horizontally. Equal distances select the raised branch.
+    private func stepMove(
+        move: inout SourceMoveData,
+        destination: SourceVector3,
+        directTrace: SourceGameTrace,
+        hull: PlayerHull,
+        diagnostics: inout MovementDiagnostics
+    ) throws {
+        let original = move
+
+        var downMove = original
+        var downDiagnostics = MovementDiagnostics()
+        try slideMove(
+            move: &downMove,
+            hull: hull,
+            diagnostics: &downDiagnostics,
+            firstDestination: destination,
+            firstTrace: directTrace
+        )
+
+        var upMove = original
+        var upDiagnostics = MovementDiagnostics()
+        let stepDistance = configuration.stepSize +
+            SourceCollisionConstants.distanceEpsilon
+        let upwardTrace = try traceHull(
+            start: upMove.origin,
+            end: upMove.origin + SourceVector3(0, 0, stepDistance),
+            hull: hull,
+            allowEmbedded: true
+        )
+        if !upwardTrace.startSolid, !upwardTrace.allSolid {
+            upMove.origin = upwardTrace.endPosition
+        }
+
+        try slideMove(move: &upMove, hull: hull, diagnostics: &upDiagnostics)
+
+        let downwardTrace = try traceHull(
+            start: upMove.origin,
+            end: upMove.origin - SourceVector3(0, 0, stepDistance),
+            hull: hull,
+            allowEmbedded: true
+        )
+        if downwardTrace.plane.normal.z < Self.walkableNormalZ {
+            let height = downMove.origin.z - original.origin.z
+            if height > 0 { downDiagnostics.stepHeight += height }
+            move = downMove
+            diagnostics.absorb(downDiagnostics)
+            return
+        }
+
+        if !downwardTrace.startSolid, !downwardTrace.allSolid {
+            upMove.origin = downwardTrace.endPosition
+        }
+
+        let downDelta = downMove.origin - original.origin
+        let upDelta = upMove.origin - original.origin
+        let downDistanceSquared = downDelta.x * downDelta.x +
+            downDelta.y * downDelta.y
+        let upDistanceSquared = upDelta.x * upDelta.x +
+            upDelta.y * upDelta.y
+
+        if downDistanceSquared > upDistanceSquared {
+            let height = downMove.origin.z - original.origin.z
+            if height > 0 { downDiagnostics.stepHeight += height }
+            move = downMove
+            diagnostics.absorb(downDiagnostics)
+        } else {
+            // Source retains the ordinary slide's vertical velocity even
+            // when the raised transaction wins.
+            upMove.velocity.z = downMove.velocity.z
+            let height = upMove.origin.z - original.origin.z
+            if height > 0 { upDiagnostics.stepHeight += height }
+            move = upMove
+            diagnostics.absorb(upDiagnostics)
+        }
     }
 
     private func airMove(
         move: inout SourceMoveData,
         command: SourceUserCommand,
+        hull: PlayerHull,
         diagnostics: inout MovementDiagnostics
     ) throws {
         let wish = try wishMove(command: command)
@@ -415,24 +986,37 @@ public struct SourceWorldWalkSolver: Sendable {
             wishSpeed: wish.speed,
             parameters: configuration.movement
         )
-        try slideMove(move: &move, diagnostics: &diagnostics)
+        let baseVelocity = move.baseVelocity
+        move.velocity += baseVelocity
+        defer { move.velocity -= baseVelocity }
+        try slideMove(move: &move, hull: hull, diagnostics: &diagnostics)
     }
 
-    /// A bounded world-brush water path. It intentionally omits currents,
-    /// water-jumps, and dynamic volumes, but it keeps ordinary map water from
-    /// becoming a permanent input rejection on iPad.
+    /// Source SDK 2013 `CGameMovement::WaterMove`, bounded to BSP world
+    /// collision. BSP currents use Source base velocity; water-jump ledge
+    /// probing and dynamic volumes stay explicit capability misses rather than
+    /// being approximated.
     private func waterMove(
         move: inout SourceMoveData,
         command: SourceUserCommand,
+        hull: PlayerHull,
         diagnostics: inout MovementDiagnostics
     ) throws {
         let basis = try viewBasis(for: command.viewAngles, flatten: false)
         var wishVelocity = basis.forward * command.forwardMove +
             basis.right * command.sideMove
         if command.buttons.contains(.jump) {
-            wishVelocity.z += configuration.maximumSpeed
-        } else if command.forwardMove == 0, command.sideMove == 0 {
-            wishVelocity.z -= 60
+            wishVelocity.z += configuration.clientMaximumSpeed
+        } else if command.forwardMove == 0,
+                  command.sideMove == 0,
+                  command.upMove == 0 {
+            wishVelocity.z -= Self.waterSinkSpeed
+        } else {
+            let upwardMovement = min(
+                max(command.forwardMove * basis.forward.z * Float(2), 0),
+                configuration.clientMaximumSpeed
+            )
+            wishVelocity.z += command.upMove + upwardMovement
         }
         try requireFinite(
             wishVelocity,
@@ -441,33 +1025,108 @@ public struct SourceWorldWalkSolver: Sendable {
         )
 
         let rawWishSpeed = wishVelocity.length
-        let maximumWaterSpeed = configuration.maximumSpeed * Float(0.8)
-        let wishSpeed = min(rawWishSpeed, maximumWaterSpeed)
+        let cappedWishSpeed = min(rawWishSpeed, configuration.maximumSpeed)
+        let wishSpeed = cappedWishSpeed * Self.waterWishSpeedScale
         let wishDirection = rawWishSpeed > 0 ? wishVelocity / rawWishSpeed : .zero
 
         let speed = move.velocity.length
+        let newSpeed: Float
         if speed > 0 {
-            let retained = max(
-                Float(0),
-                Float(1) - configuration.movement.friction *
-                    configuration.movement.frameTime
-            )
-            move.velocity *= retained
+            var candidate = speed - configuration.movement.frameTime * speed *
+                configuration.movement.friction * move.surfaceFriction
+            if candidate < Self.waterMinimumSpeed { candidate = 0 }
+            newSpeed = candidate
+            move.velocity *= candidate / speed
+        } else {
+            newSpeed = 0
         }
-        SourceGameMovement.accelerate(
-            move: &move,
-            wishDirection: wishDirection,
-            wishSpeed: wishSpeed,
-            parameters: configuration.movement
+
+        // WaterMove predates the general Accelerate helper: its `addspeed`
+        // compares against total post-friction speed, not the wish-direction
+        // dot product. Preserve that operation order and output delta.
+        if wishSpeed >= Self.waterMinimumSpeed {
+            let addSpeed = wishSpeed - newSpeed
+            if addSpeed > 0 {
+                var accelerationSpeed = configuration.movement.acceleration *
+                    wishSpeed * configuration.movement.frameTime *
+                    move.surfaceFriction
+                if accelerationSpeed > addSpeed { accelerationSpeed = addSpeed }
+                let addedVelocity = wishDirection * accelerationSpeed
+                move.velocity += addedVelocity
+                move.outputWishVelocity += addedVelocity
+            }
+        }
+
+        let baseVelocity = move.baseVelocity
+        move.velocity += baseVelocity
+        defer { move.velocity -= baseVelocity }
+
+        let destination = move.origin +
+            move.velocity * configuration.movement.frameTime
+        let directTrace = try traceHull(
+            start: move.origin,
+            end: destination,
+            hull: hull
         )
-        move.outputWishVelocity += wishDirection * wishSpeed
-        move.isOnGround = false
-        try slideMove(move: &move, diagnostics: &diagnostics)
+        if directTrace.fraction == 1 {
+            // WaterMove first reaches the intended point, then presses down
+            // from one unit above the configured step height.
+            let downwardStart = destination + SourceVector3(
+                0,
+                0,
+                configuration.stepSize + Float(1)
+            )
+            let downwardTrace = try traceHull(
+                start: downwardStart,
+                end: destination,
+                hull: hull,
+                allowEmbedded: true
+            )
+            diagnostics.bumpCount += 1
+            if !downwardTrace.startSolid, !downwardTrace.allSolid {
+                diagnostics.bumpCount += 1
+                diagnostics.stepHeight +=
+                    downwardTrace.endPosition.z - move.origin.z
+                move.origin = downwardTrace.endPosition
+                return
+            }
+
+            try slideMove(
+                move: &move,
+                hull: hull,
+                diagnostics: &diagnostics,
+                firstDestination: destination,
+                firstTrace: directTrace
+            )
+            return
+        }
+
+        if !move.isOnGround {
+            try slideMove(
+                move: &move,
+                hull: hull,
+                diagnostics: &diagnostics,
+                firstDestination: destination,
+                firstTrace: directTrace
+            )
+            return
+        }
+
+        try stepMove(
+            move: &move,
+            destination: destination,
+            directTrace: directTrace,
+            hull: hull,
+            diagnostics: &diagnostics
+        )
     }
 
     private func slideMove(
         move: inout SourceMoveData,
-        diagnostics: inout MovementDiagnostics
+        hull: PlayerHull,
+        diagnostics: inout MovementDiagnostics,
+        firstDestination: SourceVector3? = nil,
+        firstTrace: SourceGameTrace? = nil
     ) throws {
         var timeLeft = configuration.movement.frameTime
         var planes: [SourceVector3] = []
@@ -475,12 +1134,24 @@ public struct SourceWorldWalkSolver: Sendable {
         let primalVelocity = move.velocity
         var allFraction: Float = 0
 
-        for _ in 0 ..< Self.maximumBumps {
+        for bumpIndex in 0 ..< Self.maximumBumps {
             guard move.velocity.length != 0 else { break }
             diagnostics.bumpCount += 1
 
             let end = move.origin + move.velocity * timeLeft
-            let trace = try traceHull(start: move.origin, end: end)
+            let trace: SourceGameTrace
+            if bumpIndex == 0,
+               let firstDestination,
+               let firstTrace,
+               end == firstDestination {
+                trace = firstTrace
+            } else {
+                trace = try traceHull(
+                    start: move.origin,
+                    end: end,
+                    hull: hull
+                )
+            }
             allFraction += trace.fraction
 
             if trace.fraction > 0 {
@@ -548,16 +1219,19 @@ public struct SourceWorldWalkSolver: Sendable {
 
     private func stayOnGround(
         move: inout SourceMoveData,
+        hull: PlayerHull,
         diagnostics: inout MovementDiagnostics
     ) throws {
         let originalOrigin = move.origin
         let upward = try traceHull(
             start: originalOrigin,
-            end: originalOrigin + SourceVector3(0, 0, Self.groundSnapUpDistance)
+            end: originalOrigin + SourceVector3(0, 0, Self.groundSnapUpDistance),
+            hull: hull
         )
         let downward = try traceHull(
             start: upward.endPosition,
-            end: originalOrigin - SourceVector3(0, 0, Self.groundSnapDownDistance)
+            end: originalOrigin - SourceVector3(0, 0, configuration.stepSize),
+            hull: hull
         )
 
         guard downward.fraction > 0,
@@ -577,7 +1251,8 @@ public struct SourceWorldWalkSolver: Sendable {
 
     @discardableResult
     private func categorizeGround(
-        move: inout SourceMoveData
+        move: inout SourceMoveData,
+        hull: PlayerHull
     ) throws -> SourceGameTrace? {
         // CGameMovement::CategorizePosition clears any previous surface's
         // friction before determining the current ground. Surface properties
@@ -590,7 +1265,8 @@ public struct SourceWorldWalkSolver: Sendable {
 
         let trace = try traceHull(
             start: move.origin,
-            end: move.origin - SourceVector3(0, 0, Self.groundProbeDistance)
+            end: move.origin - SourceVector3(0, 0, Self.groundProbeDistance),
+            hull: hull
         )
         move.isOnGround = trace.didHit &&
             trace.plane.normal.z >= Self.walkableNormalZ
@@ -599,10 +1275,13 @@ public struct SourceWorldWalkSolver: Sendable {
 
     private func traceHull(
         start: SourceVector3,
-        end: SourceVector3
+        end: SourceVector3,
+        mask: SourceContents = Self.playerMask,
+        hull: PlayerHull,
+        allowEmbedded: Bool = false
     ) throws -> SourceGameTrace {
         let delta = end - start
-        let centerOffset = (Self.standingHullMins + Self.standingHullMaxs) * Float(0.5)
+        let centerOffset = (hull.mins + hull.maxs) * Float(0.5)
         try requireFinite(start, field: "trace start")
         try requireFinite(end, field: "trace end")
         try requireFinite(delta, includingLengthSquared: true, field: "trace delta")
@@ -619,18 +1298,22 @@ public struct SourceWorldWalkSolver: Sendable {
         let ray = SourceRay(
             start: start,
             end: end,
-            mins: Self.standingHullMins,
-            maxs: Self.standingHullMaxs
+            mins: hull.mins,
+            maxs: hull.maxs
         )
         let trace = try collisionProvider.traceWorldWalk(
             ray,
-            mask: Self.playerMask
+            mask: mask
         )
-        try validate(trace: trace, ray: ray)
+        try validate(trace: trace, ray: ray, allowEmbedded: allowEmbedded)
         return trace
     }
 
-    private func validate(trace: SourceGameTrace, ray: SourceRay) throws {
+    private func validate(
+        trace: SourceGameTrace,
+        ray: SourceRay,
+        allowEmbedded: Bool = false
+    ) throws {
         for (name, value) in [
             ("trace StartPos.x", trace.startPosition.x),
             ("trace StartPos.y", trace.startPosition.y),
@@ -654,10 +1337,7 @@ public struct SourceWorldWalkSolver: Sendable {
         guard trace.fractionLeftSolid >= 0, trace.fractionLeftSolid <= 1 else {
             throw SourceWorldWalkError.inconsistentTrace("FractionLeftSolid")
         }
-        guard trace.displacementFlags == 0 else {
-            throw SourceWorldWalkError.unsupported(.displacementCollision)
-        }
-        if trace.startSolid || trace.allSolid {
+        if !allowEmbedded, trace.startSolid || trace.allSolid {
             throw SourceWorldWalkError.embeddedInWorld(allSolid: trace.allSolid)
         }
 
@@ -691,7 +1371,8 @@ public struct SourceWorldWalkSolver: Sendable {
             throw SourceWorldWalkError.inconsistentTrace("miss Entity identity")
         }
 
-        if trace.didHit {
+        if trace.didHit,
+           !(allowEmbedded && (trace.startSolid || trace.allSolid)) {
             let normalLengthSquared = trace.plane.normal.lengthSquared
             guard normalLengthSquared.isFinite else {
                 throw SourceWorldWalkError.nonFinite("trace HitNormal lengthSquared")
@@ -702,21 +1383,118 @@ public struct SourceWorldWalkSolver: Sendable {
         }
     }
 
-    private func environmentLevel(at origin: SourceVector3) throws -> Int {
-        var waterLevel = 0
-        for (index, height) in [Float(1), Float(36), Float(71)].enumerated() {
-            let contents = try collisionProvider.worldWalkPointContents(
-                at: origin + SourceVector3(0, 0, height),
-                mask: Self.unsupportedContentsMask
+    /// Source SDK 2013 `CheckWater`: feet must be wet before waist is sampled,
+    /// and waist must be wet before the active standing/duck eye is sampled.
+    /// The provider is world-only, so dynamic `func_water_analog` entities are
+    /// deliberately absent from this result.
+    private func checkWater(
+        state: inout SourceWorldWalkState,
+        hull: PlayerHull
+    ) throws -> WaterEnvironment {
+        let environment = try waterEnvironment(
+            at: state.origin,
+            hull: hull,
+            viewOffset: state.viewOffset
+        )
+        state.waterLevel = environment.level
+
+        // Source CheckWater appends, rather than replaces, the current. Its
+        // six independent bit tests preserve compound brush currents and the
+        // magnitude is intentionally not normalized.
+        let currentSpeed = Float(50) * Float(environment.level.rawValue)
+        let currentBaseVelocity = environment.currentDirection * currentSpeed
+        state.movement.baseVelocity += currentBaseVelocity
+        state.waterCurrentBaseVelocity += currentBaseVelocity
+        try requireFinite(
+            state.movement.baseVelocity,
+            includingLengthSquared: true,
+            field: "water current base velocity"
+        )
+        try requireFinite(
+            state.waterCurrentBaseVelocity,
+            includingLengthSquared: true,
+            field: "water current provenance"
+        )
+        return environment
+    }
+
+    private func waterEnvironment(
+        at origin: SourceVector3,
+        hull: PlayerHull,
+        viewOffset: SourceVector3
+    ) throws -> WaterEnvironment {
+        let center = (hull.mins + hull.maxs) * Float(0.5)
+        let feetPoint = SourceVector3(
+            origin.x + center.x,
+            origin.y + center.y,
+            origin.z + hull.mins.z + Float(1)
+        )
+        let feetContents = try collisionProvider.worldWalkPointContents(
+            at: feetPoint,
+            mask: SourceMasks.all
+        )
+        var level = SourcePlayerWaterLevel.notInWater
+        var lastContents = feetContents
+        if !feetContents.intersection(SourceMasks.water).isEmpty {
+            level = .feet
+            let waistPoint = SourceVector3(
+                feetPoint.x,
+                feetPoint.y,
+                origin.z + center.z
             )
-            if !contents.intersection([.water, .slime]).isEmpty {
-                waterLevel = index + 1
-            }
-            if contents.contains(.ladder) {
-                throw SourceWorldWalkError.unsupported(.ladder)
+            let waistContents = try collisionProvider.worldWalkPointContents(
+                at: waistPoint,
+                mask: SourceMasks.all
+            )
+            // CheckWater retains the last probe's complete contents even when
+            // that probe is dry; current selection below observes that value.
+            lastContents = waistContents
+            if !waistContents.intersection(SourceMasks.water).isEmpty {
+                level = .waist
+                let eyeContents = try collisionProvider.worldWalkPointContents(
+                    at: SourceVector3(
+                        feetPoint.x,
+                        feetPoint.y,
+                        origin.z + viewOffset.z
+                    ),
+                    mask: SourceMasks.all
+                )
+                lastContents = eyeContents
+                if !eyeContents.intersection(SourceMasks.water).isEmpty {
+                    level = .eyes
+                }
             }
         }
-        return waterLevel
+
+        // Fixed Source CheckWater statement order. These are six independent
+        // tests, not an enum switch: opposing directions cancel and orthogonal
+        // contents combine without normalization.
+        var currentDirection = SourceVector3.zero
+        if lastContents.contains(.current0) { currentDirection.x += 1 }
+        if lastContents.contains(.current90) { currentDirection.y += 1 }
+        if lastContents.contains(.current180) { currentDirection.x -= 1 }
+        if lastContents.contains(.current270) { currentDirection.y -= 1 }
+        if lastContents.contains(.currentUp) { currentDirection.z += 1 }
+        if lastContents.contains(.currentDown) { currentDirection.z -= 1 }
+
+        // The BSP/provider returns the complete leaf OptionSet. Source stores
+        // the sampled liquid kind for CheckJumpButton, so normalize away
+        // unrelated leaf flags while preserving slime's distinct 80 u/s path.
+        let waterType: SourceContents
+        if level == .notInWater {
+            waterType = .empty
+        } else if feetContents.contains(.slime) {
+            waterType = .slime
+        } else if feetContents.contains(.water) {
+            waterType = .water
+        } else {
+            waterType = feetContents
+        }
+        return WaterEnvironment(
+            level: level,
+            waterType: waterType,
+            currentDirection: currentDirection
+        )
     }
 
     private func wishMove(
@@ -831,7 +1609,11 @@ public struct SourceWorldWalkSolver: Sendable {
             ("airAcceleration", parameters.airAcceleration),
             ("airSpeedCap", parameters.airSpeedCap),
             ("maximumSpeed", configuration.maximumSpeed),
+            ("clientMaximumSpeed", configuration.clientMaximumSpeed),
             ("jumpHeight", configuration.jumpHeight),
+            ("stepSize", configuration.stepSize),
+            ("standingViewOffsetZ", configuration.standingViewOffsetZ),
+            ("duckViewOffsetZ", configuration.duckViewOffsetZ),
         ] {
             guard value.isFinite else {
                 throw SourceWorldWalkError.nonFinite("configuration \(name)")
@@ -843,6 +1625,21 @@ public struct SourceWorldWalkSolver: Sendable {
         guard parameters.frameTime > 0,
               parameters.maximumVelocity > 0 else {
             throw SourceWorldWalkError.invalidConfiguration("frameTime/maximumVelocity")
+        }
+        for (name, value) in [
+            ("noClip frameTime", configuration.noClipMovement.frameTime),
+            ("noClip speedFactor", configuration.noClipMovement.speedFactor),
+            (
+                "noClip maximumAcceleration",
+                configuration.noClipMovement.maximumAcceleration
+            ),
+            ("noClip maximumSpeed", configuration.noClipMovement.maximumSpeed),
+            ("noClip friction", configuration.noClipMovement.friction),
+        ] where !value.isFinite {
+            throw SourceWorldWalkError.nonFinite("configuration \(name)")
+        }
+        guard configuration.noClipMovement.frameTime > 0 else {
+            throw SourceWorldWalkError.invalidConfiguration("noClip frameTime")
         }
         for (name, value) in [
             ("gravity per tick", parameters.gravity * parameters.frameTime),
@@ -857,6 +1654,10 @@ public struct SourceWorldWalkSolver: Sendable {
             ),
             ("maximum displacement per tick", parameters.maximumVelocity * parameters.frameTime),
             ("jump impulse squared", 2 * parameters.gravity * configuration.jumpHeight),
+            (
+                "step trace distance",
+                configuration.stepSize + SourceCollisionConstants.distanceEpsilon
+            ),
         ] where !value.isFinite {
             throw SourceWorldWalkError.nonFinite("configuration \(name)")
         }
@@ -874,6 +1675,9 @@ public struct SourceWorldWalkSolver: Sendable {
             ("state baseVelocity.x", move.baseVelocity.x),
             ("state baseVelocity.y", move.baseVelocity.y),
             ("state baseVelocity.z", move.baseVelocity.z),
+            ("state waterCurrentBaseVelocity.x", state.waterCurrentBaseVelocity.x),
+            ("state waterCurrentBaseVelocity.y", state.waterCurrentBaseVelocity.y),
+            ("state waterCurrentBaseVelocity.z", state.waterCurrentBaseVelocity.z),
             ("state outputWishVelocity.x", move.outputWishVelocity.x),
             ("state outputWishVelocity.y", move.outputWishVelocity.y),
             ("state outputWishVelocity.z", move.outputWishVelocity.z),
@@ -883,6 +1687,12 @@ public struct SourceWorldWalkSolver: Sendable {
             ("state view pitch", state.viewAngles.pitch),
             ("state view yaw", state.viewAngles.yaw),
             ("state view roll", state.viewAngles.roll),
+            ("state viewOffset.x", state.viewOffset.x),
+            ("state viewOffset.y", state.viewOffset.y),
+            ("state viewOffset.z", state.viewOffset.z),
+            ("state ladderNormal.x", state.ladderNormal.x),
+            ("state ladderNormal.y", state.ladderNormal.y),
+            ("state ladderNormal.z", state.ladderNormal.z),
         ] where !value.isFinite {
             throw SourceWorldWalkError.nonFinite(name)
         }
@@ -900,11 +1710,27 @@ public struct SourceWorldWalkSolver: Sendable {
             field: "state baseVelocity"
         )
         try requireFinite(
+            state.waterCurrentBaseVelocity,
+            includingLengthSquared: true,
+            field: "state waterCurrentBaseVelocity"
+        )
+        try requireFinite(
             move.outputWishVelocity,
             includingLengthSquared: true,
             field: "state outputWishVelocity"
         )
-        let centeredOrigin = move.origin + SourceVector3(0, 0, 36)
+        try requireFinite(
+            state.ladderNormal,
+            includingLengthSquared: true,
+            field: "state ladderNormal"
+        )
+        if state.moveType == .ladder {
+            guard abs(state.ladderNormal.lengthSquared - 1) <= Float(0.001) else {
+                throw SourceWorldWalkError.inconsistentTrace("state ladder normal")
+            }
+        }
+        let hull = playerHull(isDucked: state.isDucked)
+        let centeredOrigin = move.origin + (hull.mins + hull.maxs) * Float(0.5)
         try requireFinite(
             centeredOrigin,
             includingLengthSquared: false,
@@ -925,11 +1751,10 @@ public struct SourceWorldWalkSolver: Sendable {
         }
     }
 
-    private func rejectUnsupportedState(
-        _ state: SourceWorldWalkState,
-        command: SourceUserCommand
-    ) throws {
-        guard state.moveType == .walk else {
+    private func rejectUnsupportedState(_ state: SourceWorldWalkState) throws {
+        guard state.moveType == .walk ||
+            state.moveType == .ladder ||
+            state.moveType == .noClip else {
             let feature: SourceWorldWalkUnsupportedFeature =
                 state.moveType == .vPhysics ? .vPhysics : .nonWalkMoveType
             throw SourceWorldWalkError.unsupported(feature)
@@ -937,16 +1762,10 @@ public struct SourceWorldWalkSolver: Sendable {
         if state.movement.isDead {
             throw SourceWorldWalkError.unsupported(.deadPlayer)
         }
-        if command.buttons.contains(.duck) {
-            throw SourceWorldWalkError.unsupported(.duck)
-        }
-        if command.upMove != 0 {
-            throw SourceWorldWalkError.unsupported(.verticalMove)
-        }
         if state.movement.waterJumpTime != 0 {
-            throw SourceWorldWalkError.unsupported(.water)
+            throw SourceWorldWalkError.unsupported(.waterJump)
         }
-        if state.movement.baseVelocity != .zero {
+        if state.movement.baseVelocity != state.waterCurrentBaseVelocity {
             throw SourceWorldWalkError.unsupported(.movingGround)
         }
     }
@@ -978,5 +1797,24 @@ public struct SourceWorldWalkSolver: Sendable {
         var bumpCount = 0
         var collisionCount = 0
         var didSnapToGround = false
+        var stepHeight: Float = 0
+
+        mutating func absorb(_ other: Self) {
+            bumpCount += other.bumpCount
+            collisionCount += other.collisionCount
+            didSnapToGround = didSnapToGround || other.didSnapToGround
+            stepHeight += other.stepHeight
+        }
+    }
+
+    private struct WaterEnvironment {
+        let level: SourcePlayerWaterLevel
+        let waterType: SourceContents
+        let currentDirection: SourceVector3
+    }
+
+    private struct PlayerHull {
+        let mins: SourceVector3
+        let maxs: SourceVector3
     }
 }

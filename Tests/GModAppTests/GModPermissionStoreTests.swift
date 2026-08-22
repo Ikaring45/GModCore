@@ -1,4 +1,6 @@
 import Foundation
+import GModEngine
+import GModLua
 import XCTest
 @testable import GModApp
 
@@ -227,6 +229,14 @@ final class GModPermissionStoreTests: XCTestCase {
         )
         let before = fixture.store.collection
 
+        XCTAssertEqual(
+            try fixture.store.connect(
+                to: GModPermissionStore.localServerIdentifier
+            ),
+            .localSession
+        )
+        XCTAssertEqual(fixture.store.collection, before)
+
         XCTAssertThrowsError(
             try fixture.store.connect(to: "server-b:27015")
         ) { error in
@@ -248,7 +258,55 @@ final class GModPermissionStoreTests: XCTestCase {
     }
 
     @MainActor
-    func testProblemsSnapshotShowsRealGrantsAndKeepsMenuBoundaryExplicit()
+    func testMenuLuaPermissionsUseNativeStoreAndResumeRealLocalHost() throws {
+        let fixture = makeFixture()
+        defer { fixture.cleanup() }
+        let state = LuaState(output: { _ in })
+        defer { _ = state.close() }
+        var changeCount = 0
+        var localResumeCount = 0
+
+        XCTAssertTrue(try GMLuaPermissions.install(
+            into: state,
+            realm: .menu,
+            host: fixture.store.makeLuaPermissionsHost(),
+            onPermissionsChanged: { changeCount += 1 },
+            onLocalSessionConnect: { localResumeCount += 1 }
+        ))
+        try state.execute(
+            #"""
+            assert(permissions.IsGranted("connect") == false)
+            permissions.Grant("connect", true)
+            permissions.Grant("connect", true)
+            permissions.Grant("openurl", false)
+            assert(permissions.IsGranted("connect") == true)
+
+            local all = permissions.GetAll()
+            assert(all.temporary["local://garrys-pad"] == "connect")
+            assert(all.permanent["local://garrys-pad"] == "openurl")
+
+            permissions.Connect("local://garrys-pad")
+            permissions.Revoke("connect", "local://garrys-pad")
+            assert(permissions.IsGranted("connect") == false)
+            """#,
+            sourceName: "@tests/menu_permissions.lua"
+        )
+
+        XCTAssertEqual(changeCount, 3)
+        XCTAssertEqual(localResumeCount, 1)
+        XCTAssertEqual(
+            fixture.store.collection,
+            GModPermissionCollection(
+                temporary: [:],
+                permanent: [
+                    GModPermissionStore.localServerIdentifier: ["openurl"],
+                ]
+            )
+        )
+    }
+
+    @MainActor
+    func testProblemsSnapshotShowsRealGrantsWithoutInventingAProblem()
         throws {
         let fixture = makeFixture()
         defer { fixture.cleanup() }
@@ -276,7 +334,7 @@ final class GModPermissionStoreTests: XCTestCase {
                 lifetime: .temporary
             ),
         ])
-        XCTAssertTrue(snapshot.problems.contains {
+        XCTAssertFalse(snapshot.problems.contains {
             $0.id == "permissions-menu-transport-unavailable"
         })
         XCTAssertFalse(snapshot.problems.contains {

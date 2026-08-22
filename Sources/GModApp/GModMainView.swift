@@ -127,6 +127,7 @@ public struct GModMainView: View {
     @StateObject private var console: GModConsoleModel
     @StateObject private var game: GModGameSessionModel
     @StateObject private var content: GModPlaygroundContentModel
+    @StateObject private var dermaMenu: GModDermaMenuModel
     @StateObject private var developerDiagnostics:
         GModDeveloperDiagnosticsSettingsStore
     @StateObject private var localizationSelection:
@@ -141,9 +142,10 @@ public struct GModMainView: View {
     @State private var resultLabel = "READY"
     @State private var showConsole = false
     @State private var presentation = GModGamePresentationState()
+    @State private var activeHomeUtility: GMLuaMenuUtility?
     @State private var showingQuitUnavailable = false
     @State private var isChoosingContentPack = false
-    @State private var activeUtilityWindow: GModUtilityWindowKind?
+    @State private var menuVolumeBeforeMute: Double
     @State private var pendingContentManagementAction:
         GModPendingContentManagementAction?
     @State private var contentActionAfterDisconnect:
@@ -197,6 +199,38 @@ public struct GModMainView: View {
         localizationSelection.snapshot.appText(.useButton)
     }
 
+    private var localizedReloadButton: String {
+        localizationSelection.snapshot.appText(.reloadButton)
+    }
+
+    private var localizedDuckButton: String {
+        localizationSelection.snapshot.appText(.duckButton)
+    }
+
+    private var localizedSpeedButton: String {
+        localizationSelection.snapshot.appText(.speedButton)
+    }
+
+    private var localizedPreviousWeaponButton: String {
+        localizationSelection.snapshot.appText(.previousWeaponButton)
+    }
+
+    private var localizedNextWeaponButton: String {
+        localizationSelection.snapshot.appText(.nextWeaponButton)
+    }
+
+    private var localizedDropWeaponButton: String {
+        localizationSelection.snapshot.appText(.dropWeaponButton)
+    }
+
+    private var localizedUndoButton: String {
+        localizationSelection.snapshot.appText(.undoButton)
+    }
+
+    private var localizedNoClipButton: String {
+        localizationSelection.snapshot.appText(.noClipButton)
+    }
+
     private var localizedContextMenuButton: String {
         localizationSelection.snapshot.appText(
             game.isContextMenuOpen
@@ -233,6 +267,12 @@ public struct GModMainView: View {
                 settingsStore: contentSettingsStore
             )
         )
+        _dermaMenu = StateObject(
+            wrappedValue: GModDermaMenuModel(
+                runtimeFactory: factory,
+                permissionStore: permissionStore
+            )
+        )
         _developerDiagnostics = StateObject(
             wrappedValue: GModDeveloperDiagnosticsSettingsStore.shared
         )
@@ -241,6 +281,11 @@ public struct GModMainView: View {
         )
         _menuAudio = StateObject(
             wrappedValue: audioSettingsStore
+        )
+        _menuVolumeBeforeMute = State(
+            initialValue: audioSettingsStore.settings.menuVolume > 0
+                ? audioSettingsStore.settings.menuVolume
+                : 1
         )
         _inputVideoSettings = StateObject(
             wrappedValue: inputVideoSettingsStore
@@ -279,6 +324,9 @@ public struct GModMainView: View {
                     GModMetalView(
                         stats: $stats,
                         worldScene: game.worldScene,
+                        dynamicEntityScene: game.dynamicEntityScene,
+                        firstPersonViewModelScene:
+                            game.firstPersonViewModelScene,
                         surfaceScene: game.surfaceScene,
                         preferredFramesPerSecond:
                             inputVideoSettings.preferredFramesPerSecond,
@@ -388,13 +436,102 @@ public struct GModMainView: View {
                                                 }
                                             }
 
-                                            GModTouchActionButton(
-                                                label: localizedJumpButton,
-                                                diameter: layout.jumpDiameter,
-                                                accessibilityIdentifier:
-                                                    "garryspad.control.jump"
-                                            ) { pressed in
-                                                game.setJumpPressed(pressed)
+                                            HStack(spacing: 8) {
+                                                GModTouchActionButton(
+                                                    label: localizedReloadButton,
+                                                    diameter: layout.heldActionDiameter,
+                                                    accessibilityIdentifier:
+                                                        "garryspad.control.reload"
+                                                ) { pressed in
+                                                    game.setWorldActionButton(
+                                                        .reload,
+                                                        pressed: pressed
+                                                    )
+                                                }
+                                                GModTouchActionButton(
+                                                    label: localizedDuckButton,
+                                                    diameter: layout.heldActionDiameter,
+                                                    accessibilityIdentifier:
+                                                        "garryspad.control.duck"
+                                                ) { pressed in
+                                                    game.setWorldActionButton(
+                                                        .duck,
+                                                        pressed: pressed
+                                                    )
+                                                }
+                                                GModTouchActionButton(
+                                                    label: localizedSpeedButton,
+                                                    diameter: layout.heldActionDiameter,
+                                                    accessibilityIdentifier:
+                                                        "garryspad.control.speed"
+                                                ) { pressed in
+                                                    game.setWorldActionButton(
+                                                        .speed,
+                                                        pressed: pressed
+                                                    )
+                                                }
+                                                GModTouchActionButton(
+                                                    label: localizedJumpButton,
+                                                    diameter: layout.jumpDiameter,
+                                                    accessibilityIdentifier:
+                                                        "garryspad.control.jump"
+                                                ) { pressed in
+                                                    game.setJumpPressed(pressed)
+                                                }
+                                            }
+
+                                            HStack(spacing: 8) {
+                                                GModTouchActionButton(
+                                                    label:
+                                                        localizedPreviousWeaponButton,
+                                                    diameter: layout.heldActionDiameter,
+                                                    accessibilityIdentifier:
+                                                        "garryspad.control.previous-weapon"
+                                                ) { pressed in
+                                                    if pressed {
+                                                        game.selectPreviousWeapon()
+                                                    }
+                                                }
+                                                GModTouchActionButton(
+                                                    label: localizedDropWeaponButton,
+                                                    diameter: layout.heldActionDiameter,
+                                                    accessibilityIdentifier:
+                                                        "garryspad.control.drop-weapon"
+                                                ) { pressed in
+                                                    if pressed {
+                                                        game.dropActiveWeapon()
+                                                    }
+                                                }
+                                                GModTouchActionButton(
+                                                    label: localizedNextWeaponButton,
+                                                    diameter: layout.heldActionDiameter,
+                                                    accessibilityIdentifier:
+                                                        "garryspad.control.next-weapon"
+                                                ) { pressed in
+                                                    if pressed {
+                                                        game.selectNextWeapon()
+                                                    }
+                                                }
+                                                GModTouchActionButton(
+                                                    label: localizedUndoButton,
+                                                    diameter: layout.heldActionDiameter,
+                                                    accessibilityIdentifier:
+                                                        "garryspad.control.undo"
+                                                ) { pressed in
+                                                    if pressed {
+                                                        game.undoLastAction()
+                                                    }
+                                                }
+                                                GModTouchActionButton(
+                                                    label: localizedNoClipButton,
+                                                    diameter: layout.heldActionDiameter,
+                                                    accessibilityIdentifier:
+                                                        "garryspad.control.noclip"
+                                                ) { pressed in
+                                                    if pressed {
+                                                        game.toggleNoClip()
+                                                    }
+                                                }
                                             }
 
                                             GModTouchLookPad(
@@ -530,15 +667,12 @@ public struct GModMainView: View {
 
             contentOverlay
 
-            utilityOverlay
-
             if game.isStarting {
                 loadingOverlay
             }
         }
         .preferredColorScheme(.dark)
         .onAppear {
-            game.setHostPopupPresented(activeUtilityWindow != nil)
             if scenePhase == .active && !presentation.showsHomeMenu {
                 game.resumeInput()
             } else {
@@ -561,9 +695,6 @@ public struct GModMainView: View {
             @unknown default:
                 game.suspendInput()
             }
-        }
-        .onChange(of: activeUtilityWindow) { window in
-            game.setHostPopupPresented(window != nil)
         }
         .alert(
             localizationSelection.snapshot.phrase("quit"),
@@ -791,90 +922,105 @@ public struct GModMainView: View {
                 ),
                 showsForgetAction: true
             )
-        case let .ready(pack, background, logo):
+        case let .ready(pack, backgroundJPEG, logoPNG):
             if presentation.showsHomeMenu {
-                GModHomeMenuView(
-                    pack: pack,
-                    assetSource: content.assetSource,
-                    backgroundJPEG: background,
-                    logoPNG: logo,
-                    onSelectMap: { map in
-                        handlePresentationEvent(
-                            .validatedMapSelected(map),
-                            contentPackURL: pack.archiveURL
+                ZStack {
+                    GModHomeMenuView(
+                        pack: pack,
+                        assetSource: content.assetSource,
+                        backgroundJPEG: backgroundJPEG,
+                        logoPNG: logoPNG,
+                        onSelectMap: { map in
+                            handlePresentationEvent(
+                                .validatedMapSelected(map),
+                                contentPackURL: pack.archiveURL
+                            )
+                        },
+                        isInGame: game.hasActiveSession,
+                        preferredLanguageCode:
+                            localizationSelection.snapshot.code,
+                        menuBackgroundsEnabled:
+                            contentSettings.menuBackgroundsEnabled,
+                        problemCount: homeProblemCount,
+                        problemSeverity: homeProblemSeverity,
+                        onMenuAction: { action in
+                            handleHomeMenuAction(action, pack: pack)
+                        },
+                        onDiagnostic: { record in
+                            diagnostics.record(record)
+                        },
+                        audioController: game.audioController
+                    )
+                    .allowsHitTesting(activeHomeUtility == nil)
+                    .accessibilityHidden(activeHomeUtility != nil)
+
+                    if activeHomeUtility != nil {
+                        GModDermaMenuSurface(
+                            model: dermaMenu,
+                            preferredFramesPerSecond:
+                                inputVideoSettings.preferredFramesPerSecond,
+                            onActions: { actions in
+                                handleDermaMenuActions(actions, pack: pack)
+                            }
                         )
-                    },
-                    isInGame: game.hasActiveSession,
-                    preferredLanguageCode: localizationSelection.snapshot.code,
-                    menuBackgroundsEnabled: contentSettings.menuBackgroundsEnabled,
-                    problemCount: currentProblemSnapshot.problems.count,
-                    problemSeverity: currentProblemSeverity,
-                    onMenuAction: { action in
-                        handlePresentationEvent(
-                            .homeMenuAction(action),
-                            contentPackURL: pack.archiveURL
-                        )
-                    },
-                    onLanguageChange: { snapshot in
-                        publishHomeLanguageSelection(snapshot, from: pack)
-                    },
-                    onDiagnostic: { record in diagnostics.record(record) },
-                    audioController: game.audioController
-                )
-                // The coordinator owns an immutable WKURLSchemeHandler,
-                // language catalog and audio resolver for exactly one
-                // validated mount. Recreate that complete boundary only after
-                // ContentModel commits a successful candidate; failed
-                // replacements intentionally preserve the current identity.
-                .id(content.activeMountGeneration)
+                        .transition(.opacity)
+                    }
+                }
                 .ignoresSafeArea()
                 .transition(.opacity)
+                .onAppear {
+                    if activeHomeUtility != nil {
+                        reactivateVisibleDermaUtility()
+                    } else {
+                        dermaMenu.deactivate()
+                    }
+                }
+                .onChange(of: content.activeMountGeneration) { _ in
+                    reactivateVisibleDermaUtility()
+                }
+                .onChange(of: localizationSelection.snapshot) { _ in
+                    reactivateVisibleDermaUtility()
+                }
+                .onChange(of: game.permissionSessionTransportIdentity) { _ in
+                    reactivateVisibleDermaUtility()
+                }
+                .onChange(of: currentProblemSnapshot) { _ in
+                    dermaMenu.replaceProblems(dermaProblemLines)
+                }
+                .onChange(of: console.lines) { _ in
+                    dermaMenu.replaceConsoleLines(dermaConsoleLines)
+                }
+                .onChange(of: dermaMenuSettings) { settings in
+                    dermaMenu.replaceSettings(settings)
+                }
+                .onChange(of: dermaMenu.failure) { failure in
+                    guard let failure else { return }
+                    activeHomeUtility = nil
+                    diagnostics.record(
+                        kind: .compatibility,
+                        severity: .error,
+                        title: "#garryspad.problem.menu",
+                        detail: failure,
+                        source: "MENU Derma"
+                    )
+                }
+                .onChange(of: activeHomeUtility) { utility in
+                    if let utility {
+                        activateDermaMenu()
+                        dermaMenu.present(utility)
+                    } else {
+                        dermaMenu.dismissUtility()
+                        dermaMenu.deactivate()
+                    }
+                }
+            } else {
+                Color.clear
+                    .onAppear {
+                        activeHomeUtility = nil
+                        dermaMenu.dismissUtility()
+                        dermaMenu.deactivate()
+                    }
             }
-        }
-    }
-
-    @ViewBuilder
-    private var utilityOverlay: some View {
-        switch activeUtilityWindow {
-        case .options:
-            GModOptionsWindow(
-                localization: localizationSelection.snapshot,
-                audio: menuAudio,
-                inputVideo: inputVideoSettings,
-                developerDiagnostics: developerDiagnostics,
-                contentSettings: contentSettings,
-                content: content,
-                permissions: permissions,
-                currentMap: game.activeMap?.rawValue,
-                onClose: { activeUtilityWindow = nil },
-                onLanguageChange: { @MainActor languageCode in
-                    selectLanguageFromOptions(languageCode)
-                },
-                onChooseZIP: {
-                    requestContentManagementAction(.chooseZIP)
-                },
-                onUnmountZIP: {
-                    requestContentManagementAction(.unmountZIP)
-                },
-                onRevalidateZIP: {
-                    requestContentManagementAction(.revalidateZIP)
-                },
-                onClearCaches: { content.clearCaches() },
-                onDumpDiagnostics: dumpContentDiagnostics
-            )
-            .zIndex(500)
-
-        case .problems:
-            GModProblemsWindow(
-                localization: localizationSelection.snapshot,
-                snapshot: currentProblemSnapshot,
-                onClose: { activeUtilityWindow = nil },
-                onRevokePermission: revokePermission
-            )
-            .zIndex(500)
-
-        case nil:
-            EmptyView()
         }
     }
 
@@ -990,18 +1136,166 @@ public struct GModMainView: View {
         return pack.archiveURL
     }
 
+    private var homeProblemCount: Int {
+        currentProblemSnapshot.problems.count
+    }
+
+    private var homeProblemSeverity: Int {
+        currentProblemSnapshot.problems
+            .map { $0.severity.rawValue }
+            .max() ?? GModAppProblemSeverity.information.rawValue
+    }
+
+    private var dermaMenuSettings: GMLuaMenuSettingsSnapshot {
+        GMLuaMenuSettingsSnapshot(
+            audioEnabled: menuAudio.settings.menuVolume > 0,
+            menuBackgroundsEnabled: contentSettings.menuBackgroundsEnabled,
+            preferredFramesPerSecond:
+                inputVideoSettings.preferredFramesPerSecond,
+            invertTouchLookY: inputVideoSettings.invertTouchLookY,
+            touchLookSensitivity: inputVideoSettings.touchLookSensitivity
+        )
+    }
+
+    private var dermaProblemLines: [String] {
+        let snapshot = currentProblemSnapshot
+        var lines = snapshot.problems.map { problem in
+            let severity: String
+            switch problem.severity {
+            case .information:
+                severity = "INFO"
+            case .warning:
+                severity = "WARNING"
+            case .error:
+                severity = "ERROR"
+            }
+            let title = problem.localizedTitle(
+                using: localizationSelection.snapshot
+            )
+            let detail = problem.localizedDetail(
+                using: localizationSelection.snapshot
+            )
+            let source = problem.source.map { " (\($0))" } ?? ""
+            return "[\(severity)] \(title): \(detail)\(source)"
+        }
+        if lines.isEmpty {
+            lines.append("No current problems.")
+        }
+        if !snapshot.permissions.isEmpty {
+            lines.append("Permissions:")
+            lines.append(contentsOf: snapshot.permissions.map { permission in
+                "[\(permission.lifetime.rawValue.uppercased())] " +
+                    "\(permission.serverIdentifier): \(permission.permission)"
+            })
+        }
+        return lines
+    }
+
+    private var dermaConsoleLines: [String] {
+        console.visibleLines.map(\.text)
+    }
+
+    private func activateDermaMenu() {
+        dermaMenu.activate(
+            mountGeneration: content.activeMountGeneration,
+            phrases: localizationSelection.snapshot.phrases,
+            problemLines: dermaProblemLines,
+            consoleLines: dermaConsoleLines,
+            settings: dermaMenuSettings,
+            permissionSessionTransport: game.permissionSessionTransport
+        )
+    }
+
+    private func reactivateVisibleDermaUtility() {
+        guard let utility = activeHomeUtility else { return }
+        activateDermaMenu()
+        dermaMenu.present(utility)
+    }
+
+    private func handleHomeMenuAction(
+        _ action: GModHomeMenuAction,
+        pack: GarrysPADContentPack
+    ) {
+        switch action {
+        case .openOptions:
+            activeHomeUtility = .settings
+        case .openProblems:
+            activeHomeUtility = .problems
+        case .openConsole:
+            activeHomeUtility = .console
+        case .startMap, .setLanguage, .hideGameUI, .disconnect, .quit:
+            activeHomeUtility = nil
+            dermaMenu.dismissUtility()
+            handlePresentationEvent(
+                .homeMenuAction(action),
+                contentPackURL: pack.archiveURL
+            )
+        }
+    }
+
+    private func handleDermaMenuActions(
+        _ actions: [GMLuaMenuAction],
+        pack: GarrysPADContentPack
+    ) {
+        for action in actions {
+            switch action {
+            case let .startMap(rawMap):
+                guard let map = GModBundledMap(rawValue: rawMap) else { continue }
+                handlePresentationEvent(
+                    .validatedMapSelected(map),
+                    contentPackURL: pack.archiveURL
+                )
+
+            case .resumeGame:
+                handlePresentationEvent(.homeMenuAction(.hideGameUI))
+
+            case let .setAudioEnabled(enabled):
+                if enabled {
+                    menuAudio.setMenuVolume(menuVolumeBeforeMute)
+                } else {
+                    let currentVolume = menuAudio.settings.menuVolume
+                    if currentVolume > 0 {
+                        menuVolumeBeforeMute = currentVolume
+                    }
+                    menuAudio.setMenuVolume(0)
+                }
+
+            case let .setMenuBackgroundsEnabled(enabled):
+                contentSettings.setMenuBackgroundsEnabled(enabled)
+
+            case let .setPreferredFramesPerSecond(frameRate):
+                inputVideoSettings.setPreferredFramesPerSecond(frameRate)
+
+            case let .setInvertTouchLookY(enabled):
+                inputVideoSettings.setInvertTouchLookY(enabled)
+
+            case let .setTouchLookSensitivity(value):
+                inputVideoSettings.setTouchLookSensitivity(value)
+
+            case let .executeConsoleLine(line):
+                console.input = line
+                submitConsole()
+
+            case .closeUtility:
+                activeHomeUtility = nil
+                dermaMenu.dismissUtility()
+
+            case .disconnect:
+                handlePresentationEvent(.homeMenuAction(.disconnect))
+
+            case .quit:
+                handlePresentationEvent(.homeMenuAction(.quit))
+            }
+        }
+        dermaMenu.replaceProblems(dermaProblemLines)
+        dermaMenu.replaceConsoleLines(dermaConsoleLines)
+        dermaMenu.replaceSettings(dermaMenuSettings)
+    }
+
     private func handlePresentationEvent(
         _ event: GModGamePresentationEvent,
         contentPackURL: URL? = nil
     ) {
-        if case .homeMenuAction(.openOptions) = event {
-            activeUtilityWindow = .options
-            return
-        }
-        if case .homeMenuAction(.openProblems) = event {
-            activeUtilityWindow = .problems
-            return
-        }
         var replacement = presentation
         let effects = replacement.reduce(event)
         presentation = replacement
@@ -1075,10 +1369,6 @@ public struct GModMainView: View {
                 source: "permissions"
             )
         }
-    }
-
-    private var currentProblemSeverity: Int {
-        currentProblemSnapshot.problems.map(\.severity.rawValue).max() ?? 0
     }
 
     private func selectLanguageFromOptions(_ rawCode: String) {
@@ -1172,7 +1462,6 @@ public struct GModMainView: View {
         case .chooseZIP:
             isChoosingContentPack = true
         case .unmountZIP:
-            activeUtilityWindow = nil
             content.forgetSelection()
         case .revalidateZIP:
             content.revalidateActiveSelection()
@@ -1307,7 +1596,7 @@ public struct GModMainView: View {
 
     private var consoleInputBar: some View {
         HStack(spacing: 7) {
-            TextField("Lua / lua_run command", text: $console.input)
+            TextField("Console command / lua_run <code>", text: $console.input)
                 .textFieldStyle(.plain)
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundColor(.black)
@@ -1484,7 +1773,12 @@ public struct GModMainView: View {
             return
         }
         guard let submission = console.takeSubmission() else { return }
-        if case let .source(source) = submission {
+        switch submission {
+        case .clear:
+            break
+        case let .commandLine(line):
+            game.executeActiveConsoleCommandLine(line)
+        case let .luaSource(source):
             game.executeActiveServer(source)
         }
     }
@@ -1657,7 +1951,6 @@ private struct GModTouchLookPad: View {
     let width: Double
     let height: Double
     let onDelta: (_ deltaX: Float, _ deltaY: Float) -> Void
-    @State private var touchState = GModLookTouchState()
 
     var body: some View {
         ZStack {
@@ -1670,8 +1963,8 @@ private struct GModTouchLookPad: View {
             Image(systemName: "viewfinder")
                 .font(.system(size: 23, weight: .ultraLight))
                 .foregroundColor(Color.white.opacity(0.34))
-            GModTouchInputBridge { sample in
-                handleTouch(sample)
+            GModLookTouchInputBridge { deltaX, deltaY in
+                onDelta(deltaX, deltaY)
             }
         }
         .frame(width: CGFloat(width), height: CGFloat(height))
@@ -1680,14 +1973,6 @@ private struct GModTouchLookPad: View {
         .accessibilityIdentifier("garryspad.control.look")
     }
 
-    private func handleTouch(_ sample: GModTouchSample) {
-        var replacement = touchState
-        let delta = replacement.consume(sample)
-        touchState = replacement
-        if let delta {
-            onDelta(delta.x, delta.y)
-        }
-    }
 }
 
 private struct GModTouchActionButton: View {

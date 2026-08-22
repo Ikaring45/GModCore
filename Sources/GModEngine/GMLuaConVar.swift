@@ -138,6 +138,12 @@ public final class GMLuaEngineConVarCatalog: @unchecked Sendable {
         return true
     }
 
+    fileprivate func sharedCurrentValue(
+        for name: String
+    ) -> GMLuaConVarCurrentValue? {
+        entry(for: name)?.currentValue
+    }
+
     private func entry(for name: String) -> GMLuaEngineConVarEntry? {
         lock.lock()
         defer { lock.unlock() }
@@ -470,14 +476,30 @@ public enum GMLuaConVar {
                 throw LuaError.runtime("CreateConVar minimum cannot exceed maximum")
             }
 
+            let combinedFlags = suppliedFlags | automaticRealmFlag
+            var sharedCurrentValue: GMLuaConVarCurrentValue?
+            let userInfoFlag = flagConstants["FCVAR_USERINFO"] ?? 0
+            if realm == .client, (combinedFlags & userInfoFlag) != 0 {
+                _ = try engineCatalog.define(GMLuaEngineConVarDescriptor(
+                    name: name,
+                    defaultValue: defaultValue,
+                    flags: combinedFlags,
+                    helpText: helpText,
+                    minimum: minimum,
+                    maximum: maximum
+                ))
+                sharedCurrentValue = engineCatalog.sharedCurrentValue(for: name)
+            }
+
             let payload = GMLuaConVarValue(
                 name: name,
                 defaultValue: defaultValue,
                 value: defaultValue,
-                flags: suppliedFlags | automaticRealmFlag,
+                flags: combinedFlags,
                 helpText: helpText,
                 minimum: minimum,
-                maximum: maximum
+                maximum: maximum,
+                sharedCurrentValue: sharedCurrentValue
             )
             payload.value = boundedString(defaultValue, for: payload)
             let value = try typeSystem.makeObject(metaName: "ConVar", payload: payload)

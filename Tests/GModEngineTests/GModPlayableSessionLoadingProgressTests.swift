@@ -153,4 +153,22 @@ final class GModPlayableSessionLoadingProgressTests: XCTestCase {
         }
         XCTAssertEqual(recorder.values, [])
     }
+
+    func testIndependentPhysicsManifestCannotSelfAttestWithoutContentPack() {
+        let recorder = PlayableLoadingProgressRecorder()
+        XCTAssertThrowsError(try GModPlayableSession(
+            configuration: .init(
+                attestedPropPhysicsManifestURL: URL(
+                    fileURLWithPath: "C:/independent/prop-physics.json"
+                )
+            ),
+            progress: { recorder.append($0) }
+        )) { error in
+            XCTAssertEqual(
+                error as? GModPlayableSessionError,
+                .attestedPropPhysicsManifestRequiresContentPack
+            )
+        }
+        XCTAssertEqual(recorder.values, [])
+    }
 }

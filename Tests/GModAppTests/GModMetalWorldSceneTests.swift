@@ -4,6 +4,273 @@ import GModEngine
 @testable import GModMetal
 
 final class GModMetalWorldSceneTests: XCTestCase {
+    func testSourceDefaultHorizontalFOVUsesVerticalProjectionAngle() throws {
+        let vertical = try XCTUnwrap(
+            GModMetalSourceFOVContract.verticalRadians(
+                baseHorizontalDegrees: 75
+            )
+        )
+        XCTAssertEqual(vertical * 180 / .pi, 59.840_44, accuracy: 0.000_1)
+        XCTAssertEqual(
+            GModMetalSourceFOVContract.defaultWorldVerticalRadians,
+            vertical
+        )
+        XCTAssertNil(GModMetalSourceFOVContract.verticalRadians(
+            baseHorizontalDegrees: 0
+        ))
+        XCTAssertNil(GModMetalSourceFOVContract.verticalRadians(
+            baseHorizontalDegrees: 180
+        ))
+
+        let widened = try XCTUnwrap(
+            GModMetalSourceFOVContract.verticalRadians(
+                baseHorizontalDegrees: 100
+            )
+        )
+        let scene = fixtureScene(materialRanges: []).updatingCamera(
+            eye: SIMD3<Float>(1, 2, 3),
+            forward: SIMD3<Float>(1, 0, 0),
+            verticalFieldOfViewRadians: widened
+        )
+        XCTAssertEqual(scene.verticalFieldOfViewRadians, widened)
+        XCTAssertEqual(
+            scene.updatingCamera(
+                eye: SIMD3<Float>(4, 5, 6),
+                forward: SIMD3<Float>(0, 1, 0)
+            ).verticalFieldOfViewRadians,
+            widened
+        )
+    }
+
+    func testWorldVisibilityWorkspacePreservesOrderCoalescesAndCachesView() {
+        let visibility = fixtureWorldVisibility(
+            potentialVisibility: GModMetalWorldPotentialVisibility(
+                clusterCount: 2,
+                encodedBytes: [0b0000_0001],
+                pvsOffsets: [0, 0]
+            )
+        )
+        let scene = fixtureVisibilityScene(visibility: visibility)
+        let workspace = GModMetalWorldVisibilityWorkspace()
+
+        XCTAssertTrue(workspace.update(
+            scene: scene,
+            sourceCameraEye: SIMD3<Float>(1, 0, 0),
+            metalCameraEye: SIMD3<Float>(0, 0, -1),
+            metalCameraForward: SIMD3<Float>(0, 0, -1),
+            metalCameraUp: SIMD3<Float>(0, 1, 0),
+            verticalFieldOfViewRadians:
+                GModMetalSourceFOVContract.defaultWorldVerticalRadians,
+            aspectRatio: 4.0 / 3.0,
+            nearPlane: 1,
+            farPlane: 65_536
+        ))
+        XCTAssertEqual(workspace.metrics, GModMetalWorldVisibilityMetrics(
+            sourceSpanCount: 4,
+            sourceIndexCount: 12,
+            visibleSpanCount: 2,
+            visibleIndexCount: 6,
+            drawSpanCount: 1
+        ))
+        XCTAssertEqual(workspace.visibleDrawSpans, [
+            GModMetalWorldVisibleIndexSpan(
+                materialRangeIndex: 0,
+                firstIndex: 0,
+                indexCount: 6
+            ),
+        ])
+        XCTAssertEqual(workspace.rebuildCount, 1)
+
+        XCTAssertTrue(workspace.update(
+            scene: scene,
+            sourceCameraEye: SIMD3<Float>(1, 0, 0),
+            metalCameraEye: SIMD3<Float>(0, 0, -1),
+            metalCameraForward: SIMD3<Float>(0, 0, -1),
+            metalCameraUp: SIMD3<Float>(0, 1, 0),
+            verticalFieldOfViewRadians:
+                GModMetalSourceFOVContract.defaultWorldVerticalRadians,
+            aspectRatio: 4.0 / 3.0,
+            nearPlane: 1,
+            farPlane: 65_536
+        ))
+        XCTAssertEqual(workspace.rebuildCount, 1)
+        XCTAssertEqual(
+            scene.updatingCamera(
+                eye: SIMD3<Float>(2, 0, 0),
+                forward: SIMD3<Float>(1, 0, 0)
+            ).worldVisibility,
+            visibility
+        )
+    }
+
+    func testWorldVisibilityWorkspaceFailsOpenWithoutUsablePVS() {
+        let workspace = GModMetalWorldVisibilityWorkspace()
+        let missingPVS = fixtureVisibilityScene(
+            visibility: fixtureWorldVisibility(potentialVisibility: nil)
+        )
+        XCTAssertFalse(workspace.update(
+            scene: missingPVS,
+            sourceCameraEye: SIMD3<Float>(1, 0, 0),
+            metalCameraEye: SIMD3<Float>(0, 0, -1),
+            metalCameraForward: SIMD3<Float>(0, 0, -1),
+            metalCameraUp: SIMD3<Float>(0, 1, 0),
+            verticalFieldOfViewRadians:
+                GModMetalSourceFOVContract.defaultWorldVerticalRadians,
+            aspectRatio: 4.0 / 3.0,
+            nearPlane: 1,
+            farPlane: 65_536
+        ))
+        XCTAssertNil(workspace.metrics)
+        XCTAssertTrue(workspace.visibleDrawSpans.isEmpty)
+        XCTAssertEqual(workspace.rebuildCount, 1)
+        XCTAssertFalse(workspace.update(
+            scene: missingPVS,
+            sourceCameraEye: SIMD3<Float>(1, 0, 0),
+            metalCameraEye: SIMD3<Float>(0, 0, -1),
+            metalCameraForward: SIMD3<Float>(0, 0, -1),
+            metalCameraUp: SIMD3<Float>(0, 1, 0),
+            verticalFieldOfViewRadians:
+                GModMetalSourceFOVContract.defaultWorldVerticalRadians,
+            aspectRatio: 4.0 / 3.0,
+            nearPlane: 1,
+            farPlane: 65_536
+        ))
+        XCTAssertEqual(workspace.rebuildCount, 1)
+
+        let invalidLeaf = GModMetalWorldVisibility(
+            headNode: 4,
+            planes: missingPVS.worldVisibility?.planes ?? [],
+            nodes: missingPVS.worldVisibility?.nodes ?? [],
+            leafClusters: missingPVS.worldVisibility?.leafClusters ?? [],
+            potentialVisibility: GModMetalWorldPotentialVisibility(
+                clusterCount: 2,
+                encodedBytes: [1],
+                pvsOffsets: [0, 0]
+            ),
+            spans: missingPVS.worldVisibility?.spans ?? [],
+            spanClusters: missingPVS.worldVisibility?.spanClusters ?? []
+        )
+        workspace.reset()
+        XCTAssertFalse(workspace.update(
+            scene: fixtureVisibilityScene(visibility: invalidLeaf),
+            sourceCameraEye: SIMD3<Float>(1, 0, 0),
+            metalCameraEye: SIMD3<Float>(0, 0, -1),
+            metalCameraForward: SIMD3<Float>(0, 0, -1),
+            metalCameraUp: SIMD3<Float>(0, 1, 0),
+            verticalFieldOfViewRadians:
+                GModMetalSourceFOVContract.defaultWorldVerticalRadians,
+            aspectRatio: 4.0 / 3.0,
+            nearPlane: 1,
+            farPlane: 65_536
+        ))
+        XCTAssertEqual(workspace.rebuildCount, 2)
+        XCTAssertNil(workspace.metrics)
+        XCTAssertTrue(workspace.visibleDrawSpans.isEmpty)
+    }
+
+    func testEnvSunDirectionAndGlowContractSurviveCameraUpdates() throws {
+        let bitmap = try fixtureBitmap(named: "sun-core")
+        let layer = GModMetalWorldSunSpriteLayer(
+            materialName: "sprites/light_glow02_add_noz",
+            displayRGB: SIMD3<Float>(1, 240.0 / 241.0, 199.0 / 241.0),
+            size: 16,
+            materialResolution: .resolved(bitmap)
+        )
+        let sun = GModMetalWorldSunSprite(
+            sourceDirectionToSun: SIMD3<Float>(
+                -0.3778211,
+                0.5200261,
+                0.76604444
+            ),
+            hdrColorScale: 1,
+            core: layer,
+            overlay: layer
+        )
+        let scene = fixtureScene(materialRanges: [], sunSprites: [sun])
+
+        XCTAssertEqual(
+            sun.metalDirectionToSun,
+            SIMD3<Float>(-0.5200261, 0.76604444, 0.3778211)
+        )
+        XCTAssertEqual(
+            scene.updatingCamera(
+                eye: SIMD3<Float>(4, 8, 16),
+                forward: SIMD3<Float>(-0.5200261, 0.76604444, 0.3778211)
+            ).sunSprites,
+            [sun]
+        )
+        let parameters = try XCTUnwrap(
+            GModMetalSunSpriteRenderContract.parameters(
+                sun: sun,
+                layer: layer,
+                role: .core,
+                cameraEye: .zero,
+                cameraForward: sun.metalDirectionToSun
+            )
+        )
+        XCTAssertEqual(parameters.opacity, 1, accuracy: 0.0001)
+        XCTAssertEqual(parameters.hdrColorScale, 1)
+        XCTAssertEqual(parameters.basePosition.x, -52.00261, accuracy: 0.001)
+        XCTAssertEqual(parameters.basePosition.y, 76.60444, accuracy: 0.001)
+        XCTAssertEqual(parameters.basePosition.z, 37.78211, accuracy: 0.001)
+        let rightLength = (
+            parameters.rightExtent.x * parameters.rightExtent.x +
+            parameters.rightExtent.y * parameters.rightExtent.y +
+            parameters.rightExtent.z * parameters.rightExtent.z
+        ).squareRoot()
+        XCTAssertEqual(rightLength, 16, accuracy: 0.01)
+        let overlay = try XCTUnwrap(
+            GModMetalSunSpriteRenderContract.parameters(
+                sun: sun,
+                layer: layer,
+                role: .overlay,
+                cameraEye: .zero,
+                cameraForward: sun.metalDirectionToSun
+            )
+        )
+        XCTAssertEqual(overlay.opacity, 0.75, accuracy: 0.0001)
+        let overlayRightLength = (
+            overlay.rightExtent.x * overlay.rightExtent.x +
+            overlay.rightExtent.y * overlay.rightExtent.y +
+            overlay.rightExtent.z * overlay.rightExtent.z
+        ).squareRoot()
+        XCTAssertEqual(overlayRightLength, 16 * 6, accuracy: 0.01)
+        XCTAssertNil(
+            GModMetalSunSpriteRenderContract.parameters(
+                sun: sun,
+                layer: layer,
+                role: .overlay,
+                cameraEye: .zero,
+                cameraForward: -sun.metalDirectionToSun
+            )
+        )
+    }
+
+    func testCompiledEnvironmentLightingConvertsDirectionAndSurvivesCameraUpdates() {
+        let lighting = GModMetalWorldEnvironmentLighting(
+            sourceDirectionFromLight: SIMD3<Float>(0.3287, -0.4524, -0.8290),
+            directLinearRGB: SIMD3<Float>(1.5658, 1.4542, 1.2444),
+            ambientLinearRGB: SIMD3<Float>(0.3083, 0.4545, 0.5474)
+        )
+        let scene = fixtureScene(
+            materialRanges: [],
+            environmentLighting: lighting
+        )
+
+        XCTAssertEqual(
+            lighting.metalDirectionToLight,
+            SIMD3<Float>(-0.4524, 0.8290, 0.3287)
+        )
+        XCTAssertEqual(scene.environmentLighting, lighting)
+        XCTAssertEqual(
+            scene.updatingCamera(
+                eye: SIMD3<Float>(64, 32, 16),
+                forward: SIMD3<Float>(0, 1, 0)
+            ).environmentLighting,
+            lighting
+        )
+    }
+
     func testSourceLeafSkyVisibilityGates2DAnd3DPasses() {
         XCTAssertFalse(
             GModMetalSkyVisibilityRenderContract.draws2D(.notVisible)
@@ -209,7 +476,7 @@ final class GModMetalWorldSceneTests: XCTestCase {
             renderLayer: .sky2D
         )
         XCTAssertEqual(anisotropicSky.mipFilter, .linear)
-        XCTAssertEqual(anisotropicSky.maximumAnisotropy, 8)
+        XCTAssertEqual(anisotropicSky.maximumAnisotropy, 16)
         XCTAssertEqual(anisotropicSky.sAddressMode, .clampToEdge)
         XCTAssertEqual(anisotropicSky.tAddressMode, .clampToEdge)
     }
@@ -238,6 +505,139 @@ final class GModMetalWorldSceneTests: XCTestCase {
         )
     }
 
+    func testSky3DFogMatchesSourceDirectionBlendAndRangeCurve() throws {
+        let fog = GModMetalWorldSky3DFog(
+            blendsColors: true,
+            sourcePrimaryDirection: SIMD3<Float>(1, 0, 0),
+            primaryDisplayRGB: SIMD3<Float>(1, 0.25, 0),
+            secondaryDisplayRGB: SIMD3<Float>(0, 0.5, 1),
+            start: 100,
+            end: 300,
+            maximumDensity: 0.75,
+            isRadial: false
+        )
+
+        XCTAssertEqual(
+            GModMetalSky3DFogContract.resolvedDisplayRGB(
+                fog: fog,
+                sourceCameraForward: SIMD3<Float>(1, 0, 0)
+            ),
+            fog.primaryDisplayRGB
+        )
+        XCTAssertEqual(
+            GModMetalSky3DFogContract.resolvedDisplayRGB(
+                fog: fog,
+                sourceCameraForward: SIMD3<Float>(-1, 0, 0)
+            ),
+            fog.secondaryDisplayRGB
+        )
+        XCTAssertEqual(
+            GModMetalSky3DFogContract.resolvedDisplayRGB(
+                fog: fog,
+                sourceCameraForward: SIMD3<Float>(0, 1, 0)
+            ),
+            (fog.primaryDisplayRGB + fog.secondaryDisplayRGB) * 0.5
+        )
+        let rawDirectionFog = GModMetalWorldSky3DFog(
+            blendsColors: true,
+            sourcePrimaryDirection: SIMD3<Float>(2, 0, 0),
+            primaryDisplayRGB: SIMD3<Float>(1, 0, 0),
+            secondaryDisplayRGB: SIMD3<Float>(0, 0, 1),
+            start: 0,
+            end: 1,
+            maximumDensity: 1,
+            isRadial: false
+        )
+        XCTAssertEqual(
+            GModMetalSky3DFogContract.resolvedDisplayRGB(
+                fog: rawDirectionFog,
+                sourceCameraForward: SIMD3<Float>(1, 0, 0)
+            ),
+            SIMD3<Float>(1.5, 0, -0.5),
+            "Source uses the raw FIELD_VECTOR fog direction without normalization"
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(GModMetalSky3DFogContract.sourceShaderMixFactor(
+                distance: 100,
+                fog: fog
+            )),
+            0,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(GModMetalSky3DFogContract.sourceShaderMixFactor(
+                distance: 200,
+                fog: fog
+            )),
+            0.25,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(GModMetalSky3DFogContract.sourceShaderMixFactor(
+                distance: 300,
+                fog: fog
+            )),
+            0.5625,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(GModMetalSky3DFogContract.sourceShaderMixFactor(
+                distance: 1_000,
+                fog: fog
+            )),
+            0.5625,
+            accuracy: 0.000_001
+        )
+
+        let uniforms = try XCTUnwrap(GModMetalSky3DFogContract.uniforms(
+            fog: fog,
+            sourceCameraForward: SIMD3<Float>(1, 0, 0),
+            metalCameraEye: SIMD3<Float>(4, 5, 6),
+            metalCameraForward: SIMD3<Float>(0, 0, -2)
+        ))
+        XCTAssertEqual(
+            uniforms.linearRGB,
+            GModMetalWorldColorSpaceContract.decodeDisplaySRGB(
+                fog.primaryDisplayRGB
+            )
+        )
+        XCTAssertEqual(uniforms.start, 100)
+        XCTAssertEqual(uniforms.end, 300)
+        XCTAssertEqual(uniforms.maximumDensity, 0.75)
+        XCTAssertFalse(uniforms.isRadial)
+        XCTAssertEqual(uniforms.metalCameraEye, SIMD3<Float>(4, 5, 6))
+        XCTAssertEqual(uniforms.metalCameraForward, SIMD3<Float>(0, 0, -1))
+
+        let sky = GModMetalWorldSky3D(
+            sourceOrigin: .zero,
+            scale: 16,
+            fog: fog
+        )
+        XCTAssertEqual(sky.fog, fog)
+        XCTAssertEqual(
+            uniforms.start,
+            fog.start,
+            "baked sky geometry uses authored fog distances without a second scale"
+        )
+
+        let invalidRange = GModMetalWorldSky3DFog(
+            blendsColors: false,
+            sourcePrimaryDirection: .zero,
+            primaryDisplayRGB: .zero,
+            secondaryDisplayRGB: .zero,
+            start: 300,
+            end: 300,
+            maximumDensity: 1,
+            isRadial: true
+        )
+        XCTAssertNil(GModMetalSky3DFogContract.uniforms(
+            fog: invalidRange,
+            sourceCameraForward: SIMD3<Float>(1, 0, 0),
+            metalCameraEye: .zero,
+            metalCameraForward: SIMD3<Float>(0, 0, -1)
+        ))
+    }
+
     func testWorldBitmapRetentionChargesSharedRangeIdentityOnce() throws {
         let shared = try fixtureBitmap(named: "shared")
         let other = try fixtureBitmap(named: "other")
@@ -253,6 +653,73 @@ final class GModMetalWorldSceneTests: XCTestCase {
         )
         XCTAssertFalse(budget.retain(other))
         XCTAssertEqual(budget.retainedByteCount, 4)
+    }
+
+    func testWorldTextureCacheDropsOnlyBindingsAbsentFromReplacementScene() throws {
+        let base = try fixtureBitmap(named: "base")
+        let normal = try fixtureBitmap(named: "normal")
+        let sunBitmap = try fixtureBitmap(named: "sun")
+        let water = GModMetalWorldWaterMaterial(
+            resourceIdentifier: "materials/water/cache.vmt",
+            isAboveWater: true,
+            fogColor: .zero,
+            fogStart: nil,
+            fogEnd: nil,
+            reflectionAmount: 0.4,
+            refractionAmount: 1,
+            normalBitmap: normal,
+            textureScrollRate: nil,
+            textureScrollAngleDegrees: nil,
+            unsupportedBumpTextureFormat: nil
+        )
+        let sunLayer = GModMetalWorldSunSpriteLayer(
+            materialName: "sprites/cache",
+            displayRGB: SIMD3<Float>(repeating: 1),
+            size: 16,
+            materialResolution: .resolved(sunBitmap)
+        )
+        let scene = fixtureScene(
+            materialRanges: [
+                GModMetalWorldMaterialRange(
+                    materialName: "world/base",
+                    firstIndex: 0,
+                    indexCount: 3,
+                    bitmap: base
+                ),
+                GModMetalWorldMaterialRange(
+                    materialName: "water/cache",
+                    firstIndex: 0,
+                    indexCount: 3,
+                    bitmap: nil,
+                    waterSurface: GModMetalWorldWaterSurface(
+                        surfaceZ: 0,
+                        minimumZ: -64
+                    ),
+                    waterMaterial: water
+                ),
+            ],
+            sunSprites: [GModMetalWorldSunSprite(
+                sourceDirectionToSun: SIMD3<Float>(0, 0, 1),
+                hdrColorScale: 1,
+                core: sunLayer,
+                overlay: sunLayer
+            )]
+        )
+        let retainedKeys = GModMetalWorldTextureCacheContract.retainedKeys(
+            for: scene
+        )
+        XCTAssertEqual(retainedKeys, Set([
+            "srgb:\(base.cacheIdentifier)",
+            "linear:\(normal.cacheIdentifier)",
+            "srgb:\(sunBitmap.cacheIdentifier)",
+        ]))
+        XCTAssertEqual(
+            GModMetalWorldTextureCacheContract.staleKeys(
+                cachedKeys: retainedKeys.union(["srgb:removed"]),
+                for: scene
+            ),
+            Set(["srgb:removed"])
+        )
     }
 
     func testMovingCameraBeyondSkyCubeCannotIntroduceSkyTranslationOrParallax() {
@@ -489,11 +956,6 @@ final class GModMetalWorldSceneTests: XCTestCase {
                 cameraZ: -200
             )
         )
-        XCTAssertEqual(GModMetalWaterRenderContract.fallbackAlpha(top), 0.4)
-        XCTAssertEqual(
-            GModMetalWaterRenderContract.fallbackAlpha(beneath),
-            1
-        )
         XCTAssertEqual(scene.materialDiagnostics.waterMaterialRangeCount, 2)
         XCTAssertEqual(scene.materialDiagnostics.resolvedWaterMaterialRangeCount, 2)
         XCTAssertEqual(scene.materialDiagnostics.missingWorldMaterialRangeCount, 0)
@@ -552,6 +1014,7 @@ final class GModMetalWorldSceneTests: XCTestCase {
 
         XCTAssertTrue(water.isAboveWater)
         XCTAssertEqual(water.fogColor, SIMD3<Float>(7, 58, 66) / 255)
+        XCTAssertEqual(water.fogEnabled, true)
         XCTAssertEqual(water.fogStart, 0)
         XCTAssertEqual(water.fogEnd, 1_024)
         XCTAssertEqual(water.reflectionAmount, 0.4)
@@ -566,7 +1029,10 @@ final class GModMetalWorldSceneTests: XCTestCase {
         materialRanges: [GModMetalWorldMaterialRange],
         lightmapCoordinates: [SIMD2<Float>] = [],
         lightmapAtlas: GModMetalWorldLightmapAtlas? = nil,
-        lightmapDiagnostics: GModMetalWorldLightmapDiagnostics = .init()
+        lightmapDiagnostics: GModMetalWorldLightmapDiagnostics = .init(),
+        environmentLighting: GModMetalWorldEnvironmentLighting? = nil,
+        sunSprites: [GModMetalWorldSunSprite] = [],
+        worldVisibility: GModMetalWorldVisibility? = nil
     ) -> GModMetalWorldScene {
         GModMetalWorldScene(
             meshIdentifier: "sky-contract",
@@ -586,9 +1052,216 @@ final class GModMetalWorldSceneTests: XCTestCase {
             materialRanges: materialRanges,
             lightmapAtlas: lightmapAtlas,
             lightmapDiagnostics: lightmapDiagnostics,
+            environmentLighting: environmentLighting,
+            sunSprites: sunSprites,
+            worldVisibility: worldVisibility,
             cameraEye: SIMD3<Float>(0, 0, 64),
             cameraForward: SIMD3<Float>(1, 0, 0)
         )
+    }
+
+    private func fixtureVisibilityScene(
+        visibility: GModMetalWorldVisibility
+    ) -> GModMetalWorldScene {
+        GModMetalWorldScene(
+            meshIdentifier: "world-visibility",
+            sourcePositions: [
+                SIMD3<Float>(1, 0, 0),
+                SIMD3<Float>(1, 1, 0),
+                SIMD3<Float>(1, 0, 1),
+            ],
+            sourceNormals: Array(
+                repeating: SIMD3<Float>(-1, 0, 0),
+                count: 3
+            ),
+            indices: [
+                0, 1, 2, 0, 1, 2,
+                0, 1, 2, 0, 1, 2,
+            ],
+            materialRanges: [
+                GModMetalWorldMaterialRange(
+                    materialName: "world/first",
+                    firstIndex: 0,
+                    indexCount: 6,
+                    bitmap: nil
+                ),
+                GModMetalWorldMaterialRange(
+                    materialName: "world/second",
+                    firstIndex: 6,
+                    indexCount: 6,
+                    bitmap: nil
+                ),
+            ],
+            worldVisibility: visibility,
+            cameraEye: SIMD3<Float>(1, 0, 0),
+            cameraForward: SIMD3<Float>(1, 0, 0)
+        )
+    }
+
+    private func fixtureWorldVisibility(
+        potentialVisibility: GModMetalWorldPotentialVisibility?
+    ) -> GModMetalWorldVisibility {
+        GModMetalWorldVisibility(
+            headNode: 0,
+            planes: [GModMetalWorldVisibilityPlane(
+                sourceNormal: SIMD3<Float>(1, 0, 0),
+                distance: 0
+            )],
+            nodes: [GModMetalWorldVisibilityNode(
+                planeIndex: 0,
+                frontChild: -1,
+                backChild: -2
+            )],
+            leafClusters: [0, 1],
+            potentialVisibility: potentialVisibility,
+            spans: [
+                GModMetalWorldVisibilitySpan(
+                    materialRangeIndex: 0,
+                    firstIndex: 0,
+                    indexCount: 3,
+                    metalMinimum: SIMD3<Float>(-1, -1, -10),
+                    metalMaximum: SIMD3<Float>(1, 1, -9),
+                    clusterStartIndex: 0,
+                    clusterCount: 1
+                ),
+                GModMetalWorldVisibilitySpan(
+                    materialRangeIndex: 0,
+                    firstIndex: 3,
+                    indexCount: 3,
+                    metalMinimum: SIMD3<Float>(-1, -1, -11),
+                    metalMaximum: SIMD3<Float>(1, 1, -10),
+                    clusterStartIndex: 1,
+                    clusterCount: 1
+                ),
+                GModMetalWorldVisibilitySpan(
+                    materialRangeIndex: 1,
+                    firstIndex: 6,
+                    indexCount: 3,
+                    metalMinimum: SIMD3<Float>(-1, -1, -12),
+                    metalMaximum: SIMD3<Float>(1, 1, -11),
+                    clusterStartIndex: 2,
+                    clusterCount: 1
+                ),
+                GModMetalWorldVisibilitySpan(
+                    materialRangeIndex: 1,
+                    firstIndex: 9,
+                    indexCount: 3,
+                    metalMinimum: SIMD3<Float>(-1, -1, 9),
+                    metalMaximum: SIMD3<Float>(1, 1, 10),
+                    clusterStartIndex: 3,
+                    clusterCount: 1
+                ),
+            ],
+            spanClusters: [0, 0, 1, 0]
+        )
+    }
+
+    func testWaterRenderTargetsUseOnlyOneVisibleSourcePlane() throws {
+        let material = GModMetalWorldWaterMaterial(
+            resourceIdentifier: "materials/water/test.vmt",
+            isAboveWater: true,
+            fogColor: SIMD3<Float>(0.1, 0.2, 0.3),
+            fogStart: nil,
+            fogEnd: nil,
+            reflectionAmount: 0.4,
+            refractionAmount: 1,
+            normalBitmap: nil,
+            textureScrollRate: nil,
+            textureScrollAngleDegrees: nil,
+            unsupportedBumpTextureFormat: nil
+        )
+        func range(at surfaceZ: Float) -> GModMetalWorldMaterialRange {
+            GModMetalWorldMaterialRange(
+                materialName: "water/test",
+                firstIndex: 0,
+                indexCount: 3,
+                bitmap: nil,
+                waterSurface: GModMetalWorldWaterSurface(
+                    surfaceZ: surfaceZ,
+                    minimumZ: surfaceZ - 64
+                ),
+                waterMaterial: material
+            )
+        }
+
+        XCTAssertEqual(
+            GModMetalWaterRenderTargetContract.plan(
+                materialRanges: [range(at: 128)],
+                cameraZ: 256
+            ),
+            GModMetalWaterRenderTargetPlan(
+                sourceSurfaceZ: 128,
+                requiresReflection: true,
+                requiresRefraction: true
+            )
+        )
+        XCTAssertNil(
+            GModMetalWaterRenderTargetContract.plan(
+                materialRanges: [range(at: 128), range(at: 256)],
+                cameraZ: 512
+            )
+        )
+    }
+
+    func testWaterReflectionMirrorsSourceZMappedMetalCameraBasis() {
+        let reflected = GModMetalWaterReflectionContract.reflectedCamera(
+            eye: SIMD3<Float>(10, 300, 20),
+            forward: SIMD3<Float>(0.2, -0.5, 0.8),
+            up: SIMD3<Float>(0, 1, 0),
+            sourceSurfaceZ: 128
+        )
+
+        XCTAssertEqual(reflected.eye, SIMD3<Float>(10, -44, 20))
+        XCTAssertEqual(reflected.forward, SIMD3<Float>(0.2, 0.5, 0.8))
+        XCTAssertEqual(reflected.up, SIMD3<Float>(0, 1, 0))
+    }
+
+    func testWaterRenderTargetClipPlanesRetainCorrectSourceHalfSpaces() {
+        let aboveRefraction = GModMetalWaterClipPlaneContract.refraction(
+            sourceSurfaceZ: 128,
+            sourceCameraZ: 300
+        )
+        let aboveReflection = GModMetalWaterClipPlaneContract.reflection(
+            sourceSurfaceZ: 128,
+            sourceCameraZ: 300
+        )
+        XCTAssertTrue(GModMetalWaterClipPlaneContract.retains(
+            metalPosition: SIMD3<Float>(0, 64, 0),
+            plane: aboveRefraction
+        ))
+        XCTAssertFalse(GModMetalWaterClipPlaneContract.retains(
+            metalPosition: SIMD3<Float>(0, 192, 0),
+            plane: aboveRefraction
+        ))
+        XCTAssertTrue(GModMetalWaterClipPlaneContract.retains(
+            metalPosition: SIMD3<Float>(0, 192, 0),
+            plane: aboveReflection
+        ))
+        XCTAssertFalse(GModMetalWaterClipPlaneContract.retains(
+            metalPosition: SIMD3<Float>(0, 64, 0),
+            plane: aboveReflection
+        ))
+
+        let belowRefraction = GModMetalWaterClipPlaneContract.refraction(
+            sourceSurfaceZ: 128,
+            sourceCameraZ: 32
+        )
+        let belowReflection = GModMetalWaterClipPlaneContract.reflection(
+            sourceSurfaceZ: 128,
+            sourceCameraZ: 32
+        )
+        XCTAssertTrue(GModMetalWaterClipPlaneContract.retains(
+            metalPosition: SIMD3<Float>(0, 192, 0),
+            plane: belowRefraction
+        ))
+        XCTAssertTrue(GModMetalWaterClipPlaneContract.retains(
+            metalPosition: SIMD3<Float>(0, 64, 0),
+            plane: belowReflection
+        ))
+        XCTAssertTrue(GModMetalWaterClipPlaneContract.retains(
+            metalPosition: SIMD3<Float>(0, -10_000, 0),
+            plane: GModMetalWaterClipPlaneContract.disabled
+        ))
     }
 
     private func fixtureBitmap(named name: String) throws -> GModMetalSurfaceBitmap {

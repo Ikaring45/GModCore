@@ -504,6 +504,189 @@ final class SourceBSPTests: XCTestCase {
         }
     }
 
+    func testTraceWorkspacePreservesWorldTraceCorpusAndWarmsWithoutFurtherGrowth() throws {
+        let bsp = try SourceBSP(data: makeBrushWorldBSP())
+        let workspace = SourceBSPTraceWorkspace()
+        let rays = [
+            SourceRay(
+                start: SourceVector3(-10, 0, 0),
+                end: SourceVector3(10, 0, 0)
+            ),
+            SourceRay(
+                start: SourceVector3(0, 0, 0),
+                end: SourceVector3(10, 0, 0)
+            ),
+            SourceRay(
+                start: SourceVector3(-10, 0, 0),
+                end: SourceVector3(10, 0, 0),
+                mins: SourceVector3(-1, -1, -1),
+                maxs: SourceVector3(1, 1, 1)
+            ),
+        ]
+
+        for ray in rays {
+            for mask in [SourceMasks.solid, SourceMasks.water] {
+                XCTAssertEqual(
+                    try bsp.traceWorld(ray, mask: mask, workspace: workspace),
+                    try bsp.traceWorld(ray, mask: mask)
+                )
+            }
+        }
+
+        let warmed = workspace.metrics
+        XCTAssertEqual(warmed.traceCount, UInt64(rays.count * 2))
+        XCTAssertGreaterThan(warmed.nodeVisitCount, 0)
+        XCTAssertGreaterThan(warmed.leafVisitCount, 0)
+        XCTAssertGreaterThan(warmed.brushVisitCount, 0)
+        XCTAssertGreaterThanOrEqual(
+            warmed.storageGrowthCount,
+            5,
+            "three generation arrays, the DFS stack, and the candidate list " +
+                "must all warm exactly once or less"
+        )
+        let warmedStorage = workspace.retainedStorage
+        XCTAssertGreaterThanOrEqual(
+            warmedStorage.nodeGenerationCapacity,
+            bsp.nodes.count
+        )
+        XCTAssertGreaterThanOrEqual(
+            warmedStorage.leafGenerationCapacity,
+            bsp.leaves.count
+        )
+        XCTAssertGreaterThanOrEqual(
+            warmedStorage.brushGenerationCapacity,
+            bsp.brushes.count
+        )
+        XCTAssertGreaterThanOrEqual(
+            warmedStorage.pendingChildCapacity,
+            max(1, bsp.nodes.count + 1)
+        )
+        XCTAssertGreaterThanOrEqual(
+            warmedStorage.candidateBrushCapacity,
+            bsp.brushes.count
+        )
+
+        for _ in 0..<256 {
+            for ray in rays {
+                XCTAssertEqual(
+                    try bsp.traceWorld(
+                        ray,
+                        mask: .solid,
+                        workspace: workspace
+                    ),
+                    try bsp.traceWorld(ray, mask: .solid)
+                )
+            }
+        }
+
+        XCTAssertEqual(workspace.metrics.storageGrowthCount, warmed.storageGrowthCount)
+        XCTAssertEqual(workspace.retainedStorage, warmedStorage)
+        XCTAssertEqual(
+            workspace.metrics.traceCount,
+            warmed.traceCount + UInt64(rays.count * 256)
+        )
+    }
+
+    func testTraceWorkspaceMatchesLegacyCorpusAtExactFloatBitPatterns() throws {
+        let fixtures: [(String, SourceBSP)] = [
+            ("split-leaf dedup", try SourceBSP(data: makeBrushWorldBSP())),
+            (
+                "ordered two-brush surface",
+                try SourceBSP(data: makeSharedPlaneDifferentSurfaceBrushWorldBSP())
+            ),
+        ]
+        let rays: [(String, SourceRay)] = [
+            (
+                "forward line",
+                SourceRay(
+                    start: SourceVector3(-10, 0, 0),
+                    end: SourceVector3(10, 0, 0)
+                )
+            ),
+            (
+                "reverse line",
+                SourceRay(
+                    start: SourceVector3(10, 0, 0),
+                    end: SourceVector3(-10, 0, 0)
+                )
+            ),
+            (
+                "start solid",
+                SourceRay(
+                    start: SourceVector3(0, 0, 0),
+                    end: SourceVector3(10, 0, 0)
+                )
+            ),
+            (
+                "stationary start solid",
+                SourceRay(start: .zero, end: .zero)
+            ),
+            (
+                "parallel miss",
+                SourceRay(
+                    start: SourceVector3(-10, 20, 0),
+                    end: SourceVector3(10, 20, 0)
+                )
+            ),
+            (
+                "symmetric hull",
+                SourceRay(
+                    start: SourceVector3(-10, 0, 0),
+                    end: SourceVector3(10, 0, 0),
+                    mins: SourceVector3(-1, -1, -1),
+                    maxs: SourceVector3(1, 1, 1)
+                )
+            ),
+            (
+                "asymmetric hull",
+                SourceRay(
+                    start: SourceVector3(-10, 0, 0),
+                    end: SourceVector3(10, 0, 0),
+                    mins: SourceVector3(-2, -1, -3),
+                    maxs: SourceVector3(1, 2, 4)
+                )
+            ),
+            (
+                "equal-fraction two-brush hull",
+                SourceRay(
+                    start: SourceVector3(-10, 0, 0),
+                    end: SourceVector3(10, 0, 0),
+                    mins: SourceVector3(-1, -8, -1),
+                    maxs: SourceVector3(1, 8, 1)
+                )
+            ),
+        ]
+        let masks: [(String, SourceContents)] = [
+            ("solid", .solid),
+            ("water", .water),
+            ("all", SourceMasks.all),
+        ]
+
+        for (fixtureName, bsp) in fixtures {
+            let workspace = SourceBSPTraceWorkspace()
+            for (rayName, ray) in rays {
+                for (maskName, mask) in masks {
+                    let legacy = try bsp.traceWorld(
+                        ray,
+                        mask: mask,
+                        tolerance: SourceCollisionConstants.distanceEpsilon
+                    )
+                    let reused = try bsp.traceWorld(
+                        ray,
+                        mask: mask,
+                        tolerance: SourceCollisionConstants.distanceEpsilon,
+                        workspace: workspace
+                    )
+                    assertTraceBitPatternEqual(
+                        reused,
+                        legacy,
+                        context: "\(fixtureName) / \(rayName) / \(maskName)"
+                    )
+                }
+            }
+        }
+    }
+
     func testWorldTraceCarriesExactEnteringBrushSideSurface() throws {
         let bsp = try SourceBSP(data: makeSharedPlaneDifferentSurfaceBrushWorldBSP())
         let hit = try bsp.traceWorld(
@@ -628,6 +811,51 @@ final class SourceBSPTests: XCTestCase {
             XCTAssertEqual(error as? SourceBSPError, .invalidLumpIndex(64))
         }
     }
+}
+
+private func assertTraceBitPatternEqual(
+    _ actual: SourceGameTrace,
+    _ expected: SourceGameTrace,
+    context: String,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) {
+    XCTAssertEqual(actual, expected, context, file: file, line: line)
+    let actualFloatBits = [
+        actual.startPosition.x.bitPattern,
+        actual.startPosition.y.bitPattern,
+        actual.startPosition.z.bitPattern,
+        actual.endPosition.x.bitPattern,
+        actual.endPosition.y.bitPattern,
+        actual.endPosition.z.bitPattern,
+        actual.plane.normal.x.bitPattern,
+        actual.plane.normal.y.bitPattern,
+        actual.plane.normal.z.bitPattern,
+        actual.plane.distance.bitPattern,
+        actual.fraction.bitPattern,
+        actual.fractionLeftSolid.bitPattern,
+    ]
+    let expectedFloatBits = [
+        expected.startPosition.x.bitPattern,
+        expected.startPosition.y.bitPattern,
+        expected.startPosition.z.bitPattern,
+        expected.endPosition.x.bitPattern,
+        expected.endPosition.y.bitPattern,
+        expected.endPosition.z.bitPattern,
+        expected.plane.normal.x.bitPattern,
+        expected.plane.normal.y.bitPattern,
+        expected.plane.normal.z.bitPattern,
+        expected.plane.distance.bitPattern,
+        expected.fraction.bitPattern,
+        expected.fractionLeftSolid.bitPattern,
+    ]
+    XCTAssertEqual(
+        actualFloatBits,
+        expectedFloatBits,
+        "\(context): trace Float bit patterns diverged",
+        file: file,
+        line: line
+    )
 }
 
 private struct SyntheticLump {

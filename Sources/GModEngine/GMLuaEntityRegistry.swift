@@ -46,6 +46,7 @@ private final class GMLuaEntityValue: @unchecked Sendable {
     let sourceOwner: GMLuaSourceMirrorOwner?
     var className: String
     var inputButtons: SourceInputButtons = []
+    var previousInputButtons: SourceInputButtons = []
     var luaTable: LuaTable? = LuaTable()
     var canonicalSnapshot: SourceCanonicalEntitySnapshot?
 
@@ -87,6 +88,13 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
     private var localPlayerIdentity: (index: Int, generation: UInt64)?
     private var entityReplicationState = SourceEntityReplicationClientState()
     private var entityReplicationPlayerUserIDs: [Int: Int] = [:]
+    /// Serializes the two-phase CLIENT apply boundary while EntityRemoved Lua
+    /// observes the still-live userdata immediately before invalidation.
+    private let entityReplicationMutationLock = NSLock()
+    /// Detached userdata prepared for the accepted packet must remain rooted
+    /// if an EntityRemoved callback explicitly runs Lua collection before the
+    /// projection becomes registry-visible.
+    private var entityReplicationPendingReferences: [LuaValue] = []
 
     private init(
         state: LuaState,
@@ -427,6 +435,9 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
             }
         }
 
+        entityReplicationMutationLock.lock()
+        defer { entityReplicationMutationLock.unlock() }
+
         lock.lock()
         do {
             var candidateState = entityReplicationState
@@ -454,9 +465,24 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
     public func applyEntityReplicationPacket(
         _ packet: SourceEntityReplicationPacket
     ) throws -> SourceEntityReplicationApplyResult {
+        try applyEntityReplicationPacket(packet, beforeRemoving: { _ in })
+    }
+
+    /// Applies one validated packet while exposing its exact remove operations
+    /// immediately before the affected realm-local userdata is invalidated.
+    /// The callback is deliberately nonthrowing: addon failures are contained
+    /// by the host dispatcher so an accepted FIFO packet cannot be replayed.
+    @discardableResult
+    func applyEntityReplicationPacket(
+        _ packet: SourceEntityReplicationPacket,
+        beforeRemoving: ([LuaValue]) -> Void
+    ) throws -> SourceEntityReplicationApplyResult {
         guard realm == .client else {
             throw GMLuaCanonicalEntityRegistryError.clientRealmRequired
         }
+
+        entityReplicationMutationLock.lock()
+        defer { entityReplicationMutationLock.unlock() }
 
         lock.lock()
         do {
@@ -476,8 +502,33 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
                 target: target,
                 preferredPlayerUserIDs: entityReplicationPlayerUserIDs
             )
+
+            let removedValues = removalIdentities(in: packet).compactMap {
+                identity -> LuaValue? in
+                guard let value = values[identity.entryIndex],
+                      let payload = GMLuaTypeSystem.typedObject(from: value)?
+                        .payload as? GMLuaEntityValue,
+                      payload.canonicalSnapshot?.identity == identity else {
+                    return nil
+                }
+                return value
+            }
+            entityReplicationPendingReferences = projection.values.values
+                .flatMap { value -> [LuaValue] in
+                    guard let payload = GMLuaTypeSystem.typedObject(from: value)?
+                            .payload as? GMLuaEntityValue,
+                          let table = payload.luaTable else { return [value] }
+                    return [value, .table(table)]
+                }
+            // GLua's EntityRemoved contract runs immediately before removal.
+            // Release the ordinary registry lock so Entity methods and the
+            // original CallOnRemove implementation can read the sidecar table.
+            lock.unlock()
+            beforeRemoving(removedValues)
+            lock.lock()
             commitCanonicalProjectionLocked(projection)
             entityReplicationState = candidateState
+            entityReplicationPendingReferences.removeAll(keepingCapacity: true)
             lock.unlock()
             state.refreshGarbageCollectionRootProviders()
             return result
@@ -494,6 +545,9 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
         guard realm == .client else {
             throw GMLuaCanonicalEntityRegistryError.clientRealmRequired
         }
+
+        entityReplicationMutationLock.lock()
+        defer { entityReplicationMutationLock.unlock() }
 
         lock.lock()
         do {
@@ -543,6 +597,47 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
               object.isValid,
               let payload = object.payload as? GMLuaEntityValue else { return nil }
         return payload.canonicalSnapshot
+    }
+
+    /// Immutable canonical projection ordered by Source entity-list index.
+    /// Render and host consumers receive snapshots only; realm-local userdata
+    /// and sidecar tables remain owned by the Lua registry.
+    public var canonicalEntitySnapshots: [SourceCanonicalEntitySnapshot] {
+        lock.lock()
+        defer { lock.unlock() }
+        return canonicalSnapshotsByIndexLocked()
+            .sorted { $0.key < $1.key }
+            .map(\.value)
+    }
+
+    /// Allocation-free version of the CLIENT projection. Callers use this to
+    /// avoid rebuilding the ordered snapshot array on unchanged host frames.
+    public var canonicalEntityReplicationCursor: SourceEntityReplicationCursor? {
+        lock.lock()
+        defer { lock.unlock() }
+        return entityReplicationState.cursor
+    }
+
+    /// Atomically compares one kind's CLIENT replication cursor and builds its
+    /// ordered immutable projection only when changed. This prevents Player
+    /// movement packets from forcing a prop array copy at fixed-tick rate.
+    public func canonicalEntityProjection(
+        for kind: SourceCanonicalEntityKind,
+        ifChangedFrom priorCursor: SourceEntityReplicationCursor?
+    ) -> SourceCanonicalEntityKindProjection? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let cursor = entityReplicationState.cursor(for: kind),
+              cursor != priorCursor else { return nil }
+        let entities = canonicalSnapshotsByIndexLocked()
+            .filter { $0.value.kind == kind }
+            .sorted { $0.key < $1.key }
+            .map(\.value)
+        return SourceCanonicalEntityKindProjection(
+            kind: kind,
+            cursor: cursor,
+            entities: entities
+        )
     }
 
     private struct CanonicalProjection {
@@ -697,14 +792,26 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
         return snapshots
     }
 
+    private func removalIdentities(
+        in packet: SourceEntityReplicationPacket
+    ) -> [SourceCanonicalEntityIdentity] {
+        guard case let .delta(operations) = packet.payload else { return [] }
+        return operations.compactMap { operation in
+            guard case let .remove(snapshot) = operation else { return nil }
+            return snapshot.identity
+        }
+    }
+
     private static func luaKind(
         for kind: SourceCanonicalEntityKind
     ) -> GMLuaEntityKind {
         switch kind {
-        case .world, .propPhysics:
+        case .world, .propPhysics, .physicsConstraint, .playerHands:
             return .entity
         case .player:
             return .player
+        case .weapon:
+            return .weapon
         }
     }
 
@@ -725,7 +832,7 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
                 snapshot.identity.handle
             )
         }
-        guard snapshot.className == snapshot.kind.className else {
+        guard snapshot.kind.accepts(className: snapshot.className) else {
             throw GMLuaCanonicalEntityRegistryError.classNameKindMismatch(
                 handle: snapshot.identity.handle,
                 expected: snapshot.kind.className,
@@ -849,6 +956,7 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
               let payload = object.payload as? GMLuaEntityValue,
               payload.kind == .player,
               payload.generation == generation else { return false }
+        payload.previousInputButtons = payload.inputButtons
         payload.inputButtons = buttons
         return true
     }
@@ -856,7 +964,9 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
     /// Reads a button word only when the userdata is still this registry's
     /// canonical Player. Invalidated Player userdata therefore cannot inherit
     /// input from a later generation that reused its EntIndex.
-    private func playerInputButtons(for value: LuaValue) -> SourceInputButtons? {
+    func playerInputButtonState(
+        for value: LuaValue
+    ) -> (current: SourceInputButtons, previous: SourceInputButtons)? {
         guard case let .userdata(userdata) = value,
               let object = GMLuaTypeSystem.typedObject(from: value),
               let payload = object.payload as? GMLuaEntityValue else { return nil }
@@ -867,7 +977,7 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
               payload.kind == .player,
               case let .userdata(canonical)? = values[payload.index],
               canonical === userdata else { return nil }
-        return payload.inputButtons
+        return (payload.inputButtons, payload.previousInputButtons)
     }
 
     /// Reduces a state-local Entity userdata to the engine identity that is
@@ -937,7 +1047,7 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
         return values.count
     }
 
-    fileprivate func luaTable(for value: LuaValue) -> LuaTable? {
+    func luaTable(for value: LuaValue) -> LuaTable? {
         guard case let .userdata(userdata) = value,
               let object = GMLuaTypeSystem.typedObject(from: value),
               let payload = object.payload as? GMLuaEntityValue else { return nil }
@@ -974,7 +1084,7 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
     }
 
     @discardableResult
-    fileprivate func replaceLuaTable(
+    func replaceLuaTable(
         for value: LuaValue,
         with replacement: LuaTable
     ) -> Bool {
@@ -1003,7 +1113,8 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
                 as? GMLuaEntityValue else { return nil }
             return payload.luaTable
         }.map(LuaValue.table)
-        return canonical + tables + [nullValue, semanticIndex]
+        return canonical + tables + entityReplicationPendingReferences +
+            [nullValue, semanticIndex]
     }
 
     fileprivate func all(kind: GMLuaEntityKind? = nil) -> [LuaValue] {
@@ -1146,7 +1257,7 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
         }
         let playerKeyDown = entityNativeFunction("Player:KeyDown") { arguments in
             guard let receiver = arguments.first,
-                  let current = registry.playerInputButtons(for: receiver) else {
+                  let buttons = registry.playerInputButtonState(for: receiver) else {
                 return [.boolean(false)]
             }
             let mask = try inputButtonMask(
@@ -1154,13 +1265,49 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
                 index: 1,
                 function: "Player:KeyDown"
             )
-            return [.boolean((current.rawValue & mask) != 0)]
+            return [.boolean((buttons.current.rawValue & mask) != 0)]
         }
         try state.setRawTableValue(
             playerKeyDown,
             for: .string("KeyDown"),
             in: playerMetatable
         )
+        for (name, predicate) in [
+            (
+                "KeyPressed",
+                { (current: UInt32, previous: UInt32, mask: UInt32) in
+                    current & mask != 0 && previous & mask == 0
+                }
+            ),
+            (
+                "KeyReleased",
+                { (current: UInt32, previous: UInt32, mask: UInt32) in
+                    current & mask == 0 && previous & mask != 0
+                }
+            ),
+        ] {
+            let function = entityNativeFunction("Player:\(name)") { arguments in
+                guard let receiver = arguments.first,
+                      let buttons = registry.playerInputButtonState(
+                        for: receiver
+                      ) else { return [.boolean(false)] }
+                let mask = try inputButtonMask(
+                    arguments,
+                    index: 1,
+                    function: "Player:\(name)"
+                )
+                return [.boolean(predicate(
+                    buttons.current.rawValue,
+                    buttons.previous.rawValue,
+                    mask
+                ))]
+            }
+            try state.setRawTableValue(
+                function,
+                for: .string(LuaString(name)),
+                in: playerMetatable
+            )
+        }
 
         let getTable = entityNativeFunction("Entity:GetTable") { arguments in
             _ = try descriptor(arguments.first, method: "GetTable")

@@ -1,0 +1,671 @@
+import XCTest
+@testable import GModEngine
+import GModLua
+
+final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
+    func testPendingAttestedBodyRunsFixInvalidPhysicsObjectAABBReadBranch() throws {
+        let runtime = makeRuntime()
+        defer { _ = runtime.close() }
+        let typeSystem = try XCTUnwrap(runtime.typeSystem)
+        try typeSystem.installFallbackUtilities()
+
+        let entity = makeProp(
+            entryIndex: 37,
+            serialNumber: 12,
+            lifecycle: .active,
+            transform: SourceEntityTransform(
+                origin: SourceVector3(10, 20, 30),
+                angles: SourceQAngle(pitch: 1, yaw: 2, roll: 3)
+            ),
+            linearVelocity: SourceVector3(4, 5, 6),
+            angularVelocity: SourceVector3(7, 8, 9)
+        )
+        let definition = try makeDefinition(
+            solidIndex: 0,
+            damping: SourcePhysicsDamping(linear: 0.25, angular: 0.5),
+            isCollisionEnabled: false,
+            startsAwake: false
+        )
+        let pending = try SourceCanonicalPhysicsObjectSnapshot(
+            pendingEntity: entity,
+            definition: definition
+        )
+        let host = RecordingCanonicalPhysicsObjectHost()
+        host.publish(pending, asPrimary: true)
+
+        let registry = try XCTUnwrap(runtime.entityRegistry)
+        _ = try registry.applyAuthoritativeSnapshot(entity)
+        _ = try SourceCanonicalPhysicsObjectGLuaBridge.install(
+            into: runtime,
+            host: host
+        )
+
+        try runtime.execute(
+            #"""
+            local prop = Entity(37)
+            local phys = prop:GetPhysicsObject()
+            assert(IsValid(phys))
+            assert(phys == prop:GetPhysicsObject())
+            assert(phys:GetEntity() == prop)
+            assert(phys:GetMass() == 12)
+
+            local inertia = phys:GetInertia()
+            assert(inertia.x == 2 and inertia.y == 3 and inertia.z == 4)
+            local pos = phys:GetPos()
+            assert(pos.x == 10 and pos.y == 20 and pos.z == 30)
+            local ang = phys:GetAngles()
+            assert(ang.p == 1 and ang.y == 2 and ang.r == 3)
+            local velocity = phys:GetVelocity()
+            assert(velocity.x == 4 and velocity.y == 5 and velocity.z == 6)
+            local angular = phys:GetAngleVelocity()
+            assert(angular.x == 7 and angular.y == 8 and angular.z == 9)
+            local speedDamping, rotDamping = phys:GetDamping()
+            assert(speedDamping == 0.25 and rotDamping == 0.5)
+            assert(phys:GetSpeedDamping() == 0.25)
+            assert(phys:GetRotDamping() == 0.5)
+            assert(phys:IsGravityEnabled() == true)
+            assert(phys:IsCollisionEnabled() == false)
+            assert(phys:IsAsleep() == true)
+
+            assert(phys.GetMassCenter == nil)
+            assert(phys:IsMotionEnabled() == true)
+            assert(phys:IsMoveable() == true)
+            assert(type(phys.SetMass) == "function")
+            assert(type(phys.SetPos) == "function")
+            assert(type(phys.SetAngles) == "function")
+
+            phys:Wake()
+            phys:Sleep()
+            phys:EnableMotion(false)
+            phys:EnableGravity(false)
+            phys:EnableCollisions(true)
+            phys:SetVelocity(Vector(10, 20, 30))
+            phys:AddVelocity(Vector(1, 2, 3))
+            phys:SetAngleVelocity(Vector(40, 50, 60))
+            phys:AddAngleVelocity(Vector(4, 5, 6))
+            phys:SetDamping(1.25, 2.5)
+            phys:SetMass(24)
+            local massOK, massMessage = pcall(function()
+                phys:SetMass(0.09)
+            end)
+            assert(massOK == false and massMessage ~= nil)
+            massOK, massMessage = pcall(function()
+                phys:SetMass(50001)
+            end)
+            assert(massOK == false and massMessage ~= nil)
+            massOK, massMessage = pcall(function()
+                phys:SetMass(math.huge)
+            end)
+            assert(massOK == false and massMessage ~= nil)
+            massOK, massMessage = pcall(function()
+                phys:SetMass(0 / 0)
+            end)
+            assert(massOK == false and massMessage ~= nil)
+            phys:SetPos(Vector(40, 50, 60))
+            phys:SetPos(Vector(41, 51, 61), true)
+            phys:SetAngles(Angle(11, 22, 33))
+            local transformOK, transformMessage = pcall(function()
+                phys:SetPos(Vector(math.huge, 0, 0))
+            end)
+            assert(transformOK == false and transformMessage ~= nil)
+            transformOK, transformMessage = pcall(function()
+                phys:SetPos(Vector(0, 0, 0), 1)
+            end)
+            assert(transformOK == false and transformMessage ~= nil)
+            transformOK, transformMessage = pcall(function()
+                phys:SetAngles(Angle(0, 0 / 0, 0))
+            end)
+            assert(transformOK == false and transformMessage ~= nil)
+            local dampingOK, dampingMessage = pcall(function()
+                phys:SetDamping(-1, 2)
+            end)
+            assert(dampingOK == false and dampingMessage ~= nil)
+            dampingOK, dampingMessage = pcall(function()
+                phys:SetDamping(1, math.huge)
+            end)
+            assert(dampingOK == false and dampingMessage ~= nil)
+            local finite, finiteMessage = pcall(function()
+                phys:SetAngleVelocity(Vector(0 / 0, 0, 0))
+            end)
+            assert(finite == false and finiteMessage ~= nil)
+            phys:ApplyForceCenter(Vector(100, 200, 300))
+            phys:ApplyForceOffset(
+                Vector(11, 12, 13),
+                Vector(20, 30, 40)
+            )
+            finite, finiteMessage = pcall(function()
+                phys:ApplyForceOffset(
+                    Vector(1, 2, 3),
+                    Vector(0, 0 / 0, 0)
+                )
+            end)
+            assert(finite == false and finiteMessage ~= nil)
+            phys:ApplyTorqueCenter(Vector(14, 15, 16))
+            finite, finiteMessage = pcall(function()
+                phys:ApplyTorqueCenter(Vector(0, math.huge, 0))
+            end)
+            assert(finite == false and finiteMessage ~= nil)
+
+            function FixInvalidPhysicsObject(prop)
+                local PhysObj = prop:GetPhysicsObject()
+                if (not IsValid(PhysObj)) then return "invalid" end
+
+                local min, max = PhysObj:GetAABB()
+                if (not min or not max) then return "missing" end
+
+                local PhysSize = (min - max):Length()
+                if (PhysSize > 5) then return "normal" end
+                error("normal prop unexpectedly reached PhysicsInitBox repair")
+            end
+
+            assert(FixInvalidPhysicsObject(prop) == "normal")
+            local mins, maxs = phys:GetAABB()
+            assert(mins.x == -4 and mins.y == -6 and mins.z == -8)
+            assert(maxs.x == 12 and maxs.y == 10 and maxs.z == 14)
+            PENDING_PHYS = phys
+            """#,
+            sourceName: "=(canonical pending PhysObj)"
+        )
+
+        XCTAssertEqual(host.mutations, try [
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .wake
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .sleep
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .setMotionEnabled(false)
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .setGravityEnabled(false)
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .setCollisionEnabled(true)
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .setLinearVelocity(SourceVector3(10, 20, 30))
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .addLinearVelocity(SourceVector3(1, 2, 3))
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .setAngularVelocity(SourceVector3(40, 50, 60))
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .addAngularVelocity(SourceVector3(4, 5, 6))
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .setDamping(linear: 1.25, angular: 2.5)
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .setMassKilograms(24)
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .setPosition(
+                    SourceVector3(40, 50, 60),
+                    teleport: false
+                )
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .setPosition(
+                    SourceVector3(41, 51, 61),
+                    teleport: true
+                )
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .setAngles(SourceQAngle(
+                    pitch: 11,
+                    yaw: 22,
+                    roll: 33
+                ))
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .applyCenterForce(SourceVector3(100, 200, 300))
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .applyForceOffset(
+                    force: SourceVector3(11, 12, 13),
+                    worldPosition: SourceVector3(20, 30, 40)
+                )
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .applyTorqueCenter(SourceVector3(14, 15, 16))
+            ),
+        ])
+
+        let simulated = try makeBodySnapshot(
+            bodyID: pending.bodyID,
+            transform: SourceEntityTransform(
+                origin: SourceVector3(41, 51, 61),
+                angles: SourceQAngle(pitch: 11, yaw: 22, roll: 33)
+            ),
+            linearVelocity: SourceVector3(14, 15, 16),
+            angularVelocity: SourceVector3(17, 18, 19),
+            damping: SourcePhysicsDamping(linear: 1.25, angular: 2.5),
+            massKilograms: 24,
+            principalInertia: SourceVector3(4, 6, 8),
+            isCollisionEnabled: true,
+            isSleeping: false
+        )
+        host.publish(
+            try SourceCanonicalPhysicsObjectSnapshot(body: simulated),
+            asPrimary: true
+        )
+
+        try runtime.execute(
+            #"""
+            local current = Entity(37):GetPhysicsObject()
+            assert(current == PENDING_PHYS)
+            local pos = current:GetPos()
+            assert(pos.x == 41 and pos.y == 51 and pos.z == 61)
+            local angles = current:GetAngles()
+            assert(angles.p == 11 and angles.y == 22 and angles.r == 33)
+            assert(current:IsCollisionEnabled() == true)
+            assert(current:IsAsleep() == false)
+            assert(current:GetMass() == 24)
+            local speedDamping, rotDamping = current:GetDamping()
+            assert(speedDamping == 1.25 and rotDamping == 2.5)
+            assert(current:GetSpeedDamping() == 1.25)
+            assert(current:GetRotDamping() == 2.5)
+            """#,
+            sourceName: "=(canonical simulated PhysObj transition)"
+        )
+    }
+
+    func testStockDirectionAndVelocityOffsetReadsUseAuthoritativeBodyState()
+        throws
+    {
+        let runtime = makeRuntime()
+        defer { _ = runtime.close() }
+        let typeSystem = try XCTUnwrap(runtime.typeSystem)
+        try typeSystem.installFallbackUtilities()
+
+        let entity = makeProp(
+            entryIndex: 61,
+            serialNumber: 14,
+            lifecycle: .active,
+            transform: SourceEntityTransform(
+                origin: SourceVector3(10, 20, 30),
+                angles: SourceQAngle(pitch: 0, yaw: 90, roll: 0)
+            )
+        )
+        let body = try SourceCanonicalPhysicsObjectSnapshot(
+            pendingEntity: entity,
+            definition: makeDefinition(solidIndex: 0)
+        )
+        let host = RecordingCanonicalPhysicsObjectHost()
+        host.publish(body, asPrimary: true)
+        _ = try XCTUnwrap(runtime.entityRegistry)
+            .applyAuthoritativeSnapshot(entity)
+        _ = try SourceCanonicalPhysicsObjectGLuaBridge.install(
+            into: runtime,
+            host: host
+        )
+
+        try runtime.execute(
+            #"""
+            local prop = Entity(61)
+            local phys = prop:GetPhysicsObject()
+            assert(phys:GetEntity() == prop)
+            assert(phys:IsMoveable() == phys:IsMotionEnabled())
+
+            local worldZero = phys:LocalToWorldVector(Vector(0, 0, 0))
+            assert(worldZero.x == 0 and worldZero.y == 0 and worldZero.z == 0)
+            local world = phys:LocalToWorldVector(Vector(3, 4, 5))
+            local roundTrip = phys:WorldToLocalVector(world)
+            assert(math.abs(roundTrip.x - 3) < 0.0001)
+            assert(math.abs(roundTrip.y - 4) < 0.0001)
+            assert(math.abs(roundTrip.z - 5) < 0.0001)
+
+            -- yaw 90 maps local +X to world +Y. The impulse is applied one
+            -- world unit along +X from the body's origin, yielding +Z torque.
+            local linear, angular = phys:CalculateVelocityOffset(
+                Vector(0, 24, 0),
+                Vector(11, 20, 30)
+            )
+            assert(math.abs(linear.x) < 0.0001)
+            assert(math.abs(linear.y - 2) < 0.0001)
+            assert(math.abs(linear.z) < 0.0001)
+            assert(math.abs(angular.x) < 0.0001)
+            assert(math.abs(angular.y) < 0.0001)
+            assert(math.abs(angular.z - 343.7747) < 0.001)
+
+            local ok, message = pcall(function()
+                phys:CalculateVelocityOffset(
+                    Vector(0 / 0, 0, 0),
+                    Vector(11, 20, 30)
+                )
+            end)
+            assert(ok == false)
+            assert(string.find(message, "finite Vector expected", 1, true))
+            """#,
+            sourceName: "=(stock canonical PhysObj direction and offset reads)"
+        )
+
+        XCTAssertEqual(host.mutations, [])
+    }
+
+    func testCacheUsesFullBodyIdentityAndInvalidatesReusedEntityGeneration() throws {
+        let runtime = makeRuntime()
+        defer { _ = runtime.close() }
+        let typeSystem = try XCTUnwrap(runtime.typeSystem)
+        try typeSystem.installFallbackUtilities()
+        let registry = try XCTUnwrap(runtime.entityRegistry)
+        let host = RecordingCanonicalPhysicsObjectHost()
+        _ = try SourceCanonicalPhysicsObjectGLuaBridge.install(
+            into: runtime,
+            host: host
+        )
+
+        let firstEntity = makeProp(
+            entryIndex: 52,
+            serialNumber: 6,
+            lifecycle: .active
+        )
+        let firstSolid = try SourceCanonicalPhysicsObjectSnapshot(
+            pendingEntity: firstEntity,
+            definition: makeDefinition(solidIndex: 0)
+        )
+        let secondSolid = try SourceCanonicalPhysicsObjectSnapshot(
+            pendingEntity: firstEntity,
+            definition: makeDefinition(solidIndex: 1)
+        )
+        _ = try registry.applyAuthoritativeSnapshot(firstEntity)
+        host.publish(firstSolid, asPrimary: true)
+        host.publish(secondSolid, asPrimary: false)
+
+        try runtime.execute(
+            #"""
+            FIRST_SOLID = Entity(52):GetPhysicsObject()
+            assert(IsValid(FIRST_SOLID))
+            assert(FIRST_SOLID == Entity(52):GetPhysicsObject())
+            """#,
+            sourceName: "=(canonical PhysObj first solid)"
+        )
+
+        host.selectPrimary(secondSolid.bodyID)
+        try runtime.execute(
+            #"""
+            SECOND_SOLID = Entity(52):GetPhysicsObject()
+            assert(IsValid(SECOND_SOLID))
+            assert(SECOND_SOLID ~= FIRST_SOLID)
+            assert(IsValid(FIRST_SOLID))
+            """#,
+            sourceName: "=(canonical PhysObj second solid)"
+        )
+
+        host.selectPrimary(firstSolid.bodyID)
+        try runtime.execute(
+            "assert(Entity(52):GetPhysicsObject() == FIRST_SOLID)",
+            sourceName: "=(canonical PhysObj solid cache reuse)"
+        )
+
+        host.remove(firstSolid.bodyID)
+        host.remove(secondSolid.bodyID)
+        let removedFirstEntity = makeProp(
+            entryIndex: 52,
+            serialNumber: 6,
+            lifecycle: .removed
+        )
+        XCTAssertTrue(try registry.applyAuthoritativeRemoval(removedFirstEntity))
+
+        let replacementEntity = makeProp(
+            entryIndex: 52,
+            serialNumber: 7,
+            lifecycle: .active
+        )
+        let replacement = try SourceCanonicalPhysicsObjectSnapshot(
+            pendingEntity: replacementEntity,
+            definition: makeDefinition(solidIndex: 0)
+        )
+        _ = try registry.applyAuthoritativeSnapshot(replacementEntity)
+        host.publish(replacement, asPrimary: true)
+
+        try runtime.execute(
+            #"""
+            assert(IsValid(FIRST_SOLID) == false)
+            assert(IsValid(SECOND_SOLID) == false)
+            local replacement = Entity(52):GetPhysicsObject()
+            assert(IsValid(replacement))
+            assert(replacement ~= FIRST_SOLID and replacement ~= SECOND_SOLID)
+
+            local ok, message = pcall(function() FIRST_SOLID:GetMass() end)
+            assert(ok == false)
+            assert(string.find(message, "live canonical PhysObj expected", 1, true))
+            ok, message = pcall(function()
+                FIRST_SOLID:AddAngleVelocity(Vector(1, 2, 3))
+            end)
+            assert(ok == false)
+            assert(string.find(message, "live canonical PhysObj expected", 1, true))
+            ok, message = pcall(function()
+                FIRST_SOLID:ApplyForceOffset(
+                    Vector(1, 2, 3),
+                    Vector(4, 5, 6)
+                )
+            end)
+            assert(ok == false)
+            assert(string.find(message, "live canonical PhysObj expected", 1, true))
+            ok, message = pcall(function()
+                FIRST_SOLID:ApplyTorqueCenter(Vector(1, 2, 3))
+            end)
+            assert(ok == false)
+            assert(string.find(message, "live canonical PhysObj expected", 1, true))
+            """#,
+            sourceName: "=(canonical PhysObj generation replacement)"
+        )
+
+        XCTAssertNotEqual(
+            firstSolid.bodyID.entityIdentity.handle.rawValue,
+            replacement.bodyID.entityIdentity.handle.rawValue
+        )
+        XCTAssertEqual(firstSolid.bodyID.entityIdentity.entryIndex, 52)
+        XCTAssertEqual(replacement.bodyID.entityIdentity.entryIndex, 52)
+    }
+
+    private func makeRuntime() -> GMLuaRuntime {
+        GMLuaRuntime(
+            realm: .server,
+            logger: { _ in },
+            netTransport: GMLuaNetTransport()
+        )
+    }
+
+    private func makeProp(
+        entryIndex: Int,
+        serialNumber: Int,
+        lifecycle: SourceCanonicalEntityLifecycle,
+        transform: SourceEntityTransform = .identity,
+        linearVelocity: SourceVector3 = .zero,
+        angularVelocity: SourceVector3 = .zero
+    ) -> SourceCanonicalEntitySnapshot {
+        var motion = SourceEntityMotionState()
+        motion.linearVelocity = linearVelocity
+        motion.angularVelocity = angularVelocity
+        return SourceCanonicalEntitySnapshot(
+            identity: SourceCanonicalEntityIdentity(
+                handle: SourceBaseHandle(
+                    entryIndex: entryIndex,
+                    serialNumber: serialNumber
+                )
+            ),
+            kind: .propPhysics,
+            className: SourceCanonicalEntityKind.propPhysics.className,
+            transform: transform,
+            motion: motion,
+            model: SourceEntityModelReference("models/props/test.mdl"),
+            solidType: .vPhysics,
+            moveType: .vPhysics,
+            lifecycle: lifecycle,
+            isNetworkable: true,
+            revision: 1
+        )
+    }
+
+    private func makeDefinition(
+        solidIndex: Int,
+        damping: SourcePhysicsDamping = .zero,
+        isCollisionEnabled: Bool = true,
+        startsAwake: Bool = true
+    ) throws -> SourceCanonicalPropPhysicsBodyDefinition {
+        try SourceCanonicalPropPhysicsBodyDefinition(
+            solidIndex: solidIndex,
+            shape: makeShape(),
+            massProperties: SourcePhysicsMassProperties(
+                massKilograms: 12,
+                principalInertia: SourceVector3(2, 3, 4)
+            ),
+            damping: damping,
+            motionType: .dynamicBody,
+            materialIndex: 7,
+            isGravityEnabled: true,
+            isCollisionEnabled: isCollisionEnabled,
+            startsAwake: startsAwake
+        )
+    }
+
+    private func makeShape() throws -> SourcePhysicsShapeSnapshot {
+        let triangles = try [
+            SourcePhysicsIndexedTriangle(
+                first: 0,
+                second: 2,
+                third: 1,
+                materialIndex: 7
+            ),
+            SourcePhysicsIndexedTriangle(
+                first: 0,
+                second: 1,
+                third: 3,
+                materialIndex: 7
+            ),
+            SourcePhysicsIndexedTriangle(
+                first: 1,
+                second: 2,
+                third: 3,
+                materialIndex: 7
+            ),
+            SourcePhysicsIndexedTriangle(
+                first: 2,
+                second: 0,
+                third: 3,
+                materialIndex: 7
+            ),
+        ]
+        return try SourcePhysicsShapeSnapshot(
+            topology: .convexParts,
+            parts: [SourcePhysicsMeshPartSnapshot(
+                vertices: [
+                    SourceVector3(-4, -6, -8),
+                    SourceVector3(12, -6, -8),
+                    SourceVector3(-4, 10, -8),
+                    SourceVector3(-4, -6, 14),
+                ],
+                triangles: triangles
+            )]
+        )
+    }
+
+    private func makeBodySnapshot(
+        bodyID: SourcePhysicsBodyID,
+        transform: SourceEntityTransform,
+        linearVelocity: SourceVector3,
+        angularVelocity: SourceVector3,
+        damping: SourcePhysicsDamping = .zero,
+        massKilograms: Float = 12,
+        principalInertia: SourceVector3 = SourceVector3(2, 3, 4),
+        isCollisionEnabled: Bool,
+        isSleeping: Bool
+    ) throws -> SourcePhysicsBodySnapshot {
+        try SourcePhysicsBodySnapshot(
+            bodyID: bodyID,
+            shape: makeShape(),
+            massProperties: SourcePhysicsMassProperties(
+                massKilograms: massKilograms,
+                principalInertia: principalInertia
+            ),
+            transform: transform,
+            linearVelocity: linearVelocity,
+            angularVelocity: angularVelocity,
+            damping: damping,
+            motionType: .dynamicBody,
+            materialIndex: 7,
+            isGravityEnabled: true,
+            isCollisionEnabled: isCollisionEnabled,
+            isSleeping: isSleeping,
+            simulationTick: 90
+        )
+    }
+}
+
+private final class RecordingCanonicalPhysicsObjectHost:
+    SourceCanonicalPhysicsObjectLuaHost
+{
+    private(set) var mutations: [SourcePhysicsBodyMutationCommand] = []
+    private var bodies: [
+        SourcePhysicsBodyID: SourceCanonicalPhysicsObjectSnapshot
+    ] = [:]
+    private var primaryByEntity: [
+        SourceCanonicalEntityIdentity: SourcePhysicsBodyID
+    ] = [:]
+
+    func publish(
+        _ snapshot: SourceCanonicalPhysicsObjectSnapshot,
+        asPrimary: Bool
+    ) {
+        bodies[snapshot.bodyID] = snapshot
+        if asPrimary {
+            primaryByEntity[snapshot.bodyID.entityIdentity] = snapshot.bodyID
+        }
+    }
+
+    func selectPrimary(_ bodyID: SourcePhysicsBodyID) {
+        precondition(bodies[bodyID] != nil)
+        primaryByEntity[bodyID.entityIdentity] = bodyID
+    }
+
+    func remove(_ bodyID: SourcePhysicsBodyID) {
+        bodies.removeValue(forKey: bodyID)
+        if primaryByEntity[bodyID.entityIdentity] == bodyID {
+            primaryByEntity.removeValue(forKey: bodyID.entityIdentity)
+        }
+    }
+
+    func primaryCanonicalPhysicsObject(
+        for entity: SourceCanonicalEntityIdentity
+    ) -> SourceCanonicalPhysicsObjectSnapshot? {
+        primaryByEntity[entity].flatMap { bodies[$0] }
+    }
+
+    func canonicalPhysicsObject(
+        for bodyID: SourcePhysicsBodyID
+    ) -> SourceCanonicalPhysicsObjectSnapshot? {
+        bodies[bodyID]
+    }
+
+    func enqueueCanonicalPhysicsObjectMutation(
+        _ command: SourcePhysicsBodyMutationCommand
+    ) throws {
+        guard bodies[command.bodyID] != nil else {
+            throw SourceDeterministicPhysicsEnvironment.Error
+                .missingBody(command.bodyID)
+        }
+        mutations.append(command)
+    }
+}

@@ -93,7 +93,7 @@ struct GModGamePresentationState: Equatable, Sendable {
                 // accepted snapshot through the shared localization store.
                 return []
 
-            case .openOptions, .openProblems:
+            case .openOptions, .openProblems, .openConsole:
                 // Utility windows are owned by MainView and layer above the
                 // already-paused Home surface without mutating the live lane.
                 return []

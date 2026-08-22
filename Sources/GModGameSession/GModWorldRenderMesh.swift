@@ -7,17 +7,26 @@ public struct GModWorldRenderVertex: Sendable, Equatable {
     public let normal: SourceVector3
     public let textureCoordinate: GModWorldTextureCoordinate
     public let lightmapCoordinate: GModWorldTextureCoordinate?
+    /// Exact `CDispVert::m_Alpha` value from `LUMP_DISP_VERTS`.
+    ///
+    /// Source's displacement material shader consumes this channel for
+    /// vertex-transition blending. Keep the authored float unchanged here;
+    /// shader-specific normalization belongs at the material/render boundary.
+    /// Ordinary brush and sky vertices carry zero.
+    public let sourceDisplacementAlpha: Float
 
     public init(
         position: SourceVector3,
         normal: SourceVector3,
         textureCoordinate: GModWorldTextureCoordinate = .zero,
-        lightmapCoordinate: GModWorldTextureCoordinate? = nil
+        lightmapCoordinate: GModWorldTextureCoordinate? = nil,
+        sourceDisplacementAlpha: Float = 0
     ) {
         self.position = position
         self.normal = normal
         self.textureCoordinate = textureCoordinate
         self.lightmapCoordinate = lightmapCoordinate
+        self.sourceDisplacementAlpha = sourceDisplacementAlpha
     }
 }
 
@@ -61,6 +70,18 @@ public enum GModWorldRenderLayer: String, Sendable, Equatable, Hashable {
 private struct GModWorldMaterialBucketKey: Hashable {
     let material: String
     let renderLayer: GModWorldRenderLayer
+    /// Keeps genuine BSP displacement faces separate from brush faces that
+    /// happen to share the same Source material. Renderer texture LOD policy
+    /// must follow geometry provenance, not a guessed VMT name or shader.
+    let isDisplacement: Bool
+}
+
+private struct GModWorldPendingVisibilitySpan {
+    let sourceFaceIndex: Int
+    let localFirstIndex: Int
+    let indexCount: Int
+    let minimum: SourceVector3
+    let maximum: SourceVector3
 }
 
 private struct GModWorldSky3DContext {
@@ -69,10 +90,55 @@ private struct GModWorldSky3DContext {
     let area: UInt16
     let cluster: Int16
     let faceIndices: Set<Int>
+    let fogStatus: GModWorldSky3DFogStatus
 
     func transform(_ position: SourceVector3) -> SourceVector3 {
         (position - origin) * scale
     }
+}
+
+/// Static `sky_camera` fog authored in the BSP entity lump. Colors remain in
+/// display-sRGB space, matching Source's `color32` keyfields. Start/end remain
+/// in authored world units: Valve divides them by `sky_camera.scale` while
+/// drawing miniature geometry, which is projection-equivalent to leaving them
+/// unchanged after this mesh bakes `(vertex - origin) * scale`.
+public struct GModWorldSky3DFog: Sendable, Equatable {
+    public let blendsColors: Bool
+    public let sourcePrimaryDirection: SourceVector3
+    public let primaryDisplayRGB: SourceVector3
+    public let secondaryDisplayRGB: SourceVector3
+    public let start: Float
+    public let end: Float
+    public let maximumDensity: Float
+    public let isRadial: Bool
+
+    public init(
+        blendsColors: Bool,
+        sourcePrimaryDirection: SourceVector3,
+        primaryDisplayRGB: SourceVector3,
+        secondaryDisplayRGB: SourceVector3,
+        start: Float,
+        end: Float,
+        maximumDensity: Float,
+        isRadial: Bool
+    ) {
+        self.blendsColors = blendsColors
+        self.sourcePrimaryDirection = sourcePrimaryDirection
+        self.primaryDisplayRGB = primaryDisplayRGB
+        self.secondaryDisplayRGB = secondaryDisplayRGB
+        self.start = start
+        self.end = end
+        self.maximumDensity = maximumDensity
+        self.isRadial = isRadial
+    }
+}
+
+/// Keeps malformed static fog distinct from an authored disabled fog. Dynamic
+/// server changes and client fog overrides are not inferred from BSP text.
+public enum GModWorldSky3DFogStatus: Sendable, Equatable {
+    case disabled
+    case available(GModWorldSky3DFog)
+    case unavailableInvalidValue(key: String)
 }
 
 /// Real BSP `sky_camera` metadata and the area used to separate its miniature
@@ -84,19 +150,22 @@ public struct GModWorldSky3D: Sendable, Equatable {
     public let area: UInt16
     public let cluster: Int16
     public let sourceFaceCount: Int
+    public let fogStatus: GModWorldSky3DFogStatus
 
     public init(
         origin: SourceVector3,
         scale: Float,
         area: UInt16,
         cluster: Int16,
-        sourceFaceCount: Int
+        sourceFaceCount: Int,
+        fogStatus: GModWorldSky3DFogStatus = .disabled
     ) {
         self.origin = origin
         self.scale = scale
         self.area = area
         self.cluster = cluster
         self.sourceFaceCount = sourceFaceCount
+        self.fogStatus = fogStatus
     }
 }
 
@@ -184,12 +253,12 @@ public struct GModWorldSkyVisibility: Sendable, Equatable {
 
 /// Reader for Source LUMP_VISIBILITY PVS rows. Offsets are relative to the
 /// start of dvis_t and zero bytes use Source's `(0, runLength)` RLE encoding.
-struct GModSourcePotentialVisibility: Sendable, Equatable {
-    let clusterCount: Int
-    private let bytes: [UInt8]
-    private let pvsOffsets: [Int]
+public struct GModWorldPotentialVisibility: Sendable, Equatable {
+    public let clusterCount: Int
+    public let encodedBytes: [UInt8]
+    public let pvsOffsets: [Int]
 
-    init?(data: Data) {
+    public init?(data: Data) {
         let bytes = [UInt8](data)
         guard bytes.count >= 4 else { return nil }
         func int32(at offset: Int) -> Int32? {
@@ -216,38 +285,383 @@ struct GModSourcePotentialVisibility: Sendable, Equatable {
             offsets.append(offset)
         }
         self.clusterCount = clusterCount
-        self.bytes = bytes
+        encodedBytes = bytes
         pvsOffsets = offsets
     }
 
-    func visibleClusters(from cluster: Int) -> Set<Int>? {
-        guard pvsOffsets.indices.contains(cluster) else { return nil }
+    /// Decodes one Source PVS row into caller-owned reusable storage. The
+    /// buffer is resized only when the BSP cluster count changes.
+    public func decodeRow(
+        from cluster: Int,
+        into row: inout [UInt8]
+    ) -> Bool {
+        guard pvsOffsets.indices.contains(cluster) else { return false }
         let rowByteCount = (clusterCount + 7) / 8
-        var row: [UInt8] = []
-        row.reserveCapacity(rowByteCount)
+        guard rowByteCount > 0 else { return false }
+        if row.count != rowByteCount {
+            row = [UInt8](repeating: 0, count: rowByteCount)
+        }
+        var output = 0
         var cursor = pvsOffsets[cluster]
-        while row.count < rowByteCount {
-            guard cursor < bytes.count else { return nil }
-            let value = bytes[cursor]
+        while output < rowByteCount {
+            guard encodedBytes.indices.contains(cursor) else { return false }
+            let value = encodedBytes[cursor]
             cursor += 1
             if value != 0 {
-                row.append(value)
+                row[output] = value
+                output += 1
                 continue
             }
-            guard cursor < bytes.count else { return nil }
-            let runLength = Int(bytes[cursor])
+            guard encodedBytes.indices.contains(cursor) else { return false }
+            let runLength = Int(encodedBytes[cursor])
             cursor += 1
-            guard runLength > 0, runLength <= rowByteCount - row.count else {
-                return nil
+            guard runLength > 0, runLength <= rowByteCount - output else {
+                return false
             }
-            row.append(contentsOf: repeatElement(0, count: runLength))
+            for index in output..<(output + runLength) {
+                row[index] = 0
+            }
+            output += runLength
         }
+        return true
+    }
+
+    public func containsVisibleCluster(
+        _ cluster: Int,
+        inDecodedRow row: [UInt8]
+    ) -> Bool {
+        cluster >= 0 && cluster < clusterCount &&
+            row.count == (clusterCount + 7) / 8 &&
+            row[cluster >> 3] & (1 << UInt8(cluster & 7)) != 0
+    }
+
+    func visibleClusters(from cluster: Int) -> Set<Int>? {
+        var row: [UInt8] = []
+        guard decodeRow(from: cluster, into: &row) else { return nil }
         var visible = Set<Int>()
         for target in 0..<clusterCount where
-            row[target >> 3] & (1 << UInt8(target & 7)) != 0 {
+            containsVisibleCluster(target, inDecodedRow: row) {
             visible.insert(target)
         }
         return visible
+    }
+}
+
+typealias GModSourcePotentialVisibility = GModWorldPotentialVisibility
+
+/// One source face's contiguous index contribution inside an existing
+/// material range. Spans stay in material-range/source-face order so runtime
+/// culling can coalesce adjacent survivors without changing draw ties.
+public struct GModWorldVisibilitySpan: Sendable, Equatable {
+    public let materialRangeIndex: Int
+    public let firstIndex: Int
+    public let indexCount: Int
+    public let minimum: SourceVector3
+    public let maximum: SourceVector3
+    public let clusterStartIndex: Int
+    public let clusterCount: Int
+
+    public init(
+        materialRangeIndex: Int,
+        firstIndex: Int,
+        indexCount: Int,
+        minimum: SourceVector3,
+        maximum: SourceVector3,
+        clusterStartIndex: Int,
+        clusterCount: Int
+    ) {
+        self.materialRangeIndex = materialRangeIndex
+        self.firstIndex = firstIndex
+        self.indexCount = indexCount
+        self.minimum = minimum
+        self.maximum = maximum
+        self.clusterStartIndex = clusterStartIndex
+        self.clusterCount = clusterCount
+    }
+}
+
+/// Immutable world-list inputs retained from BSP model zero. Runtime workspaces
+/// decode one PVS row and append bounded visible index spans in-place; an
+/// absent/malformed camera leaf or PVS must therefore fail open in the host.
+public struct GModWorldVisibility: Sendable, Equatable {
+    public let headNode: Int32
+    public let planes: [GModWorldSkyVisibilityPlane]
+    public let nodes: [GModWorldSkyVisibilityNode]
+    public let leafClusters: [Int16]
+    public let potentialVisibility: GModWorldPotentialVisibility?
+    public let spans: [GModWorldVisibilitySpan]
+    public let spanClusters: [Int16]
+
+    public init(
+        headNode: Int32,
+        planes: [GModWorldSkyVisibilityPlane],
+        nodes: [GModWorldSkyVisibilityNode],
+        leafClusters: [Int16],
+        potentialVisibility: GModWorldPotentialVisibility?,
+        spans: [GModWorldVisibilitySpan],
+        spanClusters: [Int16]
+    ) {
+        self.headNode = headNode
+        self.planes = planes
+        self.nodes = nodes
+        self.leafClusters = leafClusters
+        self.potentialVisibility = potentialVisibility
+        self.spans = spans
+        self.spanClusters = spanClusters
+    }
+
+    public func cameraCluster(at point: SourceVector3) -> Int16? {
+        var child = headNode
+        var remainingSteps = nodes.count + 1
+        while child >= 0, remainingSteps > 0 {
+            remainingSteps -= 1
+            let nodeIndex = Int(child)
+            guard nodes.indices.contains(nodeIndex) else { return nil }
+            let node = nodes[nodeIndex]
+            guard planes.indices.contains(node.planeIndex) else { return nil }
+            let plane = planes[node.planeIndex]
+            let distance = plane.normal.dot(point) - plane.distance
+            child = distance >= 0 ? node.frontChild : node.backChild
+        }
+        guard child < 0, remainingSteps > 0 else { return nil }
+        let leafIndex64 = -1 - Int64(child)
+        guard leafIndex64 >= 0,
+              leafIndex64 < Int64(leafClusters.count) else { return nil }
+        return leafClusters[Int(leafIndex64)]
+    }
+}
+
+/// Renderer-neutral reference result used to verify real BSP PVS/frustum
+/// reduction independently of Metal command encoding.
+struct GModWorldVisibilitySelectionMetrics: Sendable, Equatable {
+    let sourceSpanCount: Int
+    let sourceIndexCount: Int
+    let visibleSpanCount: Int
+    let visibleIndexCount: Int
+    let drawSpanCount: Int
+}
+
+extension GModWorldVisibility {
+    func selectionMetrics(
+        cameraEye: SourceVector3,
+        cameraForward: SourceVector3,
+        cameraUp: SourceVector3,
+        verticalFieldOfViewRadians: Float,
+        aspectRatio: Float,
+        nearPlane: Float,
+        farPlane: Float
+    ) -> GModWorldVisibilitySelectionMetrics? {
+        selectionMetrics(
+            sourceVisibilityEye: cameraEye,
+            cameraEye: cameraEye,
+            cameraForward: cameraForward,
+            cameraUp: cameraUp,
+            verticalFieldOfViewRadians: verticalFieldOfViewRadians,
+            aspectRatio: aspectRatio,
+            nearPlane: nearPlane,
+            farPlane: farPlane
+        )
+    }
+
+    func selectionMetrics(
+        sourceVisibilityEye: SourceVector3,
+        cameraEye: SourceVector3,
+        cameraForward: SourceVector3,
+        cameraUp: SourceVector3,
+        verticalFieldOfViewRadians: Float,
+        aspectRatio: Float,
+        nearPlane: Float,
+        farPlane: Float
+    ) -> GModWorldVisibilitySelectionMetrics? {
+        guard let potentialVisibility,
+              let cameraCluster = cameraCluster(at: sourceVisibilityEye),
+              cameraCluster >= 0 else { return nil }
+        var decodedRow: [UInt8] = []
+        guard potentialVisibility.decodeRow(
+            from: Int(cameraCluster),
+            into: &decodedRow
+        ), let forward = Self.normalized(cameraForward) else { return nil }
+        let projectedUp = cameraUp - forward * cameraUp.dot(forward)
+        guard let up = Self.normalized(projectedUp),
+              let right = Self.normalized(Self.cross(forward, up)),
+              verticalFieldOfViewRadians.isFinite,
+              verticalFieldOfViewRadians > 0,
+              verticalFieldOfViewRadians < .pi,
+              aspectRatio.isFinite,
+              aspectRatio > 0,
+              nearPlane.isFinite,
+              nearPlane > 0,
+              farPlane.isFinite,
+              farPlane > nearPlane else { return nil }
+        let verticalTangent = tan(verticalFieldOfViewRadians * 0.5)
+        let horizontalTangent = verticalTangent * aspectRatio
+        guard verticalTangent.isFinite, verticalTangent > 0,
+              horizontalTangent.isFinite, horizontalTangent > 0 else {
+            return nil
+        }
+
+        var sourceIndexCount = 0
+        var visibleSpanCount = 0
+        var visibleIndexCount = 0
+        var drawSpanCount = 0
+        var lastVisibleMaterialRangeIndex = -1
+        var lastVisibleSpanEnd = -1
+        var previousMaterialRangeIndex = -1
+        var previousSpanEnd = 0
+        for span in spans {
+            let (spanEnd, spanOverflow) = span.firstIndex
+                .addingReportingOverflow(span.indexCount)
+            let (clusterEnd, clusterOverflow) = span.clusterStartIndex
+                .addingReportingOverflow(span.clusterCount)
+            guard span.materialRangeIndex >= previousMaterialRangeIndex,
+                  span.materialRangeIndex != previousMaterialRangeIndex ||
+                    span.firstIndex >= previousSpanEnd,
+                  span.indexCount > 0,
+                  span.clusterCount >= 0,
+                  !spanOverflow,
+                  !clusterOverflow,
+                  span.clusterStartIndex >= 0,
+                  clusterEnd <= spanClusters.count,
+                  Self.validBounds(
+                    minimum: span.minimum,
+                    maximum: span.maximum
+                  ) else { return nil }
+            for index in span.clusterStartIndex..<clusterEnd {
+                let cluster = Int(spanClusters[index])
+                guard cluster >= 0,
+                      cluster < potentialVisibility.clusterCount else {
+                    return nil
+                }
+            }
+            let (nextSourceIndexCount, sourceOverflow) = sourceIndexCount
+                .addingReportingOverflow(span.indexCount)
+            guard !sourceOverflow else { return nil }
+            sourceIndexCount = nextSourceIndexCount
+            previousMaterialRangeIndex = span.materialRangeIndex
+            previousSpanEnd = spanEnd
+
+            let pvsVisible = span.clusterCount == 0 ||
+                (span.clusterStartIndex..<clusterEnd).contains {
+                    potentialVisibility.containsVisibleCluster(
+                        Int(spanClusters[$0]),
+                        inDecodedRow: decodedRow
+                    )
+                }
+            guard pvsVisible,
+                  Self.intersectsFrustum(
+                    minimum: span.minimum,
+                    maximum: span.maximum,
+                    eye: cameraEye,
+                    forward: forward,
+                    right: right,
+                    up: up,
+                    verticalTangent: verticalTangent,
+                    horizontalTangent: horizontalTangent,
+                    nearPlane: nearPlane,
+                    farPlane: farPlane
+                  ) else { continue }
+            visibleSpanCount += 1
+            visibleIndexCount += span.indexCount
+            if lastVisibleMaterialRangeIndex != span.materialRangeIndex ||
+                lastVisibleSpanEnd != span.firstIndex {
+                drawSpanCount += 1
+            }
+            lastVisibleMaterialRangeIndex = span.materialRangeIndex
+            lastVisibleSpanEnd = spanEnd
+        }
+        guard !spans.isEmpty else { return nil }
+        return GModWorldVisibilitySelectionMetrics(
+            sourceSpanCount: spans.count,
+            sourceIndexCount: sourceIndexCount,
+            visibleSpanCount: visibleSpanCount,
+            visibleIndexCount: visibleIndexCount,
+            drawSpanCount: drawSpanCount
+        )
+    }
+
+    private static func intersectsFrustum(
+        minimum: SourceVector3,
+        maximum: SourceVector3,
+        eye: SourceVector3,
+        forward: SourceVector3,
+        right: SourceVector3,
+        up: SourceVector3,
+        verticalTangent: Float,
+        horizontalTangent: Float,
+        nearPlane: Float,
+        farPlane: Float
+    ) -> Bool {
+        let center = (minimum + maximum) * 0.5
+        let extents = (maximum - minimum) * 0.5
+        let relativeCenter = center - eye
+        let forwardCenter = relativeCenter.dot(forward)
+        let forwardRadius = extents.dot(absolute(forward))
+        guard forwardCenter + forwardRadius >= nearPlane,
+              forwardCenter - forwardRadius <= farPlane else { return false }
+        return retains(
+            relativeCenter,
+            extents: extents,
+            inwardNormal: forward * horizontalTangent + right
+        ) && retains(
+            relativeCenter,
+            extents: extents,
+            inwardNormal: forward * horizontalTangent - right
+        ) && retains(
+            relativeCenter,
+            extents: extents,
+            inwardNormal: forward * verticalTangent + up
+        ) && retains(
+            relativeCenter,
+            extents: extents,
+            inwardNormal: forward * verticalTangent - up
+        )
+    }
+
+    private static func retains(
+        _ relativeCenter: SourceVector3,
+        extents: SourceVector3,
+        inwardNormal: SourceVector3
+    ) -> Bool {
+        relativeCenter.dot(inwardNormal) +
+            extents.dot(absolute(inwardNormal)) >= 0
+    }
+
+    private static func validBounds(
+        minimum: SourceVector3,
+        maximum: SourceVector3
+    ) -> Bool {
+        minimum.x.isFinite && minimum.y.isFinite && minimum.z.isFinite &&
+            maximum.x.isFinite && maximum.y.isFinite && maximum.z.isFinite &&
+            minimum.x <= maximum.x &&
+            minimum.y <= maximum.y &&
+            minimum.z <= maximum.z
+    }
+
+    private static func absolute(_ value: SourceVector3) -> SourceVector3 {
+        SourceVector3(
+            Swift.abs(value.x),
+            Swift.abs(value.y),
+            Swift.abs(value.z)
+        )
+    }
+
+    private static func cross(
+        _ lhs: SourceVector3,
+        _ rhs: SourceVector3
+    ) -> SourceVector3 {
+        SourceVector3(
+            lhs.y * rhs.z - lhs.z * rhs.y,
+            lhs.z * rhs.x - lhs.x * rhs.z,
+            lhs.x * rhs.y - lhs.y * rhs.x
+        )
+    }
+
+    private static func normalized(
+        _ value: SourceVector3
+    ) -> SourceVector3? {
+        guard value.x.isFinite, value.y.isFinite, value.z.isFinite,
+              value.lengthSquared > Float.ulpOfOne else { return nil }
+        return value / value.length
     }
 }
 
@@ -261,6 +675,10 @@ public struct GModWorldMaterialRange: Sendable, Equatable {
     public let sourceMaterialNames: [String]
     public let waterSurface: GModWorldWaterSurface?
     public let renderLayer: GModWorldRenderLayer
+    /// True only when every index in this range was emitted from a BSP
+    /// displacement face. Ranges are split at mesh construction so this never
+    /// reclassifies ordinary brushes, water, or a sky render layer.
+    public let isDisplacement: Bool
 
     public init(
         materialName: String?,
@@ -268,7 +686,8 @@ public struct GModWorldMaterialRange: Sendable, Equatable {
         indexCount: Int,
         sourceMaterialNames: [String] = [],
         waterSurface: GModWorldWaterSurface? = nil,
-        renderLayer: GModWorldRenderLayer = .world
+        renderLayer: GModWorldRenderLayer = .world,
+        isDisplacement: Bool = false
     ) {
         self.materialName = materialName
         self.firstIndex = firstIndex
@@ -276,6 +695,7 @@ public struct GModWorldMaterialRange: Sendable, Equatable {
         self.sourceMaterialNames = sourceMaterialNames
         self.waterSurface = waterSurface
         self.renderLayer = renderLayer
+        self.isDisplacement = isDisplacement
     }
 }
 
@@ -289,6 +709,137 @@ public struct GModWorldSkybox: Sendable, Equatable {
         self.sourceSkySurfaceCount = sourceSkySurfaceCount
         self.materialNames = materialNames
     }
+}
+
+/// Identifies the compiled Source world-light lump that matches the selected
+/// BSP face/lightmap pair. `SourceBSP.lightmap(forFaceAt:)` prefers HDR only
+/// when both HDR faces and HDR lighting are present; the world renderer uses
+/// the same rule so dynamic/unlightmapped lighting cannot mix LDR and HDR data.
+public enum GModWorldEnvironmentLightingSource: Sendable, Equatable {
+    case standardDynamicRange
+    case highDynamicRange
+
+    fileprivate var lumpIndex: Int {
+        switch self {
+        case .standardDynamicRange: return 15
+        case .highDynamicRange: return 54
+        }
+    }
+}
+
+/// The two compiled global lights emitted by Source's `light_environment`.
+/// Values are read from `dworldlight_t` rather than reconstructed from entity
+/// keyvalues: intensity is already linear and the skylight normal already
+/// contains VRAD's final pitch/yaw interpretation.
+public struct GModWorldEnvironmentLighting: Sendable, Equatable {
+    /// `dworldlight_t.normal` for `emit_skylight`: direction travelled by the
+    /// incoming light. A renderer negates this for a surface-to-light vector.
+    public let sourceDirectionFromLight: SourceVector3
+    public let directLinearRGB: SourceVector3
+    public let ambientLinearRGB: SourceVector3
+    public let source: GModWorldEnvironmentLightingSource
+
+    public init(
+        sourceDirectionFromLight: SourceVector3,
+        directLinearRGB: SourceVector3,
+        ambientLinearRGB: SourceVector3,
+        source: GModWorldEnvironmentLightingSource
+    ) {
+        self.sourceDirectionFromLight = sourceDirectionFromLight
+        self.directLinearRGB = directLinearRGB
+        self.ambientLinearRGB = ambientLinearRGB
+        self.source = source
+    }
+}
+
+/// One image layer of Source's directional `env_sun` glow overlay. Values are
+/// retained exactly at the renderer-neutral boundary; the Metal adapter is
+/// responsible for resolving the authored VMT/VTF and applying the client
+/// glow-overlay projection contract.
+public struct GModWorldSunSpriteLayer: Sendable, Equatable {
+    public let materialName: String
+    /// Source color modulation in display-RGB space after `C_Sun`'s core-hue
+    /// normalization (or the explicit overlay color conversion).
+    public let displayRGB: SourceVector3
+    /// The authored `size`/`overlaysize`, before `CGlowOverlay`'s view-dot
+    /// dependent size multiplier.
+    public let size: Float
+
+    public init(
+        materialName: String,
+        displayRGB: SourceVector3,
+        size: Float
+    ) {
+        self.materialName = materialName
+        self.displayRGB = displayRGB
+        self.size = size
+    }
+}
+
+/// Static BSP entity-lump state needed to reproduce Source's directional sun.
+/// Angle-driven and exact-name static target-driven entities retain the
+/// direction produced by `CSun::Activate`; dynamic target names remain typed.
+public struct GModWorldSunSprite: Sendable, Equatable {
+    /// `CSun::m_vDirection`: normalized direction from the camera to the sun.
+    public let sourceDirectionToSun: SourceVector3
+    public let hdrColorScale: Float
+    public let core: GModWorldSunSpriteLayer
+    public let overlay: GModWorldSunSpriteLayer
+
+    public init(
+        sourceDirectionToSun: SourceVector3,
+        hdrColorScale: Float,
+        core: GModWorldSunSpriteLayer,
+        overlay: GModWorldSunSpriteLayer
+    ) {
+        self.sourceDirectionToSun = sourceDirectionToSun
+        self.hdrColorScale = hdrColorScale
+        self.core = core
+        self.overlay = overlay
+    }
+}
+
+/// Exact compilation boundary for the BSP `env_sun` entity. An unsupported or
+/// malformed entity never receives a guessed direction, color, size, or VMT.
+public enum GModWorldSunSpriteStatus: Sendable, Equatable {
+    case unavailableNoEntity
+    case available(entityCount: Int)
+    case unavailableUnsupportedTargetDirection(entityIndex: Int)
+    case unavailableMissingOrInvalidKey(entityIndex: Int, key: String)
+}
+
+/// Explicit availability boundary for compiled `light_environment` data.
+/// Unsupported or ambiguous inputs remain diagnosable instead of silently
+/// receiving a made-up sun direction or color.
+public enum GModWorldEnvironmentLightingStatus: Sendable, Equatable {
+    case available(
+        source: GModWorldEnvironmentLightingSource,
+        worldLightRecordCount: Int
+    )
+    case unavailableNoCompiledWorldLights(
+        source: GModWorldEnvironmentLightingSource
+    )
+    case unavailableCompressedLump(
+        source: GModWorldEnvironmentLightingSource,
+        declaredUncompressedByteCount: UInt32
+    )
+    case unavailableUnsupportedLumpVersion(
+        source: GModWorldEnvironmentLightingSource,
+        actual: Int32
+    )
+    case unavailableInvalidRecordByteCount(
+        source: GModWorldEnvironmentLightingSource,
+        actual: Int,
+        recordByteCount: Int
+    )
+    case unavailableAmbiguousGlobalLights(
+        source: GModWorldEnvironmentLightingSource,
+        skylightCount: Int,
+        skyAmbientCount: Int
+    )
+    case unavailableInvalidGlobalLightValue(
+        source: GModWorldEnvironmentLightingSource
+    )
 }
 
 public struct GModWorldLightmapAtlas: Sendable, Equatable {
@@ -344,12 +895,17 @@ public struct GModWorldRenderMeshDiagnostics: Sendable, Equatable {
     public let lightmappedFaceCount: Int
     public let unlightmappedFaceCount: Int
     public let lightmapAtlasStatus: GModWorldLightmapAtlasStatus
+    public let environmentLightingStatus: GModWorldEnvironmentLightingStatus
+    public let sunSpriteStatus: GModWorldSunSpriteStatus
     public let ignoredAdditionalLightStyleFaceCount: Int
     public let ignoredBumpLightFaceCount: Int
     public let emittedDisplacementVertexCount: Int
     public let emittedDisplacementTriangleCount: Int
     public let removedDisplacementTriangleCount: Int
     public let maximumDisplacementOffsetFromBase: Float
+    /// `false` when the loaded BSP has an exact displacement-triangle collision
+    /// representation available to the playable session's detailed world
+    /// provider. Retained as a compatibility diagnostic for older callers.
     public let displacementCollisionIsBrushOnly: Bool
     public let waterSurfaceFaceCount: Int
     public let waterBelowSurfaceFaceCount: Int
@@ -368,13 +924,16 @@ public struct GModWorldRenderMeshDiagnostics: Sendable, Equatable {
         lightmappedFaceCount: Int = 0,
         unlightmappedFaceCount: Int = 0,
         lightmapAtlasStatus: GModWorldLightmapAtlasStatus = .unavailableNoLightmaps,
+        environmentLightingStatus: GModWorldEnvironmentLightingStatus =
+            .unavailableNoCompiledWorldLights(source: .standardDynamicRange),
+        sunSpriteStatus: GModWorldSunSpriteStatus = .unavailableNoEntity,
         ignoredAdditionalLightStyleFaceCount: Int = 0,
         ignoredBumpLightFaceCount: Int = 0,
         emittedDisplacementVertexCount: Int = 0,
         emittedDisplacementTriangleCount: Int = 0,
         removedDisplacementTriangleCount: Int = 0,
         maximumDisplacementOffsetFromBase: Float = 0,
-        displacementCollisionIsBrushOnly: Bool = true,
+        displacementCollisionIsBrushOnly: Bool = false,
         waterSurfaceFaceCount: Int = 0,
         waterBelowSurfaceFaceCount: Int = 0
     ) {
@@ -392,6 +951,8 @@ public struct GModWorldRenderMeshDiagnostics: Sendable, Equatable {
         self.lightmappedFaceCount = lightmappedFaceCount
         self.unlightmappedFaceCount = unlightmappedFaceCount
         self.lightmapAtlasStatus = lightmapAtlasStatus
+        self.environmentLightingStatus = environmentLightingStatus
+        self.sunSpriteStatus = sunSpriteStatus
         self.ignoredAdditionalLightStyleFaceCount =
             ignoredAdditionalLightStyleFaceCount
         self.ignoredBumpLightFaceCount = ignoredBumpLightFaceCount
@@ -434,7 +995,11 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
     public let skybox: GModWorldSkybox?
     public let sky3D: GModWorldSky3D?
     public let skyVisibility: GModWorldSkyVisibility?
+    public let worldVisibility: GModWorldVisibility?
+    public let sky3DVisibility: GModWorldSky3DVisibility?
     public let lightmapAtlas: GModWorldLightmapAtlas?
+    public let environmentLighting: GModWorldEnvironmentLighting?
+    public let sunSprites: [GModWorldSunSprite]
     public let diagnostics: GModWorldRenderMeshDiagnostics
 
     public init(
@@ -446,7 +1011,11 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
         skybox: GModWorldSkybox? = nil,
         sky3D: GModWorldSky3D? = nil,
         skyVisibility: GModWorldSkyVisibility? = nil,
+        worldVisibility: GModWorldVisibility? = nil,
+        sky3DVisibility: GModWorldSky3DVisibility? = nil,
         lightmapAtlas: GModWorldLightmapAtlas? = nil,
+        environmentLighting: GModWorldEnvironmentLighting? = nil,
+        sunSprites: [GModWorldSunSprite] = [],
         diagnostics: GModWorldRenderMeshDiagnostics
     ) {
         self.vertices = vertices
@@ -457,7 +1026,11 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
         self.skybox = skybox
         self.sky3D = sky3D
         self.skyVisibility = skyVisibility
+        self.worldVisibility = worldVisibility
+        self.sky3DVisibility = sky3DVisibility
         self.lightmapAtlas = lightmapAtlas
+        self.environmentLighting = environmentLighting
+        self.sunSprites = sunSprites
         self.diagnostics = diagnostics
     }
 
@@ -490,8 +1063,14 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
 
         let skyName = try bsp.worldspawnValue(forKey: "skyname")
             .flatMap(Self.normalizedSkyName)
-        let sky3DContext = try Self.sky3DContext(in: bsp)
+        let potentialVisibility = Self.potentialVisibility(in: bsp)
+        let sky3DContext = try Self.sky3DContext(
+            in: bsp,
+            potentialVisibility: potentialVisibility
+        )
         let skyVisibility = Self.skyVisibility(in: bsp)
+        let environmentLightingResult = Self.environmentLighting(in: bsp)
+        let sunSpriteResult = try Self.sunSprites(in: bsp)
         let allocationEstimate = try Self.allocationEstimate(
             from: bsp,
             firstFace: firstFace,
@@ -503,6 +1082,10 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
         var vertices: [GModWorldRenderVertex] = []
         vertices.reserveCapacity(allocationEstimate.worldVertexCount)
         var materialIndices: [GModWorldMaterialBucketKey: [UInt32]] = [:]
+        var materialVisibilitySpans:
+            [GModWorldMaterialBucketKey: [GModWorldPendingVisibilitySpan]] = [:]
+        var sky3DMaterialVisibilitySpans:
+            [GModWorldMaterialBucketKey: [GModWorldPendingVisibilitySpan]] = [:]
         var materialOrder: [GModWorldMaterialBucketKey] = []
         var sourceMaterialNames: [GModWorldMaterialBucketKey: Set<String>] = [:]
         var resolverMaterialNames: [GModWorldMaterialBucketKey: String] = [:]
@@ -654,7 +1237,8 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
             }
             let materialKey = GModWorldMaterialBucketKey(
                 material: bucketMaterial,
-                renderLayer: renderLayer
+                renderLayer: renderLayer,
+                isDisplacement: displacement != nil
             )
             if let matchedWaterSurface {
                 waterSurfaces[materialKey] = matchedWaterSurface
@@ -664,6 +1248,9 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
                 materialIndices[materialKey] = []
                 materialOrder.append(materialKey)
             }
+            let visibilityVertexStart = vertices.count
+            let visibilityLocalFirstIndex =
+                materialIndices[materialKey]?.count ?? 0
             if let sourceMaterialName {
                 sourceMaterialNames[materialKey, default: []].insert(sourceMaterialName)
             }
@@ -713,7 +1300,9 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
                             position: sky3DContext.transform(vertex.position),
                             normal: vertex.normal,
                             textureCoordinate: vertex.textureCoordinate,
-                            lightmapCoordinate: vertex.lightmapCoordinate
+                            lightmapCoordinate: vertex.lightmapCoordinate,
+                            sourceDisplacementAlpha:
+                                vertex.sourceDisplacementAlpha
                         )
                     } else {
                         emittedVertex = vertex
@@ -843,6 +1432,33 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
                 )
             }
             }
+            let visibilityLocalEndIndex =
+                materialIndices[materialKey]?.count ?? visibilityLocalFirstIndex
+            let visibilityIndexCount =
+                visibilityLocalEndIndex - visibilityLocalFirstIndex
+            if matchedWaterSurface == nil,
+               visibilityIndexCount > 0,
+               let bounds = Self.visibilityBounds(
+                vertices[visibilityVertexStart..<vertices.count]
+               ) {
+                let pending = GModWorldPendingVisibilitySpan(
+                    sourceFaceIndex: faceIndex,
+                    localFirstIndex: visibilityLocalFirstIndex,
+                    indexCount: visibilityIndexCount,
+                    minimum: bounds.minimum,
+                    maximum: bounds.maximum
+                )
+                switch renderLayer {
+                case .world:
+                    materialVisibilitySpans[materialKey, default: []]
+                        .append(pending)
+                case .sky3D:
+                    sky3DMaterialVisibilitySpans[materialKey, default: []]
+                        .append(pending)
+                case .sky2D:
+                    break
+                }
+            }
             emittedFaces += 1
         }
 
@@ -862,7 +1478,8 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
                 let baseIndex = UInt32(vertices.count)
                 let materialKey = GModWorldMaterialBucketKey(
                     material: face.materialName.lowercased(),
-                    renderLayer: .sky2D
+                    renderLayer: .sky2D,
+                    isDisplacement: false
                 )
                 if materialIndices[materialKey] == nil {
                     materialIndices[materialKey] = []
@@ -925,7 +1542,9 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
                     position: vertex.position,
                     normal: vertex.normal,
                     textureCoordinate: vertex.textureCoordinate,
-                    lightmapCoordinate: atlasCoordinate
+                    lightmapCoordinate: atlasCoordinate,
+                    sourceDisplacementAlpha:
+                        vertex.sourceDisplacementAlpha
                 )
             }
         } else {
@@ -934,7 +1553,8 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
                     position: $0.position,
                     normal: $0.normal,
                     textureCoordinate: $0.textureCoordinate,
-                    lightmapCoordinate: nil
+                    lightmapCoordinate: nil,
+                    sourceDisplacementAlpha: $0.sourceDisplacementAlpha
                 )
             }
         }
@@ -942,7 +1562,53 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
         var indices: [UInt32] = []
         indices.reserveCapacity(allocationEstimate.worldIndexCount)
         var materialRanges: [GModWorldMaterialRange] = []
-        for key in materialOrder {
+        let faceClusters = Self.worldFaceClusters(
+            in: bsp,
+            firstFace: firstFace,
+            endFace: endFace
+        )
+        var visibilitySpans: [GModWorldVisibilitySpan] = []
+        visibilitySpans.reserveCapacity(
+            materialVisibilitySpans.values.reduce(0) { $0 + $1.count }
+        )
+        var visibilitySpanClusters: [Int16] = []
+        visibilitySpanClusters.reserveCapacity(bsp.leafFaces.count)
+        var sky3DVisibilitySpans: [GModWorldVisibilitySpan] = []
+        sky3DVisibilitySpans.reserveCapacity(
+            sky3DMaterialVisibilitySpans.values.reduce(0) { $0 + $1.count }
+        )
+        var sky3DVisibilitySpanClusters: [Int16] = []
+        sky3DVisibilitySpanClusters.reserveCapacity(bsp.leafFaces.count)
+
+        func appendVisibilitySpans(
+            _ pendingSpans: [GModWorldPendingVisibilitySpan],
+            materialRangeIndex: Int,
+            materialFirstIndex: Int,
+            faceClusters: [[Int16]],
+            to spans: inout [GModWorldVisibilitySpan],
+            spanClusters: inout [Int16]
+        ) {
+            for pending in pendingSpans {
+                let localFaceIndex = pending.sourceFaceIndex - firstFace
+                guard faceClusters.indices.contains(localFaceIndex) else {
+                    continue
+                }
+                let clusters = faceClusters[localFaceIndex]
+                let clusterStartIndex = spanClusters.count
+                spanClusters.append(contentsOf: clusters)
+                spans.append(GModWorldVisibilitySpan(
+                    materialRangeIndex: materialRangeIndex,
+                    firstIndex: materialFirstIndex + pending.localFirstIndex,
+                    indexCount: pending.indexCount,
+                    minimum: pending.minimum,
+                    maximum: pending.maximum,
+                    clusterStartIndex: clusterStartIndex,
+                    clusterCount: clusters.count
+                ))
+            }
+        }
+
+        for (materialRangeIndex, key) in materialOrder.enumerated() {
             let grouped = materialIndices[key] ?? []
             let firstIndex = indices.count
             indices.append(contentsOf: grouped)
@@ -957,9 +1623,50 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
                         $0.lowercased() < $1.lowercased()
                     },
                     waterSurface: waterSurfaces[key],
-                    renderLayer: key.renderLayer
+                    renderLayer: key.renderLayer,
+                    isDisplacement: key.isDisplacement
                 )
             )
+            if let faceClusters, waterSurfaces[key] == nil {
+                switch key.renderLayer {
+                case .world:
+                    appendVisibilitySpans(
+                        materialVisibilitySpans[key] ?? [],
+                        materialRangeIndex: materialRangeIndex,
+                        materialFirstIndex: firstIndex,
+                        faceClusters: faceClusters,
+                        to: &visibilitySpans,
+                        spanClusters: &visibilitySpanClusters
+                    )
+                case .sky3D:
+                    appendVisibilitySpans(
+                        sky3DMaterialVisibilitySpans[key] ?? [],
+                        materialRangeIndex: materialRangeIndex,
+                        materialFirstIndex: firstIndex,
+                        faceClusters: faceClusters,
+                        to: &sky3DVisibilitySpans,
+                        spanClusters: &sky3DVisibilitySpanClusters
+                    )
+                case .sky2D:
+                    break
+                }
+            }
+        }
+        let cullableIndexCount = materialRanges.reduce(0) { count, range in
+            guard range.renderLayer == .world,
+                  range.waterSurface == nil else { return count }
+            return count + range.indexCount
+        }
+        let visibilityIndexCount = visibilitySpans.reduce(0) {
+            $0 + $1.indexCount
+        }
+        let cullableSky3DIndexCount = materialRanges.reduce(0) { count, range in
+            guard range.renderLayer == .sky3D,
+                  range.waterSurface == nil else { return count }
+            return count + range.indexCount
+        }
+        let sky3DVisibilityIndexCount = sky3DVisibilitySpans.reduce(0) {
+            $0 + $1.indexCount
         }
         let sky3D = sky3DContext.map {
             GModWorldSky3D(
@@ -967,8 +1674,48 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
                 scale: $0.scale,
                 area: $0.area,
                 cluster: $0.cluster,
-                sourceFaceCount: $0.faceIndices.count
+                sourceFaceCount: $0.faceIndices.count,
+                fogStatus: $0.fogStatus
             )
+        }
+        let worldVisibility: GModWorldVisibility?
+        if let skyVisibility,
+           faceClusters != nil,
+           cullableIndexCount > 0,
+           visibilityIndexCount == cullableIndexCount {
+            worldVisibility = GModWorldVisibility(
+                headNode: skyVisibility.headNode,
+                planes: skyVisibility.planes,
+                nodes: skyVisibility.nodes,
+                leafClusters: bsp.leaves.map(\.cluster),
+                potentialVisibility: potentialVisibility,
+                spans: visibilitySpans,
+                spanClusters: visibilitySpanClusters
+            )
+        } else {
+            worldVisibility = nil
+        }
+        let sky3DVisibility: GModWorldSky3DVisibility?
+        if let sky3D,
+           let skyVisibility,
+           faceClusters != nil,
+           cullableSky3DIndexCount > 0,
+           sky3DVisibilityIndexCount == cullableSky3DIndexCount {
+            sky3DVisibility = GModWorldSky3DVisibility(
+                sourceVisibilityOrigin: sky3D.origin,
+                scale: sky3D.scale,
+                bspVisibility: GModWorldVisibility(
+                    headNode: skyVisibility.headNode,
+                    planes: skyVisibility.planes,
+                    nodes: skyVisibility.nodes,
+                    leafClusters: bsp.leaves.map(\.cluster),
+                    potentialVisibility: potentialVisibility,
+                    spans: sky3DVisibilitySpans,
+                    spanClusters: sky3DVisibilitySpanClusters
+                )
+            )
+        } else {
+            sky3DVisibility = nil
         }
         return Self(
             vertices: vertices,
@@ -979,7 +1726,11 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
             skybox: skybox,
             sky3D: sky3D,
             skyVisibility: skyVisibility,
+            worldVisibility: worldVisibility,
+            sky3DVisibility: sky3DVisibility,
             lightmapAtlas: lightmapAtlas,
+            environmentLighting: environmentLightingResult.lighting,
+            sunSprites: sunSpriteResult.sprites,
             diagnostics: GModWorldRenderMeshDiagnostics(
                 sourceFaceCount: faceCount,
                 emittedFaceCount: emittedFaces,
@@ -995,6 +1746,8 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
                 lightmappedFaceCount: lightmappedFaces,
                 unlightmappedFaceCount: unlightmappedFaces,
                 lightmapAtlasStatus: lightmapResult.status,
+                environmentLightingStatus: environmentLightingResult.status,
+                sunSpriteStatus: sunSpriteResult.status,
                 ignoredAdditionalLightStyleFaceCount:
                     ignoredAdditionalLightStyleFaces,
                 ignoredBumpLightFaceCount: ignoredBumpLightFaces,
@@ -1002,11 +1755,334 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
                 emittedDisplacementTriangleCount: emittedDisplacementTriangles,
                 removedDisplacementTriangleCount: removedDisplacementTriangles,
                 maximumDisplacementOffsetFromBase: maximumDisplacementOffset,
-                displacementCollisionIsBrushOnly: true,
+                displacementCollisionIsBrushOnly: false,
                 waterSurfaceFaceCount: waterSurfaceFaces,
                 waterBelowSurfaceFaceCount: waterBelowSurfaceFaces
             )
         )
+    }
+
+    struct SunSpriteCompilationResult: Sendable, Equatable {
+        let sprites: [GModWorldSunSprite]
+        let status: GModWorldSunSpriteStatus
+    }
+
+    /// Compiles angle-driven and exact-name static target-driven `env_sun`
+    /// entities. Dynamic/special target names remain an explicit unsupported
+    /// boundary because static BSP keyvalues cannot reproduce runtime motion.
+    private static func sunSprites(
+        in bsp: SourceBSP
+    ) throws -> SunSpriteCompilationResult {
+        sunSprites(from: try bsp.entities.parsedEntities())
+    }
+
+    static func sunSprites(
+        from entities: [SourceBSPParsedEntity]
+    ) -> SunSpriteCompilationResult {
+        guard entities.contains(where: {
+            $0.value(forKey: "classname")?
+                .caseInsensitiveCompare("env_sun") == .orderedSame
+        }) else {
+            return SunSpriteCompilationResult(
+                sprites: [],
+                status: .unavailableNoEntity
+            )
+        }
+        do {
+            let compiled = try SourceWorldEnvironmentEntityCompiler
+                .compileSuns(parsedEntities: entities)
+            let sprites = compiled.map { sun in
+                GModWorldSunSprite(
+                    sourceDirectionToSun: sun.sourceDirectionToSun,
+                    hdrColorScale: sun.hdrColorScale,
+                    core: GModWorldSunSpriteLayer(
+                        materialName: sun.core.materialName,
+                        displayRGB: sun.core.displayRGB,
+                        size: Float(sun.core.size)
+                    ),
+                    overlay: GModWorldSunSpriteLayer(
+                        materialName: sun.overlay.materialName,
+                        displayRGB: sun.overlay.displayRGB,
+                        size: Float(sun.overlay.size)
+                    )
+                )
+            }
+            return SunSpriteCompilationResult(
+                sprites: sprites,
+                status: .available(entityCount: sprites.count)
+            )
+        } catch let error as SourceWorldEnvironmentEntityError {
+            switch error {
+            case let .unsupportedDynamicTarget(entityIndex, _),
+                 let .unresolvedTarget(entityIndex, _):
+                return SunSpriteCompilationResult(
+                    sprites: [],
+                    status: .unavailableUnsupportedTargetDirection(
+                        entityIndex: entityIndex
+                    )
+                )
+            case let .invalidValue(entityIndex, className, key, _)
+                where className.caseInsensitiveCompare("env_sun") ==
+                    .orderedSame && key == "target":
+                return SunSpriteCompilationResult(
+                    sprites: [],
+                    status: .unavailableUnsupportedTargetDirection(
+                        entityIndex: entityIndex
+                    )
+                )
+            case let .invalidValue(entityIndex, _, key, _):
+                return invalidSun(entityIndex: entityIndex, key: key)
+            case let .zeroDirection(entityIndex, _):
+                return invalidSun(
+                    entityIndex: entityIndex,
+                    key: "angles/pitch/target"
+                )
+            }
+        } catch {
+            return invalidSun(entityIndex: 0, key: "env_sun")
+        }
+    }
+
+    private static func invalidSun(
+        entityIndex: Int,
+        key: String
+    ) -> SunSpriteCompilationResult {
+        SunSpriteCompilationResult(
+            sprites: [],
+            status: .unavailableMissingOrInvalidKey(
+                entityIndex: entityIndex,
+                key: key
+            )
+        )
+    }
+
+    /// Source SDK `SetupLightNormalFromProps`, followed by the negation in
+    /// `CSun::Activate`. Zero angle/pitch selects the corresponding component
+    /// from the entity's explicit `angles` key.
+    private static func angleDrivenSunDirection(
+        angles: SourceVector3,
+        angle: Float,
+        pitch: Float
+    ) -> SourceVector3? {
+        let yawDegrees = angle == 0 ? angles.y : angle
+        let pitchDegrees = pitch == 0 ? angles.x : pitch
+        let yawRadians = yawDegrees * .pi / 180
+        let pitchRadians = pitchDegrees * .pi / 180
+        let cosinePitch = cos(pitchRadians)
+        let setupNormal = SourceVector3(
+            cos(yawRadians) * cosinePitch,
+            sin(yawRadians) * cosinePitch,
+            sin(pitchRadians)
+        )
+        guard isFinite(setupNormal),
+              setupNormal.lengthSquared > Float.ulpOfOne else { return nil }
+        return -setupNormal / setupNormal.length
+    }
+
+    private static func finiteFloat(_ text: String) -> Float? {
+        guard let value = Float(
+            text.trimmingCharacters(in: .whitespacesAndNewlines)
+        ), value.isFinite else { return nil }
+        return value
+    }
+
+    private static func sourceColor(from text: String) -> SourceVector3? {
+        let components = text.split(whereSeparator: { $0.isWhitespace })
+        guard components.count == 3 || components.count == 4 else { return nil }
+        var channels: [Int] = []
+        channels.reserveCapacity(components.count)
+        for component in components {
+            guard let channel = Int(component), (0...255).contains(channel) else {
+                return nil
+            }
+            channels.append(channel)
+        }
+        return SourceVector3(
+            Float(channels[0]),
+            Float(channels[1]),
+            Float(channels[2])
+        )
+    }
+
+    private static func normalizedMaterialName(_ text: String) -> String? {
+        var normalized = text
+            .replacingOccurrences(of: "\\", with: "/")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if normalized.hasPrefix("materials/") {
+            normalized.removeFirst("materials/".count)
+        }
+        if normalized.hasSuffix(".vmt") {
+            normalized.removeLast(".vmt".count)
+        }
+        let components = normalized.split(
+            separator: "/",
+            omittingEmptySubsequences: false
+        )
+        guard !normalized.isEmpty,
+              !normalized.hasPrefix("/"),
+              !normalized.contains(":"),
+              components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
+            return nil
+        }
+        return normalized
+    }
+
+    private struct EnvironmentLightingResult {
+        let lighting: GModWorldEnvironmentLighting?
+        let status: GModWorldEnvironmentLightingStatus
+    }
+
+    private struct CompiledWorldLight {
+        let intensity: SourceVector3
+        let normal: SourceVector3
+        let type: Int32
+    }
+
+    /// `dworldlight_t` from Source SDK 2013 `src/public/bspfile.h` is 88
+    /// little-endian bytes. The renderer consumes only the fields whose binary
+    /// contract is required here; the remaining attenuation/entity fields stay
+    /// untouched in the raw BSP lump.
+    private static let compiledWorldLightRecordByteCount = 88
+    private static let compiledSkylightType: Int32 = 3
+    private static let compiledSkyAmbientType: Int32 = 5
+
+    private static func environmentLighting(
+        in bsp: SourceBSP
+    ) -> EnvironmentLightingResult {
+        let source: GModWorldEnvironmentLightingSource =
+            !bsp.facesHDR.isEmpty && !bsp.lightingHDR.isEmpty
+                ? .highDynamicRange
+                : .standardDynamicRange
+        let lump = bsp.lumps[source.lumpIndex]
+        let descriptor = lump.descriptor
+        guard !descriptor.isCompressed else {
+            return EnvironmentLightingResult(
+                lighting: nil,
+                status: .unavailableCompressedLump(
+                    source: source,
+                    declaredUncompressedByteCount: descriptor.uncompressedSize
+                )
+            )
+        }
+        guard descriptor.version == 0 else {
+            return EnvironmentLightingResult(
+                lighting: nil,
+                status: .unavailableUnsupportedLumpVersion(
+                    source: source,
+                    actual: descriptor.version
+                )
+            )
+        }
+        let data = lump.data
+        guard !data.isEmpty else {
+            return EnvironmentLightingResult(
+                lighting: nil,
+                status: .unavailableNoCompiledWorldLights(source: source)
+            )
+        }
+        guard data.count.isMultiple(of: compiledWorldLightRecordByteCount) else {
+            return EnvironmentLightingResult(
+                lighting: nil,
+                status: .unavailableInvalidRecordByteCount(
+                    source: source,
+                    actual: data.count,
+                    recordByteCount: compiledWorldLightRecordByteCount
+                )
+            )
+        }
+
+        let records: [CompiledWorldLight] = data.withUnsafeBytes { bytes in
+            var result: [CompiledWorldLight] = []
+            result.reserveCapacity(data.count / compiledWorldLightRecordByteCount)
+            for offset in stride(
+                from: 0,
+                to: data.count,
+                by: compiledWorldLightRecordByteCount
+            ) {
+                result.append(CompiledWorldLight(
+                    intensity: SourceVector3(
+                        littleEndianFloat(bytes, at: offset + 12),
+                        littleEndianFloat(bytes, at: offset + 16),
+                        littleEndianFloat(bytes, at: offset + 20)
+                    ),
+                    normal: SourceVector3(
+                        littleEndianFloat(bytes, at: offset + 24),
+                        littleEndianFloat(bytes, at: offset + 28),
+                        littleEndianFloat(bytes, at: offset + 32)
+                    ),
+                    type: littleEndianInt32(bytes, at: offset + 40)
+                ))
+            }
+            return result
+        }
+        let skylights = records.filter { $0.type == compiledSkylightType }
+        let skyAmbientLights = records.filter {
+            $0.type == compiledSkyAmbientType
+        }
+        guard skylights.count == 1, skyAmbientLights.count == 1 else {
+            return EnvironmentLightingResult(
+                lighting: nil,
+                status: .unavailableAmbiguousGlobalLights(
+                    source: source,
+                    skylightCount: skylights.count,
+                    skyAmbientCount: skyAmbientLights.count
+                )
+            )
+        }
+        let skylight = skylights[0]
+        let skyAmbient = skyAmbientLights[0]
+        guard isFinite(skylight.intensity),
+              isFinite(skylight.normal),
+              isFinite(skyAmbient.intensity),
+              skylight.normal.lengthSquared > Float.ulpOfOne,
+              nonnegative(skylight.intensity),
+              nonnegative(skyAmbient.intensity) else {
+            return EnvironmentLightingResult(
+                lighting: nil,
+                status: .unavailableInvalidGlobalLightValue(source: source)
+            )
+        }
+        return EnvironmentLightingResult(
+            lighting: GModWorldEnvironmentLighting(
+                sourceDirectionFromLight: skylight.normal,
+                directLinearRGB: skylight.intensity,
+                ambientLinearRGB: skyAmbient.intensity,
+                source: source
+            ),
+            status: .available(
+                source: source,
+                worldLightRecordCount: records.count
+            )
+        )
+    }
+
+    private static func littleEndianInt32(
+        _ bytes: UnsafeRawBufferPointer,
+        at offset: Int
+    ) -> Int32 {
+        Int32(bitPattern: littleEndianUInt32(bytes, at: offset))
+    }
+
+    private static func littleEndianFloat(
+        _ bytes: UnsafeRawBufferPointer,
+        at offset: Int
+    ) -> Float {
+        Float(bitPattern: littleEndianUInt32(bytes, at: offset))
+    }
+
+    private static func littleEndianUInt32(
+        _ bytes: UnsafeRawBufferPointer,
+        at offset: Int
+    ) -> UInt32 {
+        UInt32(bytes[offset]) |
+            UInt32(bytes[offset + 1]) << 8 |
+            UInt32(bytes[offset + 2]) << 16 |
+            UInt32(bytes[offset + 3]) << 24
+    }
+
+    private static func nonnegative(_ value: SourceVector3) -> Bool {
+        value.x >= 0 && value.y >= 0 && value.z >= 0
     }
 
     static func allocationEstimate(
@@ -1458,6 +2534,83 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
         value.x.isFinite && value.y.isFinite && value.z.isFinite
     }
 
+    private static func visibilityBounds(
+        _ vertices: ArraySlice<GModWorldRenderVertex>
+    ) -> (minimum: SourceVector3, maximum: SourceVector3)? {
+        guard let first = vertices.first?.position, isFinite(first) else {
+            return nil
+        }
+        var minimum = first
+        var maximum = first
+        for vertex in vertices.dropFirst() {
+            let position = vertex.position
+            guard isFinite(position) else { return nil }
+            minimum = SourceVector3(
+                Swift.min(minimum.x, position.x),
+                Swift.min(minimum.y, position.y),
+                Swift.min(minimum.z, position.z)
+            )
+            maximum = SourceVector3(
+                Swift.max(maximum.x, position.x),
+                Swift.max(maximum.y, position.y),
+                Swift.max(maximum.z, position.z)
+            )
+        }
+        return (minimum, maximum)
+    }
+
+    private static func potentialVisibility(
+        in bsp: SourceBSP
+    ) -> GModWorldPotentialVisibility? {
+        let visibilityLumpIndex = 4
+        guard bsp.lumps.indices.contains(visibilityLumpIndex),
+              !bsp.lumps[visibilityLumpIndex].descriptor.isCompressed else {
+            return nil
+        }
+        return GModWorldPotentialVisibility(
+            data: bsp.lumps[visibilityLumpIndex].data
+        )
+    }
+
+    /// Builds immutable leaf-cluster membership for model-zero faces once.
+    /// Faces with no leaf reference keep an empty list and therefore fail open
+    /// at PVS selection time; malformed leaf-face ranges disable the metadata.
+    private static func worldFaceClusters(
+        in bsp: SourceBSP,
+        firstFace: Int,
+        endFace: Int
+    ) -> [[Int16]]? {
+        guard firstFace >= 0, endFace >= firstFace else { return nil }
+        var result = [[Int16]](
+            repeating: [],
+            count: endFace - firstFace
+        )
+        for leaf in bsp.leaves where leaf.cluster >= 0 {
+            let first = Int(leaf.firstLeafFace)
+            let count = Int(leaf.leafFaceCount)
+            let (end, overflow) = first.addingReportingOverflow(count)
+            guard !overflow, first >= 0, end <= bsp.leafFaces.count else {
+                return nil
+            }
+            for leafFaceIndex in first..<end {
+                let sourceFaceIndex = Int(bsp.leafFaces[leafFaceIndex])
+                guard sourceFaceIndex >= firstFace,
+                      sourceFaceIndex < endFace else { continue }
+                result[sourceFaceIndex - firstFace].append(leaf.cluster)
+            }
+        }
+        for index in result.indices {
+            result[index].sort()
+            var unique: [Int16] = []
+            unique.reserveCapacity(result[index].count)
+            for cluster in result[index] where unique.last != cluster {
+                unique.append(cluster)
+            }
+            result[index] = unique
+        }
+        return result
+    }
+
     private static func isSkySurface(flags: Int32) -> Bool {
         let sky2D: UInt32 = 0x0002
         let sky: UInt32 = 0x0004
@@ -1478,10 +2631,11 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
     /// Finds the real miniature 3D-sky area from `sky_camera`. Source changes
     /// the visible area and origin for this pass; model-zero membership alone
     /// is therefore insufficient and was the reason sky terrain leaked into
-    /// the ordinary world. Full per-frame PVS remains a separate renderer
-    /// milestone, while area membership is exact and available at build time.
+    /// the ordinary world. This build-time sky partition remains independent
+    /// from the ordinary world's per-view PVS/frustum metadata.
     private static func sky3DContext(
-        in bsp: SourceBSP
+        in bsp: SourceBSP,
+        potentialVisibility: GModWorldPotentialVisibility?
     ) throws -> GModWorldSky3DContext? {
         let entities = try bsp.entities.parsedEntities()
         guard let entity = entities.first(where: {
@@ -1498,18 +2652,8 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
         let leafIndex = try bsp.leafIndex(containing: origin)
         guard bsp.leaves.indices.contains(leafIndex) else { return nil }
         let cameraLeaf = bsp.leaves[leafIndex]
-        let visibility: GModSourcePotentialVisibility?
-        let visibilityLumpIndex = 4
-        if bsp.lumps.indices.contains(visibilityLumpIndex),
-           !bsp.lumps[visibilityLumpIndex].descriptor.isCompressed {
-            visibility = GModSourcePotentialVisibility(
-                data: bsp.lumps[visibilityLumpIndex].data
-            )
-        } else {
-            visibility = nil
-        }
         let visibleClusters = cameraLeaf.cluster >= 0
-            ? visibility?.visibleClusters(from: Int(cameraLeaf.cluster))
+            ? potentialVisibility?.visibleClusters(from: Int(cameraLeaf.cluster))
             : nil
         var faceIndices = Set<Int>()
         for leaf in bsp.leaves where leaf.area == cameraLeaf.area {
@@ -1535,8 +2679,102 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
             scale: scale,
             area: cameraLeaf.area,
             cluster: cameraLeaf.cluster,
-            faceIndices: faceIndices
+            faceIndices: faceIndices,
+            fogStatus: sky3DFogStatus(from: entity)
         )
+    }
+
+    /// Mirrors the pinned SDK `CSkyCamera` keyfields and constructor defaults.
+    /// `use_angles` replaces `fogdir` with the negated entity forward vector in
+    /// `CSkyCamera::Activate`; other dynamic activation behavior is out of this
+    /// immutable BSP compilation boundary.
+    private static func sky3DFogStatus(
+        from entity: SourceBSPParsedEntity
+    ) -> GModWorldSky3DFogStatus {
+        func boolean(_ key: String, default defaultValue: Bool) -> Bool? {
+            guard let text = entity.value(forKey: key) else {
+                return defaultValue
+            }
+            guard let integer = Int(
+                text.trimmingCharacters(in: .whitespacesAndNewlines)
+            ) else { return nil }
+            return integer != 0
+        }
+        func float(_ key: String, default defaultValue: Float) -> Float? {
+            guard let text = entity.value(forKey: key) else {
+                return defaultValue
+            }
+            return finiteFloat(text)
+        }
+        func vector(
+            _ key: String,
+            default defaultValue: SourceVector3
+        ) -> SourceVector3? {
+            guard let text = entity.value(forKey: key) else {
+                return defaultValue
+            }
+            return sourceVector(from: text)
+        }
+        func color(_ key: String) -> SourceVector3? {
+            guard let text = entity.value(forKey: key) else { return .zero }
+            return sourceColor(from: text).map { $0 / 255 }
+        }
+
+        guard let enabled = boolean("fogenable", default: false) else {
+            return .unavailableInvalidValue(key: "fogenable")
+        }
+        guard enabled else { return .disabled }
+        guard let blendsColors = boolean("fogblend", default: false) else {
+            return .unavailableInvalidValue(key: "fogblend")
+        }
+        guard let usesAngles = boolean("use_angles", default: false) else {
+            return .unavailableInvalidValue(key: "use_angles")
+        }
+        let direction: SourceVector3
+        if usesAngles {
+            guard let angles = vector("angles", default: .zero) else {
+                return .unavailableInvalidValue(key: "angles")
+            }
+            direction = -SourceQAngle(
+                pitch: angles.x,
+                yaw: angles.y,
+                roll: angles.z
+            ).sourceBasis.forward
+        } else {
+            guard let parsedDirection = vector("fogdir", default: .zero) else {
+                return .unavailableInvalidValue(key: "fogdir")
+            }
+            direction = parsedDirection
+        }
+        guard let primary = color("fogcolor") else {
+            return .unavailableInvalidValue(key: "fogcolor")
+        }
+        guard let secondary = color("fogcolor2") else {
+            return .unavailableInvalidValue(key: "fogcolor2")
+        }
+        guard let start = float("fogstart", default: 0) else {
+            return .unavailableInvalidValue(key: "fogstart")
+        }
+        guard let end = float("fogend", default: 0) else {
+            return .unavailableInvalidValue(key: "fogend")
+        }
+        // CSkyCamera's constructor is the authoritative default.
+        guard let maximumDensity = float("fogmaxdensity", default: 1) else {
+            return .unavailableInvalidValue(key: "fogmaxdensity")
+        }
+        guard let isRadial = boolean("fogradial", default: false) else {
+            return .unavailableInvalidValue(key: "fogradial")
+        }
+        return .available(GModWorldSky3DFog(
+            blendsColors: blendsColors,
+            sourcePrimaryDirection: direction,
+            primaryDisplayRGB: primary,
+            secondaryDisplayRGB: secondary,
+            start: start,
+            end: end,
+            maximumDensity: maximumDensity,
+            isRadial: isRadial
+        ))
     }
 
     private static func skyVisibility(
@@ -1802,9 +3040,11 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
         var positions: [SourceVector3] = []
         var textureCoordinates: [GModWorldTextureCoordinate] = []
         var lightmapCoordinates: [GModWorldTextureCoordinate?] = []
+        var sourceDisplacementAlphas: [Float] = []
         positions.reserveCapacity(displacement.vertexCount)
         textureCoordinates.reserveCapacity(displacement.vertexCount)
         lightmapCoordinates.reserveCapacity(displacement.vertexCount)
+        sourceDisplacementAlphas.reserveCapacity(displacement.vertexCount)
         var maximumOffset: Float = 0
 
         for y in 0..<sideLength {
@@ -1832,6 +3072,7 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
                     )
                 }
                 positions.append(position)
+                sourceDisplacementAlphas.append(sourceVertex.alpha)
                 maximumOffset = Swift.max(maximumOffset, offset.length)
 
                 let uv = try textureCoordinate(
@@ -1901,7 +3142,8 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
                 position: positions[index],
                 normal: normal,
                 textureCoordinate: textureCoordinates[index],
-                lightmapCoordinate: lightmapCoordinates[index]
+                lightmapCoordinate: lightmapCoordinates[index],
+                sourceDisplacementAlpha: sourceDisplacementAlphas[index]
             )
         }
         return GeneratedDisplacementGeometry(
@@ -1916,65 +3158,7 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
     /// Children are lower-left, lower-right, upper-left, upper-right; each
     /// power-one leaf fans eight triangles around its center.
     static func displacementTriangleIndices(power: Int) -> [UInt32] {
-        precondition((2...4).contains(power))
-        let sideLength = (1 << power) + 1
-        let winding = [
-            (0, 1), (0, 0), (1, 0), (2, 0), (2, 1),
-            (2, 2), (1, 2), (0, 2), (0, 1),
-        ]
-        let children = [
-            ((0, 0), (1, 1)),
-            ((1, 0), (2, 1)),
-            ((0, 1), (1, 2)),
-            ((1, 1), (2, 2)),
-        ]
-        func coordinate(
-            _ lower: (Int, Int),
-            _ upper: (Int, Int),
-            _ selector: (Int, Int)
-        ) -> (Int, Int) {
-            func component(_ lower: Int, _ upper: Int, _ selector: Int) -> Int {
-                switch selector {
-                case 0: return lower
-                case 1: return (lower + upper) >> 1
-                default: return upper
-                }
-            }
-            return (
-                component(lower.0, upper.0, selector.0),
-                component(lower.1, upper.1, selector.1)
-            )
-        }
-        var indices: [UInt32] = []
-        indices.reserveCapacity((1 << power) * (1 << power) * 6)
-        func generate(
-            lower: (Int, Int),
-            upper: (Int, Int),
-            remainingPower: Int
-        ) {
-            if remainingPower == 1 {
-                let center = coordinate(lower, upper, (1, 1))
-                var previous = coordinate(lower, upper, winding[0])
-                for selector in winding.dropFirst() {
-                    let current = coordinate(lower, upper, selector)
-                    for vertex in [current, previous, center] {
-                        indices.append(UInt32(vertex.1 * sideLength + vertex.0))
-                    }
-                    previous = current
-                }
-                return
-            }
-            for child in children {
-                generate(
-                    lower: coordinate(lower, upper, child.0),
-                    upper: coordinate(lower, upper, child.1),
-                    remainingPower: remainingPower - 1
-                )
-            }
-        }
-        let extent = 1 << power
-        generate(lower: (0, 0), upper: (extent, extent), remainingPower: power)
-        return indices
+        SourceBSPDisplacementTopology.triangleIndices(power: power)
     }
 
     private static func lerp(

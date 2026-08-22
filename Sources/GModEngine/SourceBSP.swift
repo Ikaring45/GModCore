@@ -583,6 +583,167 @@ public struct SourceBSPFaceLightmap: Sendable, Equatable {
     }
 }
 
+/// Caller-owned scratch storage for a sequence of BSP world traces.
+///
+/// `SourceBSP` deliberately remains immutable and never retains one of these.
+/// A workspace belongs to exactly one serialized simulation lane (for example,
+/// one `GModPlayableSessionLane`) and must not be used by two concurrent
+/// callers. Its generation marks are Source's `checkcount` equivalent: they
+/// avoid allocating or clearing three `Set`s for every hull trace while still
+/// preserving the first leaf / first brush visit order.
+///
+/// It is marked unchecked-Sendable solely so a lane-confined
+/// `SourceWorldWalkCollisionProvider` can satisfy the protocol boundary. The
+/// lane ownership rule above is the synchronization contract.
+public final class SourceBSPTraceWorkspace: @unchecked Sendable {
+    /// Observable only for focused regression and performance checks. Counts
+    /// are monotonic for the workspace lifetime and do not participate in
+    /// collision behavior.
+    public struct Metrics: Sendable, Equatable {
+        public fileprivate(set) var traceCount: UInt64 = 0
+        public fileprivate(set) var nodeVisitCount: UInt64 = 0
+        public fileprivate(set) var leafVisitCount: UInt64 = 0
+        public fileprivate(set) var brushVisitCount: UInt64 = 0
+        public fileprivate(set) var storageGrowthCount: UInt64 = 0
+    }
+
+    /// Actual reusable buffer retention after a trace. Capacities are exposed
+    /// only so focused performance tests can prove that a warmed lane does not
+    /// retain progressively more storage. They do not affect trace results.
+    public struct RetainedStorage: Sendable, Equatable {
+        public let nodeGenerationCapacity: Int
+        public let leafGenerationCapacity: Int
+        public let brushGenerationCapacity: Int
+        public let pendingChildCapacity: Int
+        public let candidateBrushCapacity: Int
+
+        public var totalElementCapacity: Int {
+            nodeGenerationCapacity + leafGenerationCapacity +
+                brushGenerationCapacity + pendingChildCapacity +
+                candidateBrushCapacity
+        }
+    }
+
+    public private(set) var metrics = Metrics()
+
+    public var retainedStorage: RetainedStorage {
+        RetainedStorage(
+            nodeGenerationCapacity: nodeGenerations.capacity,
+            leafGenerationCapacity: leafGenerations.capacity,
+            brushGenerationCapacity: brushGenerations.capacity,
+            pendingChildCapacity: pendingChildren.capacity,
+            candidateBrushCapacity: candidateBrushIndices.capacity
+        )
+    }
+
+    private var generation: UInt32 = 0
+    private var nodeGenerations: ContiguousArray<UInt32> = []
+    private var leafGenerations: ContiguousArray<UInt32> = []
+    private var brushGenerations: ContiguousArray<UInt32> = []
+    private var pendingChildren: ContiguousArray<Int32> = []
+    private var candidateBrushIndices: [Int] = []
+
+    public init() {}
+
+    fileprivate func begin(
+        nodeCount: Int,
+        leafCount: Int,
+        brushCount: Int
+    ) {
+        prepareMarks(&nodeGenerations, count: nodeCount)
+        prepareMarks(&leafGenerations, count: leafCount)
+        prepareMarks(&brushGenerations, count: brushCount)
+        prepareTraversalBuffers(
+            nodeCount: nodeCount,
+            brushCount: brushCount
+        )
+
+        // A wrap is practically unreachable in a game session, but clearing
+        // the existing backing buffers keeps the identity exact even then.
+        if generation == UInt32.max {
+            nodeGenerations = ContiguousArray(repeating: 0, count: nodeCount)
+            leafGenerations = ContiguousArray(repeating: 0, count: leafCount)
+            brushGenerations = ContiguousArray(repeating: 0, count: brushCount)
+            metrics.storageGrowthCount &+= 3
+            generation = 1
+        } else {
+            generation &+= 1
+        }
+
+        pendingChildren.removeAll(keepingCapacity: true)
+        candidateBrushIndices.removeAll(keepingCapacity: true)
+        metrics.traceCount &+= 1
+    }
+
+    fileprivate func appendRoot(_ root: Int32) {
+        pendingChildren.append(root)
+    }
+
+    fileprivate func popPendingChild() -> Int32? {
+        pendingChildren.popLast()
+    }
+
+    fileprivate func appendPendingChild(_ child: Int32) {
+        pendingChildren.append(child)
+    }
+
+    fileprivate func visitNode(_ index: Int) -> Bool {
+        guard nodeGenerations[index] != generation else { return false }
+        nodeGenerations[index] = generation
+        metrics.nodeVisitCount &+= 1
+        return true
+    }
+
+    fileprivate func visitLeaf(_ index: Int) -> Bool {
+        guard leafGenerations[index] != generation else { return false }
+        leafGenerations[index] = generation
+        metrics.leafVisitCount &+= 1
+        return true
+    }
+
+    fileprivate func visitBrush(_ index: Int) -> Bool {
+        guard brushGenerations[index] != generation else { return false }
+        brushGenerations[index] = generation
+        metrics.brushVisitCount &+= 1
+        return true
+    }
+
+    fileprivate func appendCandidateBrush(_ index: Int) {
+        candidateBrushIndices.append(index)
+    }
+
+    fileprivate var candidates: [Int] {
+        candidateBrushIndices
+    }
+
+    private func prepareMarks(
+        _ marks: inout ContiguousArray<UInt32>,
+        count: Int
+    ) {
+        guard marks.count != count else { return }
+        marks = ContiguousArray(repeating: 0, count: count)
+        metrics.storageGrowthCount &+= 1
+    }
+
+    private func prepareTraversalBuffers(
+        nodeCount: Int,
+        brushCount: Int
+    ) {
+        // One visited node can leave at most one additional sibling pending,
+        // so nodeCount + the root bounds the DFS stack even for shared-child
+        // BSP graphs. Brush generation marks bound the candidate list.
+        let pendingMinimum = max(1, nodeCount + 1)
+        if pendingChildren.capacity < pendingMinimum {
+            pendingChildren.reserveCapacity(pendingMinimum)
+            metrics.storageGrowthCount &+= 1
+        }
+        if candidateBrushIndices.capacity < brushCount {
+            candidateBrushIndices.reserveCapacity(brushCount)
+            metrics.storageGrowthCount &+= 1
+        }
+    }
+}
+
 public struct SourceBSP: Sendable, Equatable {
     public static let magic = UInt32(0x5053_4256) // little-endian bytes: V B S P
     public static let headerByteCount = 4 + 4 + 64 * 16 + 4
@@ -1249,7 +1410,12 @@ public struct SourceBSP: Sendable, Equatable {
         headNode: Int32? = nil
     ) throws -> Int {
         var child = try resolvedHeadNode(headNode)
-        var visitedNodes = Set<Int>()
+        // A point lookup follows exactly one child per node. The BSP was
+        // already tri-colour validated at load, so retaining a Set here only
+        // adds a heap allocation to every contents sample (WaterMove performs
+        // several per tick). Keep a defensive step bound for malformed state
+        // without allocating per query.
+        var remainingNodeVisits = nodes.count
 
         while child >= 0 {
             let nodeIndex = Int(child)
@@ -1260,9 +1426,10 @@ public struct SourceBSP: Sendable, Equatable {
                     availableCount: nodes.count
                 )
             }
-            guard visitedNodes.insert(nodeIndex).inserted else {
+            guard remainingNodeVisits > 0 else {
                 throw SourceBSPError.cyclicNodeGraph(nodeIndex: nodeIndex)
             }
+            remainingNodeVisits -= 1
 
             let node = nodes[nodeIndex]
             let plane = planes[Int(node.planeIndex)]
@@ -1320,9 +1487,24 @@ public struct SourceBSP: Sendable, Equatable {
         _ ray: SourceRay,
         mask: SourceContents = SourceMasks.all,
         tolerance: Float = SourceCollisionConstants.distanceEpsilon,
-        headNode: Int32? = nil
+        headNode: Int32? = nil,
+        workspace: SourceBSPTraceWorkspace? = nil
     ) throws -> SourceGameTrace {
-        let indices = try brushIndicesIntersected(by: ray, headNode: headNode)
+        if let workspace {
+            try collectBrushIndicesIntersected(
+                by: ray,
+                headNode: headNode,
+                workspace: workspace
+            )
+            return prebuiltWorldCollision.trace(
+                ray,
+                candidatePrimitiveIndices: workspace.candidates,
+                mask: mask,
+                tolerance: tolerance
+            )
+        }
+
+        let indices = try legacyBrushIndicesIntersected(by: ray, headNode: headNode)
         return prebuiltWorldCollision.trace(
             ray,
             candidatePrimitiveIndices: indices,
@@ -1339,7 +1521,79 @@ public struct SourceBSP: Sendable, Equatable {
         throw SourceBSPError.missingWorldTree
     }
 
-    private func brushIndicesIntersected(
+    private func collectBrushIndicesIntersected(
+        by ray: SourceRay,
+        headNode: Int32?,
+        workspace: SourceBSPTraceWorkspace
+    ) throws {
+
+        let root = try resolvedHeadNode(headNode)
+        workspace.begin(
+            nodeCount: nodes.count,
+            leafCount: leaves.count,
+            brushCount: brushes.count
+        )
+        workspace.appendRoot(root)
+
+        while let child = workspace.popPendingChild() {
+            if child < 0 {
+                let leafIndex64 = -1 - Int64(child)
+                guard leafIndex64 >= 0,
+                      leafIndex64 < Int64(leaves.count) else {
+                    throw SourceBSPError.invalidReference(
+                        context: "node leaf child",
+                        index: leafIndex64,
+                        availableCount: leaves.count
+                    )
+                }
+                let leafIndex = Int(leafIndex64)
+                guard workspace.visitLeaf(leafIndex) else { continue }
+                let leaf = leaves[leafIndex]
+                let first = Int(leaf.firstLeafBrush)
+                let end = first + Int(leaf.leafBrushCount)
+                for tableIndex in first..<end {
+                    let brushIndex = Int(leafBrushes[tableIndex])
+                    if workspace.visitBrush(brushIndex) {
+                        workspace.appendCandidateBrush(brushIndex)
+                    }
+                }
+                continue
+            }
+
+            let nodeIndex = Int(child)
+            guard nodes.indices.contains(nodeIndex) else {
+                throw SourceBSPError.invalidReference(
+                    context: "head/node child",
+                    index: Int64(child),
+                    availableCount: nodes.count
+                )
+            }
+            guard workspace.visitNode(nodeIndex) else { continue }
+
+            let node = nodes[nodeIndex]
+            let plane = planes[Int(node.planeIndex)]
+            let normal = Self.vector(plane.normal)
+            let startDistance = normal.dot(ray.start) - plane.distance
+            let endDistance = normal.dot(ray.start + ray.delta) - plane.distance
+            let extentOffset = abs(normal.x) * ray.extents.x +
+                abs(normal.y) * ray.extents.y +
+                abs(normal.z) * ray.extents.z
+
+            if startDistance > extentOffset, endDistance > extentOffset {
+                workspace.appendPendingChild(node.children[0])
+            } else if startDistance < -extentOffset, endDistance < -extentOffset {
+                workspace.appendPendingChild(node.children[1])
+            } else {
+                // Stack the far child first so the near child is processed
+                // first, preserving Source's start-to-end brush check order.
+                let nearSide = startDistance >= 0 ? 0 : 1
+                workspace.appendPendingChild(node.children[1 - nearSide])
+                workspace.appendPendingChild(node.children[nearSide])
+            }
+        }
+    }
+
+    private func legacyBrushIndicesIntersected(
         by ray: SourceRay,
         headNode: Int32?
     ) throws -> [Int] {

@@ -74,6 +74,10 @@ final class GModGameSessionModelSupportTests: XCTestCase {
             []
         )
         XCTAssertEqual(
+            state.reduce(.homeMenuAction(.openConsole)),
+            []
+        )
+        XCTAssertEqual(
             state.reduce(.homeMenuAction(.quit)),
             [.presentQuitUnavailable]
         )
@@ -314,7 +318,9 @@ final class GModGameSessionModelSupportTests: XCTestCase {
             forwardAxis: positive.forward,
             sideAxis: positive.side,
             jumpPressed: positive.jump,
-            heldActionButtons: [.attack, .attack2, .use, .reload]
+            heldActionButtons: [
+                .attack, .attack2, .use, .reload, .duck, .speed,
+            ]
         )
         XCTAssertTrue(accepts)
         XCTAssertEqual(admitted.forwardMove, 250)
@@ -325,7 +331,9 @@ final class GModGameSessionModelSupportTests: XCTestCase {
         XCTAssertTrue(admitted.buttons.contains(.attack))
         XCTAssertTrue(admitted.buttons.contains(.attack2))
         XCTAssertTrue(admitted.buttons.contains(.use))
-        XCTAssertFalse(admitted.buttons.contains(.reload))
+        XCTAssertTrue(admitted.buttons.contains(.reload))
+        XCTAssertTrue(admitted.buttons.contains(.duck))
+        XCTAssertTrue(admitted.buttons.contains(.speed))
 
         let popupAccepts = GModGameWorldInputPolicy.accepts(
             isReady: true,
@@ -351,7 +359,7 @@ final class GModGameSessionModelSupportTests: XCTestCase {
     func testUnsupportedMovementDiagnosticNeverClaimsSuccess() {
         let water = GModGameMovementDiagnostic(
             commandNumber: 12,
-            reason: .feature(.water)
+            reason: .feature(.waterCurrent)
         )
         XCTAssertTrue(water.status.contains("Movement blocked"))
         XCTAssertTrue(water.status.contains("water"))
@@ -467,10 +475,15 @@ final class GModGameSessionModelSupportTests: XCTestCase {
         ))
     }
 
-    func testSurfaceCaptureRunsOnlyForStableForegroundClientMenu() {
+    func testSurfaceCaptureRunsForStableForegroundMenuOrVisibleOverlay() {
         XCTAssertFalse(GModGameClientSurfaceCapturePolicy.shouldCapture(
             activeMenu: nil,
             transitioningMenu: nil
+        ))
+        XCTAssertTrue(GModGameClientSurfaceCapturePolicy.shouldCapture(
+            activeMenu: nil,
+            transitioningMenu: nil,
+            hasVisibleOverlayPanels: true
         ))
         XCTAssertTrue(GModGameClientSurfaceCapturePolicy.shouldCapture(
             activeMenu: .spawn,
@@ -483,6 +496,11 @@ final class GModGameSessionModelSupportTests: XCTestCase {
         XCTAssertFalse(GModGameClientSurfaceCapturePolicy.shouldCapture(
             activeMenu: .spawn,
             transitioningMenu: .context
+        ))
+        XCTAssertFalse(GModGameClientSurfaceCapturePolicy.shouldCapture(
+            activeMenu: nil,
+            transitioningMenu: .spawn,
+            hasVisibleOverlayPanels: true
         ))
     }
 
@@ -514,6 +532,13 @@ final class GModGameSessionModelSupportTests: XCTestCase {
         queue.submit(first)
         queue.removeAll()
         XCTAssertNil(queue.takeLatest())
+
+        let overlay = GModGameSurfaceRefreshRequest(
+            generation: latestGeneration,
+            scope: .overlay
+        )
+        queue.submit(overlay)
+        XCTAssertEqual(queue.takeLatest(), overlay)
     }
 
     func testPointerQueueIsBoundedCoalescesMovesAndRetainsCriticalOrder() {

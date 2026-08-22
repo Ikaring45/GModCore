@@ -35,6 +35,31 @@ private final class LockedNetInvocationCount: @unchecked Sendable {
 }
 
 final class GMLuaNetTransportTests: XCTestCase {
+    func testPhysicsCommandsReserveTheExistingGlobalSequenceClock() throws {
+        let transport = GMLuaNetTransport()
+
+        XCTAssertEqual(
+            try transport.reservePhysicsCommandSequences(count: 3),
+            [1, 2, 3]
+        )
+        XCTAssertEqual(
+            try transport.reservePhysicsCommandSequences(count: 0),
+            []
+        )
+        XCTAssertEqual(
+            try transport.reservePhysicsCommandSequences(count: 2),
+            [4, 5]
+        )
+        XCTAssertThrowsError(
+            try transport.reservePhysicsCommandSequences(count: -1)
+        ) { error in
+            XCTAssertEqual(
+                error as? GMLuaPhysicsSequenceReservationError,
+                .negativeCount(-1)
+            )
+        }
+    }
+
     func testTTTRoundStateBroadcastIsQueuedAndDispatchedThroughLuaIncoming() throws {
         let sharedGlobals = GMLuaNetworkedGlobalTransport()
         let transport = GMLuaNetTransport(

@@ -23,6 +23,7 @@ public final class GMLuaRuntime {
     private(set) var typeSystem: GMLuaTypeSystem?
     public private(set) var entityRegistry: GMLuaEntityRegistry?
     public private(set) var achievements: GMLuaAchievements?
+    public private(set) var effects: GMLuaEffects?
     public private(set) var chat: GMLuaChat?
     public private(set) var input: GMLuaInput?
     public private(set) var sound: GMLuaSound?
@@ -44,6 +45,19 @@ public final class GMLuaRuntime {
     public private(set) var netTransport: GMLuaNetTransport?
     public private(set) var netEndpoint: GMLuaNetEndpoint?
     public private(set) var traceBridge: GMLuaTraceBridge?
+    /// SERVER-owned `Entity:FireBullets` projection. The active user command
+    /// is supplied only while the authoritative ItemPostFrame pass runs, so a
+    /// timer cannot silently inherit an unrelated prediction seed.
+    public internal(set) var fireBulletsBridge:
+        SourceCanonicalFireBulletsGLuaBridge?
+    /// SERVER-owned health/death/respawn state machine. CLIENT observes only
+    /// immutable canonical Entity snapshots delivered by SharedSession.
+    public internal(set) var playerLifecycleController:
+        SourceCanonicalPlayerLifecycleController?
+    /// Pending framebuffer captures requested by the stock `gmod_camera`
+    /// `jpeg` command, exposed for the app renderer to drain at a frame boundary.
+    public internal(set) var cameraCaptureRequests:
+        SourceCanonicalCameraCaptureRequestState?
     public private(set) var systemTimeSource: (any GMLuaSystemTimeSource)?
     private let logger: (String) -> Void
     private let fileLoader: ((String) throws -> String)?
@@ -254,6 +268,12 @@ public final class GMLuaRuntime {
                 into: state,
                 realm: realm
             )
+            effects = try GMLuaEffects.install(
+                into: state,
+                realm: realm,
+                typeSystem: installedTypeSystem,
+                entityRegistry: installedEntityRegistry
+            )
             traceBridge = try GMLuaUtilTrace.install(
                 into: state,
                 typeSystem: installedTypeSystem,
@@ -297,10 +317,17 @@ public final class GMLuaRuntime {
                     networkedGlobalTransport: installedNetworkedGlobals.transport
                 )
                 netTransport = installedNetTransport
+                let endpointLogger = self.logger
+                let endpointRealm = self.realm
                 netEndpoint = try installedNetTransport.installEndpoint(
                     into: state,
                     realm: realm,
-                    entityRegistry: installedEntityRegistry
+                    entityRegistry: installedEntityRegistry,
+                    consoleMessageSink: { message in
+                        endpointLogger(
+                            "[\(endpointRealm.rawValue)][Lua] " + message.utf8String
+                        )
+                    }
                 )
             }
             let installedEngineConVarCatalog = explicitEngineConVarCatalog
@@ -452,6 +479,16 @@ public final class GMLuaRuntime {
             self.logger("[\(self.realm.rawValue)][Lua] " + arguments.map(\.printable).joined())
             return []
         }
+        state.register("MsgAll") { [unowned self] arguments in
+            let message = arguments.map(\.printable).joined()
+            // MsgAll is exactly Msg outside SERVER. SERVER also queues the
+            // already-converted text for every connected Player console.
+            self.logger("[\(self.realm.rawValue)][Lua] " + message)
+            if self.realm == .server, let endpoint = self.netEndpoint {
+                try endpoint.broadcastConsoleMessage(LuaString(message))
+            }
+            return []
+        }
         state.register("MsgN") { [unowned self] arguments in
             self.logger("[\(self.realm.rawValue)][Lua] " + arguments.map(\.printable).joined(separator: "\t"))
             return []
@@ -463,6 +500,35 @@ public final class GMLuaRuntime {
         state.register("ErrorNoHaltWithStack") { [unowned self] arguments in
             self.logger("[\(self.realm.rawValue)][Lua][ERROR] " + arguments.map(\.printable).joined())
             return []
+        }
+        state.register("ProtectedCall") { [unowned self] arguments in
+            guard let function = arguments.first else {
+                throw LuaError.runtime(
+                    "bad argument #1 to 'ProtectedCall' (function expected, got no value)"
+                )
+            }
+            switch function {
+            case .luaFunction, .nativeFunction:
+                break
+            default:
+                throw LuaError.runtime(
+                    "bad argument #1 to 'ProtectedCall' " +
+                        "(function expected, got \(function.typeName))"
+                )
+            }
+            do {
+                _ = try self.state.call(
+                    function,
+                    arguments: Array(arguments.dropFirst())
+                )
+                return [.boolean(true)]
+            } catch {
+                self.logger(
+                    "[\(self.realm.rawValue)][Lua][ERROR] " +
+                        Self.describe(error)
+                )
+                return [.boolean(false)]
+            }
         }
         if realm == .server {
             state.register("__gmod_AddNetworkString") { [unowned self] arguments in
@@ -576,8 +642,11 @@ public final class GMLuaRuntime {
             end
             util.KeyValuesToTable = __gmod_KeyValuesToTable
             util.KeyValuesToTablePreserveOrder = __gmod_KeyValuesToTablePreserveOrder
+            -- MENU loads the shared net extension because Garry's Mod exposes
+            -- the client-side Lua surface there too. It has no gameplay
+            -- endpoint, but the extension still owns logical receiver state.
+            net = net or {}
             if __gmod_network_realm then
-                net = net or {}
                 net.Start = __gmod_net_Start
                 net.Abort = __gmod_net_Abort
                 net.WriteBit = __gmod_net_WriteBit

@@ -8,12 +8,17 @@ final class GMLuaSourceRuntimeAdapterCanonicalEntityTests: XCTestCase {
         let server = makeRuntime(.server, transport: transport)
         let client = makeRuntime(.client, transport: transport)
         let model = SourceEntityModelReference("models/props_c17/oildrum001.mdl")
+        let propAsset = try makeAttestedPropPhysicsTestAsset(
+            modelPath: model.path
+        )
         let adapter = try GMLuaSourceRuntimeAdapter(
             serverRuntime: server,
             initialEntitySerialNumber: 9,
             canonicalModelValidator: { requestedModel, kind in
                 requestedModel == model && kind == .propPhysics ? .valid : .invalid
-            }
+            },
+            canonicalPropPhysicsAssetResolver:
+                makeAttestedPropPhysicsTestResolver(asset: propAsset)
         )
         defer {
             try? adapter.close()
@@ -23,6 +28,16 @@ final class GMLuaSourceRuntimeAdapterCanonicalEntityTests: XCTestCase {
         try installNoopHooks(in: server)
         try installNoopHooks(in: client)
         try adapter.attach(client: client)
+        try client.execute(
+            """
+            assert(type(util.IsValidModel) == "function")
+            assert(type(util.IsValidProp) == "function")
+            assert(util.IsValidModel("models/props_c17/oildrum001.mdl"))
+            assert(util.IsValidProp("models/props_c17/oildrum001.mdl"))
+            assert(util.IsValidProp("models/props_c17/not_present.mdl") == false)
+            """,
+            sourceName: "=(CLIENT canonical model validation)"
+        )
 
         let world = try adapter.createCanonicalEntity(kind: .world)
         let player = try adapter.createCanonicalEntity(
@@ -271,7 +286,7 @@ final class GMLuaSourceRuntimeAdapterCanonicalEntityTests: XCTestCase {
         XCTAssertEqual(list.pendingDeletionCount, 1)
     }
 
-    func testMissingServerRemovalProjectionIsReported() throws {
+    func testMissingServerRemovalProjectionIsRejectedBeforeCleanupAndCanRetry() throws {
         let transport = GMLuaNetTransport()
         let server = makeRuntime(.server, transport: transport)
         let adapter = try GMLuaSourceRuntimeAdapter(
@@ -285,7 +300,7 @@ final class GMLuaSourceRuntimeAdapterCanonicalEntityTests: XCTestCase {
         try installNoopHooks(in: server)
 
         let player = try adapter.createCanonicalEntity(kind: .player, at: 9)
-        _ = try adapter.markCanonicalEntityForRemoval(player.identity)
+        let pending = try adapter.markCanonicalEntityForRemoval(player.identity)
         server.entityRegistry?.unregister(index: player.identity.entryIndex)
 
         XCTAssertThrowsError(try adapter.runServerFixedTick()) { error in
@@ -295,6 +310,13 @@ final class GMLuaSourceRuntimeAdapterCanonicalEntityTests: XCTestCase {
             }
             XCTAssertEqual(identity, player.identity)
         }
+        XCTAssertTrue(adapter.contains(player.identity))
+        XCTAssertEqual(adapter.canonicalSnapshot(for: player.identity), pending)
+
+        _ = try XCTUnwrap(server.entityRegistry)
+            .applyAuthoritativeSnapshot(pending)
+        let retry = try adapter.runServerFixedTick()
+        XCTAssertEqual(retry.removedEntities, [player.identity])
         XCTAssertFalse(adapter.contains(player.identity))
         XCTAssertNil(adapter.canonicalSnapshot(for: player.identity))
     }

@@ -260,7 +260,16 @@ final class GMLuaNetworkedGlobalsTests: XCTestCase {
         XCTAssertNil(runtime.netEndpoint)
         try runtime.execute(
             """
-            assert(net == nil)
+            assert(type(net) == "table")
+            for _, name in ipairs({
+                "Start", "Abort", "WriteBit", "ReadBit",
+                "WriteUInt", "ReadUInt", "WriteInt", "ReadInt",
+                "WriteFloat", "ReadFloat", "WriteString", "ReadString",
+                "WriteData", "ReadData", "ReadHeader", "Broadcast",
+                "Send", "SendToServer", "BytesWritten", "BytesLeft"
+            }) do
+                assert(net[name] == nil, "MENU unexpectedly exposed net." .. name)
+            end
             assert(SetGlobalVar == nil and GetGlobalVar == nil)
             assert(util.AddNetworkString == nil)
             assert(util.NetworkStringToID == nil and util.NetworkIDToString == nil)

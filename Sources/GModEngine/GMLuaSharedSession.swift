@@ -54,6 +54,32 @@ public enum GMLuaSharedSessionError: Error, CustomStringConvertible {
 /// enter Lua only when the host calls ``pump``.
 public final class GMLuaSharedSession: @unchecked Sendable {
     public let netTransport: GMLuaNetTransport
+    public let serverPermissionProjection: GMLuaPermissionRealmProjection
+    public let clientPermissionProjection: GMLuaPermissionRealmProjection
+    public let permissionSessionTransport: GMLuaPermissionSessionTransport
+
+    private final class PermissionTransportReference: @unchecked Sendable {
+        private let lock = NSLock()
+        private weak var storage: GMLuaPermissionSessionTransport?
+
+        func install(_ transport: GMLuaPermissionSessionTransport) {
+            lock.lock()
+            storage = transport
+            lock.unlock()
+        }
+
+        func deliver(_ delivery: GMLuaPermissionSessionDelivery) throws {
+            lock.lock()
+            let transport = storage
+            lock.unlock()
+            guard let transport else {
+                throw LuaError.runtime(
+                    "permission session transport is no longer available"
+                )
+            }
+            _ = try transport.deliver(delivery)
+        }
+    }
 
     private final class ConnectionRecord: @unchecked Sendable {
         weak var server: GMLuaRuntime?
@@ -128,6 +154,18 @@ public final class GMLuaSharedSession: @unchecked Sendable {
         }
     }
 
+    /// Keeps the transport's `@Sendable` replication handler from capturing a
+    /// non-Sendable Lua runtime directly. The reference remains weak, matching
+    /// the connection record's lifetime contract; packet delivery is already
+    /// serialized by `CanonicalReplicationLease` before the runtime is read.
+    private final class WeakRuntimeReference: @unchecked Sendable {
+        weak var value: GMLuaRuntime?
+
+        init(_ value: GMLuaRuntime) {
+            self.value = value
+        }
+    }
+
     private let connectionMutationLock = NSRecursiveLock()
     private let lock = NSLock()
     private weak var serverRuntime: GMLuaRuntime?
@@ -138,6 +176,34 @@ public final class GMLuaSharedSession: @unchecked Sendable {
 
     public init(netTransport: GMLuaNetTransport = GMLuaNetTransport()) {
         self.netTransport = netTransport
+        let serverProjection = GMLuaPermissionRealmProjection(
+            destination: .server
+        )
+        let clientProjection = GMLuaPermissionRealmProjection(
+            destination: .client
+        )
+        serverPermissionProjection = serverProjection
+        clientPermissionProjection = clientProjection
+        let transportReference = PermissionTransportReference()
+        let permissionTransport = GMLuaPermissionSessionTransport(
+            fifo: GMLuaPermissionSharedFIFO { [weak netTransport] batch in
+                guard let netTransport else {
+                    throw GMLuaPermissionFIFOTransportError.serverUnavailable
+                }
+                try netTransport.enqueuePermissionSessionDeliveries(
+                    batch,
+                    deliver: { delivery in
+                        try transportReference.deliver(delivery)
+                    }
+                )
+            },
+            endpoints: GMLuaPermissionSessionEndpoints(
+                server: { try serverProjection.apply($0) },
+                client: { try clientProjection.apply($0) }
+            )
+        )
+        transportReference.install(permissionTransport)
+        permissionSessionTransport = permissionTransport
         netTransport.requireExplicitClientConnections()
     }
 
@@ -401,6 +467,7 @@ public final class GMLuaSharedSession: @unchecked Sendable {
             replicationLease: replicationLease,
             replicationStream: stream
         )
+        let clientRuntimeReference = WeakRuntimeReference(client)
 
         lock.lock()
         guard connectionsByClient[clientIdentifier] == nil,
@@ -427,10 +494,22 @@ public final class GMLuaSharedSession: @unchecked Sendable {
                 )
             }
             try clientEndpoint.connectEntityReplicationHandler {
-                [clientRegistry] packet in
+                [clientRuntimeReference, clientRegistry] packet in
                 try replicationLease.withActive {
+                    let identitiesBefore = Set(
+                        clientRegistry.canonicalEntitySnapshots.map(\.identity)
+                    )
                     let result = try clientRegistry.applyEntityReplicationPacket(
-                        packet
+                        packet,
+                        beforeRemoving: { entities in
+                            guard let client = clientRuntimeReference.value else { return }
+                            for entity in entities {
+                                _ = client.dispatchContainedHostHook(
+                                    named: "EntityRemoved",
+                                    arguments: [entity, .boolean(false)]
+                                )
+                            }
+                        }
                     )
                     if case .applied = result,
                        clientRegistry.canonicalIdentity(at: playerIndex) == playerIdentity {
@@ -438,6 +517,23 @@ public final class GMLuaSharedSession: @unchecked Sendable {
                             index: playerIndex,
                             generation: playerIdentity.generation
                         )
+                    }
+                    if case .applied = result,
+                       let client = clientRuntimeReference.value {
+                        let newlyNetworked = clientRegistry
+                            .canonicalEntitySnapshots
+                            .filter {
+                                !identitiesBefore.contains($0.identity)
+                            }
+                        for snapshot in newlyNetworked {
+                            let entity = clientRegistry.entity(
+                                at: snapshot.identity.entryIndex
+                            )
+                            _ = client.dispatchContainedHostHook(
+                                named: "NetworkEntityCreated",
+                                arguments: [entity]
+                            )
+                        }
                     }
                     return result
                 }
@@ -512,7 +608,13 @@ public final class GMLuaSharedSession: @unchecked Sendable {
                 .sorted { $0.playerIndex < $1.playerIndex }
             lock.unlock()
 
-            var enqueued = 0
+            var sourceEndpoint: GMLuaNetEndpoint?
+            var prepared: [(
+                record: ConnectionRecord,
+                stream: SourceEntityReplicationServerStream,
+                request: GMLuaEntityReplicationEnqueueRequest
+            )] = []
+            prepared.reserveCapacity(records.count)
             for record in records {
                 guard let server = record.server, !server.isClosed else {
                     throw GMLuaSharedSessionError.closedRuntime(.server)
@@ -523,6 +625,13 @@ public final class GMLuaSharedSession: @unchecked Sendable {
                         "net endpoint for canonical entity replication"
                     )
                 }
+                if let sourceEndpoint {
+                    guard sourceEndpoint === serverEndpoint else {
+                        throw GMLuaSharedSessionError.differentServer
+                    }
+                } else {
+                    sourceEndpoint = serverEndpoint
+                }
                 guard var stream = record.replicationStream else {
                     throw GMLuaSharedSessionError.missingRuntimeSurface(
                         .server,
@@ -530,15 +639,24 @@ public final class GMLuaSharedSession: @unchecked Sendable {
                     )
                 }
                 let packet = try stream.makeDelta(operations)
-                try netTransport.enqueueEntityReplication(
-                    packet,
-                    from: serverEndpoint,
-                    to: record.clientEndpoint
-                )
-                record.replicationStream = stream
-                enqueued += 1
+                prepared.append((
+                    record: record,
+                    stream: stream,
+                    request: GMLuaEntityReplicationEnqueueRequest(
+                        packet: packet,
+                        destination: record.clientEndpoint
+                    )
+                ))
             }
-            return enqueued
+            guard let sourceEndpoint else { return 0 }
+            try netTransport.enqueueEntityReplications(
+                prepared.map { $0.request },
+                from: sourceEndpoint
+            )
+            for item in prepared {
+                item.record.replicationStream = item.stream
+            }
+            return prepared.count
         }
     }
 

@@ -22,11 +22,200 @@ public enum GMLuaFileSystemError: Error, LocalizedError {
     }
 }
 
+/// Observable counters for the immutable host-directory path index.
+///
+/// The counters are intentionally about host I/O rather than call counts. A
+/// cached lookup still revalidates its final URL before data is opened, while
+/// repeated Source-style case-insensitive traversal does not enumerate the
+/// same host directory again.
+public struct GMLuaHostDirectoryCacheDiagnostics: Sendable, Equatable {
+    public let directoryEnumerationCount: UInt64
+    public let directorySnapshotHitCount: UInt64
+    public let resolvedPathCacheHitCount: UInt64
+    public let resolvedPathCacheMissCount: UInt64
+    public let missingPathCacheHitCount: UInt64
+    public let dataReadCount: UInt64
+}
+
+/// Shared immutable directory metadata for read-only mounts of one canonical
+/// host root. SERVER and CLIENT use separate mounted VFS objects, but their
+/// bundled Source content is the same immutable resource tree. Sharing only
+/// path metadata avoids repeating thousands of host directory enumerations;
+/// file bytes remain demand-loaded and realm-local Lua execution is unchanged.
+private final class GMLuaReadOnlyHostDirectoryCache: @unchecked Sendable {
+    private struct DirectorySnapshot {
+        let children: [URL]
+        let exact: [String: URL]
+    }
+
+    private let rootURL: URL
+    private let lock = NSRecursiveLock()
+    private var directories: [String: DirectorySnapshot] = [:]
+    private var resolvedPaths: [String: URL] = [:]
+    private var missingPaths: Set<String> = []
+    private var directoryEnumerationCount: UInt64 = 0
+    private var directorySnapshotHitCount: UInt64 = 0
+    private var resolvedPathCacheHitCount: UInt64 = 0
+    private var resolvedPathCacheMissCount: UInt64 = 0
+    private var missingPathCacheHitCount: UInt64 = 0
+    private var dataReadCount: UInt64 = 0
+
+    init(rootURL: URL) {
+        self.rootURL = rootURL
+    }
+
+    func resolve(_ normalizedPath: String) throws -> URL {
+        lock.lock()
+        defer { lock.unlock() }
+
+        if normalizedPath.isEmpty { return rootURL }
+        if missingPaths.contains(normalizedPath) {
+            missingPathCacheHitCount &+= 1
+            throw GMLuaFileSystemError.fileNotFound(normalizedPath)
+        }
+        if let cached = resolvedPaths[normalizedPath] {
+            resolvedPathCacheHitCount &+= 1
+            return try validated(cached, requestedPath: normalizedPath)
+        }
+        resolvedPathCacheMissCount &+= 1
+
+        var candidate = rootURL
+        var logicalLeaf = rootURL
+        for component in normalizedPath.split(separator: "/").map(String.init) {
+            let snapshot = try directorySnapshot(
+                at: candidate,
+                requestedPath: normalizedPath
+            )
+            let selected = snapshot.exact[component] ?? snapshot.children.first {
+                $0.lastPathComponent.caseInsensitiveCompare(component) == .orderedSame
+            }
+            guard let selected else {
+                missingPaths.insert(normalizedPath)
+                throw GMLuaFileSystemError.fileNotFound(normalizedPath)
+            }
+            logicalLeaf = selected
+            candidate = try validated(selected, requestedPath: normalizedPath)
+        }
+        // Cache the unresolved logical leaf rather than only its present
+        // symlink target. Revalidation on each hit therefore still rejects a
+        // leaf that is later replaced by a symlink escaping the sandbox.
+        resolvedPaths[normalizedPath] = logicalLeaf
+        return candidate
+    }
+
+    func children(
+        at directoryURL: URL,
+        requestedPath: String
+    ) throws -> [URL] {
+        lock.lock()
+        defer { lock.unlock() }
+        return try directorySnapshot(
+            at: directoryURL,
+            requestedPath: requestedPath
+        ).children
+    }
+
+    func recordDataRead() {
+        lock.lock()
+        dataReadCount &+= 1
+        lock.unlock()
+    }
+
+    func diagnostics() -> GMLuaHostDirectoryCacheDiagnostics {
+        lock.lock()
+        defer { lock.unlock() }
+        return GMLuaHostDirectoryCacheDiagnostics(
+            directoryEnumerationCount: directoryEnumerationCount,
+            directorySnapshotHitCount: directorySnapshotHitCount,
+            resolvedPathCacheHitCount: resolvedPathCacheHitCount,
+            resolvedPathCacheMissCount: resolvedPathCacheMissCount,
+            missingPathCacheHitCount: missingPathCacheHitCount,
+            dataReadCount: dataReadCount
+        )
+    }
+
+    private func directorySnapshot(
+        at directoryURL: URL,
+        requestedPath: String
+    ) throws -> DirectorySnapshot {
+        let validatedDirectory = try validated(
+            directoryURL,
+            requestedPath: requestedPath
+        )
+        let key = validatedDirectory.path
+        if let cached = directories[key] {
+            directorySnapshotHitCount &+= 1
+            return cached
+        }
+
+        let children = (try? FileManager.default.contentsOfDirectory(
+            at: validatedDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsSubdirectoryDescendants]
+        )) ?? []
+        var exact: [String: URL] = [:]
+        for child in children {
+            exact[child.lastPathComponent] = child
+        }
+        let snapshot = DirectorySnapshot(
+            children: children.sorted { $0.lastPathComponent < $1.lastPathComponent },
+            exact: exact
+        )
+        directories[key] = snapshot
+        directoryEnumerationCount &+= 1
+        return snapshot
+    }
+
+    private func validated(_ url: URL, requestedPath: String) throws -> URL {
+        let resolved = url.standardizedFileURL.resolvingSymlinksInPath()
+        let rootPath = rootURL.path.replacingOccurrences(of: "\\", with: "/")
+        let candidatePath = resolved.path.replacingOccurrences(of: "\\", with: "/")
+        let containmentPrefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
+        guard candidatePath == rootPath || candidatePath.hasPrefix(containmentPrefix) else {
+            throw GMLuaFileSystemError.invalidPath(requestedPath)
+        }
+        return resolved
+    }
+}
+
+/// Owns the process-wide immutable-directory cache behind one synchronization
+/// boundary. `NSCache` itself is not `Sendable` on Apple platforms; all access
+/// is nevertheless serialized here and callers only receive the separately
+/// locked cache values.
+private final class GMLuaReadOnlyHostDirectoryCacheRegistry: @unchecked Sendable {
+    private let lock = NSLock()
+    private let caches: NSCache<NSString, GMLuaReadOnlyHostDirectoryCache> = {
+        let cache = NSCache<NSString, GMLuaReadOnlyHostDirectoryCache>()
+        cache.countLimit = 8
+        return cache
+    }()
+
+    func cache(
+        for root: URL,
+        createIfMissing: Bool
+    ) -> GMLuaReadOnlyHostDirectoryCache? {
+        let key = root.path.replacingOccurrences(of: "\\", with: "/") as NSString
+        lock.lock()
+        defer { lock.unlock() }
+        if let cached = caches.object(forKey: key) {
+            return cached
+        }
+        guard createIfMissing else { return nil }
+        let cache = GMLuaReadOnlyHostDirectoryCache(rootURL: root)
+        caches.setObject(cache, forKey: key)
+        return cache
+    }
+}
+
 /// A sandboxed host-directory adapter used by the Windows corpus runner and by
 /// app-owned unpacked content on iPad. Every access is containment checked.
 public final class GMLuaHostDirectoryFileSystem: LuaVirtualFileSystem, @unchecked Sendable {
+    private static let readOnlyCacheRegistry =
+        GMLuaReadOnlyHostDirectoryCacheRegistry()
+
     private let rootURL: URL
     private let writable: Bool
+    private let readOnlyCache: GMLuaReadOnlyHostDirectoryCache?
 
     public init(rootURL: URL, writable: Bool = false) throws {
         let root = rootURL.standardizedFileURL.resolvingSymlinksInPath()
@@ -37,6 +226,28 @@ public final class GMLuaHostDirectoryFileSystem: LuaVirtualFileSystem, @unchecke
         }
         self.rootURL = root
         self.writable = writable
+        if writable {
+            readOnlyCache = nil
+        } else {
+            readOnlyCache = Self.readOnlyCacheRegistry.cache(
+                for: root,
+                createIfMissing: true
+            )
+        }
+    }
+
+    public var cacheDiagnostics: GMLuaHostDirectoryCacheDiagnostics? {
+        readOnlyCache?.diagnostics()
+    }
+
+    public static func cacheDiagnostics(
+        forRootURL rootURL: URL
+    ) -> GMLuaHostDirectoryCacheDiagnostics? {
+        let root = rootURL.standardizedFileURL.resolvingSymlinksInPath()
+        return readOnlyCacheRegistry.cache(
+            for: root,
+            createIfMissing: false
+        )?.diagnostics()
     }
 
     public func fileExists(at path: String) -> Bool {
@@ -63,11 +274,16 @@ public final class GMLuaHostDirectoryFileSystem: LuaVirtualFileSystem, @unchecke
         }
         guard isDirectory.boolValue else { throw GMLuaFileSystemError.notDirectory(path) }
 
-        let urls = try FileManager.default.contentsOfDirectory(
-            at: url,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsSubdirectoryDescendants]
-        )
+        let urls: [URL]
+        if let readOnlyCache {
+            urls = try readOnlyCache.children(at: url, requestedPath: path)
+        } else {
+            urls = try FileManager.default.contentsOfDirectory(
+                at: url,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsSubdirectoryDescendants]
+            )
+        }
         var entries: [LuaVirtualFileSystemEntry] = []
         for child in urls {
             let relative = path.isEmpty ? child.lastPathComponent : path + "/" + child.lastPathComponent
@@ -85,7 +301,12 @@ public final class GMLuaHostDirectoryFileSystem: LuaVirtualFileSystem, @unchecke
 
     public func readFile(at path: String) throws -> Data {
         let url = try resolve(path, allowMissingLeaf: false)
-        guard fileExists(at: path) else { throw GMLuaFileSystemError.fileNotFound(path) }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue else {
+            throw GMLuaFileSystemError.fileNotFound(path)
+        }
+        readOnlyCache?.recordDataRead()
         return try Data(contentsOf: url)
     }
 
@@ -168,6 +389,9 @@ public final class GMLuaHostDirectoryFileSystem: LuaVirtualFileSystem, @unchecke
             allowEmpty: allowEmpty,
             allowReservedWhiteout: true
         )
+        if !allowMissingLeaf, let readOnlyCache {
+            return try readOnlyCache.resolve(normalized)
+        }
         let components = normalized.split(separator: "/").map(String.init)
         var candidate = rootURL
         var index = 0

@@ -86,6 +86,10 @@ final class GModMenuWebContractTests: XCTestCase {
             .openProblems
         )
         XCTAssertEqual(
+            GModHomeMenuCommandParser.parse("gui.ShowConsole()"),
+            .openConsole
+        )
+        XCTAssertEqual(
             GModHomeMenuCommandParser.parse("RunConsoleCommand('disconnect')"),
             .disconnect
         )
@@ -105,6 +109,9 @@ final class GModMenuWebContractTests: XCTestCase {
         ))
         XCTAssertNil(GModHomeMenuCommandParser.parse(
             "print('OpenProblemsPanel()')"
+        ))
+        XCTAssertNil(GModHomeMenuCommandParser.parse(
+            "print('gui.HideGameUI() gui.ShowConsole()')"
         ))
     }
 }

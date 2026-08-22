@@ -1,6 +1,32 @@
 import Foundation
 import GModEngine
 
+/// Lossless outcome for one Studio VMT candidate. Callers may continue to the
+/// next ordered candidate only for `materialMissing`; an existing VMT with an
+/// unusable base texture remains the authoritative stopping point.
+public enum GModMetalStudioMaterialCandidateResolution: Sendable, Equatable {
+    case materialMissing
+    case materialWithoutBaseTexture
+    case baseTextureMissing
+    case resolved(GModMetalSurfaceBitmap)
+}
+
+public enum GModMetalStudioMaterialCandidateError:
+    Error,
+    Sendable,
+    Equatable
+{
+    case resolvedMaterialHasNoBitmap(String)
+}
+
+public enum GModMetalWorldTerrainMaterialError:
+    Error,
+    Sendable,
+    Equatable
+{
+    case invalidTextureTransform(String)
+}
+
 /// Metal-facing adapter over the same VMT/VTF core used by IMaterial and
 /// ITexture. It performs only the alpha-premultiplication required by the
 /// Surface shader and retains a separately bounded bitmap cache so a frame
@@ -9,6 +35,11 @@ public final class GModMetalSurfaceSourceMaterialResolver:
     GModMetalSurfaceTextureResolving,
     @unchecked Sendable
 {
+    private struct CacheKey: Hashable {
+        let contentEpoch: UInt64
+        let logicalKey: String
+    }
+
     private enum CachedResult {
         case missing
         case bitmap(GModMetalSurfaceBitmap)
@@ -18,31 +49,42 @@ public final class GModMetalSurfaceSourceMaterialResolver:
 
     private let maximumCachedEntryCount: Int
     private let maximumCachedByteCount: Int
+    private let contentEpochProvider:
+        GMLuaSourceMaterialResolver.ContentEpochProvider
     private let lock = NSLock()
-    private var cache: [String: CachedResult] = [:]
-    private var cacheOrder: [String] = []
+    private var cache: [CacheKey: CachedResult] = [:]
+    private var cacheOrder: [CacheKey] = []
     private var cachedByteCountStorage = 0
 
     public convenience init(
         maximumCachedEntryCount: Int = 512,
         maximumCachedByteCount: Int = 32 * 1_024 * 1_024,
+        contentEpochProvider: @escaping
+            GMLuaSourceMaterialResolver.ContentEpochProvider = { 0 },
         loader: @escaping GMLuaSourceMaterialResolver.Loader
     ) {
         self.init(
-            sourceMaterialResolver: GMLuaSourceMaterialResolver(loader: loader),
+            sourceMaterialResolver: GMLuaSourceMaterialResolver(
+                contentEpochProvider: contentEpochProvider,
+                loader: loader
+            ),
             maximumCachedEntryCount: maximumCachedEntryCount,
-            maximumCachedByteCount: maximumCachedByteCount
+            maximumCachedByteCount: maximumCachedByteCount,
+            contentEpochProvider: contentEpochProvider
         )
     }
 
     public init(
         sourceMaterialResolver: GMLuaSourceMaterialResolver,
         maximumCachedEntryCount: Int = 512,
-        maximumCachedByteCount: Int = 32 * 1_024 * 1_024
+        maximumCachedByteCount: Int = 32 * 1_024 * 1_024,
+        contentEpochProvider: @escaping
+            GMLuaSourceMaterialResolver.ContentEpochProvider = { 0 }
     ) {
         self.sourceMaterialResolver = sourceMaterialResolver
         self.maximumCachedEntryCount = max(1, maximumCachedEntryCount)
         self.maximumCachedByteCount = max(1, maximumCachedByteCount)
+        self.contentEpochProvider = contentEpochProvider
     }
 
     public var cachedEntryCount: Int {
@@ -82,6 +124,124 @@ public final class GModMetalSurfaceSourceMaterialResolver:
         try resolveTexture(named: logicalName, retainingAuthoredMipChain: true)
     }
 
+    /// Resolves secondary terrain bindings only when the real VMT declares
+    /// them. Defaults are the values authored by Valve's Source shaders:
+    /// detail scale 4, blend factor 1, and combine mode 0.
+    public func resolveWorldTerrainMaterial(
+        named logicalName: String
+    ) throws -> GModMetalWorldTerrainMaterial? {
+        let resolved = try sourceMaterialResolver.resolve(
+            named: logicalName,
+            mipPolicy: .authoredChain
+        )
+
+        func textureResolution(
+            _ textureName: String
+        ) -> GModMetalWorldMaterialResolution {
+            do {
+                return try resolveWorldSourceTexture(named: textureName).map {
+                    .resolved($0)
+                } ?? .sourceMissing
+            } catch {
+                return .decodeFailed(String(describing: error))
+            }
+        }
+
+        let detail: GModMetalWorldDetailMaterial?
+        if let parameters = resolved.detailParameters {
+            let scale = parameters.scale ?? 4
+            let blendFactor = parameters.blendFactor ?? 1
+            let blendMode = parameters.blendMode ?? 0
+            guard scale.isFinite, blendFactor.isFinite,
+                  let transform = Self.makeUVTransform(
+                    parameters.textureTransform,
+                    scale: scale
+                  ) else {
+                throw GModMetalWorldTerrainMaterialError
+                    .invalidTextureTransform(parameters.textureName)
+            }
+            detail = GModMetalWorldDetailMaterial(
+                textureName: parameters.textureName,
+                textureResolution: textureResolution(parameters.textureName),
+                textureTransform: transform,
+                blendFactor: blendFactor,
+                blendMode: blendMode
+            )
+        } else {
+            detail = nil
+        }
+
+        let vertexTransition: GModMetalWorldVertexTransitionMaterial?
+        if let parameters = resolved.worldVertexTransitionParameters {
+            guard let blendMaskTransform = Self.makeUVTransform(
+                parameters.blendMaskTransform,
+                scale: 1
+            ) else {
+                throw GModMetalWorldTerrainMaterialError
+                    .invalidTextureTransform(
+                        parameters.blendModulateTextureName ??
+                            parameters.baseTexture2Name
+                    )
+            }
+            vertexTransition = GModMetalWorldVertexTransitionMaterial(
+                baseTexture2Name: parameters.baseTexture2Name,
+                baseTexture2Resolution: textureResolution(
+                    parameters.baseTexture2Name
+                ),
+                blendModulateTextureName:
+                    parameters.blendModulateTextureName,
+                blendModulateResolution:
+                    parameters.blendModulateTextureName.map(textureResolution),
+                blendMaskTransform: blendMaskTransform
+            )
+        } else {
+            vertexTransition = nil
+        }
+
+        guard detail != nil || vertexTransition != nil else { return nil }
+        return GModMetalWorldTerrainMaterial(
+            detail: detail,
+            vertexTransition: vertexTransition
+        )
+    }
+
+    /// Resolves one ordered Studio VMT candidate without collapsing distinct
+    /// Source absence/failure boundaries into an optional bitmap.
+    public func resolveStudioMaterialCandidate(
+        named logicalName: String
+    ) throws -> GModMetalStudioMaterialCandidateResolution {
+        let resolved = try sourceMaterialResolver.resolve(
+            named: logicalName,
+            mipPolicy: .authoredChain
+        )
+        switch resolved.metadata.status {
+        case .materialMissing:
+            return .materialMissing
+        case .materialWithoutBaseTexture:
+            return .materialWithoutBaseTexture
+        case .baseTextureMissing:
+            return .baseTextureMissing
+        case .resolved:
+            guard let bitmap = try resolveWorldTexture(named: logicalName) else {
+                throw GModMetalStudioMaterialCandidateError
+                    .resolvedMaterialHasNoBitmap(logicalName)
+            }
+            return .resolved(bitmap)
+        }
+    }
+
+    /// Returns the ordered entity-colour proxy declarations from the same
+    /// resolved Studio VMT. Bitmap caching remains independent because two
+    /// VMTs may share one VTF while binding different material variables.
+    public func resolveStudioEntityColorProxies(
+        named logicalName: String
+    ) throws -> [GMLuaSourceEntityColorProxy] {
+        try sourceMaterialResolver.resolve(
+            named: logicalName,
+            mipPolicy: .authoredChain
+        ).entityColorProxies
+    }
+
     private func resolveTexture(
         named logicalName: String,
         retainingAuthoredMipChain: Bool
@@ -91,7 +251,11 @@ public final class GModMetalSurfaceSourceMaterialResolver:
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         guard !logicalKey.isEmpty else { return nil }
-        let key = (retainingAuthoredMipChain ? "world:" : "surface:") + logicalKey
+        let key = CacheKey(
+            contentEpoch: contentEpochProvider(),
+            logicalKey: (retainingAuthoredMipChain ? "world:" : "surface:") +
+                logicalKey
+        )
         if let cached = cachedValue(for: key) {
             switch cached {
             case .missing: return nil
@@ -106,12 +270,16 @@ public final class GModMetalSurfaceSourceMaterialResolver:
                 : .mipZeroOnly
         )
         guard let dimensions = resolved.metadata.dimensions,
-              let rgbaBytes = resolved.rgbaBytes else {
+              let rgbaBytes = resolved.rgbaBytes,
+              let baseTextureName = resolved.metadata.baseTextureName else {
             store(.missing, for: key)
             return nil
         }
+        // Source paths are case-insensitive. Use the normalized VTF path, not
+        // the referring VMT path, as the immutable payload identity.
+        let canonicalTexturePath = baseTextureName.utf8String.lowercased()
         let bitmap = try makeBitmap(
-            resourceIdentifier: resolved.metadata.materialPath.utf8String,
+            resourceIdentifier: canonicalTexturePath,
             width: dimensions.width,
             height: dimensions.height,
             rgbaBytes: rgbaBytes,
@@ -123,6 +291,103 @@ public final class GModMetalSurfaceSourceMaterialResolver:
         )
         store(.bitmap(bitmap), for: key)
         return bitmap
+    }
+
+    private func resolveWorldSourceTexture(
+        named textureName: String
+    ) throws -> GModMetalSurfaceBitmap? {
+        let logicalKey = textureName
+            .replacingOccurrences(of: "\\", with: "/")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !logicalKey.isEmpty else { return nil }
+        let key = CacheKey(
+            contentEpoch: contentEpochProvider(),
+            logicalKey: "world-vtf:" + logicalKey
+        )
+        if let cached = cachedValue(for: key) {
+            switch cached {
+            case .missing: return nil
+            case let .bitmap(bitmap): return bitmap
+            }
+        }
+        guard let texture = try sourceMaterialResolver.resolveTexture(
+            named: textureName,
+            mipPolicy: .authoredChain
+        ), texture.status == .decoded,
+        let width = texture.width,
+        let height = texture.height,
+        let rgbaBytes = texture.rgbaBytes else {
+            store(.missing, for: key)
+            return nil
+        }
+        let bitmap = try makeBitmap(
+            resourceIdentifier: texture.logicalPath.lowercased(),
+            width: width,
+            height: height,
+            rgbaBytes: rgbaBytes,
+            mipImages: texture.mipImages,
+            flags: texture.flags,
+            alphaRepresentation: .straight
+        )
+        store(.bitmap(bitmap), for: key)
+        return bitmap
+    }
+
+    private static func makeUVTransform(
+        _ source: SourceVMTMatrix?,
+        scale: Float
+    ) -> GModMetalWorldUVTransform? {
+        guard scale.isFinite else { return nil }
+        var row0: SIMD3<Float>
+        var row1: SIMD3<Float>
+        switch source {
+        case nil:
+            row0 = SIMD3<Float>(1, 0, 0)
+            row1 = SIMD3<Float>(0, 1, 0)
+        case let .matrix4x4(values):
+            guard values.count == 16 else { return nil }
+            row0 = SIMD3<Float>(
+                Float(values[0]), Float(values[1]), Float(values[3])
+            )
+            row1 = SIMD3<Float>(
+                Float(values[4]), Float(values[5]), Float(values[7])
+            )
+        case let .textureTransform(
+            center,
+            authoredScale,
+            rotationDegrees,
+            translation
+        ):
+            let radians = rotationDegrees * .pi / 180
+            let cosine = cos(radians)
+            let sine = sin(radians)
+            let m00 = cosine * authoredScale.x
+            let m01 = -sine * authoredScale.y
+            let m10 = sine * authoredScale.x
+            let m11 = cosine * authoredScale.y
+            row0 = SIMD3<Float>(
+                Float(m00),
+                Float(m01),
+                Float(center.x + translation.x - m00 * center.x -
+                    m01 * center.y)
+            )
+            row1 = SIMD3<Float>(
+                Float(m10),
+                Float(m11),
+                Float(center.y + translation.y - m10 * center.x -
+                    m11 * center.y)
+            )
+        }
+        // Source scales both the two basis coefficients and translation after
+        // resolving the material matrix (`SetVertexShaderTextureScaledTransform`).
+        row0 *= scale
+        row1 *= scale
+        guard row0.x.isFinite, row0.y.isFinite, row0.z.isFinite,
+              row1.x.isFinite, row1.y.isFinite, row1.z.isFinite else {
+            return nil
+        }
+        return GModMetalWorldUVTransform(row0: row0, row1: row1)
     }
 
     /// Resolves only values present in a real Source `Water` VMT. Missing
@@ -145,23 +410,39 @@ public final class GModMetalSurfaceSourceMaterialResolver:
             return nil
         }
 
-        let normalBitmap: GModMetalSurfaceBitmap?
-        if let normalTexture = material.normalTexture,
-           normalTexture.status == .decoded,
-           let width = normalTexture.width,
-           let height = normalTexture.height,
-           let rgbaBytes = normalTexture.rgbaBytes {
-            normalBitmap = try makeBitmap(
-                resourceIdentifier: normalTexture.logicalPath,
+        func bitmap(
+            _ texture: GMLuaResolvedSourceTexture?
+        ) throws -> GModMetalSurfaceBitmap? {
+            guard let texture,
+                  texture.status == .decoded,
+                  let width = texture.width,
+                  let height = texture.height,
+                  let rgbaBytes = texture.rgbaBytes else { return nil }
+            return try makeBitmap(
+                resourceIdentifier: texture.logicalPath,
                 width: width,
                 height: height,
                 rgbaBytes: rgbaBytes,
-                mipImages: normalTexture.mipImages,
-                flags: normalTexture.flags,
+                mipImages: texture.mipImages,
+                flags: texture.flags,
                 alphaRepresentation: .straight
             )
+        }
+        let decodedNormalBitmap = try bitmap(material.normalTexture)
+        let decodedDuDvBitmap = try bitmap(material.duDvTexture)
+        let distortionBitmap: GModMetalSurfaceBitmap?
+        let distortionEncoding: GModMetalWaterDistortionEncoding
+        if let decodedNormalBitmap {
+            // Native Water consumes `$normalmap`; `$dudvmap` remains a
+            // compatibility path only when no decoded normal is available.
+            distortionBitmap = decodedNormalBitmap
+            distortionEncoding = .tangentSpaceNormal
+        } else if let decodedDuDvBitmap {
+            distortionBitmap = decodedDuDvBitmap
+            distortionEncoding = .duDvRG
         } else {
-            normalBitmap = nil
+            distortionBitmap = nil
+            distortionEncoding = .none
         }
 
         let unsupportedBumpTextureFormat: String?
@@ -170,13 +451,46 @@ public final class GModMetalSurfaceSourceMaterialResolver:
         } else {
             unsupportedBumpTextureFormat = nil
         }
+        let unsupportedDuDvTextureFormat: String?
+        if case let .unsupportedImageFormat(format)? =
+            material.duDvTexture?.status {
+            unsupportedDuDvTextureFormat = String(describing: format)
+        } else {
+            unsupportedDuDvTextureFormat = nil
+        }
+
+        func renderTargetBinding(
+            _ reference: GMLuaSourceWaterTextureReference,
+            expectedName: String
+        ) -> GModMetalWaterRenderTargetBinding {
+            let actual = reference.name.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            guard actual.caseInsensitiveCompare(expectedName) == .orderedSame else {
+                return .unsupportedAuthoredTexture(reference.name)
+            }
+            switch reference {
+            case .authored:
+                return .authoredRuntimeTarget(reference.name)
+            case .sourceShaderDefault:
+                return .sourceShaderDefaultRuntimeTarget(reference.name)
+            }
+        }
+        let reflectionEntityMode: GModMetalWaterReflectionEntityMode =
+            material.reflectEntities.map {
+                .authored($0)
+            } ?? .sourceShaderDefaultDisabled
 
         let textureScroll = material.textureScroll.flatMap { scroll in
-            scroll.targetVariable
+            let target = scroll.targetVariable
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-                .caseInsensitiveCompare("$bumptransform") == .orderedSame
-                ? scroll
-                : nil
+            let isWaterNormalTransform = target.caseInsensitiveCompare(
+                "$bumptransform"
+            ) == .orderedSame
+            let isDuDvTransform = target.caseInsensitiveCompare(
+                "$dudvmaptransform"
+            ) == .orderedSame
+            return isWaterNormalTransform || isDuDvTransform ? scroll : nil
         }
         return GModMetalWorldWaterMaterial(
             resourceIdentifier: material.materialPath,
@@ -186,14 +500,28 @@ public final class GModMetalSurfaceSourceMaterialResolver:
                 rawFogColor[1] / 255,
                 rawFogColor[2] / 255
             ),
+            fogEnabled: material.fogEnabled,
             fogStart: material.fogStart,
             fogEnd: material.fogEnd,
             reflectionAmount: material.reflectionAmount,
             refractionAmount: material.refractionAmount,
-            normalBitmap: normalBitmap,
+            normalBitmap: distortionBitmap,
             textureScrollRate: textureScroll?.rate,
             textureScrollAngleDegrees: textureScroll?.angleDegrees,
-            unsupportedBumpTextureFormat: unsupportedBumpTextureFormat
+            unsupportedBumpTextureFormat: unsupportedBumpTextureFormat,
+            reflectionTextureBinding: renderTargetBinding(
+                material.reflectionTexture,
+                expectedName:
+                    SourceWaterShaderContract.reflectionRenderTargetName
+            ),
+            refractionTextureBinding: renderTargetBinding(
+                material.refractionTexture,
+                expectedName:
+                    SourceWaterShaderContract.refractionRenderTargetName
+            ),
+            reflectionEntityMode: reflectionEntityMode,
+            distortionEncoding: distortionEncoding,
+            unsupportedDuDvTextureFormat: unsupportedDuDvTextureFormat
         )
     }
 
@@ -237,7 +565,10 @@ public final class GModMetalSurfaceSourceMaterialResolver:
                     : rgbaBytes
             )]
         } else {
-            retainedMipLevels = mipImages.map {
+            let retainedSourceMips = flags?.contains(.noMip) == true
+                ? mipImages.prefix(1)
+                : mipImages[...]
+            retainedMipLevels = retainedSourceMips.map {
                 GModMetalSurfaceMipLevel(
                     width: $0.width,
                     height: $0.height,
@@ -261,7 +592,7 @@ public final class GModMetalSurfaceSourceMaterialResolver:
         )
     }
 
-    private func cachedValue(for key: String) -> CachedResult? {
+    private func cachedValue(for key: CacheKey) -> CachedResult? {
         lock.lock()
         defer { lock.unlock() }
         guard let value = cache[key] else { return nil }
@@ -270,7 +601,7 @@ public final class GModMetalSurfaceSourceMaterialResolver:
         return value
     }
 
-    private func store(_ value: CachedResult, for key: String) {
+    private func store(_ value: CachedResult, for key: CacheKey) {
         let byteCount: Int
         switch value {
         case .missing: byteCount = 0

@@ -7,6 +7,8 @@ public enum GMLuaSourceMaterialError: Error, Sendable, Equatable,
     case unsafeLogicalPath(String)
     case encodedMaterialByteCountExceeded(path: String, actual: Int, maximum: Int)
     case materialIsNotUTF8(String)
+    case entityMaterialOverrideMissing(String)
+    case entityMaterialOverrideRequiresVMT(String)
     case invalidPNGHeader(String)
     case textureWidthExceeded(path: String, actual: Int, maximum: Int)
     case textureHeightExceeded(path: String, actual: Int, maximum: Int)
@@ -26,6 +28,10 @@ public enum GMLuaSourceMaterialError: Error, Sendable, Equatable,
             return "Source material \(path) contains \(actual) encoded bytes; maximum is \(maximum)"
         case let .materialIsNotUTF8(path):
             return "Source material \(path) is not UTF-8"
+        case let .entityMaterialOverrideMissing(path):
+            return "Source Entity material override is missing from GAME: \(path)"
+        case let .entityMaterialOverrideRequiresVMT(path):
+            return "Source Entity material override requires a VMT: \(path)"
         case let .invalidPNGHeader(path):
             return "imported material PNG header is invalid: \(path)"
         case let .textureWidthExceeded(path, actual, maximum):
@@ -45,6 +51,76 @@ public enum GMLuaSourceMaterialError: Error, Sendable, Equatable,
     }
 }
 
+public enum GMLuaSourceEntityColorProxyKind: Sendable, Equatable {
+    case playerColor
+    case playerWeaponColor
+}
+
+/// Ordered Source material-proxy binding retained from the resolved VMT.
+/// The renderer may implement only variables whose shader contract it owns;
+/// retaining the exact `resultvar` prevents a similarly named proxy from
+/// becoming blanket model tinting.
+public struct GMLuaSourceEntityColorProxy: Sendable, Equatable {
+    public let kind: GMLuaSourceEntityColorProxyKind
+    public let resultVariable: String
+
+    public init(
+        kind: GMLuaSourceEntityColorProxyKind,
+        resultVariable: String
+    ) {
+        self.kind = kind
+        self.resultVariable = resultVariable
+    }
+}
+
+/// Authored `$detail` shader inputs retained without resolving or decoding the
+/// secondary VTF during an ordinary material lookup. World render adapters can
+/// request the texture through `resolveTexture` only when the selected shader
+/// path actually consumes it.
+public struct GMLuaSourceDetailMaterialParameters: Sendable, Equatable {
+    public let textureName: String
+    public let scale: Float?
+    public let blendFactor: Float?
+    public let blendMode: Int?
+    public let textureTransform: SourceVMTMatrix?
+
+    public init(
+        textureName: String,
+        scale: Float?,
+        blendFactor: Float?,
+        blendMode: Int?,
+        textureTransform: SourceVMTMatrix?
+    ) {
+        self.textureName = textureName
+        self.scale = scale
+        self.blendFactor = blendFactor
+        self.blendMode = blendMode
+        self.textureTransform = textureTransform
+    }
+}
+
+/// Exact texture bindings used by Source's `WorldVertexTransition` material.
+/// The BSP displacement alpha channel is kept separately on render vertices;
+/// this contract deliberately does not guess shader blend math.
+public struct GMLuaSourceWorldVertexTransitionParameters: Sendable, Equatable {
+    public let baseTexture2Name: String
+    public let baseTextureTransform2: SourceVMTMatrix?
+    public let blendModulateTextureName: String?
+    public let blendMaskTransform: SourceVMTMatrix?
+
+    public init(
+        baseTexture2Name: String,
+        baseTextureTransform2: SourceVMTMatrix?,
+        blendModulateTextureName: String?,
+        blendMaskTransform: SourceVMTMatrix? = nil
+    ) {
+        self.baseTexture2Name = baseTexture2Name
+        self.baseTextureTransform2 = baseTextureTransform2
+        self.blendModulateTextureName = blendModulateTextureName
+        self.blendMaskTransform = blendMaskTransform
+    }
+}
+
 /// Complete static result shared by GLua resource handles and renderer adapters.
 /// `rgbaBytes == nil` is intentional for real VMTs whose base texture is an
 /// engine render target or is absent from the mounted search paths.
@@ -57,18 +133,32 @@ public struct GMLuaResolvedSourceMaterial: Sendable, Equatable {
     /// Every authored VTF mip, largest first. Imported PNGs have one level.
     /// These are the real file levels; the renderer must not synthesize blur.
     public let mipImages: [SourceVTFDecodedImage]
+    /// Exact supported entity-colour proxy declarations from the resolved VMT.
+    /// They remain ordered because duplicate Source proxy blocks are legal.
+    public let entityColorProxies: [GMLuaSourceEntityColorProxy]
+    public let detailParameters: GMLuaSourceDetailMaterialParameters?
+    public let worldVertexTransitionParameters:
+        GMLuaSourceWorldVertexTransitionParameters?
 
     public init(
         metadata: GMLuaMaterialMetadata,
         rgbaBytes: Data?,
         sourceTextureFormat: SourceVTFImageFormat? = nil,
         sourceTextureFlags: SourceVTFTextureFlags? = nil,
-        mipImages: [SourceVTFDecodedImage] = []
+        mipImages: [SourceVTFDecodedImage] = [],
+        entityColorProxies: [GMLuaSourceEntityColorProxy] = [],
+        detailParameters: GMLuaSourceDetailMaterialParameters? = nil,
+        worldVertexTransitionParameters:
+            GMLuaSourceWorldVertexTransitionParameters? = nil
     ) {
         self.metadata = metadata
         self.rgbaBytes = rgbaBytes
         self.sourceTextureFormat = sourceTextureFormat
         self.sourceTextureFlags = sourceTextureFlags
+        self.entityColorProxies = entityColorProxies
+        self.detailParameters = detailParameters
+        self.worldVertexTransitionParameters =
+            worldVertexTransitionParameters
         if mipImages.isEmpty,
            let dimensions = metadata.dimensions,
            let rgbaBytes {
@@ -136,6 +226,21 @@ public struct GMLuaSourceTextureScroll: Sendable, Equatable {
     public let angleDegrees: Float
 }
 
+/// Keeps the provenance of Water's dependent render target binding. Source's
+/// shader-declared runtime target is real SDK behavior, not an inferred VMT
+/// value; authored custom names remain separate for renderer capability checks.
+public enum GMLuaSourceWaterTextureReference: Sendable, Equatable {
+    case authored(String)
+    case sourceShaderDefault(String)
+
+    public var name: String {
+        switch self {
+        case let .authored(name), let .sourceShaderDefault(name):
+            return name
+        }
+    }
+}
+
 /// Shader-specific Water inputs parsed from the real resolved VMT. Optional
 /// values remain absent rather than being replaced with invented defaults.
 public struct GMLuaResolvedSourceWaterMaterial: Sendable, Equatable {
@@ -148,19 +253,27 @@ public struct GMLuaResolvedSourceWaterMaterial: Sendable, Equatable {
     public let fogEnd: Float?
     public let reflectionAmount: Float?
     public let refractionAmount: Float?
+    public let reflectionTexture: GMLuaSourceWaterTextureReference
+    public let refractionTexture: GMLuaSourceWaterTextureReference
+    public let reflectEntities: Bool?
     public let normalTexture: GMLuaResolvedSourceTexture?
+    public let duDvTexture: GMLuaResolvedSourceTexture?
     public let bumpTexture: GMLuaResolvedSourceTexture?
     public let textureScroll: GMLuaSourceTextureScroll?
 }
 
-/// Bounded Source VMT/VTF material resolver. It resolves only the explicit
-/// VMT `$basetexture` binding (or an explicitly imported PNG); proxies,
-/// animation frames, cubemap faces, environment maps, and wrap behavior are
-/// deliberately left to later renderer contracts.
+/// Bounded Source VMT/VTF material resolver. It resolves the explicit VMT
+/// `$basetexture` binding (or an explicitly imported PNG) and retains exact
+/// supported entity-colour proxy declarations. Proxy evaluation, animation
+/// frames, cubemap faces, environment maps, and wrap behavior belong to their
+/// renderer contracts.
 public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
     @unchecked Sendable
 {
     public typealias Loader = @Sendable (_ logicalPath: String) throws -> Data?
+    /// Monotonic identity of the loader's active content/search-path mount.
+    /// A request retains the value captured before its first cache lookup.
+    public typealias ContentEpochProvider = @Sendable () -> UInt64
 
     public static let defaultMaximumEncodedMaterialByteCount = 1 * 1_024 * 1_024
     public static let defaultMaximumEncodedTextureByteCount = 16 * 1_024 * 1_024
@@ -172,12 +285,14 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
     public static let defaultMaximumDecodedTextureByteCount = 16 * 1_024 * 1_024
 
     private struct Key: Hashable {
+        let contentEpoch: UInt64
         let canonicalMaterialPath: String
         let encodedParameters: LuaString?
         let mipPolicy: GMLuaSourceTextureMipPolicy
     }
 
     private let loader: Loader
+    private let contentEpochProvider: ContentEpochProvider
     private let maximumPatchDepth: Int
     private let maximumEncodedMaterialByteCount: Int
     private let maximumTextureWidth: Int
@@ -206,6 +321,7 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
             GMLuaSourceMaterialResolver.defaultMaximumTexturePixelCount,
         maximumDecodedTextureByteCount: Int =
             GMLuaSourceMaterialResolver.defaultMaximumDecodedTextureByteCount,
+        contentEpochProvider: @escaping ContentEpochProvider = { 0 },
         loader: @escaping Loader
     ) {
         self.maximumPatchDepth = max(0, maximumPatchDepth)
@@ -219,6 +335,7 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
             maximumPixelCount: max(1, maximumTexturePixelCount),
             maximumDecodedBytes: max(1, maximumDecodedTextureByteCount)
         )
+        self.contentEpochProvider = contentEpochProvider
         self.loader = loader
     }
 
@@ -286,6 +403,44 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
         )
     }
 
+    /// Resolves the public `Entity:SetMaterial` spelling to one real GAME VMT.
+    /// Empty input clears the override. Missing materials and imported images
+    /// are rejected before canonical state or its replication revision moves.
+    public func resolveEntityMaterialOverride(
+        named materialName: String
+    ) throws -> SourceEntityMaterialOverride? {
+        guard !materialName.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).isEmpty else { return nil }
+        let resolved = try resolve(named: materialName)
+        let logicalPath = resolved.metadata.materialPath.utf8String
+        guard resolved.metadata.status != .materialMissing else {
+            throw GMLuaSourceMaterialError.entityMaterialOverrideMissing(
+                logicalPath
+            )
+        }
+        let lowercasedPath = logicalPath.lowercased()
+        guard lowercasedPath.hasPrefix("materials/"),
+              lowercasedPath.hasSuffix(".vmt") else {
+            throw GMLuaSourceMaterialError.entityMaterialOverrideRequiresVMT(
+                logicalPath
+            )
+        }
+        let nameStart = lowercasedPath.index(
+            lowercasedPath.startIndex,
+            offsetBy: "materials/".count
+        )
+        let nameEnd = lowercasedPath.index(
+            lowercasedPath.endIndex,
+            offsetBy: -".vmt".count
+        )
+        let canonicalName = String(lowercasedPath[nameStart..<nameEnd])
+        return SourceEntityMaterialOverride(
+            name: canonicalName,
+            logicalMaterialPath: lowercasedPath
+        )
+    }
+
     public func resolve(
         materialPath: LuaString,
         encodedParameters: LuaString? = nil,
@@ -296,7 +451,11 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
               let logicalPath = try Self.normalizedMaterialPath(sourceName) else {
             throw GMLuaSourceMaterialError.unsafeLogicalPath(sourceName)
         }
+        // Capture the mount identity before touching either cache or loader.
+        // A concurrent content swap can let this request finish, but its old-
+        // epoch result can never satisfy a lookup begun against the new mount.
         let key = Key(
+            contentEpoch: contentEpochProvider(),
             canonicalMaterialPath: logicalPath.lowercased(),
             encodedParameters: encodedParameters,
             mipPolicy: mipPolicy
@@ -317,6 +476,15 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
         }
         store(resolved, for: key)
         return resolved
+    }
+
+    /// Resolves one explicit Source VTF through the same bounded loader used
+    /// by material base textures and Water normal maps.
+    public func resolveTexture(
+        named textureName: String,
+        mipPolicy: GMLuaSourceTextureMipPolicy = .mipZeroOnly
+    ) throws -> GMLuaResolvedSourceTexture? {
+        try resolveSourceTexture(named: textureName, mipPolicy: mipPolicy)
     }
 
     public func resolveWater(
@@ -341,8 +509,32 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
             .map { Float($0) }
         let normalTexture = try document.string(named: "$normalmap")
             .flatMap { try resolveSourceTexture(named: $0, mipPolicy: mipPolicy) }
+        let duDvTexture = try document.string(named: "$dudvmap")
+            .flatMap {
+                try resolveSourceTexture(
+                    named: $0,
+                    mipPolicy: mipPolicy,
+                    semantic: .waterDuDv
+                )
+            }
         let bumpTexture = try document.string(named: "$bumpmap")
             .flatMap { try resolveSourceTexture(named: $0, mipPolicy: mipPolicy) }
+        let reflectionTexture: GMLuaSourceWaterTextureReference
+        if let authored = try document.string(named: "$reflecttexture") {
+            reflectionTexture = .authored(authored)
+        } else {
+            reflectionTexture = .sourceShaderDefault(
+                SourceWaterShaderContract.reflectionRenderTargetName
+            )
+        }
+        let refractionTexture: GMLuaSourceWaterTextureReference
+        if let authored = try document.string(named: "$refracttexture") {
+            refractionTexture = .authored(authored)
+        } else {
+            refractionTexture = .sourceShaderDefault(
+                SourceWaterShaderContract.refractionRenderTargetName
+            )
+        }
 
         let textureScroll = document.proxies.first(where: {
             $0.name.caseInsensitiveCompare("TextureScroll") == .orderedSame
@@ -375,7 +567,11 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
             fogEnd: try float("$fogend"),
             reflectionAmount: try float("$reflectamount"),
             refractionAmount: try float("$refractamount"),
+            reflectionTexture: reflectionTexture,
+            refractionTexture: refractionTexture,
+            reflectEntities: try document.boolean(named: "$reflectentities"),
             normalTexture: normalTexture,
+            duDvTexture: duDvTexture,
             bumpTexture: bumpTexture,
             textureScroll: textureScroll
         )
@@ -389,6 +585,10 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
             return missingMaterial(logicalPath)
         }
         let shader = LuaString(document.shader)
+        let entityColorProxies = Self.entityColorProxies(in: document)
+        let detailParameters = try Self.detailParameters(in: document)
+        let worldVertexTransitionParameters = try Self
+            .worldVertexTransitionParameters(in: document)
         guard let baseTextureValue = try document.string(named: "$basetexture"),
               !baseTextureValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return GMLuaResolvedSourceMaterial(
@@ -400,7 +600,11 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
                     isError: false,
                     status: .materialWithoutBaseTexture
                 ),
-                rgbaBytes: nil
+                rgbaBytes: nil,
+                entityColorProxies: entityColorProxies,
+                detailParameters: detailParameters,
+                worldVertexTransitionParameters:
+                    worldVertexTransitionParameters
             )
         }
         guard let baseTexturePath = try Self.normalizedVTFPath(baseTextureValue) else {
@@ -416,7 +620,11 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
                     isError: false,
                     status: .baseTextureMissing
                 ),
-                rgbaBytes: nil
+                rgbaBytes: nil,
+                entityColorProxies: entityColorProxies,
+                detailParameters: detailParameters,
+                worldVertexTransitionParameters:
+                    worldVertexTransitionParameters
             )
         }
 
@@ -442,8 +650,122 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
             rgbaBytes: image.rgbaBytes,
             sourceTextureFormat: vtf.imageFormat,
             sourceTextureFlags: vtf.flags,
-            mipImages: mipImages
+            mipImages: mipImages,
+            entityColorProxies: entityColorProxies,
+            detailParameters: detailParameters,
+            worldVertexTransitionParameters: worldVertexTransitionParameters
         )
+    }
+
+    private static func detailParameters(
+        in document: SourceVMTDocument
+    ) throws -> GMLuaSourceDetailMaterialParameters? {
+        guard let rawTexture = try document.string(named: "$detail"),
+              !rawTexture.trimmingCharacters(
+                in: .whitespacesAndNewlines
+              ).isEmpty else { return nil }
+        guard let textureName = try normalizedVTFPath(rawTexture) else {
+            throw GMLuaSourceMaterialError.unsafeLogicalPath(rawTexture)
+        }
+
+        func float(_ name: String) throws -> Float? {
+            guard let number = try document.number(named: name) else {
+                return nil
+            }
+            let value = Float(number)
+            guard value.isFinite else {
+                throw SourceVMTError.invalidNumber(name, String(number))
+            }
+            return value
+        }
+
+        let blendMode: Int?
+        if let number = try document.number(named: "$detailblendmode") {
+            guard let value = Int(exactly: number) else {
+                throw SourceVMTError.invalidNumber(
+                    "$detailblendmode",
+                    String(number)
+                )
+            }
+            blendMode = value
+        } else {
+            blendMode = nil
+        }
+
+        return GMLuaSourceDetailMaterialParameters(
+            textureName: textureName,
+            scale: try float("$detailscale"),
+            blendFactor: try float("$detailblendfactor"),
+            blendMode: blendMode,
+            textureTransform: try document.matrix(
+                named: "$detailtexturetransform"
+            )
+        )
+    }
+
+    private static func worldVertexTransitionParameters(
+        in document: SourceVMTDocument
+    ) throws -> GMLuaSourceWorldVertexTransitionParameters? {
+        guard document.shader.caseInsensitiveCompare(
+            "WorldVertexTransition"
+        ) == .orderedSame,
+        let rawBaseTexture2 = try document.string(named: "$basetexture2"),
+        !rawBaseTexture2.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).isEmpty else { return nil }
+        guard let baseTexture2Name = try normalizedVTFPath(rawBaseTexture2) else {
+            throw GMLuaSourceMaterialError.unsafeLogicalPath(rawBaseTexture2)
+        }
+
+        let blendModulateTextureName: String?
+        if let rawBlend = try document.string(named: "$blendmodulatetexture"),
+           !rawBlend.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            guard let normalized = try normalizedVTFPath(rawBlend) else {
+                throw GMLuaSourceMaterialError.unsafeLogicalPath(rawBlend)
+            }
+            blendModulateTextureName = normalized
+        } else {
+            blendModulateTextureName = nil
+        }
+
+        return GMLuaSourceWorldVertexTransitionParameters(
+            baseTexture2Name: baseTexture2Name,
+            baseTextureTransform2: try document.matrix(
+                named: "$basetexturetransform2"
+            ),
+            blendModulateTextureName: blendModulateTextureName,
+            blendMaskTransform: try document.matrix(
+                named: "$blendmasktransform"
+            )
+        )
+    }
+
+    private static func entityColorProxies(
+        in document: SourceVMTDocument
+    ) -> [GMLuaSourceEntityColorProxy] {
+        document.proxies.compactMap { proxy in
+            let kind: GMLuaSourceEntityColorProxyKind
+            if proxy.name.caseInsensitiveCompare("PlayerColor") == .orderedSame {
+                kind = .playerColor
+            } else if proxy.name.caseInsensitiveCompare("PlayerWeaponColor") ==
+                        .orderedSame {
+                kind = .playerWeaponColor
+            } else {
+                return nil
+            }
+            guard let result = proxy.parameters.first(where: {
+                $0.key.caseInsensitiveCompare("resultvar") == .orderedSame
+            }), case let .string(resultVariable) = result.value,
+               !resultVariable.trimmingCharacters(
+                in: .whitespacesAndNewlines
+               ).isEmpty else {
+                return nil
+            }
+            return GMLuaSourceEntityColorProxy(
+                kind: kind,
+                resultVariable: resultVariable
+            )
+        }
     }
 
     private func loadVMTDocument(
@@ -466,9 +788,15 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
         )
     }
 
+    private enum SourceTextureSemantic: Equatable {
+        case generic
+        case waterDuDv
+    }
+
     private func resolveSourceTexture(
         named textureName: String,
-        mipPolicy: GMLuaSourceTextureMipPolicy
+        mipPolicy: GMLuaSourceTextureMipPolicy,
+        semantic: SourceTextureSemantic = .generic
     ) throws -> GMLuaResolvedSourceTexture? {
         guard let logicalPath = try Self.normalizedVTFPath(textureName) else {
             throw GMLuaSourceMaterialError.unsafeLogicalPath(textureName)
@@ -492,7 +820,12 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
             logicalPath: logicalPath
         )
         do {
-            let mipImages = try Self.decodeMipImages(from: vtf, policy: mipPolicy)
+            let mipImages = try Self.decodeMipImages(
+                from: vtf,
+                policy: mipPolicy,
+                semantic: semantic,
+                allocationLimits: vtfLimits
+            )
             guard let image = mipImages.first else {
                 throw SourceVTFError.invalidMipCount(0, maximum: vtf.mipCount)
             }
@@ -662,18 +995,35 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
 
     private static func decodeMipImages(
         from vtf: SourceVTFFile,
-        policy: GMLuaSourceTextureMipPolicy
+        policy: GMLuaSourceTextureMipPolicy,
+        semantic: SourceTextureSemantic = .generic,
+        allocationLimits: SourceVTFAllocationLimits = .default
     ) throws -> [SourceVTFDecodedImage] {
         var images: [SourceVTFDecodedImage] = []
         let decodedMipCount = policy == .authoredChain ? vtf.mipCount : 1
         images.reserveCapacity(decodedMipCount)
         for mipLevel in 0..<decodedMipCount {
-            images.append(try vtf.decodeRGBA8(
-                mipLevel: mipLevel,
-                frame: 0,
-                face: 0,
-                slice: 0
-            ))
+            if semantic == .waterDuDv, vtf.imageFormat == .uv88 {
+                let resource = try vtf.subresource(
+                    mipLevel: mipLevel,
+                    frame: 0,
+                    face: 0,
+                    slice: 0
+                )
+                images.append(try SourceWaterDuDvTextureDecoder.decodeUV88(
+                    data: resource.data,
+                    width: resource.width,
+                    height: resource.height,
+                    allocationLimits: allocationLimits
+                ))
+            } else {
+                images.append(try vtf.decodeRGBA8(
+                    mipLevel: mipLevel,
+                    frame: 0,
+                    face: 0,
+                    slice: 0
+                ))
+            }
         }
         return images
     }
