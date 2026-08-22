@@ -115,6 +115,33 @@ struct SourcePhysicsEnvironmentTests {
                 startsAwake: true
             )
         }
+
+        #expect(
+            throws: SourcePhysicsContractError.nonFinite(
+                field: "bodyMutation.offsetForce"
+            )
+        ) {
+            _ = try SourcePhysicsBodyMutationCommand(
+                bodyID: bodyID,
+                mutation: .applyForceOffset(
+                    force: SourceVector3(.nan, 0, 0),
+                    worldPosition: .zero
+                )
+            )
+        }
+        #expect(
+            throws: SourcePhysicsContractError.nonFinite(
+                field: "bodyMutation.offsetWorldPosition"
+            )
+        ) {
+            _ = try SourcePhysicsBodyMutationCommand(
+                bodyID: bodyID,
+                mutation: .applyForceOffset(
+                    force: SourceVector3(1, 2, 3),
+                    worldPosition: SourceVector3(0, .infinity, 0)
+                )
+            )
+        }
     }
 
     @Test("indexed geometry is bounded before reaching a backend")

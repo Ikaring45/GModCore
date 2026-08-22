@@ -55,6 +55,56 @@ struct SourcePhysicsDeterministicReplayTests {
         #expect(replayProbe.executionCount == 4)
     }
 
+    @Test("offset-force world point round-trips through canonical replay bytes")
+    func offsetForceMutationRoundTrips() throws {
+        let bodyID = try makeBodyID(entryIndex: 42, serialNumber: 9)
+        let creation = try makeCreation(bodyID: bodyID, x: 0)
+        let mutation = try SourcePhysicsBodyMutationCommand(
+            bodyID: bodyID,
+            mutation: .applyForceOffset(
+                force: SourceVector3(0, 12, 0),
+                worldPosition: SourceVector3(0, 0, 33)
+            )
+        )
+        let batch = try SourcePhysicsCommandBatch(commands: [
+            SourcePhysicsCommand(
+                sequence: 1,
+                payload: .createBody(creation)
+            ),
+            SourcePhysicsCommand(
+                sequence: 2,
+                payload: .mutateBody(mutation)
+            ),
+            SourcePhysicsCommand(
+                sequence: 3,
+                payload: .simulate(SourcePhysicsSimulateCommand(
+                    simulationTick: 1
+                ))
+            ),
+        ])
+        let harness = SourcePhysicsDeterministicReplayHarness()
+        let log = try harness.record(
+            commandBatches: [batch],
+            using: SourceDeterministicPhysicsEnvironment()
+        )
+        #expect(SourcePhysicsReplayLog.formatVersion == 3)
+
+        let decoded = try SourcePhysicsReplayLog(
+            canonicalBytes: log.canonicalBytes
+        )
+        guard case let .mutateBody(decodedMutation) =
+                decoded.frames[0].commandBatch.commands[1].payload else {
+            Issue.record("decoded command lost offset-force mutation")
+            return
+        }
+        #expect(decodedMutation == mutation)
+        #expect(decoded == log)
+        _ = try harness.replay(
+            decoded,
+            using: SourceDeterministicPhysicsEnvironment()
+        )
+    }
+
     @Test("exact replay detects a different but structurally valid solver value")
     func deterministicValueDifferenceFailsClosed() throws {
         let corpus = try makeCorpus()

@@ -275,6 +275,7 @@ public final class SourceDeterministicPhysicsEnvironment:
         var linearVelocity: SourceVector3
         var angularVelocity: SourceVector3
         var accumulatedCenterForce: SourceVector3
+        var accumulatedCenterTorque: SourceVector3
         var isMotionEnabled: Bool
         var isGravityEnabled: Bool
         var isCollisionEnabled: Bool
@@ -666,6 +667,7 @@ public final class SourceDeterministicPhysicsEnvironment:
                     linearVelocity: creation.linearVelocity,
                     angularVelocity: creation.angularVelocity,
                     accumulatedCenterForce: .zero,
+                    accumulatedCenterTorque: .zero,
                     isMotionEnabled: creation.motionType != .staticBody,
                     isGravityEnabled: creation.isGravityEnabled,
                     isCollisionEnabled: creation.isCollisionEnabled,
@@ -770,6 +772,7 @@ public final class SourceDeterministicPhysicsEnvironment:
             body.linearVelocity = .zero
             body.angularVelocity = .zero
             body.accumulatedCenterForce = .zero
+            body.accumulatedCenterTorque = .zero
         case let .setMotionEnabled(enabled):
             try requireMotionSupport()
             body.isMotionEnabled = enabled
@@ -783,6 +786,7 @@ public final class SourceDeterministicPhysicsEnvironment:
                 body.linearVelocity = .zero
                 body.angularVelocity = .zero
                 body.accumulatedCenterForce = .zero
+                body.accumulatedCenterTorque = .zero
             }
         case let .setGravityEnabled(enabled):
             body.isGravityEnabled = enabled
@@ -818,6 +822,27 @@ public final class SourceDeterministicPhysicsEnvironment:
                 body.accumulatedCenterForce + force,
                 operation: "applyCenterForce"
             )
+            wake(&body)
+        case let .applyForceOffset(force, worldPosition):
+            try requireEnabledDynamicMotion()
+            let offset = try checked(
+                worldPosition - body.transform.origin,
+                operation: "applyForceOffsetWorldOffset"
+            )
+            let torque = try checked(
+                offset.cross(force),
+                operation: "applyForceOffsetTorque"
+            )
+            let accumulatedForce = try checked(
+                body.accumulatedCenterForce + force,
+                operation: "applyForceOffsetCenterForce"
+            )
+            let accumulatedTorque = try checked(
+                body.accumulatedCenterTorque + torque,
+                operation: "applyForceOffsetAccumulatedTorque"
+            )
+            body.accumulatedCenterForce = accumulatedForce
+            body.accumulatedCenterTorque = accumulatedTorque
             wake(&body)
         case let .applyCenterImpulse(impulse):
             try requireEnabledDynamicMotion()
@@ -868,6 +893,25 @@ public final class SourceDeterministicPhysicsEnvironment:
                     }
                     body.linearVelocity = nextVelocity
                     body.accumulatedCenterForce = .zero
+                }
+                if body.accumulatedCenterTorque != .zero {
+                    let angularAccelerationRadians = inverseInertiaMultiply(
+                        body: body,
+                        worldVector: body.accumulatedCenterTorque
+                    )
+                    let nextAngularVelocity = body.angularVelocity +
+                        angularAccelerationRadians *
+                        (delta * 180 / Float.pi)
+                    guard nextAngularVelocity.x.isFinite,
+                          nextAngularVelocity.y.isFinite,
+                          nextAngularVelocity.z.isFinite else {
+                        throw Error.nonFiniteMutationResult(
+                            bodyID: body.bodyID,
+                            operation: "integrateForceOffsetTorque"
+                        )
+                    }
+                    body.angularVelocity = nextAngularVelocity
+                    body.accumulatedCenterTorque = .zero
                 }
                 if body.isGravityEnabled {
                     body.linearVelocity += configuration.gravity * delta

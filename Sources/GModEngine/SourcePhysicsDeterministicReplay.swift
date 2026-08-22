@@ -245,7 +245,7 @@ public struct SourcePhysicsReplayFrame: Equatable, Sendable {
 
 /// Decoded value transcript plus its canonical little-endian binary form.
 public struct SourcePhysicsReplayLog: Equatable, Sendable {
-    public static let formatVersion: UInt16 = 2
+    public static let formatVersion: UInt16 = 3
 
     public let fixedTimeStepSeconds: Float
     public let frames: [SourcePhysicsReplayFrame]
@@ -760,7 +760,11 @@ private struct SourcePhysicsReplayTranscriptValidator {
         let supportsMotion = body.creation.motionType != .staticBody
         let requiresEnabledDynamicMotion: Bool
         switch command.mutation {
-        case .wake, .sleep, .applyCenterForce, .applyCenterImpulse:
+        case .wake,
+             .sleep,
+             .applyCenterForce,
+             .applyForceOffset,
+             .applyCenterImpulse:
             requiresEnabledDynamicMotion = true
         default:
             requiresEnabledDynamicMotion = false
@@ -791,7 +795,11 @@ private struct SourcePhysicsReplayTranscriptValidator {
             guard supportsMotion else {
                 throw SourcePhysicsReplayError.bodyMutationNotSupported(bodyID)
             }
-        case .wake, .sleep, .applyCenterForce, .applyCenterImpulse:
+        case .wake,
+             .sleep,
+             .applyCenterForce,
+             .applyForceOffset,
+             .applyCenterImpulse:
             break
         }
         liveBodies[bodyID] = body
@@ -1200,6 +1208,13 @@ private struct SourcePhysicsReplayEncoder {
         case let .applyCenterImpulse(value):
             try writeUInt8(10)
             try write(value, field: "mutation.centerImpulse")
+        case let .applyForceOffset(force, worldPosition):
+            try writeUInt8(11)
+            try write(force, field: "mutation.offsetForce")
+            try write(
+                worldPosition,
+                field: "mutation.offsetWorldPosition"
+            )
         }
     }
 
@@ -1641,6 +1656,13 @@ private struct SourcePhysicsReplayDecoder {
             mutation = .applyCenterImpulse(try readVector(
                 field: "mutation.centerImpulse"
             ))
+        case 11:
+            mutation = .applyForceOffset(
+                force: try readVector(field: "mutation.offsetForce"),
+                worldPosition: try readVector(
+                    field: "mutation.offsetWorldPosition"
+                )
+            )
         default:
             throw SourcePhysicsReplayError.invalidTag(
                 field: "bodyMutation",

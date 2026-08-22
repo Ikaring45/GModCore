@@ -79,6 +79,17 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
             end)
             assert(finite == false and finiteMessage ~= nil)
             phys:ApplyForceCenter(Vector(100, 200, 300))
+            phys:ApplyForceOffset(
+                Vector(11, 12, 13),
+                Vector(20, 30, 40)
+            )
+            finite, finiteMessage = pcall(function()
+                phys:ApplyForceOffset(
+                    Vector(1, 2, 3),
+                    Vector(0, 0 / 0, 0)
+                )
+            end)
+            assert(finite == false and finiteMessage ~= nil)
 
             function FixInvalidPhysicsObject(prop)
                 local PhysObj = prop:GetPhysicsObject()
@@ -141,6 +152,13 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
             SourcePhysicsBodyMutationCommand(
                 bodyID: pending.bodyID,
                 mutation: .applyCenterForce(SourceVector3(100, 200, 300))
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .applyForceOffset(
+                    force: SourceVector3(11, 12, 13),
+                    worldPosition: SourceVector3(20, 30, 40)
+                )
             ),
         ])
 
@@ -262,6 +280,14 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
             assert(string.find(message, "live canonical PhysObj expected", 1, true))
             ok, message = pcall(function()
                 FIRST_SOLID:AddAngleVelocity(Vector(1, 2, 3))
+            end)
+            assert(ok == false)
+            assert(string.find(message, "live canonical PhysObj expected", 1, true))
+            ok, message = pcall(function()
+                FIRST_SOLID:ApplyForceOffset(
+                    Vector(1, 2, 3),
+                    Vector(4, 5, 6)
+                )
             end)
             assert(ok == false)
             assert(string.find(message, "live canonical PhysObj expected", 1, true))

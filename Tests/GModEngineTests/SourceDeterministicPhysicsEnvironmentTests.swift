@@ -475,6 +475,76 @@ struct SourceDeterministicPhysicsEnvironmentTests {
         #expect(body.transform.origin.z < frozenOrigin.z)
     }
 
+    @Test("world offset force integrates linear and principal-inertia angular acceleration")
+    func applyForceOffsetUsesWorldPointAndBodyInertiaFrame() throws {
+        let environment = SourceDeterministicPhysicsEnvironment()
+        let bodyID = try makeBodyID(entry: 82, serial: 23)
+        let origin = SourceVector3(10, 20, 30)
+        let creation = try makeCreation(
+            bodyID: bodyID,
+            shape: makeCubeShape(),
+            origin: origin,
+            motionType: .dynamicBody,
+            mass: 2,
+            inertia: SourceVector3(2, 4, 8),
+            material: 5,
+            gravity: false,
+            angles: SourceQAngle(yaw: 90)
+        )
+        let force = SourceVector3(0, 10, 0)
+        let worldPosition = origin + SourceVector3(0, 0, 1)
+        let snapshot = try environment.execute(SourcePhysicsCommandBatch(
+            commands: [
+                SourcePhysicsCommand(
+                    sequence: 1,
+                    payload: .createBody(creation)
+                ),
+                SourcePhysicsCommand(
+                    sequence: 2,
+                    payload: .mutateBody(
+                        try SourcePhysicsBodyMutationCommand(
+                            bodyID: bodyID,
+                            mutation: .applyForceOffset(
+                                force: force,
+                                worldPosition: worldPosition
+                            )
+                        )
+                    )
+                ),
+                SourcePhysicsCommand(
+                    sequence: 3,
+                    payload: .simulate(SourcePhysicsSimulateCommand(
+                        simulationTick: 1
+                    ))
+                ),
+            ]
+        ))
+
+        let body = try #require(snapshot.bodies.first)
+        // Linear force uses the existing fixed-tick ApplyForceCenter unit:
+        // dv = F / m * 0.015.
+        #expect(abs(body.linearVelocity.x) < 0.000_001)
+        #expect(abs(body.linearVelocity.y - 0.075) < 0.000_001)
+        #expect(abs(body.linearVelocity.z) < 0.000_001)
+
+        // r x F is (-10, 0, 0) in world space. At yaw 90 that axis maps to
+        // the body's principal Y inertia (4), then radians/s becomes the
+        // Source angular-velocity degrees/s contract.
+        let expectedAngularX = (-10 / Float(4)) *
+            SourcePhysicsContract.fixedTimeStepSeconds *
+            (180 / Float.pi)
+        #expect(abs(body.angularVelocity.x - expectedAngularX) < 0.000_01)
+        #expect(abs(body.angularVelocity.y) < 0.000_01)
+        #expect(abs(body.angularVelocity.z) < 0.000_01)
+        #expect(
+            abs(
+                body.transform.angles.pitch -
+                    expectedAngularX *
+                    SourcePhysicsContract.fixedTimeStepSeconds
+            ) < 0.000_01
+        )
+    }
+
     @Test("a later invalid body mutation rolls back earlier mutations")
     func bodyMutationRollback() throws {
         let environment = SourceDeterministicPhysicsEnvironment()
@@ -590,7 +660,8 @@ struct SourceDeterministicPhysicsEnvironmentTests {
         gravity: Bool,
         startsAwake: Bool = true,
         linearVelocity: SourceVector3 = .zero,
-        angularVelocity: SourceVector3 = .zero
+        angularVelocity: SourceVector3 = .zero,
+        angles: SourceQAngle = .zero
     ) throws -> SourcePhysicsBodyCreationCommand {
         try SourcePhysicsBodyCreationCommand(
             bodyID: bodyID,
@@ -599,7 +670,7 @@ struct SourceDeterministicPhysicsEnvironmentTests {
                 massKilograms: mass,
                 principalInertia: inertia
             ),
-            transform: SourceEntityTransform(origin: origin, angles: .zero),
+            transform: SourceEntityTransform(origin: origin, angles: angles),
             linearVelocity: linearVelocity,
             angularVelocity: angularVelocity,
             motionType: motionType,

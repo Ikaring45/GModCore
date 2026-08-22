@@ -265,8 +265,10 @@ public struct SourcePhysicsBodyDeletionCommand: Equatable, Sendable {
 ///
 /// Vector-bearing operations are validated at construction, before they can
 /// enter the host's global FIFO. `centerForce` is accumulated until the next
-/// fixed 0.015-second simulation command; `centerImpulse` changes velocity at
-/// the mutation command's exact FIFO position.
+/// fixed 0.015-second simulation command. `forceOffset` uses the same force
+/// unit and tick boundary while retaining the exact world application point;
+/// `centerImpulse` changes velocity at the mutation command's exact FIFO
+/// position.
 public enum SourcePhysicsBodyMutation: Equatable, Sendable {
     case wake
     case sleep
@@ -278,6 +280,10 @@ public enum SourcePhysicsBodyMutation: Equatable, Sendable {
     case setAngularVelocity(SourceVector3)
     case addAngularVelocity(SourceVector3)
     case applyCenterForce(SourceVector3)
+    case applyForceOffset(
+        force: SourceVector3,
+        worldPosition: SourceVector3
+    )
     case applyCenterImpulse(SourceVector3)
 }
 
@@ -314,6 +320,15 @@ public struct SourcePhysicsBodyMutationCommand: Equatable, Sendable {
             try sourcePhysicsRequireFinite(
                 value,
                 field: "bodyMutation.centerForce"
+            )
+        case let .applyForceOffset(force, worldPosition):
+            try sourcePhysicsRequireFinite(
+                force,
+                field: "bodyMutation.offsetForce"
+            )
+            try sourcePhysicsRequireFinite(
+                worldPosition,
+                field: "bodyMutation.offsetWorldPosition"
             )
         case let .applyCenterImpulse(value):
             try sourcePhysicsRequireFinite(

@@ -702,7 +702,7 @@ private final class RecordingPhysicsEnvironment: SourcePhysicsEnvironment {
             angularVelocity = value
         case let .addAngularVelocity(value):
             angularVelocity += value
-        case .applyCenterForce:
+        case .applyCenterForce, .applyForceOffset:
             break
         case let .applyCenterImpulse(value):
             linearVelocity += value / body.massProperties.massKilograms

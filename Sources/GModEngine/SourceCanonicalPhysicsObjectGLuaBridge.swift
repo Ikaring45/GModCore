@@ -341,6 +341,20 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
                 function: "PhysObj:ApplyForceCenter"
             ))
         }
+        try setPhysicsMutationMethod("ApplyForceOffset") { arguments in
+            .applyForceOffset(
+                force: try self.requiredVector(
+                    arguments,
+                    at: 1,
+                    function: "PhysObj:ApplyForceOffset"
+                ),
+                worldPosition: try self.requiredVector(
+                    arguments,
+                    at: 2,
+                    function: "PhysObj:ApplyForceOffset"
+                )
+            )
+        }
     }
 
     private func setPhysicsMutationMethod(
