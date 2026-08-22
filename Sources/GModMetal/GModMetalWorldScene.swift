@@ -1,5 +1,26 @@
 import Foundation
 
+/// Source's `fov_desired` is authored as a horizontal angle for a 4:3 base
+/// viewport. Metal's perspective matrix accepts a vertical angle; feeding it
+/// 75 degrees directly distorts terrain and weapon scale on iPad.
+public enum GModMetalSourceFOVContract {
+    public static func verticalRadians(
+        baseHorizontalDegrees: Float,
+        baseAspectRatio: Float = 4.0 / 3.0
+    ) -> Float? {
+        guard baseHorizontalDegrees.isFinite,
+              baseHorizontalDegrees > 0,
+              baseHorizontalDegrees < 180,
+              baseAspectRatio.isFinite,
+              baseAspectRatio > 0 else { return nil }
+        let horizontal = baseHorizontalDegrees * .pi / 180
+        return 2 * atan(tan(horizontal * 0.5) / baseAspectRatio)
+    }
+
+    public static let defaultWorldVerticalRadians =
+        verticalRadians(baseHorizontalDegrees: 75)!
+}
+
 public enum GModMetalSkyboxFace: String, CaseIterable, Sendable, Equatable, Hashable {
     case right = "rt"
     case back = "bk"
@@ -40,6 +61,160 @@ public struct GModMetalWorldSky3D: Sendable, Equatable {
     public init(sourceOrigin: SIMD3<Float>, scale: Float) {
         self.sourceOrigin = sourceOrigin
         self.scale = scale
+    }
+}
+
+/// Renderer-facing form of Source's compiled `light_environment` pair.
+/// The original direction is retained for diagnostics while the Metal-space
+/// surface-to-light vector is derived by the same orthonormal basis conversion
+/// used for world normals.
+public struct GModMetalWorldEnvironmentLighting: Sendable, Equatable {
+    public let sourceDirectionFromLight: SIMD3<Float>
+    public let metalDirectionToLight: SIMD3<Float>
+    public let directLinearRGB: SIMD3<Float>
+    public let ambientLinearRGB: SIMD3<Float>
+
+    public init(
+        sourceDirectionFromLight: SIMD3<Float>,
+        directLinearRGB: SIMD3<Float>,
+        ambientLinearRGB: SIMD3<Float>
+    ) {
+        self.sourceDirectionFromLight = sourceDirectionFromLight
+        self.metalDirectionToLight = GModMetalWorldScene.convertSourceVector(
+            -sourceDirectionFromLight
+        )
+        self.directLinearRGB = directLinearRGB
+        self.ambientLinearRGB = ambientLinearRGB
+    }
+}
+
+public struct GModMetalWorldSunSpriteLayer: Sendable, Equatable {
+    public let materialName: String
+    public let displayRGB: SIMD3<Float>
+    public let size: Float
+    public let materialResolution: GModMetalWorldMaterialResolution
+    public var bitmap: GModMetalSurfaceBitmap? { materialResolution.bitmap }
+
+    public init(
+        materialName: String,
+        displayRGB: SIMD3<Float>,
+        size: Float,
+        materialResolution: GModMetalWorldMaterialResolution
+    ) {
+        self.materialName = materialName
+        self.displayRGB = displayRGB
+        self.size = size
+        self.materialResolution = materialResolution
+    }
+}
+
+public struct GModMetalWorldSunSprite: Sendable, Equatable {
+    public let sourceDirectionToSun: SIMD3<Float>
+    public let metalDirectionToSun: SIMD3<Float>
+    public let hdrColorScale: Float
+    public let core: GModMetalWorldSunSpriteLayer
+    public let overlay: GModMetalWorldSunSpriteLayer
+
+    public init(
+        sourceDirectionToSun: SIMD3<Float>,
+        hdrColorScale: Float,
+        core: GModMetalWorldSunSpriteLayer,
+        overlay: GModMetalWorldSunSpriteLayer
+    ) {
+        self.sourceDirectionToSun = sourceDirectionToSun
+        self.metalDirectionToSun = GModMetalWorldScene.convertSourceVector(
+            sourceDirectionToSun
+        )
+        self.hdrColorScale = hdrColorScale
+        self.core = core
+        self.overlay = overlay
+    }
+}
+
+struct GModMetalSunSpriteDrawParameters: Sendable, Equatable {
+    let basePosition: SIMD3<Float>
+    let rightExtent: SIMD3<Float>
+    let upExtent: SIMD3<Float>
+    let displayRGB: SIMD3<Float>
+    let opacity: Float
+    let hdrColorScale: Float
+}
+
+/// Source SDK 2013 `CGlowOverlay` constants and directional billboard math.
+/// Static/dynamic opaque geometry is rendered after this sky pass and provides
+/// the real obstruction boundary; no screen-space placement or sprite size is
+/// invented by the Metal host.
+enum GModMetalSunSpriteRenderContract {
+    static let overlayRangeCosine = cos(Float(40) * .pi / 180)
+    static let distance: Float = 100
+    static let sizeAtOverlayRangeMultiplier: Float = 150
+    static let sizeAtOneMultiplier: Float = 70
+
+    static func parameters(
+        sun: GModMetalWorldSunSprite,
+        layer: GModMetalWorldSunSpriteLayer,
+        cameraEye: SIMD3<Float>,
+        cameraForward: SIMD3<Float>
+    ) -> GModMetalSunSpriteDrawParameters? {
+        guard let direction = normalized(sun.metalDirectionToSun),
+              let forward = normalized(cameraForward),
+              layer.size.isFinite, layer.size > 0,
+              sun.hdrColorScale.isFinite, sun.hdrColorScale >= 0,
+              finite(layer.displayRGB) else { return nil }
+        let viewDot = dot(direction, forward)
+        guard viewDot > overlayRangeCosine else { return nil }
+        let fraction = Swift.min(
+            1,
+            Swift.max(
+                0,
+                (viewDot - overlayRangeCosine) / (1 - overlayRangeCosine)
+            )
+        )
+        let sizeMultiplier = sizeAtOverlayRangeMultiplier +
+            (sizeAtOneMultiplier - sizeAtOverlayRangeMultiplier) * fraction
+        let extent = layer.size * sizeMultiplier
+        let worldUp = SIMD3<Float>(0, 1, 0)
+        guard let right = normalized(cross(direction, worldUp)),
+              let up = normalized(cross(right, direction)) else { return nil }
+        return GModMetalSunSpriteDrawParameters(
+            basePosition: cameraEye + direction * distance,
+            rightExtent: right * extent,
+            upExtent: up * extent,
+            displayRGB: layer.displayRGB,
+            opacity: fraction,
+            hdrColorScale: sun.hdrColorScale
+        )
+    }
+
+    private static func finite(_ value: SIMD3<Float>) -> Bool {
+        value.x.isFinite && value.y.isFinite && value.z.isFinite
+    }
+
+    private static func dot(
+        _ lhs: SIMD3<Float>,
+        _ rhs: SIMD3<Float>
+    ) -> Float {
+        lhs.x * rhs.x + lhs.y * rhs.y + lhs.z * rhs.z
+    }
+
+    private static func cross(
+        _ lhs: SIMD3<Float>,
+        _ rhs: SIMD3<Float>
+    ) -> SIMD3<Float> {
+        SIMD3<Float>(
+            lhs.y * rhs.z - lhs.z * rhs.y,
+            lhs.z * rhs.x - lhs.x * rhs.z,
+            lhs.x * rhs.y - lhs.y * rhs.x
+        )
+    }
+
+    private static func normalized(
+        _ value: SIMD3<Float>
+    ) -> SIMD3<Float>? {
+        guard finite(value) else { return nil }
+        let lengthSquared = dot(value, value)
+        guard lengthSquared > Float.ulpOfOne else { return nil }
+        return value / lengthSquared.squareRoot()
     }
 }
 
@@ -230,6 +405,117 @@ enum GModMetalWaterRenderContract {
         guard let explicitAmount = material.reflectionAmount ??
             material.refractionAmount else { return nil }
         return Swift.min(1, Swift.max(0, explicitAmount))
+    }
+}
+
+/// A single Source water plane can share one reflected view for every material
+/// range on that plane. Multiple visible heights require separate reflected
+/// views and therefore stay on the diagnosed fallback path instead of sampling
+/// a render target produced for the wrong plane.
+struct GModMetalWaterRenderTargetPlan: Sendable, Equatable {
+    let sourceSurfaceZ: Float
+    let requiresReflection: Bool
+    let requiresRefraction: Bool
+}
+
+enum GModMetalWaterRenderTargetContract {
+    static func plan(
+        materialRanges: [GModMetalWorldMaterialRange],
+        cameraZ: Float
+    ) -> GModMetalWaterRenderTargetPlan? {
+        let visible = materialRanges.compactMap {
+            range -> (surface: GModMetalWorldWaterSurface,
+                      material: GModMetalWorldWaterMaterial)? in
+            guard range.renderLayer == .world,
+                  let surface = range.waterSurface,
+                  let material = range.waterMaterial,
+                  GModMetalWaterRenderContract.shouldRender(
+                    material,
+                    surface: surface,
+                    cameraZ: cameraZ
+                  ) else { return nil }
+            let reflection = material.reflectionAmount ?? 0
+            let refraction = material.refractionAmount ?? 0
+            guard reflection > 0 || refraction > 0 else { return nil }
+            return (surface, material)
+        }
+        guard let first = visible.first else { return nil }
+        let surfaceBits = Set(visible.map { $0.surface.surfaceZ.bitPattern })
+        guard surfaceBits.count == 1 else { return nil }
+        return GModMetalWaterRenderTargetPlan(
+            sourceSurfaceZ: first.surface.surfaceZ,
+            requiresReflection: visible.contains {
+                ($0.material.reflectionAmount ?? 0) > 0
+            },
+            requiresRefraction: visible.contains {
+                ($0.material.refractionAmount ?? 0) > 0
+            }
+        )
+    }
+}
+
+struct GModMetalWaterReflectedCamera: Sendable, Equatable {
+    let eye: SIMD3<Float>
+    let forward: SIMD3<Float>
+    let up: SIMD3<Float>
+}
+
+enum GModMetalWaterReflectionContract {
+    /// Source Z maps to Metal Y. Reflecting the complete camera basis across
+    /// that plane preserves handedness as `makeViewMatrix` rebuilds the right
+    /// vector from the reflected forward/up pair.
+    static func reflectedCamera(
+        eye: SIMD3<Float>,
+        forward: SIMD3<Float>,
+        up: SIMD3<Float>,
+        sourceSurfaceZ: Float
+    ) -> GModMetalWaterReflectedCamera {
+        GModMetalWaterReflectedCamera(
+            eye: SIMD3<Float>(
+                eye.x,
+                sourceSurfaceZ * 2 - eye.y,
+                eye.z
+            ),
+            forward: SIMD3<Float>(forward.x, -forward.y, forward.z),
+            up: SIMD3<Float>(up.x, -up.y, up.z)
+        )
+    }
+}
+
+/// Signed Metal-space clipping planes for Source water render targets.
+/// Source Z maps to Metal Y; positions whose signed distance is non-negative
+/// are retained. Refraction keeps the half-space across the water from the
+/// real camera, while reflection keeps the camera's own half-space.
+enum GModMetalWaterClipPlaneContract {
+    static let disabled = SIMD4<Float>(0, 0, 0, 1)
+
+    static func refraction(
+        sourceSurfaceZ: Float,
+        sourceCameraZ: Float
+    ) -> SIMD4<Float> {
+        if sourceCameraZ >= sourceSurfaceZ {
+            return SIMD4<Float>(0, -1, 0, sourceSurfaceZ)
+        }
+        return SIMD4<Float>(0, 1, 0, -sourceSurfaceZ)
+    }
+
+    static func reflection(
+        sourceSurfaceZ: Float,
+        sourceCameraZ: Float
+    ) -> SIMD4<Float> {
+        if sourceCameraZ >= sourceSurfaceZ {
+            return SIMD4<Float>(0, 1, 0, -sourceSurfaceZ)
+        }
+        return SIMD4<Float>(0, -1, 0, sourceSurfaceZ)
+    }
+
+    static func retains(
+        metalPosition: SIMD3<Float>,
+        plane: SIMD4<Float>
+    ) -> Bool {
+        metalPosition.x * plane.x +
+            metalPosition.y * plane.y +
+            metalPosition.z * plane.z + plane.w >= 0
     }
 }
 
@@ -550,6 +836,8 @@ public struct GModMetalWorldScene: Sendable, Equatable {
     public let materialDiagnostics: GModMetalWorldMaterialDiagnostics
     public let lightmapAtlas: GModMetalWorldLightmapAtlas?
     public let lightmapDiagnostics: GModMetalWorldLightmapDiagnostics
+    public let environmentLighting: GModMetalWorldEnvironmentLighting?
+    public let sunSprites: [GModMetalWorldSunSprite]
     public let sky3D: GModMetalWorldSky3D?
     public let skyboxVisibility: GModMetalSkyboxVisibility
     /// Fixed Source session time. Pause freezes this value, so material
@@ -581,6 +869,8 @@ public struct GModMetalWorldScene: Sendable, Equatable {
         materialRanges: [GModMetalWorldMaterialRange] = [],
         lightmapAtlas: GModMetalWorldLightmapAtlas? = nil,
         lightmapDiagnostics: GModMetalWorldLightmapDiagnostics = .init(),
+        environmentLighting: GModMetalWorldEnvironmentLighting? = nil,
+        sunSprites: [GModMetalWorldSunSprite] = [],
         sky3D: GModMetalWorldSky3D? = nil,
         skyboxVisibility: GModMetalSkyboxVisibility = .notVisible,
         cameraEye: SIMD3<Float>,
@@ -605,6 +895,8 @@ public struct GModMetalWorldScene: Sendable, Equatable {
         self.materialDiagnostics = Self.makeMaterialDiagnostics(materialRanges)
         self.lightmapAtlas = lightmapAtlas
         self.lightmapDiagnostics = lightmapDiagnostics
+        self.environmentLighting = environmentLighting
+        self.sunSprites = sunSprites
         self.sky3D = sky3D
         self.skyboxVisibility = skyboxVisibility
         self.sourceFixedTime = sourceFixedTime
@@ -637,6 +929,8 @@ public struct GModMetalWorldScene: Sendable, Equatable {
             materialRanges: materialRanges,
             lightmapAtlas: lightmapAtlas,
             lightmapDiagnostics: lightmapDiagnostics,
+            environmentLighting: environmentLighting,
+            sunSprites: sunSprites,
             sky3D: sky3D,
             skyboxVisibility: skyboxVisibility ?? self.skyboxVisibility,
             cameraEye: eye,
@@ -666,6 +960,8 @@ public struct GModMetalWorldScene: Sendable, Equatable {
         materialRanges: [GModMetalWorldMaterialRange],
         lightmapAtlas: GModMetalWorldLightmapAtlas?,
         lightmapDiagnostics: GModMetalWorldLightmapDiagnostics,
+        environmentLighting: GModMetalWorldEnvironmentLighting?,
+        sunSprites: [GModMetalWorldSunSprite],
         sky3D: GModMetalWorldSky3D?,
         skyboxVisibility: GModMetalSkyboxVisibility,
         cameraEye: SIMD3<Float>,
@@ -685,6 +981,8 @@ public struct GModMetalWorldScene: Sendable, Equatable {
         self.materialDiagnostics = Self.makeMaterialDiagnostics(materialRanges)
         self.lightmapAtlas = lightmapAtlas
         self.lightmapDiagnostics = lightmapDiagnostics
+        self.environmentLighting = environmentLighting
+        self.sunSprites = sunSprites
         self.sky3D = sky3D
         self.skyboxVisibility = skyboxVisibility
         self.sourceFixedTime = sourceFixedTime

@@ -367,10 +367,22 @@ public struct GModMetalView:
         private var worldSkyboxPipeline:
             MTLRenderPipelineState?
 
+        private var worldSunSpritePipeline:
+            MTLRenderPipelineState?
+
         private var worldWaterSolidPipeline:
             MTLRenderPipelineState?
 
         private var worldWaterNormalPipeline:
+            MTLRenderPipelineState?
+
+        private var worldWaterCompositeSolidPipeline:
+            MTLRenderPipelineState?
+
+        private var worldWaterCompositeNormalPipeline:
+            MTLRenderPipelineState?
+
+        private var worldSceneCopyPipeline:
             MTLRenderPipelineState?
 
         private var surfaceSolidPipeline:
@@ -441,13 +453,40 @@ public struct GModMetalView:
         private struct WorldUniforms {
             let viewProjection: simd_float4x4
             let lightDirection: SIMD4<Float>
+            let directLinearRGB: SIMD4<Float>
+            let ambientLinearRGB: SIMD4<Float>
+            /// Metal-space plane; fragments with a negative signed distance
+            /// are outside the active water render-target half-space.
+            let clipPlane: SIMD4<Float>
         }
 
         private struct WorldWaterUniforms {
-            /// Premultiplied fog color and fallback alpha.
+            /// Authored display-sRGB fog color and diagnosed fallback alpha.
             let fogColorAndAlpha: SIMD4<Float>
             /// Unit scroll direction, real VMT rate, and frozen Source time.
             let scrollDirectionRateAndTime: SIMD4<Float>
+            /// Authored reflect/refract amounts and physical drawable size.
+            let sourceAmountsAndViewport: SIMD4<Float>
+        }
+
+        private struct WorldSunSpriteUniforms {
+            let viewProjection: simd_float4x4
+            let basePosition: SIMD4<Float>
+            let rightExtent: SIMD4<Float>
+            let upExtent: SIMD4<Float>
+            let displayRGBAndOpacity: SIMD4<Float>
+            let hdrColorScale: SIMD4<Float>
+        }
+
+        private struct CachedWaterRenderTargets {
+            let width: Int
+            let height: Int
+            let colorPixelFormat: MTLPixelFormat
+            let depthPixelFormat: MTLPixelFormat
+            let refractionColor: MTLTexture
+            let refractionDepth: MTLTexture
+            let reflectionColor: MTLTexture
+            let reflectionDepth: MTLTexture
         }
 
         /// Resource-local Studio vertex. The entity pose is supplied separately
@@ -639,6 +678,8 @@ public struct GModMetalView:
             case invalidSkyboxRanges
             case invalidSky3DMetadata
             case invalidWaterMaterialRange(index: Int)
+            case invalidEnvironmentLighting
+            case invalidSunSprite(index: Int)
             case invalidCameraEye
             case invalidCameraForward
             case zeroCameraForward
@@ -685,6 +726,10 @@ public struct GModMetalView:
                     return "3D sky ranges require finite sky_camera origin and positive scale"
                 case let .invalidWaterMaterialRange(index):
                     return "water material range \(index) contains non-finite or mismatched Source inputs"
+                case .invalidEnvironmentLighting:
+                    return "compiled light_environment contains invalid Source world-light values"
+                case let .invalidSunSprite(index):
+                    return "env_sun sprite \(index) contains invalid entity-driven values"
                 case .invalidCameraEye:
                     return "camera eye is non-finite"
                 case .invalidCameraForward:
@@ -725,6 +770,23 @@ public struct GModMetalView:
                     return "lightmap atlas has \(actual) bytes; expected \(expected)"
                 case .textureAllocationFailed:
                     return "Metal lightmap texture allocation failed"
+                }
+            }
+        }
+
+        private enum WaterRenderTargetError: Error, CustomStringConvertible {
+            case invalidDimensions(width: Int, height: Int)
+            case colorAllocationFailed(label: String)
+            case depthAllocationFailed(label: String)
+
+            var description: String {
+                switch self {
+                case let .invalidDimensions(width, height):
+                    return "water target dimensions are invalid (\(width)x\(height))"
+                case let .colorAllocationFailed(label):
+                    return "failed to allocate \(label) water color target"
+                case let .depthAllocationFailed(label):
+                    return "failed to allocate \(label) water depth target"
                 }
             }
         }
@@ -783,6 +845,11 @@ public struct GModMetalView:
         private var cachedWorldLightmap:
             CachedWorldLightmap?
 
+        /// Full-resolution Source water views. These are rebuilt only when the
+        /// physical drawable or attachment formats change.
+        private var cachedWaterRenderTargets:
+            CachedWaterRenderTargets?
+
         private var worldSceneIssue:
             String?
 
@@ -836,6 +903,10 @@ public struct GModMetalView:
         private var lastWaterMissingMaterialRangeCount = 0
 
         private var lastWaterPendingNormalRangeCount = 0
+
+        private var lastWaterRenderTargetRangeCount = 0
+
+        private var waterRenderTargetIssue: String?
 
         private var lastSurfaceDroppedDrawCount = 0
 
@@ -972,6 +1043,16 @@ public struct GModMetalView:
                                 "worldSkyboxFragmentMain"
                         ),
 
+                    let worldSunSpriteVertexFunction =
+                        library.makeFunction(
+                            name: "worldSunSpriteVertexMain"
+                        ),
+
+                    let worldSunSpriteFragmentFunction =
+                        library.makeFunction(
+                            name: "worldSunSpriteFragmentMain"
+                        ),
+
                     let worldWaterSolidFragmentFunction =
                         library.makeFunction(
                             name:
@@ -983,6 +1064,22 @@ public struct GModMetalView:
                             name:
                                 "worldWaterNormalFragmentMain"
                         ),
+
+                    let worldWaterCompositeSolidFragmentFunction =
+                        library.makeFunction(
+                            name: "worldWaterCompositeSolidFragmentMain"
+                        ),
+
+                    let worldWaterCompositeNormalFragmentFunction =
+                        library.makeFunction(
+                            name: "worldWaterCompositeNormalFragmentMain"
+                        ),
+
+                    let worldSceneCopyVertexFunction =
+                        library.makeFunction(name: "worldSceneCopyVertexMain"),
+
+                    let worldSceneCopyFragmentFunction =
+                        library.makeFunction(name: "worldSceneCopyFragmentMain"),
 
                     let surfaceVertexFunction =
                         library.makeFunction(
@@ -1124,6 +1221,17 @@ public struct GModMetalView:
                     descriptor: worldSkyboxDescriptor
                 )
 
+                let worldSunSpriteDescriptor =
+                    Self.makeWorldSunSpritePipelineDescriptor(
+                        vertexFunction: worldSunSpriteVertexFunction,
+                        fragmentFunction: worldSunSpriteFragmentFunction,
+                        colorPixelFormat: colorPixelFormat,
+                        depthPixelFormat: depthPixelFormat
+                    )
+                worldSunSpritePipeline = try device.makeRenderPipelineState(
+                    descriptor: worldSunSpriteDescriptor
+                )
+
                 let worldWaterSolidDescriptor =
                     Self.makeWorldWaterPipelineDescriptor(
                         vertexFunction: worldVertexFunction,
@@ -1144,6 +1252,45 @@ public struct GModMetalView:
                     )
                 worldWaterNormalPipeline = try device.makeRenderPipelineState(
                     descriptor: worldWaterNormalDescriptor
+                )
+
+                let worldWaterCompositeSolidDescriptor =
+                    Self.makeWorldWaterPipelineDescriptor(
+                        vertexFunction: worldVertexFunction,
+                        fragmentFunction:
+                            worldWaterCompositeSolidFragmentFunction,
+                        colorPixelFormat: colorPixelFormat,
+                        depthPixelFormat: depthPixelFormat
+                    )
+                worldWaterCompositeSolidPipeline =
+                    try device.makeRenderPipelineState(
+                        descriptor: worldWaterCompositeSolidDescriptor
+                    )
+
+                let worldWaterCompositeNormalDescriptor =
+                    Self.makeWorldWaterPipelineDescriptor(
+                        vertexFunction: worldVertexFunction,
+                        fragmentFunction:
+                            worldWaterCompositeNormalFragmentFunction,
+                        colorPixelFormat: colorPixelFormat,
+                        depthPixelFormat: depthPixelFormat
+                    )
+                worldWaterCompositeNormalPipeline =
+                    try device.makeRenderPipelineState(
+                        descriptor: worldWaterCompositeNormalDescriptor
+                    )
+
+                let worldSceneCopyDescriptor = MTLRenderPipelineDescriptor()
+                worldSceneCopyDescriptor.vertexFunction =
+                    worldSceneCopyVertexFunction
+                worldSceneCopyDescriptor.fragmentFunction =
+                    worldSceneCopyFragmentFunction
+                worldSceneCopyDescriptor.colorAttachments[0].pixelFormat =
+                    colorPixelFormat
+                worldSceneCopyDescriptor.depthAttachmentPixelFormat =
+                    depthPixelFormat
+                worldSceneCopyPipeline = try device.makeRenderPipelineState(
+                    descriptor: worldSceneCopyDescriptor
                 )
 
                 let surfaceSolidDescriptor =
@@ -1810,6 +1957,33 @@ public struct GModMetalView:
             return descriptor
         }
 
+        private static func makeWorldSunSpritePipelineDescriptor(
+            vertexFunction: MTLFunction,
+            fragmentFunction: MTLFunction,
+            colorPixelFormat: MTLPixelFormat,
+            depthPixelFormat: MTLPixelFormat
+        ) -> MTLRenderPipelineDescriptor {
+            let descriptor = MTLRenderPipelineDescriptor()
+            descriptor.vertexFunction = vertexFunction
+            descriptor.fragmentFunction = fragmentFunction
+            descriptor.colorAttachments[0].pixelFormat = colorPixelFormat
+            descriptor.depthAttachmentPixelFormat = depthPixelFormat
+
+            // C_Sun explicitly tints an additive glow material. The sampled
+            // texture alpha is folded into fragment RGB, then accumulated over
+            // the completed 2D/3D sky before ordinary world geometry occludes
+            // it in the following depth-cleared pass.
+            let color = descriptor.colorAttachments[0]!
+            color.isBlendingEnabled = true
+            color.rgbBlendOperation = .add
+            color.alphaBlendOperation = .add
+            color.sourceRGBBlendFactor = .one
+            color.destinationRGBBlendFactor = .one
+            color.sourceAlphaBlendFactor = .one
+            color.destinationAlphaBlendFactor = .one
+            return descriptor
+        }
+
         private static func makeCachedWorldMesh(
             _ scene: GModMetalWorldScene,
             device: MTLDevice
@@ -1928,6 +2102,73 @@ public struct GModMetalView:
                 byteCount: atlas.linearRGBA16Float.count,
                 texture: texture
             )
+        }
+
+        private func waterRenderTargets(
+            device: MTLDevice,
+            width: Int,
+            height: Int,
+            colorPixelFormat: MTLPixelFormat,
+            depthPixelFormat: MTLPixelFormat
+        ) throws -> CachedWaterRenderTargets {
+            guard width > 0, height > 0 else {
+                throw WaterRenderTargetError.invalidDimensions(
+                    width: width,
+                    height: height
+                )
+            }
+            if let cachedWaterRenderTargets,
+               cachedWaterRenderTargets.width == width,
+               cachedWaterRenderTargets.height == height,
+               cachedWaterRenderTargets.colorPixelFormat == colorPixelFormat,
+               cachedWaterRenderTargets.depthPixelFormat == depthPixelFormat {
+                return cachedWaterRenderTargets
+            }
+
+            func colorTexture(label: String) throws -> MTLTexture {
+                let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                    pixelFormat: colorPixelFormat,
+                    width: width,
+                    height: height,
+                    mipmapped: false
+                )
+                descriptor.storageMode = .private
+                descriptor.usage = [.renderTarget, .shaderRead]
+                guard let texture = device.makeTexture(descriptor: descriptor) else {
+                    throw WaterRenderTargetError.colorAllocationFailed(label: label)
+                }
+                texture.label = "GMod \(label) water color"
+                return texture
+            }
+
+            func depthTexture(label: String) throws -> MTLTexture {
+                let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                    pixelFormat: depthPixelFormat,
+                    width: width,
+                    height: height,
+                    mipmapped: false
+                )
+                descriptor.storageMode = .private
+                descriptor.usage = [.renderTarget, .shaderRead]
+                guard let texture = device.makeTexture(descriptor: descriptor) else {
+                    throw WaterRenderTargetError.depthAllocationFailed(label: label)
+                }
+                texture.label = "GMod \(label) water depth"
+                return texture
+            }
+
+            let targets = CachedWaterRenderTargets(
+                width: width,
+                height: height,
+                colorPixelFormat: colorPixelFormat,
+                depthPixelFormat: depthPixelFormat,
+                refractionColor: try colorTexture(label: "refraction"),
+                refractionDepth: try depthTexture(label: "refraction"),
+                reflectionColor: try colorTexture(label: "reflection"),
+                reflectionDepth: try depthTexture(label: "reflection")
+            )
+            cachedWaterRenderTargets = targets
+            return targets
         }
 
         private static func validateMesh(
@@ -2067,6 +2308,46 @@ public struct GModMetalView:
                       skyboxRanges.count == GModMetalSkyboxFace.allCases.count,
                       faces.count == GModMetalSkyboxFace.allCases.count else {
                     throw WorldSceneError.invalidSkyboxRanges
+                }
+            }
+            if let lighting = scene.environmentLighting {
+                guard isFinite(lighting.sourceDirectionFromLight),
+                      isFinite(lighting.metalDirectionToLight),
+                      isFinite(lighting.directLinearRGB),
+                      isFinite(lighting.ambientLinearRGB),
+                      simd_length_squared(lighting.metalDirectionToLight) >
+                        Float.ulpOfOne,
+                      lighting.directLinearRGB.x >= 0,
+                      lighting.directLinearRGB.y >= 0,
+                      lighting.directLinearRGB.z >= 0,
+                      lighting.ambientLinearRGB.x >= 0,
+                      lighting.ambientLinearRGB.y >= 0,
+                      lighting.ambientLinearRGB.z >= 0 else {
+                    throw WorldSceneError.invalidEnvironmentLighting
+                }
+            }
+            for (index, sun) in scene.sunSprites.enumerated() {
+                let layers = [sun.core, sun.overlay]
+                guard isFinite(sun.sourceDirectionToSun),
+                      isFinite(sun.metalDirectionToSun),
+                      simd_length_squared(sun.metalDirectionToSun) >
+                        Float.ulpOfOne,
+                      sun.hdrColorScale.isFinite,
+                      sun.hdrColorScale >= 0,
+                      sun.hdrColorScale <= 100,
+                      layers.allSatisfy({ layer in
+                          !layer.materialName.trimmingCharacters(
+                              in: .whitespacesAndNewlines
+                          ).isEmpty &&
+                            layer.size.isFinite && layer.size > 0 &&
+                            layer.displayRGB.x.isFinite &&
+                            layer.displayRGB.y.isFinite &&
+                            layer.displayRGB.z.isFinite &&
+                            layer.displayRGB.x >= 0 && layer.displayRGB.x <= 1 &&
+                            layer.displayRGB.y >= 0 && layer.displayRGB.y <= 1 &&
+                            layer.displayRGB.z >= 0 && layer.displayRGB.z <= 1
+                      }) else {
+                    throw WorldSceneError.invalidSunSprite(index: index)
                 }
             }
         }
@@ -2250,8 +2531,12 @@ public struct GModMetalView:
                 let dynamicEntityTexturedPipeline,
                 let dynamicEntityMissingMaterialPipeline,
                 let worldSkyboxPipeline,
+                let worldSunSpritePipeline,
                 let worldWaterSolidPipeline,
                 let worldWaterNormalPipeline,
+                let worldWaterCompositeSolidPipeline,
+                let worldWaterCompositeNormalPipeline,
+                let worldSceneCopyPipeline,
                 let surfaceSolidPipeline,
                 let surfaceTexturedPipeline,
                 let depthState,
@@ -2310,8 +2595,8 @@ public struct GModMetalView:
                 viewportDimensions?.logicalHeight ?? 1
             )
             let drawableViewport = SIMD2<Int>(
-                viewportDimensions?.drawableWidth ?? 1,
-                viewportDimensions?.drawableHeight ?? 1
+                drawable.texture.width,
+                drawable.texture.height
             )
             onFrame(
                 GModMetalFrameRequest(
@@ -2339,34 +2624,71 @@ public struct GModMetalView:
                 }
                 return
             }
+            let worldPair: (scene: GModMetalWorldScene, mesh: CachedWorldMesh)? = {
+                guard let scene = activeWorldScene,
+                      let mesh = cachedWorldMesh,
+                      mesh.identifier == scene.meshIdentifier,
+                      mesh.vertexCount == scene.metalPositions.count,
+                      mesh.indexCount == scene.indices.count else { return nil }
+                return (scene, mesh)
+            }()
+            var waterPlan: GModMetalWaterRenderTargetPlan?
+            var waterTargets: CachedWaterRenderTargets?
+            if let pair = worldPair,
+               let plan = GModMetalWaterRenderTargetContract.plan(
+                materialRanges: pair.scene.materialRanges,
+                cameraZ: pair.scene.cameraEye.z
+               ) {
+                do {
+                    let targets = try waterRenderTargets(
+                        device: device,
+                        width: Swift.max(1, drawableViewport.x),
+                        height: Swift.max(1, drawableViewport.y),
+                        colorPixelFormat: drawable.texture.pixelFormat,
+                        depthPixelFormat:
+                            descriptor.depthAttachment.texture?.pixelFormat ??
+                                .depth32Float
+                    )
+                    waterPlan = plan
+                    waterTargets = targets
+                    waterRenderTargetIssue = nil
+                } catch {
+                    waterRenderTargetIssue = String(describing: error)
+                }
+            } else {
+                waterRenderTargetIssue = nil
+            }
+
+            let skyDescriptor = descriptor.copy() as! MTLRenderPassDescriptor
+            if let waterTargets {
+                skyDescriptor.colorAttachments[0].texture =
+                    waterTargets.refractionColor
+                skyDescriptor.depthAttachment.texture =
+                    waterTargets.refractionDepth
+            }
+            skyDescriptor.colorAttachments[0].storeAction = .store
+            skyDescriptor.depthAttachment.storeAction = .dontCare
             var storedSkyColor = false
-            if let scene = activeWorldScene,
-               let mesh = cachedWorldMesh,
-               mesh.identifier == scene.meshIdentifier,
-               mesh.vertexCount == scene.metalPositions.count,
-               mesh.indexCount == scene.indices.count {
+            if let pair = worldPair {
                 worldTextureUploadFailureReason = nil
-                // An iPad GPU may keep this attachment in tile memory until
-                // the encoder ends. The following ordinary-world pass loads
-                // the sky color, so make that inter-pass store explicit rather
-                // than depending on the MTKView descriptor's transient
-                // default and then mutating the same descriptor in place.
-                descriptor.colorAttachments[0].storeAction = .store
-                descriptor.depthAttachment.storeAction = .dontCare
                 guard let skyEncoder = commandBuffer.makeRenderCommandEncoder(
-                    descriptor: descriptor
+                    descriptor: skyDescriptor
                 ) else {
                     worldFramePresentationSink.fail(
-                        meshIdentifier: scene.meshIdentifier,
+                        meshIdentifier: pair.scene.meshIdentifier,
                         reason: .renderEncoderCreationFailed
                     )
                     return
                 }
                 skyEncoder.setCullMode(.none)
                 drawWorldSky(
-                    scene: scene,
-                    mesh: mesh,
+                    scene: pair.scene,
+                    mesh: pair.mesh,
                     viewport: drawableViewport,
+                    metalCameraEye: pair.scene.metalCameraEye,
+                    metalCameraForward: pair.scene.metalCameraForward,
+                    metalCameraUp: pair.scene.metalCameraUp,
+                    rendersWater: waterTargets == nil,
                     device: device,
                     solidPipeline: worldPipeline,
                     texturedPipeline: worldTexturedPipeline,
@@ -2384,22 +2706,31 @@ public struct GModMetalView:
                     skyboxSampler: skyboxSamplerState,
                     encoder: skyEncoder
                 )
+                drawWorldSunSprites(
+                    scene: pair.scene,
+                    viewport: drawableViewport,
+                    metalCameraEye: pair.scene.metalCameraEye,
+                    metalCameraForward: pair.scene.metalCameraForward,
+                    metalCameraUp: pair.scene.metalCameraUp,
+                    device: device,
+                    pipeline: worldSunSpritePipeline,
+                    depthState: skyboxDepthState,
+                    encoder: skyEncoder
+                )
                 skyEncoder.endEncoding()
                 storedSkyColor = true
             } else {
                 worldTextureUploadFailureReason = nil
             }
-            // Metal copies a descriptor when an encoder is created, but an
-            // independent value keeps the tile store/load boundary explicit
-            // on physical iPad hardware. Sky depth is intentionally discarded;
-            // Source starts the ordinary world with a fresh depth lifetime.
-            let worldDescriptor = descriptor.copy() as! MTLRenderPassDescriptor
+
+            let worldDescriptor = skyDescriptor.copy() as! MTLRenderPassDescriptor
             if storedSkyColor {
                 worldDescriptor.colorAttachments[0].loadAction = .load
             }
             worldDescriptor.colorAttachments[0].storeAction = .store
             worldDescriptor.depthAttachment.loadAction = .clear
-            worldDescriptor.depthAttachment.storeAction = .dontCare
+            worldDescriptor.depthAttachment.storeAction =
+                waterTargets == nil ? .dontCare : .store
             guard let encoder = commandBuffer.makeRenderCommandEncoder(
                 descriptor: worldDescriptor
             ) else {
@@ -2411,22 +2742,32 @@ public struct GModMetalView:
                 }
                 return
             }
-
             encoder.setDepthStencilState(depthState)
             encoder.setCullMode(.none)
 
             var encodedWorldIdentifier: String?
-            if
-                let scene = activeWorldScene,
-                let mesh = cachedWorldMesh,
-                mesh.identifier == scene.meshIdentifier,
-                mesh.vertexCount == scene.metalPositions.count,
-                mesh.indexCount == scene.indices.count
-            {
+            if let pair = worldPair {
+                let refractionClipPlane: SIMD4<Float>
+                if waterTargets != nil, let waterPlan {
+                    refractionClipPlane =
+                        GModMetalWaterClipPlaneContract.refraction(
+                            sourceSurfaceZ: waterPlan.sourceSurfaceZ,
+                            sourceCameraZ: pair.scene.cameraEye.z
+                        )
+                } else {
+                    refractionClipPlane =
+                        GModMetalWaterClipPlaneContract.disabled
+                }
                 let drawResult = drawWorld(
-                    scene: scene,
-                    mesh: mesh,
+                    scene: pair.scene,
+                    mesh: pair.mesh,
                     viewport: drawableViewport,
+                    metalCameraEye: pair.scene.metalCameraEye,
+                    metalCameraForward: pair.scene.metalCameraForward,
+                    metalCameraUp: pair.scene.metalCameraUp,
+                    clipPlane: refractionClipPlane,
+                    rendersWater: waterTargets == nil,
+                    recordsDiagnostics: true,
                     device: device,
                     solidPipeline: worldPipeline,
                     texturedPipeline: worldTexturedPipeline,
@@ -2449,37 +2790,229 @@ public struct GModMetalView:
                 )
                 worldFramePresentationSink.publishProgress(
                     GModMetalWorldTextureUploadProgress(
-                        meshIdentifier: scene.meshIdentifier,
+                        meshIdentifier: pair.scene.meshIdentifier,
                         uploadedTextureCount: drawResult.uploadedTextureCount,
                         requiredTextureCount: drawResult.requiredTextureCount
                     )
                 )
                 if let failureReason = drawResult.failureReason {
                     worldFramePresentationSink.fail(
-                        meshIdentifier: scene.meshIdentifier,
+                        meshIdentifier: pair.scene.meshIdentifier,
                         reason: failureReason
                     )
                 } else if drawResult.isReadyForPresentation {
-                    encodedWorldIdentifier = scene.meshIdentifier
+                    encodedWorldIdentifier = pair.scene.meshIdentifier
                 }
             }
 
-            if let surfaceScene = activeSurfaceScene {
-                lastSurfaceDrawCount = drawSurface(
-                    scene: surfaceScene,
-                    device: device,
-                    solidPipeline: surfaceSolidPipeline,
-                    texturedPipeline: surfaceTexturedPipeline,
-                    depthState: surfaceDepthState,
-                    samplers: surfaceSamplerStates,
-                    encoder: encoder
-                )
-            } else {
-                lastSurfaceDrawCount = 0
-                lastSurfaceDroppedDrawCount = 0
+            if waterTargets == nil {
+                if let surfaceScene = activeSurfaceScene {
+                    lastSurfaceDrawCount = drawSurface(
+                        scene: surfaceScene,
+                        device: device,
+                        solidPipeline: surfaceSolidPipeline,
+                        texturedPipeline: surfaceTexturedPipeline,
+                        depthState: surfaceDepthState,
+                        samplers: surfaceSamplerStates,
+                        encoder: encoder
+                    )
+                } else {
+                    lastSurfaceDrawCount = 0
+                    lastSurfaceDroppedDrawCount = 0
+                }
             }
-
             encoder.endEncoding()
+
+            if let pair = worldPair,
+               let waterPlan,
+               let waterTargets {
+                if waterPlan.requiresReflection {
+                    let reflected =
+                        GModMetalWaterReflectionContract.reflectedCamera(
+                            eye: pair.scene.metalCameraEye,
+                            forward: pair.scene.metalCameraForward,
+                            up: pair.scene.metalCameraUp,
+                            sourceSurfaceZ: waterPlan.sourceSurfaceZ
+                        )
+                    let reflectionSkyDescriptor =
+                        descriptor.copy() as! MTLRenderPassDescriptor
+                    reflectionSkyDescriptor.colorAttachments[0].texture =
+                        waterTargets.reflectionColor
+                    reflectionSkyDescriptor.colorAttachments[0].storeAction = .store
+                    reflectionSkyDescriptor.depthAttachment.texture =
+                        waterTargets.reflectionDepth
+                    reflectionSkyDescriptor.depthAttachment.storeAction = .dontCare
+                    guard let reflectionSkyEncoder =
+                        commandBuffer.makeRenderCommandEncoder(
+                            descriptor: reflectionSkyDescriptor
+                        ) else {
+                        worldFramePresentationSink.fail(
+                            meshIdentifier: pair.scene.meshIdentifier,
+                            reason: .renderEncoderCreationFailed
+                        )
+                        return
+                    }
+                    reflectionSkyEncoder.setCullMode(.none)
+                    drawWorldSky(
+                        scene: pair.scene,
+                        mesh: pair.mesh,
+                        viewport: drawableViewport,
+                        metalCameraEye: reflected.eye,
+                        metalCameraForward: reflected.forward,
+                        metalCameraUp: reflected.up,
+                        clipPlane:
+                            GModMetalWaterClipPlaneContract.reflection(
+                                sourceSurfaceZ: waterPlan.sourceSurfaceZ,
+                                sourceCameraZ: pair.scene.cameraEye.z
+                            ),
+                        rendersWater: false,
+                        device: device,
+                        solidPipeline: worldPipeline,
+                        texturedPipeline: worldTexturedPipeline,
+                        lightmappedPipeline: worldLightmappedPipeline,
+                        texturedLightmappedPipeline:
+                            worldTexturedLightmappedPipeline,
+                        missingMaterialPipeline: worldMissingMaterialPipeline,
+                        skyboxPipeline: worldSkyboxPipeline,
+                        waterSolidPipeline: worldWaterSolidPipeline,
+                        waterNormalPipeline: worldWaterNormalPipeline,
+                        worldDepthState: depthState,
+                        skyboxDepthState: skyboxDepthState,
+                        waterDepthState: waterDepthState,
+                        worldSampler: worldSamplerState,
+                        lightmapSampler: worldLightmapSamplerState,
+                        skyboxSampler: skyboxSamplerState,
+                        encoder: reflectionSkyEncoder
+                    )
+                    drawWorldSunSprites(
+                        scene: pair.scene,
+                        viewport: drawableViewport,
+                        metalCameraEye: reflected.eye,
+                        metalCameraForward: reflected.forward,
+                        metalCameraUp: reflected.up,
+                        device: device,
+                        pipeline: worldSunSpritePipeline,
+                        depthState: skyboxDepthState,
+                        encoder: reflectionSkyEncoder
+                    )
+                    reflectionSkyEncoder.endEncoding()
+
+                    let reflectionWorldDescriptor =
+                        reflectionSkyDescriptor.copy()
+                            as! MTLRenderPassDescriptor
+                    reflectionWorldDescriptor.colorAttachments[0].loadAction = .load
+                    reflectionWorldDescriptor.depthAttachment.loadAction = .clear
+                    reflectionWorldDescriptor.depthAttachment.storeAction = .store
+                    guard let reflectionEncoder =
+                        commandBuffer.makeRenderCommandEncoder(
+                            descriptor: reflectionWorldDescriptor
+                        ) else {
+                        worldFramePresentationSink.fail(
+                            meshIdentifier: pair.scene.meshIdentifier,
+                            reason: .renderEncoderCreationFailed
+                        )
+                        return
+                    }
+                    reflectionEncoder.setCullMode(.none)
+                    _ = drawWorld(
+                        scene: pair.scene,
+                        mesh: pair.mesh,
+                        viewport: drawableViewport,
+                        metalCameraEye: reflected.eye,
+                        metalCameraForward: reflected.forward,
+                        metalCameraUp: reflected.up,
+                        clipPlane:
+                            GModMetalWaterClipPlaneContract.reflection(
+                                sourceSurfaceZ: waterPlan.sourceSurfaceZ,
+                                sourceCameraZ: pair.scene.cameraEye.z
+                            ),
+                        rendersWater: false,
+                        recordsDiagnostics: false,
+                        device: device,
+                        solidPipeline: worldPipeline,
+                        texturedPipeline: worldTexturedPipeline,
+                        lightmappedPipeline: worldLightmappedPipeline,
+                        texturedLightmappedPipeline:
+                            worldTexturedLightmappedPipeline,
+                        missingMaterialPipeline: worldMissingMaterialPipeline,
+                        dynamicEntityTexturedPipeline:
+                            dynamicEntityTexturedPipeline,
+                        dynamicEntityMissingMaterialPipeline:
+                            dynamicEntityMissingMaterialPipeline,
+                        skyboxPipeline: worldSkyboxPipeline,
+                        waterSolidPipeline: worldWaterSolidPipeline,
+                        waterNormalPipeline: worldWaterNormalPipeline,
+                        worldDepthState: depthState,
+                        skyboxDepthState: skyboxDepthState,
+                        waterDepthState: waterDepthState,
+                        worldSampler: worldSamplerState,
+                        lightmapSampler: worldLightmapSamplerState,
+                        skyboxSampler: skyboxSamplerState,
+                        encoder: reflectionEncoder
+                    )
+                    reflectionEncoder.endEncoding()
+                }
+
+                let compositeDescriptor =
+                    descriptor.copy() as! MTLRenderPassDescriptor
+                compositeDescriptor.colorAttachments[0].texture = drawable.texture
+                compositeDescriptor.colorAttachments[0].loadAction = .dontCare
+                compositeDescriptor.colorAttachments[0].storeAction = .store
+                compositeDescriptor.depthAttachment.texture =
+                    waterTargets.refractionDepth
+                compositeDescriptor.depthAttachment.loadAction = .load
+                compositeDescriptor.depthAttachment.storeAction = .dontCare
+                guard let compositeEncoder =
+                    commandBuffer.makeRenderCommandEncoder(
+                        descriptor: compositeDescriptor
+                    ) else {
+                    worldFramePresentationSink.fail(
+                        meshIdentifier: pair.scene.meshIdentifier,
+                        reason: .renderEncoderCreationFailed
+                    )
+                    return
+                }
+                compositeEncoder.setCullMode(.none)
+                compositeEncoder.setDepthStencilState(surfaceDepthState)
+                compositeEncoder.setRenderPipelineState(worldSceneCopyPipeline)
+                compositeEncoder.setFragmentTexture(
+                    waterTargets.refractionColor,
+                    index: 2
+                )
+                compositeEncoder.drawPrimitives(
+                    type: .triangle,
+                    vertexStart: 0,
+                    vertexCount: 3
+                )
+                drawWorldWaterComposite(
+                    scene: pair.scene,
+                    mesh: pair.mesh,
+                    plan: waterPlan,
+                    targets: waterTargets,
+                    viewport: drawableViewport,
+                    device: device,
+                    solidPipeline: worldWaterCompositeSolidPipeline,
+                    normalPipeline: worldWaterCompositeNormalPipeline,
+                    waterDepthState: waterDepthState,
+                    worldSampler: worldSamplerState,
+                    encoder: compositeEncoder
+                )
+                if let surfaceScene = activeSurfaceScene {
+                    lastSurfaceDrawCount = drawSurface(
+                        scene: surfaceScene,
+                        device: device,
+                        solidPipeline: surfaceSolidPipeline,
+                        texturedPipeline: surfaceTexturedPipeline,
+                        depthState: surfaceDepthState,
+                        samplers: surfaceSamplerStates,
+                        encoder: compositeEncoder
+                    )
+                } else {
+                    lastSurfaceDrawCount = 0
+                    lastSurfaceDroppedDrawCount = 0
+                }
+                compositeEncoder.endEncoding()
+            }
 
             if let encodedWorldIdentifier,
                worldFramePresentationSink.reserve(encodedWorldIdentifier) {
@@ -2510,6 +3043,10 @@ public struct GModMetalView:
             scene: GModMetalWorldScene,
             mesh: CachedWorldMesh,
             viewport: SIMD2<Int>,
+            metalCameraEye: SIMD3<Float>,
+            metalCameraForward: SIMD3<Float>,
+            metalCameraUp: SIMD3<Float>,
+            rendersWater: Bool,
             device: MTLDevice,
             solidPipeline: MTLRenderPipelineState,
             texturedPipeline: MTLRenderPipelineState,
@@ -2530,7 +3067,8 @@ public struct GModMetalView:
             let width = Swift.max(1, viewport.x)
             let height = Swift.max(1, viewport.y)
             let sky2DProjection = Self.makePerspectiveMatrix(
-                verticalFieldOfViewRadians: 75 * .pi / 180,
+                verticalFieldOfViewRadians:
+                    GModMetalSourceFOVContract.defaultWorldVerticalRadians,
                 aspect: Float(width) / Float(height),
                 near: 1,
                 far: 65_536
@@ -2544,12 +3082,28 @@ public struct GModMetalView:
             ) {
                 let view = Self.makeViewMatrix(
                     eye: eye,
-                    forward: scene.metalCameraForward,
-                    up: scene.metalCameraUp
+                    forward: metalCameraForward,
+                    up: metalCameraUp
                 )
+                let lighting = scene.environmentLighting
+                let lightDirection = lighting?.metalDirectionToLight ?? .zero
+                let direct = lighting?.directLinearRGB ?? .zero
+                let ambient = lighting?.ambientLinearRGB ?? .zero
                 var uniforms = WorldUniforms(
                     viewProjection: simd_mul(projection, view),
-                    lightDirection: SIMD4<Float>(0.35, 0.80, 0.48, 0)
+                    lightDirection: SIMD4<Float>(
+                        lightDirection.x,
+                        lightDirection.y,
+                        lightDirection.z,
+                        lighting == nil ? 0 : 1
+                    ),
+                    directLinearRGB: SIMD4<Float>(
+                        direct.x, direct.y, direct.z, 0
+                    ),
+                    ambientLinearRGB: SIMD4<Float>(
+                        ambient.x, ambient.y, ambient.z, 0
+                    ),
+                    clipPlane: GModMetalWaterClipPlaneContract.disabled
                 )
                 withUnsafeBytes(of: &uniforms) { bytes in
                     guard let address = bytes.baseAddress else { return }
@@ -2627,13 +3181,14 @@ public struct GModMetalView:
                 scale: sky3D.scale
             )
             let sky3DProjection = Self.makePerspectiveMatrix(
-                verticalFieldOfViewRadians: 75 * .pi / 180,
+                verticalFieldOfViewRadians:
+                    GModMetalSourceFOVContract.defaultWorldVerticalRadians,
                 aspect: Float(width) / Float(height),
                 near: clipPlanes.near,
                 far: clipPlanes.far
             )
             setUniforms(
-                eye: scene.metalCameraEye,
+                eye: metalCameraEye,
                 projection: sky3DProjection
             )
             encoder.setDepthStencilState(worldDepthState)
@@ -2695,6 +3250,7 @@ public struct GModMetalView:
                 draw(range)
             }
 
+            guard rendersWater else { return }
             let skyCameraZ = GModMetalSky3DProjectionContract.sourceCameraEye(
                 worldEye: scene.cameraEye,
                 sky: sky3D
@@ -2720,7 +3276,7 @@ public struct GModMetalView:
                 )
                 var uniforms = WorldWaterUniforms(
                     fogColorAndAlpha: SIMD4<Float>(
-                        material.fogColor * alpha,
+                        material.fogColor,
                         alpha
                     ),
                     scrollDirectionRateAndTime: SIMD4<Float>(
@@ -2728,6 +3284,12 @@ public struct GModMetalView:
                         direction.y,
                         material.textureScrollRate ?? 0,
                         scene.sourceFixedTime
+                    ),
+                    sourceAmountsAndViewport: SIMD4<Float>(
+                        material.reflectionAmount ?? 0,
+                        material.refractionAmount ?? 0,
+                        Float(width),
+                        Float(height)
                     )
                 )
                 withUnsafeBytes(of: &uniforms) { bytes in
@@ -2765,10 +3327,116 @@ public struct GModMetalView:
             }
         }
 
+        /// Draws Source's two directional `env_sun` glow layers after the
+        /// completed 2D/3D sky. The next ordinary-world pass clears depth and
+        /// overwrites these pixels with BSP/Studio geometry, reproducing the
+        /// sky-only obstruction boundary without a fabricated screen position.
+        private func drawWorldSunSprites(
+            scene: GModMetalWorldScene,
+            viewport: SIMD2<Int>,
+            metalCameraEye: SIMD3<Float>,
+            metalCameraForward: SIMD3<Float>,
+            metalCameraUp: SIMD3<Float>,
+            device: MTLDevice,
+            pipeline: MTLRenderPipelineState,
+            depthState: MTLDepthStencilState,
+            encoder: MTLRenderCommandEncoder
+        ) {
+            guard GModMetalSkyVisibilityRenderContract.draws2D(
+                scene.skyboxVisibility
+            ), !scene.sunSprites.isEmpty else { return }
+            let width = Swift.max(1, viewport.x)
+            let height = Swift.max(1, viewport.y)
+            let projection = Self.makePerspectiveMatrix(
+                verticalFieldOfViewRadians:
+                    GModMetalSourceFOVContract.defaultWorldVerticalRadians,
+                aspect: Float(width) / Float(height),
+                near: 1,
+                far: 65_536
+            )
+            let view = Self.makeViewMatrix(
+                eye: metalCameraEye,
+                forward: metalCameraForward,
+                up: metalCameraUp
+            )
+            let viewProjection = simd_mul(projection, view)
+            var uploadBudget = WorldUploadBudget()
+            encoder.setRenderPipelineState(pipeline)
+            encoder.setDepthStencilState(depthState)
+
+            for sun in scene.sunSprites {
+                for layer in [sun.core, sun.overlay] {
+                    guard let bitmap = layer.bitmap,
+                          let parameters =
+                            GModMetalSunSpriteRenderContract.parameters(
+                                sun: sun,
+                                layer: layer,
+                                cameraEye: metalCameraEye,
+                                cameraForward: metalCameraForward
+                            ),
+                          let texture = worldTexture(
+                            for: bitmap,
+                            device: device,
+                            uploadBudget: &uploadBudget
+                          ) else { continue }
+                    let configuration = GModMetalWorldSamplerConfiguration(
+                        bitmap: bitmap,
+                        renderLayer: .sky2D
+                    )
+                    guard let sampler = samplerStateForWorldTexture(
+                        for: configuration,
+                        device: device
+                    ) else { continue }
+                    var uniforms = WorldSunSpriteUniforms(
+                        viewProjection: viewProjection,
+                        basePosition: SIMD4<Float>(parameters.basePosition, 1),
+                        rightExtent: SIMD4<Float>(parameters.rightExtent, 0),
+                        upExtent: SIMD4<Float>(parameters.upExtent, 0),
+                        displayRGBAndOpacity: SIMD4<Float>(
+                            parameters.displayRGB,
+                            parameters.opacity
+                        ),
+                        hdrColorScale: SIMD4<Float>(
+                            parameters.hdrColorScale,
+                            0,
+                            0,
+                            0
+                        )
+                    )
+                    withUnsafeBytes(of: &uniforms) { bytes in
+                        guard let address = bytes.baseAddress else { return }
+                        encoder.setVertexBytes(
+                            address,
+                            length: bytes.count,
+                            index: 1
+                        )
+                        encoder.setFragmentBytes(
+                            address,
+                            length: bytes.count,
+                            index: 1
+                        )
+                    }
+                    encoder.setFragmentTexture(texture, index: 0)
+                    encoder.setFragmentSamplerState(sampler, index: 0)
+                    encoder.drawPrimitives(
+                        type: .triangleStrip,
+                        vertexStart: 0,
+                        vertexCount: 4
+                    )
+                }
+            }
+        }
+
         private func drawWorld(
             scene: GModMetalWorldScene,
             mesh: CachedWorldMesh,
             viewport: SIMD2<Int>,
+            metalCameraEye: SIMD3<Float>,
+            metalCameraForward: SIMD3<Float>,
+            metalCameraUp: SIMD3<Float>,
+            clipPlane: SIMD4<Float>,
+            rendersWater: Bool,
+            recordsDiagnostics: Bool,
             device: MTLDevice,
             solidPipeline: MTLRenderPipelineState,
             texturedPipeline: MTLRenderPipelineState,
@@ -2792,7 +3460,8 @@ public struct GModMetalView:
             let height = Swift.max(1, viewport.y)
             let aspect = Float(width) / Float(height)
             let projection = Self.makePerspectiveMatrix(
-                verticalFieldOfViewRadians: 75 * .pi / 180,
+                verticalFieldOfViewRadians:
+                    GModMetalSourceFOVContract.defaultWorldVerticalRadians,
                 aspect: aspect,
                 near: 1,
                 far: 65_536
@@ -2818,12 +3487,28 @@ public struct GModMetalView:
             func setUniforms(eye: SIMD3<Float>) {
                 let view = Self.makeViewMatrix(
                     eye: eye,
-                    forward: scene.metalCameraForward,
-                    up: scene.metalCameraUp
+                    forward: metalCameraForward,
+                    up: metalCameraUp
                 )
+                let lighting = scene.environmentLighting
+                let lightDirection = lighting?.metalDirectionToLight ?? .zero
+                let direct = lighting?.directLinearRGB ?? .zero
+                let ambient = lighting?.ambientLinearRGB ?? .zero
                 var uniforms = WorldUniforms(
                     viewProjection: simd_mul(projection, view),
-                    lightDirection: SIMD4<Float>(0.35, 0.80, 0.48, 0)
+                    lightDirection: SIMD4<Float>(
+                        lightDirection.x,
+                        lightDirection.y,
+                        lightDirection.z,
+                        lighting == nil ? 0 : 1
+                    ),
+                    directLinearRGB: SIMD4<Float>(
+                        direct.x, direct.y, direct.z, 0
+                    ),
+                    ambientLinearRGB: SIMD4<Float>(
+                        ambient.x, ambient.y, ambient.z, 0
+                    ),
+                    clipPlane: clipPlane
                 )
                 withUnsafeBytes(of: &uniforms) { bytes in
                     guard let address = bytes.baseAddress else { return }
@@ -2850,7 +3535,7 @@ public struct GModMetalView:
                 )
             }
 
-            setUniforms(eye: scene.metalCameraEye)
+            setUniforms(eye: metalCameraEye)
             encoder.setDepthStencilState(worldDepthState)
             encoder.setFragmentSamplerState(worldSampler, index: 0)
             let lightmapTexture: MTLTexture?
@@ -2950,14 +3635,15 @@ public struct GModMetalView:
                 lastDynamicEntityCheckerRangeCount = 0
             }
 
-            encoder.setDepthStencilState(waterDepthState)
-            encoder.setFragmentSamplerState(worldSampler, index: 0)
             var waterRenderedRangeCount = 0
             var waterNormalMappedRangeCount = 0
             var waterMissingMaterialRangeCount = 0
             var waterPendingNormalRangeCount = 0
-            for range in ranges where
-                range.renderLayer == .world && range.waterSurface != nil {
+            if rendersWater {
+                encoder.setDepthStencilState(waterDepthState)
+                encoder.setFragmentSamplerState(worldSampler, index: 0)
+                for range in ranges where
+                    range.renderLayer == .world && range.waterSurface != nil {
                 guard let surface = range.waterSurface,
                       let material = range.waterMaterial else {
                     waterMissingMaterialRangeCount += 1
@@ -2985,7 +3671,7 @@ public struct GModMetalView:
                 )
                 var uniforms = WorldWaterUniforms(
                     fogColorAndAlpha: SIMD4<Float>(
-                        material.fogColor * alpha,
+                        material.fogColor,
                         alpha
                     ),
                     scrollDirectionRateAndTime: SIMD4<Float>(
@@ -2993,6 +3679,12 @@ public struct GModMetalView:
                         direction.y,
                         material.textureScrollRate ?? 0,
                         scene.sourceFixedTime
+                    ),
+                    sourceAmountsAndViewport: SIMD4<Float>(
+                        material.reflectionAmount ?? 0,
+                        material.refractionAmount ?? 0,
+                        Float(width),
+                        Float(height)
                     )
                 )
                 withUnsafeBytes(of: &uniforms) { bytes in
@@ -3036,14 +3728,18 @@ public struct GModMetalView:
                 draw(range)
                 waterRenderedRangeCount += 1
             }
-            lastWorldTexturedRangeCount = texturedRangeCount
-            lastWorldMissingMaterialRangeCount = missingRangeCount
-            lastWorldPendingTextureRangeCount = pendingRangeCount
-            lastWorldLightmappedRangeCount = lightmappedRangeCount
-            lastWaterRenderedRangeCount = waterRenderedRangeCount
-            lastWaterNormalMappedRangeCount = waterNormalMappedRangeCount
-            lastWaterMissingMaterialRangeCount = waterMissingMaterialRangeCount
-            lastWaterPendingNormalRangeCount = waterPendingNormalRangeCount
+            }
+            if recordsDiagnostics {
+                lastWorldTexturedRangeCount = texturedRangeCount
+                lastWorldMissingMaterialRangeCount = missingRangeCount
+                lastWorldPendingTextureRangeCount = pendingRangeCount
+                lastWorldLightmappedRangeCount = lightmappedRangeCount
+                lastWaterRenderedRangeCount = waterRenderedRangeCount
+                lastWaterNormalMappedRangeCount = waterNormalMappedRangeCount
+                lastWaterMissingMaterialRangeCount = waterMissingMaterialRangeCount
+                lastWaterPendingNormalRangeCount = waterPendingNormalRangeCount
+                lastWaterRenderTargetRangeCount = 0
+            }
 
             let requiredTextures = requiredWorldTextures(for: scene)
             let uploadedTextureCount = requiredTextures.reduce(into: 0) {
@@ -3058,6 +3754,179 @@ public struct GModMetalView:
                 requiredTextureCount: requiredTextures.count,
                 failureReason: worldTextureUploadFailureReason
             )
+        }
+
+        private func drawWorldWaterComposite(
+            scene: GModMetalWorldScene,
+            mesh: CachedWorldMesh,
+            plan: GModMetalWaterRenderTargetPlan,
+            targets: CachedWaterRenderTargets,
+            viewport: SIMD2<Int>,
+            device: MTLDevice,
+            solidPipeline: MTLRenderPipelineState,
+            normalPipeline: MTLRenderPipelineState,
+            waterDepthState: MTLDepthStencilState,
+            worldSampler: MTLSamplerState,
+            encoder: MTLRenderCommandEncoder
+        ) {
+            let width = Swift.max(1, viewport.x)
+            let height = Swift.max(1, viewport.y)
+            let projection = Self.makePerspectiveMatrix(
+                verticalFieldOfViewRadians:
+                    GModMetalSourceFOVContract.defaultWorldVerticalRadians,
+                aspect: Float(width) / Float(height),
+                near: 1,
+                far: 65_536
+            )
+            let view = Self.makeViewMatrix(
+                eye: scene.metalCameraEye,
+                forward: scene.metalCameraForward,
+                up: scene.metalCameraUp
+            )
+            let lighting = scene.environmentLighting
+            let lightDirection = lighting?.metalDirectionToLight ?? .zero
+            let direct = lighting?.directLinearRGB ?? .zero
+            let ambient = lighting?.ambientLinearRGB ?? .zero
+            var worldUniforms = WorldUniforms(
+                viewProjection: simd_mul(projection, view),
+                lightDirection: SIMD4<Float>(
+                    lightDirection.x,
+                    lightDirection.y,
+                    lightDirection.z,
+                    lighting == nil ? 0 : 1
+                ),
+                directLinearRGB: SIMD4<Float>(direct.x, direct.y, direct.z, 0),
+                ambientLinearRGB: SIMD4<Float>(ambient.x, ambient.y, ambient.z, 0),
+                clipPlane: GModMetalWaterClipPlaneContract.disabled
+            )
+            withUnsafeBytes(of: &worldUniforms) { bytes in
+                guard let address = bytes.baseAddress else { return }
+                encoder.setVertexBytes(address, length: bytes.count, index: 1)
+                encoder.setFragmentBytes(address, length: bytes.count, index: 1)
+            }
+            encoder.setVertexBuffer(mesh.vertexBuffer, offset: 0, index: 0)
+            encoder.setDepthStencilState(waterDepthState)
+            encoder.setFragmentTexture(targets.refractionColor, index: 2)
+            encoder.setFragmentTexture(
+                plan.requiresReflection
+                    ? targets.reflectionColor
+                    : targets.refractionColor,
+                index: 3
+            )
+            encoder.setFragmentTexture(targets.refractionDepth, index: 4)
+            encoder.setFragmentTexture(
+                plan.requiresReflection
+                    ? targets.reflectionDepth
+                    : targets.refractionDepth,
+                index: 5
+            )
+
+            var uploadBudget = WorldUploadBudget()
+            var rendered = 0
+            var normalMapped = 0
+            var missing = 0
+            var pendingNormal = 0
+            for range in scene.materialRanges where
+                range.renderLayer == .world && range.waterSurface != nil {
+                guard let surface = range.waterSurface,
+                      surface.surfaceZ.bitPattern == plan.sourceSurfaceZ.bitPattern,
+                      let material = range.waterMaterial else {
+                    missing += 1
+                    continue
+                }
+                guard GModMetalWaterRenderContract.shouldRender(
+                    material,
+                    surface: surface,
+                    cameraZ: scene.cameraEye.z
+                ) else { continue }
+                let reflectionAmount = material.reflectionAmount ?? 0
+                let refractionAmount = material.refractionAmount ?? 0
+                guard reflectionAmount > 0 || refractionAmount > 0,
+                      let fallbackAlpha =
+                        GModMetalWaterRenderContract.fallbackAlpha(material)
+                else {
+                    missing += 1
+                    continue
+                }
+                let angleRadians = (material.textureScrollAngleDegrees ?? 0) *
+                    .pi / 180
+                let direction = SIMD2<Float>(
+                    cos(angleRadians),
+                    sin(angleRadians)
+                )
+                var waterUniforms = WorldWaterUniforms(
+                    fogColorAndAlpha: SIMD4<Float>(
+                        material.fogColor,
+                        fallbackAlpha
+                    ),
+                    scrollDirectionRateAndTime: SIMD4<Float>(
+                        direction.x,
+                        direction.y,
+                        material.textureScrollRate ?? 0,
+                        scene.sourceFixedTime
+                    ),
+                    sourceAmountsAndViewport: SIMD4<Float>(
+                        reflectionAmount,
+                        refractionAmount,
+                        Float(width),
+                        Float(height)
+                    )
+                )
+                withUnsafeBytes(of: &waterUniforms) { bytes in
+                    guard let address = bytes.baseAddress else { return }
+                    encoder.setFragmentBytes(
+                        address,
+                        length: bytes.count,
+                        index: 2
+                    )
+                }
+
+                if let normalBitmap = material.normalBitmap {
+                    if let normalTexture = worldTexture(
+                        for: normalBitmap,
+                        device: device,
+                        uploadBudget: &uploadBudget,
+                        isSRGB: false
+                    ) {
+                        encoder.setRenderPipelineState(normalPipeline)
+                        encoder.setFragmentTexture(normalTexture, index: 0)
+                        let configuration = GModMetalWorldSamplerConfiguration(
+                            bitmap: normalBitmap,
+                            renderLayer: range.renderLayer
+                        )
+                        if let sampler = samplerStateForWorldTexture(
+                            for: configuration,
+                            device: device
+                        ) {
+                            encoder.setFragmentSamplerState(sampler, index: 0)
+                        } else {
+                            encoder.setFragmentSamplerState(worldSampler, index: 0)
+                        }
+                        normalMapped += 1
+                    } else {
+                        encoder.setRenderPipelineState(solidPipeline)
+                        encoder.setFragmentTexture(nil, index: 0)
+                        pendingNormal += 1
+                    }
+                } else {
+                    encoder.setRenderPipelineState(solidPipeline)
+                    encoder.setFragmentTexture(nil, index: 0)
+                }
+                encoder.drawIndexedPrimitives(
+                    type: .triangle,
+                    indexCount: range.indexCount,
+                    indexType: .uint32,
+                    indexBuffer: mesh.indexBuffer,
+                    indexBufferOffset:
+                        range.firstIndex * MemoryLayout<UInt32>.stride
+                )
+                rendered += 1
+            }
+            lastWaterRenderedRangeCount = rendered
+            lastWaterNormalMappedRangeCount = normalMapped
+            lastWaterMissingMaterialRangeCount = missing
+            lastWaterPendingNormalRangeCount = pendingNormal
+            lastWaterRenderTargetRangeCount = rendered
         }
 
         private func drawDynamicEntities(
@@ -3946,8 +4815,10 @@ public struct GModMetalView:
                     "\(diagnostics.waterMaterialRangeCount), normal " +
                     "\(lastWaterNormalMappedRangeCount), missing " +
                     "\(lastWaterMissingMaterialRangeCount), normal pending " +
-                    "\(lastWaterPendingNormalRangeCount), unsupported bump " +
+                    "\(lastWaterPendingNormalRangeCount), RT " +
+                    "\(lastWaterRenderTargetRangeCount), unsupported bump " +
                     "\(diagnostics.unsupportedWaterBumpTextureNames.count))" +
+                    (waterRenderTargetIssue.map { "; water RT: \($0)" } ?? "") +
                     (missingPreview.isEmpty ? "" : "; unresolved: \(missingPreview)")
             } else if let worldSceneIssue {
                 rendererStats =
@@ -4067,17 +4938,32 @@ public struct GModMetalView:
         {
             float4x4 viewProjection;
             float4 lightDirection;
+            float4 directLinearRGB;
+            float4 ambientLinearRGB;
+            float4 clipPlane;
         };
 
         struct WorldWaterUniforms
         {
             float4 fogColorAndAlpha;
             float4 scrollDirectionRateAndTime;
+            float4 sourceAmountsAndViewport;
+        };
+
+        struct WorldSunSpriteUniforms
+        {
+            float4x4 viewProjection;
+            float4 basePosition;
+            float4 rightExtent;
+            float4 upExtent;
+            float4 displayRGBAndOpacity;
+            float4 hdrColorScale;
         };
 
         struct WorldVertexOutput
         {
             float4 position [[position]];
+            float3 worldPosition;
             float3 normal;
             float2 uv;
             float2 lightmapUV;
@@ -4098,6 +4984,7 @@ public struct GModMetalView:
             WorldVertex sourceVertex = vertices[vertexID];
             output.position =
                 uniforms.viewProjection * sourceVertex.position;
+            output.worldPosition = sourceVertex.position.xyz;
             output.normal = sourceVertex.normal.xyz;
             output.uv = sourceVertex.uv;
             output.lightmapUV = sourceVertex.lightmapUV;
@@ -4131,10 +5018,39 @@ public struct GModMetalView:
             WorldVertexOutput output;
             output.position = uniforms.viewProjection
                 * float4(worldPosition, 1.0);
+            output.worldPosition = worldPosition;
             output.normal = worldNormal;
             output.uv = sourceVertex.uv;
             output.lightmapUV = float2(0.0);
             return output;
+        }
+
+        float3 gmodWorldEnvironmentLight(
+            float3 normal,
+            constant WorldUniforms &uniforms
+        )
+        {
+            // No compiled environment is an explicit unlit fallback. This
+            // keeps the base material visible without inventing a sun vector.
+            if (uniforms.lightDirection.w < 0.5)
+            {
+                return float3(1.0);
+            }
+            float3 light = normalize(uniforms.lightDirection.xyz);
+            float diffuse = max(dot(normalize(normal), light), 0.0);
+            return uniforms.ambientLinearRGB.xyz
+                + uniforms.directLinearRGB.xyz * diffuse;
+        }
+
+        void gmodApplyWorldClip(
+            WorldVertexOutput input,
+            constant WorldUniforms &uniforms
+        )
+        {
+            if (dot(float4(input.worldPosition, 1.0), uniforms.clipPlane) < 0.0)
+            {
+                discard_fragment();
+            }
         }
 
         fragment float4 worldFragmentMain(
@@ -4144,15 +5060,14 @@ public struct GModMetalView:
                 [[buffer(1)]]
         )
         {
-            float3 normal = normalize(input.normal);
-            float3 light = normalize(uniforms.lightDirection.xyz);
-            float diffuse = max(dot(normal, light), 0.0);
-            float hemisphere = 0.18 + 0.20 * (normal.y * 0.5 + 0.5);
-            float brightness = min(1.0, hemisphere + diffuse * 0.72);
+            gmodApplyWorldClip(input, uniforms);
             float3 baseLinear = gmodDecodeDisplaySRGB(
                 float3(0.48, 0.61, 0.72)
             );
-            return gmodWorldOutput(baseLinear * brightness, 1.0);
+            return gmodWorldOutput(
+                baseLinear * gmodWorldEnvironmentLight(input.normal, uniforms),
+                1.0
+            );
         }
 
         fragment float4 worldTexturedFragmentMain(
@@ -4166,23 +5081,26 @@ public struct GModMetalView:
             sampler baseSampler [[sampler(0)]]
         )
         {
-            float3 normal = normalize(input.normal);
-            float3 light = normalize(uniforms.lightDirection.xyz);
-            float diffuse = max(dot(normal, light), 0.0);
-            float hemisphere = 0.28 + 0.24 * (normal.y * 0.5 + 0.5);
-            float brightness = min(1.0, hemisphere + diffuse * 0.62);
+            gmodApplyWorldClip(input, uniforms);
             float4 sample = baseTexture.sample(baseSampler, input.uv);
-            return gmodWorldOutput(sample.rgb * brightness, 1.0);
+            return gmodWorldOutput(
+                sample.rgb * gmodWorldEnvironmentLight(input.normal, uniforms),
+                1.0
+            );
         }
 
         fragment float4 worldLightmappedFragmentMain(
             WorldVertexOutput input [[stage_in]],
+
+            constant WorldUniforms &uniforms
+                [[buffer(1)]],
 
             texture2d<float> lightmapTexture [[texture(1)]],
 
             sampler lightmapSampler [[sampler(1)]]
         )
         {
+            gmodApplyWorldClip(input, uniforms);
             float3 baseLinear = gmodDecodeDisplaySRGB(
                 float3(0.48, 0.61, 0.72)
             );
@@ -4196,6 +5114,9 @@ public struct GModMetalView:
         fragment float4 worldTexturedLightmappedFragmentMain(
             WorldVertexOutput input [[stage_in]],
 
+            constant WorldUniforms &uniforms
+                [[buffer(1)]],
+
             texture2d<float> baseTexture [[texture(0)]],
 
             texture2d<float> lightmapTexture [[texture(1)]],
@@ -4205,6 +5126,7 @@ public struct GModMetalView:
             sampler lightmapSampler [[sampler(1)]]
         )
         {
+            gmodApplyWorldClip(input, uniforms);
             float3 baseLinear = baseTexture.sample(baseSampler, input.uv).rgb;
             float3 bakedLight = lightmapTexture.sample(
                 lightmapSampler,
@@ -4214,9 +5136,13 @@ public struct GModMetalView:
         }
 
         fragment float4 worldMissingMaterialFragmentMain(
-            WorldVertexOutput input [[stage_in]]
+            WorldVertexOutput input [[stage_in]],
+
+            constant WorldUniforms &uniforms
+                [[buffer(1)]]
         )
         {
+            gmodApplyWorldClip(input, uniforms);
             float2 tile = floor(input.uv * 8.0);
             bool alternate = fmod(tile.x + tile.y, 2.0) != 0.0;
             float3 displayColor = alternate
@@ -4240,13 +5166,67 @@ public struct GModMetalView:
             return gmodWorldOutput(sample.rgb, 1.0);
         }
 
+        struct WorldSunSpriteVertexOutput
+        {
+            float4 position [[position]];
+            float2 uv;
+        };
+
+        vertex WorldSunSpriteVertexOutput worldSunSpriteVertexMain(
+            constant WorldSunSpriteUniforms &sun [[buffer(1)]],
+            uint vertexID [[vertex_id]]
+        )
+        {
+            const float2 signs[4] = {
+                float2(-1.0,  1.0),
+                float2( 1.0,  1.0),
+                float2(-1.0, -1.0),
+                float2( 1.0, -1.0)
+            };
+            const float2 textureCoordinates[4] = {
+                float2(0.0, 1.0),
+                float2(1.0, 1.0),
+                float2(0.0, 0.0),
+                float2(1.0, 0.0)
+            };
+            float2 sign = signs[vertexID];
+            float3 position = sun.basePosition.xyz
+                + sun.rightExtent.xyz * sign.x
+                + sun.upExtent.xyz * sign.y;
+            WorldSunSpriteVertexOutput output;
+            output.position = sun.viewProjection * float4(position, 1.0);
+            output.uv = textureCoordinates[vertexID];
+            return output;
+        }
+
+        fragment float4 worldSunSpriteFragmentMain(
+            WorldSunSpriteVertexOutput input [[stage_in]],
+            constant WorldSunSpriteUniforms &sun [[buffer(1)]],
+            texture2d<float> spriteTexture [[texture(0)]],
+            sampler spriteSampler [[sampler(0)]]
+        )
+        {
+            float4 sample = spriteTexture.sample(spriteSampler, input.uv);
+            float fade = sun.displayRGBAndOpacity.a;
+            float opacity = fade * sample.a;
+            float3 modulation = gmodDecodeDisplaySRGB(
+                sun.displayRGBAndOpacity.rgb
+            );
+            // World bitmaps retain premultiplied RGBA, so texture alpha must
+            // not be multiplied into RGB a second time here.
+            float3 linear = sample.rgb * modulation * fade
+                * sun.hdrColorScale.x;
+            return gmodWorldOutput(linear, opacity);
+        }
+
         fragment float4 worldWaterSolidFragmentMain(
             constant WorldWaterUniforms &water
                 [[buffer(2)]]
         )
         {
             return gmodWorldOutput(
-                gmodDecodeDisplaySRGB(water.fogColorAndAlpha.rgb),
+                gmodDecodeDisplaySRGB(water.fogColorAndAlpha.rgb) *
+                    water.fogColorAndAlpha.a,
                 water.fogColorAndAlpha.a
             );
         }
@@ -4262,20 +5242,171 @@ public struct GModMetalView:
             sampler normalSampler [[sampler(0)]]
         )
         {
+            // The retained normal is meaningful only once scene-color targets
+            // exist. The fallback keeps the authored fog visible and does not
+            // invent a separate water light vector.
+            return gmodWorldOutput(
+                gmodDecodeDisplaySRGB(water.fogColorAndAlpha.rgb) *
+                    water.fogColorAndAlpha.a,
+                water.fogColorAndAlpha.a
+            );
+        }
+
+        struct WorldSceneCopyVertexOutput
+        {
+            float4 position [[position]];
+        };
+
+        vertex WorldSceneCopyVertexOutput worldSceneCopyVertexMain(
+            uint vertexID [[vertex_id]]
+        )
+        {
+            const float2 positions[3] = {
+                float2(-1.0, -1.0),
+                float2( 3.0, -1.0),
+                float2(-1.0,  3.0)
+            };
+            WorldSceneCopyVertexOutput output;
+            output.position = float4(positions[vertexID], 0.0, 1.0);
+            return output;
+        }
+
+        fragment float4 worldSceneCopyFragmentMain(
+            WorldSceneCopyVertexOutput input [[stage_in]],
+            texture2d<float> sceneColor [[texture(2)]]
+        )
+        {
+            constexpr sampler sceneSampler(
+                coord::normalized,
+                address::clamp_to_edge,
+                filter::linear
+            );
+            float2 size = float2(
+                sceneColor.get_width(),
+                sceneColor.get_height()
+            );
+            return sceneColor.sample(sceneSampler, input.position.xy / size);
+        }
+
+        float4 gmodWaterRenderTargetComposite(
+            WorldVertexOutput input,
+            constant WorldWaterUniforms &water,
+            float2 normalXY,
+            texture2d<float> refractionColor,
+            texture2d<float> reflectionColor,
+            depth2d<float> refractionDepth,
+            depth2d<float> reflectionDepth
+        )
+        {
+            constexpr sampler sceneSampler(
+                coord::normalized,
+                address::clamp_to_edge,
+                filter::linear
+            );
+            constexpr sampler depthSampler(
+                coord::normalized,
+                address::clamp_to_edge,
+                filter::nearest
+            );
+            float2 viewport = max(
+                water.sourceAmountsAndViewport.zw,
+                float2(1.0)
+            );
+            float2 baseUV = clamp(input.position.xy / viewport, 0.0, 1.0);
+            float2 amounts = max(
+                water.sourceAmountsAndViewport.xy,
+                float2(0.0)
+            );
+            // `$reflectamount`/`$refractamount` are the only authored scale
+            // inputs retained by this slice. Interpreting their maximum as a
+            // physical-pixel displacement avoids a resolution-dependent UV
+            // constant that does not exist in the VMT.
+            float2 candidateUV = clamp(
+                baseUV + normalXY * max(amounts.x, amounts.y) / viewport,
+                0.0,
+                1.0
+            );
+            float refractionCandidateDepth = refractionDepth.sample(
+                depthSampler,
+                candidateUV
+            );
+            float reflectionCandidateDepth = reflectionDepth.sample(
+                depthSampler,
+                candidateUV
+            );
+            // Reject distorted samples that cross in front of the water
+            // plane. Both offscreen views retain their real opaque depth.
+            float2 refractionUV = refractionCandidateDepth > input.position.z
+                ? candidateUV
+                : baseUV;
+            float2 reflectionUV = reflectionCandidateDepth > input.position.z
+                ? candidateUV
+                : baseUV;
+            float3 refracted = gmodDecodeDisplaySRGB(
+                refractionColor.sample(sceneSampler, refractionUV).rgb
+            );
+            float3 reflected = gmodDecodeDisplaySRGB(
+                reflectionColor.sample(sceneSampler, reflectionUV).rgb
+            );
+            float3 fog = gmodDecodeDisplaySRGB(water.fogColorAndAlpha.rgb);
+            float total = amounts.x + amounts.y;
+            float3 target = total > 0.0
+                ? (reflected * amounts.x + refracted * amounts.y) / total
+                : fog;
+            // Absolute VMT amount controls coverage; relative amounts choose
+            // reflection versus refraction. No material-independent mix ratio
+            // is introduced.
+            float3 composed = mix(fog, target, saturate(total));
+            return gmodWorldOutput(composed, 1.0);
+        }
+
+        fragment float4 worldWaterCompositeSolidFragmentMain(
+            WorldVertexOutput input [[stage_in]],
+            constant WorldWaterUniforms &water [[buffer(2)]],
+            texture2d<float> refractionColor [[texture(2)]],
+            texture2d<float> reflectionColor [[texture(3)]],
+            depth2d<float> refractionDepth [[texture(4)]],
+            depth2d<float> reflectionDepth [[texture(5)]]
+        )
+        {
+            return gmodWaterRenderTargetComposite(
+                input,
+                water,
+                float2(0.0),
+                refractionColor,
+                reflectionColor,
+                refractionDepth,
+                reflectionDepth
+            );
+        }
+
+        fragment float4 worldWaterCompositeNormalFragmentMain(
+            WorldVertexOutput input [[stage_in]],
+            constant WorldWaterUniforms &water [[buffer(2)]],
+            texture2d<float> normalTexture [[texture(0)]],
+            sampler normalSampler [[sampler(0)]],
+            texture2d<float> refractionColor [[texture(2)]],
+            texture2d<float> reflectionColor [[texture(3)]],
+            depth2d<float> refractionDepth [[texture(4)]],
+            depth2d<float> reflectionDepth [[texture(5)]]
+        )
+        {
             float2 direction = water.scrollDirectionRateAndTime.xy;
             float rate = water.scrollDirectionRateAndTime.z;
             float sourceTime = water.scrollDirectionRateAndTime.w;
             float2 animatedUV = input.uv + direction * rate * sourceTime;
-            float3 sampledNormal = normalize(
-                normalTexture.sample(normalSampler, animatedUV).xyz * 2.0 - 1.0
-            );
-            float normalLighting = 0.88 + 0.12 * saturate(
-                dot(sampledNormal, normalize(float3(0.35, 0.55, 0.76)))
-            );
-            return gmodWorldOutput(
-                gmodDecodeDisplaySRGB(water.fogColorAndAlpha.rgb) *
-                    normalLighting,
-                water.fogColorAndAlpha.a
+            float2 normalXY = normalTexture.sample(
+                normalSampler,
+                animatedUV
+            ).xy * 2.0 - 1.0;
+            return gmodWaterRenderTargetComposite(
+                input,
+                water,
+                normalXY,
+                refractionColor,
+                reflectionColor,
+                refractionDepth,
+                reflectionDepth
             );
         }
 
