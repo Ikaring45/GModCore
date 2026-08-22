@@ -25,6 +25,7 @@ public enum GMLuaMenuSessionError: Error, Sendable, Equatable,
     case actionQueueFull(maximum: Int)
     case invalidAction(String)
     case invalidProblemText(String)
+    case invalidConsoleText(String)
 
     public var description: String {
         switch self {
@@ -42,6 +43,8 @@ public enum GMLuaMenuSessionError: Error, Sendable, Equatable,
             return "invalid MENU action: \(message)"
         case let .invalidProblemText(message):
             return "invalid MENU Problems text: \(message)"
+        case let .invalidConsoleText(message):
+            return "invalid MENU Console text: \(message)"
         }
     }
 }
@@ -62,10 +65,14 @@ private final class GMLuaMenuHostState: @unchecked Sendable {
     static let maximumProblemLineBytes = 1_024
     static let maximumProblemTextBytes = 64 * 1_024
     static let maximumConsoleLineBytes = 8 * 1_024
+    static let maximumConsoleHistoryLineCount = 512
+    static let maximumConsoleHistoryLineBytes = 2 * 1_024
+    static let maximumConsoleHistoryTextBytes = 128 * 1_024
 
     private let lock = NSLock()
     private var actions: [GMLuaMenuAction] = []
     private var problemText = "No current problems."
+    private var consoleText = "Console ready."
 
     func append(_ action: GMLuaMenuAction) throws {
         lock.lock()
@@ -127,6 +134,48 @@ private final class GMLuaMenuHostState: @unchecked Sendable {
         defer { lock.unlock() }
         return problemText
     }
+
+    func replaceConsoleLines(_ lines: [String]) throws {
+        guard lines.count <= Self.maximumConsoleHistoryLineCount else {
+            throw GMLuaMenuSessionError.invalidConsoleText(
+                "more than \(Self.maximumConsoleHistoryLineCount) lines"
+            )
+        }
+        var encodedLines: [String] = []
+        encodedLines.reserveCapacity(lines.count)
+        var totalBytes = 0
+        for line in lines {
+            let bytes = Array(line.utf8)
+            guard bytes.count <= Self.maximumConsoleHistoryLineBytes else {
+                throw GMLuaMenuSessionError.invalidConsoleText(
+                    "one line exceeds \(Self.maximumConsoleHistoryLineBytes) UTF-8 bytes"
+                )
+            }
+            let separatorBytes = encodedLines.isEmpty ? 0 : 1
+            let addition = totalBytes.addingReportingOverflow(
+                bytes.count + separatorBytes
+            )
+            guard !addition.overflow,
+                  addition.partialValue <= Self.maximumConsoleHistoryTextBytes else {
+                throw GMLuaMenuSessionError.invalidConsoleText(
+                    "text exceeds \(Self.maximumConsoleHistoryTextBytes) UTF-8 bytes"
+                )
+            }
+            totalBytes = addition.partialValue
+            encodedLines.append(line)
+        }
+        lock.lock()
+        consoleText = encodedLines.isEmpty
+            ? "Console ready."
+            : encodedLines.joined(separator: "\n")
+        lock.unlock()
+    }
+
+    func currentConsoleText() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return consoleText
+    }
 }
 
 /// One trusted Garry's Mod MENU realm backed by the same native VGUI, Derma,
@@ -144,6 +193,9 @@ public final class GMLuaMenuSession: @unchecked Sendable {
         "lua/vgui/dpanel.lua",
         "lua/vgui/dlabel.lua",
         "lua/vgui/dbutton.lua",
+        "lua/vgui/dscrollbargrip.lua",
+        "lua/vgui/dvscrollbar.lua",
+        "lua/vgui/dscrollpanel.lua",
         "lua/vgui/dtextentry.lua",
         "lua/vgui/dframe.lua",
         "lua/skins/default.lua",
@@ -227,6 +279,15 @@ public final class GMLuaMenuSession: @unchecked Sendable {
         )
     }
 
+    public func updateConsoleLines(_ lines: [String]) throws {
+        try requireActive()
+        try hostState.replaceConsoleLines(lines)
+        try runtime.execute(
+            "if GARRYSPAD_REFRESH_CONSOLE then GARRYSPAD_REFRESH_CONSOLE() end",
+            sourceName: "=(Garry's PAD Console refresh)"
+        )
+    }
+
     public func drainActions() -> [GMLuaMenuAction] {
         hostState.drainActions()
     }
@@ -288,6 +349,24 @@ public final class GMLuaMenuSession: @unchecked Sendable {
             throw GMLuaMenuSessionError.missingRuntimeSurface("VGUI registry")
         }
         return try registry.insertText(text)
+    }
+
+    @discardableResult
+    public func deleteTextBackward() throws -> Int? {
+        try requireActive()
+        guard let registry = runtime.vguiRegistry else {
+            throw GMLuaMenuSessionError.missingRuntimeSurface("VGUI registry")
+        }
+        return try registry.deleteTextBackward()
+    }
+
+    @discardableResult
+    public func submitFocusedTextEntry() throws -> Int? {
+        try requireActive()
+        guard let registry = runtime.vguiRegistry else {
+            throw GMLuaMenuSessionError.missingRuntimeSurface("VGUI registry")
+        }
+        return try registry.submitFocusedTextEntry()
     }
 
     @discardableResult
@@ -388,6 +467,9 @@ public final class GMLuaMenuSession: @unchecked Sendable {
         state.register("__garryspad_menu_problem_text") { _ in
             [.string(LuaString(hostState.currentProblemText()))]
         }
+        state.register("__garryspad_menu_console_text") { _ in
+            [.string(LuaString(hostState.currentConsoleText()))]
+        }
     }
 
     private static func requiredString(
@@ -471,38 +553,58 @@ public final class GMLuaMenuSession: @unchecked Sendable {
         problems:SetSizable(true)
         problems:SetDeleteOnClose(false)
         problems:SetVisible(false)
-        local problemText = assert(vgui.Create("DLabel", problems))
-        problemText:SetPos(20, 48)
-        problemText:SetSize(570, 340)
+        local problemScroll = assert(vgui.Create("DScrollPanel", problems))
+        local problemText = assert(vgui.Create("DLabel"))
+        problemScroll:AddItem(problemText)
         problemText:SetWrap(true)
         problemText:SetAutoStretchVertical(false)
         local function refreshProblems()
             local text = __garryspad_menu_problem_text()
             if problemText:GetText() ~= text then problemText:SetText(text) end
+            problems:InvalidateLayout()
         end
         GARRYSPAD_REFRESH_PROBLEMS = refreshProblems
-        problemText.Think = refreshProblems
         refreshProblems()
-        menuButton(problems, "Back", 430, 358, 150, function()
+        local problemBack = menuButton(problems, "Back", 430, 358, 150, function()
             problems:SetVisible(false)
         end)
+        local problemFrameLayout = problems.PerformLayout
+        problems.PerformLayout = function(self, w, h)
+            problemFrameLayout(self, w, h)
+            local contentWide = math.max(120, w - 40)
+            local contentTall = math.max(70, h - 116)
+            problemScroll:SetPos(20, 48)
+            problemScroll:SetSize(contentWide, contentTall)
+            problemText:SetWide(math.max(80, contentWide - 18))
+            problemText:SizeToContentsY()
+            problemScroll:InvalidateLayout()
+            problemBack:SetPos(math.max(20, w - 170), math.max(48, h - 58))
+        end
+        problems:InvalidateLayout()
 
         local console = assert(vgui.Create("DFrame"))
         GARRYSPAD_CONSOLE = console
         console:SetTitle("Console")
-        console:SetSize(660, 260)
+        console:SetSize(700, 440)
         console:Center()
         console:SetSizable(true)
         console:SetDeleteOnClose(false)
         console:SetVisible(false)
-        local consoleHint = assert(vgui.Create("DLabel", console))
-        consoleHint:SetText("Enter a console command and submit it to the active host.")
-        consoleHint:SetPos(20, 50)
-        consoleHint:SetSize(610, 24)
+        local consoleScroll = assert(vgui.Create("DScrollPanel", console))
+        local consoleOutput = assert(vgui.Create("DLabel"))
+        consoleScroll:AddItem(consoleOutput)
+        consoleOutput:SetFont("DermaDefault")
+        consoleOutput:SetWrap(true)
+        consoleOutput:SetAutoStretchVertical(false)
+        local function refreshConsole()
+            local text = __garryspad_menu_console_text()
+            if consoleOutput:GetText() ~= text then consoleOutput:SetText(text) end
+            console:InvalidateLayout()
+        end
+        GARRYSPAD_REFRESH_CONSOLE = refreshConsole
+        refreshConsole()
         local consoleEntry = assert(vgui.Create("DTextEntry", console))
         GARRYSPAD_CONSOLE_ENTRY = consoleEntry
-        consoleEntry:SetPos(20, 90)
-        consoleEntry:SetSize(610, 38)
         local function submitConsole()
             local value = consoleEntry:GetValue()
             if value == nil or value == "" then return end
@@ -510,7 +612,27 @@ public final class GMLuaMenuSession: @unchecked Sendable {
             consoleEntry:SetText("")
         end
         consoleEntry.OnEnter = submitConsole
-        menuButton(console, "Run", 20, 148, 150, submitConsole)
+        local consoleRun = menuButton(console, "Run", 20, 148, 150, submitConsole)
+        local consoleBack = menuButton(console, "Back", 180, 148, 150, function()
+            console:SetVisible(false)
+        end)
+        local consoleFrameLayout = console.PerformLayout
+        console.PerformLayout = function(self, w, h)
+            consoleFrameLayout(self, w, h)
+            local contentWide = math.max(160, w - 40)
+            local outputTall = math.max(80, h - 156)
+            consoleScroll:SetPos(20, 44)
+            consoleScroll:SetSize(contentWide, outputTall)
+            consoleOutput:SetWide(math.max(100, contentWide - 18))
+            consoleOutput:SizeToContentsY()
+            consoleScroll:InvalidateLayout()
+            local entryY = math.max(128, h - 100)
+            consoleEntry:SetPos(20, entryY)
+            consoleEntry:SetSize(contentWide, 32)
+            consoleRun:SetPos(20, math.max(166, h - 58))
+            consoleBack:SetPos(180, math.max(166, h - 58))
+        end
+        console:InvalidateLayout()
 
         menuButton(home, "gm_construct", 28, 142, 230, function()
             __garryspad_menu_action("start_map", "gm_construct")

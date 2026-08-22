@@ -945,6 +945,9 @@ public struct GModMainView: View {
                 .onChange(of: currentProblemSnapshot) { _ in
                     dermaMenu.replaceProblems(dermaProblemLines)
                 }
+                .onChange(of: console.lines) { _ in
+                    dermaMenu.replaceConsoleLines(dermaConsoleLines)
+                }
             } else {
                 Color.clear
                     .onAppear { dermaMenu.deactivate() }
@@ -1090,11 +1093,16 @@ public struct GModMainView: View {
         }
     }
 
+    private var dermaConsoleLines: [String] {
+        console.visibleLines.map(\.text)
+    }
+
     private func activateDermaMenu() {
         dermaMenu.activate(
             mountGeneration: content.activeMountGeneration,
             phrases: localizationSelection.snapshot.phrases,
-            problemLines: dermaProblemLines
+            problemLines: dermaProblemLines,
+            consoleLines: dermaConsoleLines
         )
     }
 
@@ -1137,6 +1145,7 @@ public struct GModMainView: View {
             }
         }
         dermaMenu.replaceProblems(dermaProblemLines)
+        dermaMenu.replaceConsoleLines(dermaConsoleLines)
     }
 
     private func handlePresentationEvent(

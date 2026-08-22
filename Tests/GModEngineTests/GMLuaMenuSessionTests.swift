@@ -56,10 +56,19 @@ final class GMLuaMenuSessionTests: XCTestCase {
 
         // Raising Console after the other frames exercises real Derma popup
         // ordering instead of bypassing VGUI with a direct native call.
+        try session.updateConsoleLines([
+            "GModLua Console initialized",
+            "[CLIENT][VGUI] original Surface route ready",
+        ])
         try tap(x: 523, y: 331, in: session)
-        _ = try session.renderFrame(viewportWidth: 1_024, viewportHeight: 768)
-        XCTAssertNotNil(try session.insertText("status"))
-        try tap(x: 277, y: 423, in: session)
+        frame = try session.renderFrame(viewportWidth: 1_024, viewportHeight: 768)
+        XCTAssertTrue(texts(in: frame).contains(where: {
+            $0.contains("original Surface route ready")
+        }))
+        XCTAssertNotNil(try session.insertText("status日本"))
+        XCTAssertNotNil(try session.deleteTextBackward())
+        XCTAssertNotNil(try session.deleteTextBackward())
+        XCTAssertNotNil(try session.submitFocusedTextEntry())
         XCTAssertEqual(
             session.drainActions(),
             [.executeConsoleLine("status")]
@@ -89,6 +98,12 @@ final class GMLuaMenuSessionTests: XCTestCase {
         ]))
         XCTAssertThrowsError(try session.updateProblems([
             String(repeating: "a", count: 1_025),
+        ]))
+        XCTAssertNoThrow(try session.updateConsoleLines([
+            String(repeating: "c", count: 2 * 1_024),
+        ]))
+        XCTAssertThrowsError(try session.updateConsoleLines([
+            String(repeating: "c", count: 2 * 1_024 + 1),
         ]))
 
         XCTAssertTrue(session.close())

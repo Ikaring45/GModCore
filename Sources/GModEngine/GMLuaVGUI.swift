@@ -1895,6 +1895,71 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         return identifier
     }
 
+    /// Deletes the decoded character immediately before the caret in the
+    /// focused native TextEntry. Invalid UTF-8 bytes remain one addressable
+    /// unit, matching the insertion/caret boundary above without normalizing
+    /// arbitrary Lua strings at the UIKit handoff.
+    @discardableResult
+    public func deleteTextBackward() throws -> Int? {
+        let identifier: Int?
+        let descriptor: GMLuaPanelValue?
+        var changed = false
+        lock.lock()
+        identifier = focusedPanelIdentifier
+        descriptor = identifier
+            .flatMap { panels[$0] }
+            .flatMap { panelDescriptor(from: $0) }
+        if let descriptor,
+           descriptor.engineClassName == "TextEntry",
+           descriptor.keyboardInputEnabled {
+            let boundaries = utf8CharacterBoundaries(in: descriptor.text.bytes)
+            let clampedCaret = min(
+                max(0, descriptor.caretPosition),
+                boundaries.count - 1
+            )
+            if clampedCaret > 0 {
+                let lower = boundaries[clampedCaret - 1]
+                let upper = boundaries[clampedCaret]
+                descriptor.text = LuaString(
+                    bytes: Array(descriptor.text.bytes[..<lower]) +
+                        Array(descriptor.text.bytes[upper...])
+                )
+                descriptor.caretPosition = clampedCaret - 1
+                changed = true
+            }
+        }
+        lock.unlock()
+        guard let identifier, let descriptor,
+              descriptor.engineClassName == "TextEntry",
+              descriptor.keyboardInputEnabled else { return nil }
+        if changed {
+            _ = try callPanelMethod(identifier: identifier, name: "OnTextChanged")
+        }
+        return identifier
+    }
+
+    /// Submits the currently focused single-line TextEntry through its real
+    /// scripted `OnEnter` callback. The iPad MENU host uses this for the soft
+    /// keyboard Return key; the callback remains owned by original Derma Lua,
+    /// receives only the usual Panel self argument, and no console action is
+    /// synthesized in Swift.
+    @discardableResult
+    public func submitFocusedTextEntry() throws -> Int? {
+        let identifier: Int?
+        let descriptor: GMLuaPanelValue?
+        lock.lock()
+        identifier = focusedPanelIdentifier
+        descriptor = identifier
+            .flatMap { panels[$0] }
+            .flatMap { panelDescriptor(from: $0) }
+        lock.unlock()
+        guard let identifier, let descriptor,
+              descriptor.engineClassName == "TextEntry",
+              descriptor.keyboardInputEnabled else { return nil }
+        _ = try callPanelMethod(identifier: identifier, name: "OnEnter")
+        return identifier
+    }
+
     private func callPanelMethod(
         identifier: Int,
         name: String,

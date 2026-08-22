@@ -26,6 +26,7 @@ final class GModDermaMenuModel: ObservableObject {
     private var frameRevision: UInt64 = 0
     private var lastAdvanceTimestamp: TimeInterval?
     private var problemLines: [String] = []
+    private var consoleLines: [String] = []
 
     init(
         runtimeFactory: GModAppRuntimeFactory,
@@ -42,7 +43,8 @@ final class GModDermaMenuModel: ObservableObject {
     func activate(
         mountGeneration: UInt64,
         phrases: [String: String],
-        problemLines: [String]
+        problemLines: [String],
+        consoleLines: [String]
     ) {
         let configuration = GMLuaLanguageConfiguration(phrases: phrases)
         let requiresNewSession = self.mountGeneration != mountGeneration
@@ -58,6 +60,7 @@ final class GModDermaMenuModel: ObservableObject {
             frameRevision &+= 1
             lastAdvanceTimestamp = nil
             self.problemLines = []
+            self.consoleLines = []
             self.mountGeneration = mountGeneration
             languageConfiguration = configuration
 
@@ -80,7 +83,8 @@ final class GModDermaMenuModel: ObservableObject {
                 return
             }
         }
-        replaceProblems(problemLines)
+        replaceProblems(problemLines, requestFrame: false)
+        replaceConsoleLines(consoleLines, requestFrame: false)
         requestFrame()
     }
 
@@ -101,14 +105,27 @@ final class GModDermaMenuModel: ObservableObject {
         requestFrame()
     }
 
-    func replaceProblems(_ lines: [String]) {
+    func replaceProblems(_ lines: [String], requestFrame: Bool = true) {
         let bounded = Self.boundedProblemLines(lines)
         guard bounded != problemLines else { return }
         problemLines = bounded
         guard let session else { return }
         do {
             try session.updateProblems(bounded)
-            requestFrame()
+            if requestFrame { self.requestFrame() }
+        } catch {
+            fail(error)
+        }
+    }
+
+    func replaceConsoleLines(_ lines: [String], requestFrame: Bool = true) {
+        let bounded = Self.boundedConsoleLines(lines)
+        guard bounded != consoleLines else { return }
+        consoleLines = bounded
+        guard let session else { return }
+        do {
+            try session.updateConsoleLines(bounded)
+            if requestFrame { self.requestFrame() }
         } catch {
             fail(error)
         }
@@ -143,7 +160,21 @@ final class GModDermaMenuModel: ObservableObject {
     func insertText(_ text: String) {
         guard !text.isEmpty, let session else { return }
         do {
-            _ = try session.insertText(text)
+            if text == "\n" || text == "\r" {
+                _ = try session.submitFocusedTextEntry()
+            } else {
+                _ = try session.insertText(text)
+            }
+            requestFrame()
+        } catch {
+            fail(error)
+        }
+    }
+
+    func deleteTextBackward() {
+        guard let session else { return }
+        do {
+            _ = try session.deleteTextBackward()
             requestFrame()
         } catch {
             fail(error)
@@ -222,9 +253,33 @@ final class GModDermaMenuModel: ObservableObject {
 
     private static func boundedProblemLines(_ lines: [String]) -> [String] {
         Array(lines.prefix(256)).map { line in
-            let bytes = Array(line.utf8.prefix(1_024))
-            return String(decoding: bytes, as: UTF8.self)
+            boundedUTF8Prefix(line, maximumByteCount: 1_024)
         }
+    }
+
+    private static func boundedConsoleLines(_ lines: [String]) -> [String] {
+        Array(lines.suffix(512)).map { line in
+            boundedUTF8Prefix(line, maximumByteCount: 2 * 1_024)
+        }
+    }
+
+    /// Keeps retained MENU text inside its byte budget without cutting a
+    /// decoded Unicode scalar in half. The host boundary therefore never
+    /// manufactures a replacement glyph (or additional UTF-8 bytes).
+    private static func boundedUTF8Prefix(
+        _ value: String,
+        maximumByteCount: Int
+    ) -> String {
+        let bytes = Array(value.utf8)
+        guard bytes.count > maximumByteCount else { return value }
+        var end = maximumByteCount
+        while end > 0 {
+            if let prefix = String(bytes: bytes[..<end], encoding: .utf8) {
+                return prefix
+            }
+            end -= 1
+        }
+        return ""
     }
 }
 
@@ -259,7 +314,8 @@ struct GModDermaMenuSurface: View {
 
                 GModDermaMenuTextInputBridge(
                     wantsFocus: model.wantsTextInput,
-                    onText: model.insertText
+                    onText: model.insertText,
+                    onDeleteBackward: model.deleteTextBackward
                 )
                 .frame(width: 1, height: 1)
                 .allowsHitTesting(false)
@@ -288,15 +344,18 @@ import UIKit
 private struct GModDermaMenuTextInputBridge: UIViewRepresentable {
     let wantsFocus: Bool
     let onText: (String) -> Void
+    let onDeleteBackward: () -> Void
 
     func makeUIView(context: Context) -> GModDermaMenuKeyInputView {
         let view = GModDermaMenuKeyInputView()
         view.onText = onText
+        view.onDeleteBackward = onDeleteBackward
         return view
     }
 
     func updateUIView(_ uiView: GModDermaMenuKeyInputView, context: Context) {
         uiView.onText = onText
+        uiView.onDeleteBackward = onDeleteBackward
         if wantsFocus {
             if !uiView.isFirstResponder {
                 DispatchQueue.main.async { _ = uiView.becomeFirstResponder() }
@@ -310,6 +369,7 @@ private struct GModDermaMenuTextInputBridge: UIViewRepresentable {
 @MainActor
 private final class GModDermaMenuKeyInputView: UIView, UIKeyInput {
     var onText: ((String) -> Void)?
+    var onDeleteBackward: (() -> Void)?
 
     override var canBecomeFirstResponder: Bool { true }
     var hasText: Bool { false }
@@ -318,16 +378,16 @@ private final class GModDermaMenuKeyInputView: UIView, UIKeyInput {
         onText?(text)
     }
 
-    // GMLuaVGUI currently exposes an insertion boundary only. Keeping
-    // backspace unclaimed prevents UIKit from synthesizing a different text
-    // model outside the real DTextEntry implementation.
-    func deleteBackward() {}
+    func deleteBackward() {
+        onDeleteBackward?()
+    }
 }
 #else
 @MainActor
 private struct GModDermaMenuTextInputBridge: View {
     let wantsFocus: Bool
     let onText: (String) -> Void
+    let onDeleteBackward: () -> Void
 
     var body: some View { Color.clear }
 }
