@@ -261,6 +261,77 @@ public struct SourcePhysicsBodyDeletionCommand: Equatable, Sendable {
     }
 }
 
+/// One authoritative mutation of an existing rigid body.
+///
+/// Vector-bearing operations are validated at construction, before they can
+/// enter the host's global FIFO. `centerForce` is accumulated until the next
+/// fixed 0.015-second simulation command; `centerImpulse` changes velocity at
+/// the mutation command's exact FIFO position.
+public enum SourcePhysicsBodyMutation: Equatable, Sendable {
+    case wake
+    case sleep
+    case setMotionEnabled(Bool)
+    case setGravityEnabled(Bool)
+    case setCollisionEnabled(Bool)
+    case setLinearVelocity(SourceVector3)
+    case addLinearVelocity(SourceVector3)
+    case setAngularVelocity(SourceVector3)
+    case addAngularVelocity(SourceVector3)
+    case applyCenterForce(SourceVector3)
+    case applyCenterImpulse(SourceVector3)
+}
+
+public struct SourcePhysicsBodyMutationCommand: Equatable, Sendable {
+    public let bodyID: SourcePhysicsBodyID
+    public let mutation: SourcePhysicsBodyMutation
+
+    public init(
+        bodyID: SourcePhysicsBodyID,
+        mutation: SourcePhysicsBodyMutation
+    ) throws {
+        switch mutation {
+        case let .setLinearVelocity(value):
+            try sourcePhysicsRequireFinite(
+                value,
+                field: "bodyMutation.linearVelocity"
+            )
+        case let .addLinearVelocity(value):
+            try sourcePhysicsRequireFinite(
+                value,
+                field: "bodyMutation.linearVelocityDelta"
+            )
+        case let .setAngularVelocity(value):
+            try sourcePhysicsRequireFinite(
+                value,
+                field: "bodyMutation.angularVelocity"
+            )
+        case let .addAngularVelocity(value):
+            try sourcePhysicsRequireFinite(
+                value,
+                field: "bodyMutation.angularVelocityDelta"
+            )
+        case let .applyCenterForce(value):
+            try sourcePhysicsRequireFinite(
+                value,
+                field: "bodyMutation.centerForce"
+            )
+        case let .applyCenterImpulse(value):
+            try sourcePhysicsRequireFinite(
+                value,
+                field: "bodyMutation.centerImpulse"
+            )
+        case .wake,
+             .sleep,
+             .setMotionEnabled,
+             .setGravityEnabled,
+             .setCollisionEnabled:
+            break
+        }
+        self.bodyID = bodyID
+        self.mutation = mutation
+    }
+}
+
 /// Advances exactly one Source tick. An arbitrary delta is intentionally not
 /// representable at this boundary.
 public struct SourcePhysicsSimulateCommand: Equatable, Sendable {
@@ -346,6 +417,7 @@ public struct SourcePhysicsQueryCommand: Equatable, Sendable {
 public enum SourcePhysicsCommandPayload: Equatable, Sendable {
     case createBody(SourcePhysicsBodyCreationCommand)
     case deleteBody(SourcePhysicsBodyDeletionCommand)
+    case mutateBody(SourcePhysicsBodyMutationCommand)
     case simulate(SourcePhysicsSimulateCommand)
     case query(SourcePhysicsQueryCommand)
 }
@@ -404,6 +476,7 @@ public struct SourcePhysicsBodySnapshot: Equatable, Sendable {
     public let angularVelocity: SourceVector3
     public let motionType: SourcePhysicsMotionType
     public let materialIndex: Int
+    public let isMotionEnabled: Bool
     public let isGravityEnabled: Bool
     public let isCollisionEnabled: Bool
     public let isSleeping: Bool
@@ -418,6 +491,7 @@ public struct SourcePhysicsBodySnapshot: Equatable, Sendable {
         angularVelocity: SourceVector3,
         motionType: SourcePhysicsMotionType,
         materialIndex: Int,
+        isMotionEnabled: Bool? = nil,
         isGravityEnabled: Bool,
         isCollisionEnabled: Bool,
         isSleeping: Bool,
@@ -440,6 +514,7 @@ public struct SourcePhysicsBodySnapshot: Equatable, Sendable {
         self.angularVelocity = angularVelocity
         self.motionType = motionType
         self.materialIndex = materialIndex
+        self.isMotionEnabled = isMotionEnabled ?? (motionType != .staticBody)
         self.isGravityEnabled = isGravityEnabled
         self.isCollisionEnabled = isCollisionEnabled
         self.isSleeping = isSleeping
