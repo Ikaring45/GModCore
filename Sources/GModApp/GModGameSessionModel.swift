@@ -2284,7 +2284,9 @@ final class GModGameSessionModel: ObservableObject {
                 renderLayer: renderLayer
             )
         }
-        let worldVisibility = mesh.worldVisibility.map { visibility in
+        func metalVisibility(
+            _ visibility: GModWorldVisibility
+        ) -> GModMetalWorldVisibility {
             GModMetalWorldVisibility(
                 headNode: visibility.headNode,
                 planes: visibility.planes.map {
@@ -2334,6 +2336,17 @@ final class GModGameSessionModel: ObservableObject {
                     )
                 },
                 spanClusters: visibility.spanClusters
+            )
+        }
+        let worldVisibility = mesh.worldVisibility.map(metalVisibility)
+        let sky3DVisibility = mesh.sky3DVisibility.map { visibility in
+            GModMetalSky3DVisibility(
+                sourceVisibilityOrigin: SIMD3<Float>(
+                    visibility.sourceVisibilityOrigin.x,
+                    visibility.sourceVisibilityOrigin.y,
+                    visibility.sourceVisibilityOrigin.z
+                ),
+                bspVisibility: metalVisibility(visibility.bspVisibility)
             )
         }
         let environmentLighting = mesh.environmentLighting.map {
@@ -2462,6 +2475,7 @@ final class GModGameSessionModel: ObservableObject {
                 )
             },
             worldVisibility: worldVisibility,
+            sky3DVisibility: sky3DVisibility,
             skyboxVisibility: metalSkyboxVisibility(
                 mesh.skyVisibility?.visibility(
                     at: SourceVector3(

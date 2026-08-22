@@ -1328,6 +1328,7 @@ public struct GModMetalWorldVisibilityMetrics: Sendable, Equatable {
 final class GModMetalWorldVisibilityWorkspace {
     private struct ViewKey: Equatable {
         let meshIdentifier: String
+        let renderLayer: GModMetalWorldRenderLayer
         let sourceCameraEye: SIMD3<Float>
         let metalCameraEye: SIMD3<Float>
         let metalCameraForward: SIMD3<Float>
@@ -1364,8 +1365,42 @@ final class GModMetalWorldVisibilityWorkspace {
         nearPlane: Float,
         farPlane: Float
     ) -> Bool {
+        guard let visibility = scene.worldVisibility else {
+            reset()
+            return false
+        }
+        return update(
+            scene: scene,
+            visibility: visibility,
+            renderLayer: .world,
+            sourceCameraEye: sourceCameraEye,
+            metalCameraEye: metalCameraEye,
+            metalCameraForward: metalCameraForward,
+            metalCameraUp: metalCameraUp,
+            verticalFieldOfViewRadians: verticalFieldOfViewRadians,
+            aspectRatio: aspectRatio,
+            nearPlane: nearPlane,
+            farPlane: farPlane
+        )
+    }
+
+    @discardableResult
+    func update(
+        scene: GModMetalWorldScene,
+        visibility: GModMetalWorldVisibility,
+        renderLayer: GModMetalWorldRenderLayer,
+        sourceCameraEye: SIMD3<Float>,
+        metalCameraEye: SIMD3<Float>,
+        metalCameraForward: SIMD3<Float>,
+        metalCameraUp: SIMD3<Float>,
+        verticalFieldOfViewRadians: Float,
+        aspectRatio: Float,
+        nearPlane: Float,
+        farPlane: Float
+    ) -> Bool {
         let viewKey = ViewKey(
             meshIdentifier: scene.meshIdentifier,
+            renderLayer: renderLayer,
             sourceCameraEye: sourceCameraEye,
             metalCameraEye: metalCameraEye,
             metalCameraForward: metalCameraForward,
@@ -1385,8 +1420,7 @@ final class GModMetalWorldVisibilityWorkspace {
         metrics = nil
         visibleDrawSpans.removeAll(keepingCapacity: true)
 
-        guard let visibility = scene.worldVisibility,
-              let pvs = visibility.potentialVisibility,
+        guard let pvs = visibility.potentialVisibility,
               let cameraCluster = visibility.cameraCluster(
                 at: sourceCameraEye
               ), cameraCluster >= 0,
@@ -1431,7 +1465,7 @@ final class GModMetalWorldVisibilityWorkspace {
                   spanEnd <= scene.indices.count,
                   span.clusterStartIndex >= 0,
                   clusterEnd <= visibility.spanClusters.count,
-                  materialRange.renderLayer == .world,
+                  materialRange.renderLayer == renderLayer,
                   materialRange.waterSurface == nil,
                   materialRange.waterMaterial == nil,
                   Self.validBounds(
@@ -1461,7 +1495,7 @@ final class GModMetalWorldVisibilityWorkspace {
         }
         var expectedIndexCount = 0
         for range in scene.materialRanges where
-            range.renderLayer == .world &&
+            range.renderLayer == renderLayer &&
             range.waterSurface == nil &&
             range.waterMaterial == nil {
             let (nextExpectedCount, overflow) = expectedIndexCount
@@ -1890,6 +1924,7 @@ public struct GModMetalWorldScene: Sendable, Equatable {
     public let sunSprites: [GModMetalWorldSunSprite]
     public let sky3D: GModMetalWorldSky3D?
     public let worldVisibility: GModMetalWorldVisibility?
+    public let sky3DVisibility: GModMetalSky3DVisibility?
     public let skyboxVisibility: GModMetalSkyboxVisibility
     /// Fixed Source session time. Pause freezes this value, so material
     /// proxies such as TextureScroll freeze with the singleplayer world.
@@ -1930,6 +1965,7 @@ public struct GModMetalWorldScene: Sendable, Equatable {
         sunSprites: [GModMetalWorldSunSprite] = [],
         sky3D: GModMetalWorldSky3D? = nil,
         worldVisibility: GModMetalWorldVisibility? = nil,
+        sky3DVisibility: GModMetalSky3DVisibility? = nil,
         skyboxVisibility: GModMetalSkyboxVisibility = .notVisible,
         cameraEye: SIMD3<Float>,
         cameraForward: SIMD3<Float>,
@@ -1962,6 +1998,7 @@ public struct GModMetalWorldScene: Sendable, Equatable {
         self.sunSprites = sunSprites
         self.sky3D = sky3D
         self.worldVisibility = worldVisibility
+        self.sky3DVisibility = sky3DVisibility
         self.skyboxVisibility = skyboxVisibility
         self.sourceFixedTime = sourceFixedTime
         self.verticalFieldOfViewRadians = verticalFieldOfViewRadians
@@ -2000,6 +2037,7 @@ public struct GModMetalWorldScene: Sendable, Equatable {
             sunSprites: sunSprites,
             sky3D: sky3D,
             worldVisibility: worldVisibility,
+            sky3DVisibility: sky3DVisibility,
             skyboxVisibility: skyboxVisibility ?? self.skyboxVisibility,
             cameraEye: eye,
             cameraForward: forward,
@@ -2035,6 +2073,7 @@ public struct GModMetalWorldScene: Sendable, Equatable {
         sunSprites: [GModMetalWorldSunSprite],
         sky3D: GModMetalWorldSky3D?,
         worldVisibility: GModMetalWorldVisibility?,
+        sky3DVisibility: GModMetalSky3DVisibility?,
         skyboxVisibility: GModMetalSkyboxVisibility,
         cameraEye: SIMD3<Float>,
         cameraForward: SIMD3<Float>,
@@ -2059,6 +2098,7 @@ public struct GModMetalWorldScene: Sendable, Equatable {
         self.sunSprites = sunSprites
         self.sky3D = sky3D
         self.worldVisibility = worldVisibility
+        self.sky3DVisibility = sky3DVisibility
         self.skyboxVisibility = skyboxVisibility
         self.sourceFixedTime = sourceFixedTime
         self.verticalFieldOfViewRadians = verticalFieldOfViewRadians
