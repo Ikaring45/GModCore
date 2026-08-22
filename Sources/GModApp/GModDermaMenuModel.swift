@@ -204,7 +204,8 @@ final class GModDermaMenuModel: ObservableObject {
         let permissionIdentity = permissionSessionTransport.map(
             ObjectIdentifier.init
         )
-        let requiresNewSession = self.mountGeneration != mountGeneration
+        let requiresNewSession = !hasSession
+            || self.mountGeneration != mountGeneration
             || languageConfiguration != configuration
             || permissionSessionTransportIdentity != permissionIdentity
         if requiresNewSession {
@@ -391,6 +392,7 @@ final class GModDermaMenuModel: ObservableObject {
 
     func present(_ utility: GMLuaMenuUtility) {
         guard hasSession, utility != presentedUtility else { return }
+        failure = nil
         presentedUtility = utility
         let generation = sessionGeneration
         let installation = installationTask
