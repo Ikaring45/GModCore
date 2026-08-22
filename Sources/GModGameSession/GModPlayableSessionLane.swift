@@ -401,6 +401,58 @@ public actor GModPlayableSessionLane {
         return session.clientCanonicalEntitySnapshots
     }
 
+    /// Resolves the current CLIENT-owned Weapon selector state without
+    /// exposing the lane-owned Lua runtime or canonical registry.
+    public func clientOwnedWeaponSelectorCatalog(
+        expectedGeneration: UInt64? = nil
+    ) throws -> SourceOwnedWeaponSelectorCatalog {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        return try session.clientOwnedWeaponSelectorCatalog()
+    }
+
+    /// Queues one exact owned class through CLIENT RunConsoleCommand on the
+    /// same actor lane that owns the session FIFO.
+    @discardableResult
+    public func requestWeaponSelection(
+        className: String,
+        expectedGeneration: UInt64? = nil
+    ) throws -> String {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        return try session.requestWeaponSelection(className: className)
+    }
+
+    @discardableResult
+    public func requestNextWeapon(
+        expectedGeneration: UInt64? = nil
+    ) throws -> String? {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        return try session.requestNextWeapon()
+    }
+
+    @discardableResult
+    public func requestPreviousWeapon(
+        expectedGeneration: UInt64? = nil
+    ) throws -> String? {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        return try session.requestPreviousWeapon()
+    }
+
     /// Shares the session's already-validated, immutable BSP pak index with
     /// the App renderer. Returning this Sendable read-only object avoids a
     /// second 40+ MB map read and keeps Lua and Metal on the same GAME layer.

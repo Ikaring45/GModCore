@@ -378,6 +378,27 @@ public enum GModPlayableSessionError: Error, CustomStringConvertible, Equatable 
     }
 }
 
+public enum GModPlayableWeaponSelectionError:
+    Error,
+    CustomStringConvertible,
+    Equatable,
+    Sendable
+{
+    case clientPlayerSnapshotMissing(SourceCanonicalEntityIdentity)
+    case classNotInCatalog(String)
+
+    public var description: String {
+        switch self {
+        case let .clientPlayerSnapshotMissing(identity):
+            return "CLIENT canonical Player EHANDLE " +
+                "\(identity.handle.rawValue) is unavailable"
+        case let .classNotInCatalog(className):
+            return "Weapon class is not an exact owned selector entry: " +
+                className
+        }
+    }
+}
+
 /// Cross-platform ownership layer used by the iPad host and Windows tests.
 ///
 /// It owns one paired SERVER/CLIENT runtime, the bundled read-only VFS, a
@@ -450,6 +471,63 @@ public final class GModPlayableSession {
         SourceEntityReplicationCursor?
     {
         clientRuntime.entityRegistry?.canonicalEntityReplicationCursor
+    }
+
+    /// Builds the renderer-independent selector catalog from only the exact
+    /// replicated CLIENT Player and CLIENT Weapon snapshots.
+    public func clientOwnedWeaponSelectorCatalog() throws
+        -> SourceOwnedWeaponSelectorCatalog
+    {
+        try ensureOpen()
+        let snapshots = clientCanonicalEntitySnapshots
+        guard let player = snapshots.first(where: {
+            $0.identity == playerIdentity
+        }) else {
+            throw GModPlayableWeaponSelectionError
+                .clientPlayerSnapshotMissing(playerIdentity)
+        }
+        return try clientRuntime.ownedWeaponSelectorCatalog(
+            playerSnapshot: player,
+            weaponSnapshots: snapshots.filter { $0.kind == .weapon }
+        )
+    }
+
+    /// Queues Source's real CLIENT `use` command for one exact catalog class.
+    /// The shared-session FIFO performs SERVER dispatch and replication during
+    /// the following ordinary drain.
+    @discardableResult
+    public func requestWeaponSelection(className: String) throws -> String {
+        try requestWeaponSelection(
+            className: className,
+            catalog: clientOwnedWeaponSelectorCatalog()
+        )
+    }
+
+    /// Queues the next selector class relative to the exact active EHANDLE.
+    /// Nil means the catalog had no active identity; no starting item is
+    /// inferred and no console request is queued.
+    @discardableResult
+    public func requestNextWeapon() throws -> String? {
+        let catalog = try clientOwnedWeaponSelectorCatalog()
+        guard let className = catalog.nextWeaponClassName() else { return nil }
+        return try requestWeaponSelection(
+            className: className,
+            catalog: catalog
+        )
+    }
+
+    /// Queues the previous selector class relative to the exact active
+    /// EHANDLE, with the same no-active fail-closed behavior as next.
+    @discardableResult
+    public func requestPreviousWeapon() throws -> String? {
+        let catalog = try clientOwnedWeaponSelectorCatalog()
+        guard let className = catalog.previousWeaponClassName() else {
+            return nil
+        }
+        return try requestWeaponSelection(
+            className: className,
+            catalog: catalog
+        )
     }
 
     /// Drops the currently selected canonical Weapon through the same
@@ -1448,6 +1526,22 @@ public final class GModPlayableSession {
     private static func isASCIILetter(_ scalar: Unicode.Scalar) -> Bool {
         (scalar.value >= 65 && scalar.value <= 90) ||
             (scalar.value >= 97 && scalar.value <= 122)
+    }
+
+    private func requestWeaponSelection(
+        className: String,
+        catalog: SourceOwnedWeaponSelectorCatalog
+    ) throws -> String {
+        guard let entry = catalog.entries.first(where: {
+            $0.className == className
+        }) else {
+            throw GModPlayableWeaponSelectionError.classNotInCatalog(className)
+        }
+        try clientRuntime.invokeClientRunConsoleCommand(
+            command: SourceCanonicalWeaponUseConsoleCommand.commandName,
+            arguments: [entry.className]
+        )
+        return entry.className
     }
 
     private static func readAttestedPropPhysicsManifest(
