@@ -215,17 +215,99 @@ public struct GModMetalDynamicEntityInstanceInput: Sendable, Equatable {
     public let sourceEntityRevision: UInt64
     public let transform: SourceEntityTransform
     public let resourceID: GModMetalDynamicEntityResourceID
+    public let colorModulation: SourceEntityRenderColor
+    public let renderMode: SourceEntityRenderMode
+    public let renderFX: SourceEntityRenderFX
 
     public init(
         identity: SourceCanonicalEntityIdentity,
         sourceEntityRevision: UInt64,
         transform: SourceEntityTransform,
-        resourceID: GModMetalDynamicEntityResourceID
+        resourceID: GModMetalDynamicEntityResourceID,
+        colorModulation: SourceEntityRenderColor = .white,
+        renderMode: SourceEntityRenderMode = .normal,
+        renderFX: SourceEntityRenderFX = .none
     ) {
         self.identity = identity
         self.sourceEntityRevision = sourceEntityRevision
         self.transform = transform
         self.resourceID = resourceID
+        self.colorModulation = colorModulation
+        self.renderMode = renderMode
+        self.renderFX = renderFX
+    }
+}
+
+/// The subset of Source `RenderMode_t` whose fixed-function blend equation is
+/// completely specified by SDK 2013. Special sprite/glow/frame-blend modes do
+/// not fall back to one of these paths because that would silently change
+/// Source semantics.
+enum GModMetalDynamicEntityBlendMode: Sendable, Equatable, CaseIterable {
+    case opaque
+    case sourceAlpha
+    case additive
+}
+
+enum GModMetalDynamicEntityFragmentMode: Sendable, Equatable {
+    case material
+    case constantColor
+}
+
+enum GModMetalDynamicEntityRenderDisposition: Sendable, Equatable {
+    case draw(
+        blendMode: GModMetalDynamicEntityBlendMode,
+        fragmentMode: GModMetalDynamicEntityFragmentMode
+    )
+    case hidden
+    case unsupported
+}
+
+enum GModMetalDynamicEntityRenderContract {
+    /// Fixed Valve SDK `RenderMode_t` equations from `const.h` at
+    /// c8f4c6351162fbff83bfa5a428d45d1e6eed3824. `transColor` is
+    /// `c*a + dest*(1-a)`, `transTexture` is `src*a + dest*(1-a)`, and
+    /// `transAdd` is `src*a + dest`.
+    static func disposition(
+        for mode: SourceEntityRenderMode
+    ) -> GModMetalDynamicEntityRenderDisposition {
+        switch mode {
+        case .normal:
+            return .draw(blendMode: .opaque, fragmentMode: .material)
+        case .transColor:
+            return .draw(
+                blendMode: .sourceAlpha,
+                fragmentMode: .constantColor
+            )
+        case .transTexture:
+            return .draw(
+                blendMode: .sourceAlpha,
+                fragmentMode: .material
+            )
+        case .transAdd:
+            return .draw(blendMode: .additive, fragmentMode: .material)
+        case .environmental, .none:
+            return .hidden
+        case .glow, .transAlpha, .transAddFrameBlend, .transAlphaAdd,
+                .worldGlow:
+            return .unsupported
+        }
+    }
+
+    /// Source exposes RGB modulation as byte-normalized `color32` channels.
+    /// Alpha is the fixed blend amount for the supported translucent/additive
+    /// modes; SDK `ComputeFxBlend` forces normal mode to 255 when RenderFX is
+    /// none, so the opaque route deliberately ignores color alpha.
+    static func displayRGBAndAlpha(
+        color: SourceEntityRenderColor,
+        blendMode: GModMetalDynamicEntityBlendMode
+    ) -> SIMD4<Float> {
+        let scale = 1 / Float(UInt8.max)
+        return SIMD4<Float>(
+            Float(color.red) * scale,
+            Float(color.green) * scale,
+            Float(color.blue) * scale,
+            blendMode == .opaque ? 1 : Float(color.alpha) * scale
+        )
     }
 }
 
@@ -298,6 +380,13 @@ public struct GModMetalDynamicEntityInstance: Sendable, Equatable {
     public let sourceTransform: SourceEntityTransform
     public let metalTransform: GModMetalDynamicEntityTransform
     public let resourceID: GModMetalDynamicEntityResourceID
+    /// Authoritative Source `color32`; conversion to linear RGB happens in
+    /// the fragment shader beside the existing world color-space contract.
+    public let colorModulation: SourceEntityRenderColor
+    public let renderMode: SourceEntityRenderMode
+    /// Retained exactly. Time-varying RenderFX evaluation is intentionally not
+    /// approximated by this renderer slice.
+    public let renderFX: SourceEntityRenderFX
 }
 
 /// Complete publication identity. Source connection generations restart in a
@@ -874,7 +963,10 @@ private extension GModMetalDynamicEntityScene {
                 sourceEntityRevision: source.sourceEntityRevision,
                 sourceTransform: source.transform,
                 metalTransform: metalTransform,
-                resourceID: source.resourceID
+                resourceID: source.resourceID,
+                colorModulation: source.colorModulation,
+                renderMode: source.renderMode,
+                renderFX: source.renderFX
             ))
         }
         return converted

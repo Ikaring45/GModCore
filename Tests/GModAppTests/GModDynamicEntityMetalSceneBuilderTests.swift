@@ -58,7 +58,15 @@ final class GModDynamicEntityMetalSceneBuilderTests: XCTestCase {
             resources: [resource(candidates: [
                 "materials/models/props/missing.vmt",
                 "materials/models/props/crate.vmt",
-            ])]
+            ])],
+            colorModulation: SourceEntityRenderColor(
+                red: 17,
+                green: 34,
+                blue: 51,
+                alpha: 96
+            ),
+            renderMode: .transColor,
+            renderFX: .strobeFast
         )
 
         let built = try XCTUnwrap(builder.build(
@@ -78,6 +86,12 @@ final class GModDynamicEntityMetalSceneBuilderTests: XCTestCase {
         XCTAssertEqual(built.resources.first?.id.normalizedModelPath,
                        "models/props/crate.mdl")
         XCTAssertEqual(built.instances.first?.identity.serialNumber, 4)
+        XCTAssertEqual(
+            built.instances.first?.colorModulation,
+            SourceEntityRenderColor(red: 17, green: 34, blue: 51, alpha: 96)
+        )
+        XCTAssertEqual(built.instances.first?.renderMode, .transColor)
+        XCTAssertEqual(built.instances.first?.renderFX, .strobeFast)
         XCTAssertEqual(
             built.resources.first?.vertices.first?.textureCoordinate,
             SIMD2<Float>(0.25, 0.75)
@@ -138,6 +152,31 @@ final class GModDynamicEntityMetalSceneBuilderTests: XCTestCase {
         XCTAssertEqual(moved.instances.first?.sourceTransform.origin.x, 75)
         XCTAssertEqual(builder.retainedBitmapByteCount,
                        firstBitmap.totalByteCount)
+
+        XCTAssertThrowsError(try builder.build(
+            from: scene(
+                revision: 2,
+                connection: 2,
+                resources: [resource(candidates: [firstCandidate])],
+                x: 75,
+                entityRevision: 2,
+                colorModulation: SourceEntityRenderColor(
+                    red: 255,
+                    green: 128,
+                    blue: 64,
+                    alpha: 96
+                ),
+                renderMode: .transAdd,
+                renderFX: .pulseSlow
+            ),
+            applicationGeneration: 1,
+            laneGeneration: 9
+        )) { error in
+            XCTAssertEqual(
+                error as? GModDynamicEntityMetalSceneBuilderError,
+                .revisionNotIncreasing(previous: 2, received: 2)
+            )
+        }
 
         let changed = try XCTUnwrap(builder.build(
             from: scene(
@@ -565,7 +604,10 @@ private func scene(
     resourcePath: String = "models/props/crate.mdl",
     resourceChecksum: Int32 = 11,
     x: Float = 10,
-    entityRevision: UInt64 = 1
+    entityRevision: UInt64 = 1,
+    colorModulation: SourceEntityRenderColor = .white,
+    renderMode: SourceEntityRenderMode = .normal,
+    renderFX: SourceEntityRenderFX = .none
 ) -> GModDynamicEntityRenderSceneSnapshot {
     let resourceID = GModStudioRenderableModelResourceID(
         normalizedModelPath: resourcePath,
@@ -589,7 +631,10 @@ private func scene(
             )),
             sourceEntityRevision: entityRevision,
             transform: SourceEntityTransform(origin: SourceVector3(x, 2, 3)),
-            resourceID: resourceID
+            resourceID: resourceID,
+            colorModulation: colorModulation,
+            renderMode: renderMode,
+            renderFX: renderFX
         )],
         issues: []
     )

@@ -365,11 +365,8 @@ public struct GModMetalView:
         private var worldMissingMaterialPipeline:
             MTLRenderPipelineState?
 
-        private var dynamicEntityTexturedPipeline:
-            MTLRenderPipelineState?
-
-        private var dynamicEntityMissingMaterialPipeline:
-            MTLRenderPipelineState?
+        private var dynamicEntityPipelines:
+            DynamicEntityRenderPipelines?
 
         private var firstPersonViewModelTexturedPipeline:
             MTLRenderPipelineState?
@@ -556,6 +553,34 @@ public struct GModMetalView:
             let metalYAxis: SIMD4<Float>
             let metalZAxis: SIMD4<Float>
             let metalTranslation: SIMD4<Float>
+        }
+
+        private struct DynamicEntityAppearanceUniforms {
+            /// RGB remains authored display-sRGB until the fragment shader;
+            /// alpha is the fixed Source blend amount for the selected mode.
+            let displayRGBAndAlpha: SIMD4<Float>
+        }
+
+        private struct DynamicEntityPipelinePair {
+            let textured: MTLRenderPipelineState
+            let missingMaterial: MTLRenderPipelineState
+        }
+
+        private struct DynamicEntityRenderPipelines {
+            let opaque: DynamicEntityPipelinePair
+            let sourceAlpha: DynamicEntityPipelinePair
+            let sourceColorAlpha: MTLRenderPipelineState
+            let additive: DynamicEntityPipelinePair
+
+            func pair(
+                for blendMode: GModMetalDynamicEntityBlendMode
+            ) -> DynamicEntityPipelinePair {
+                switch blendMode {
+                case .opaque: return opaque
+                case .sourceAlpha: return sourceAlpha
+                case .additive: return additive
+                }
+            }
         }
 
         private struct CachedDynamicEntityGeometry {
@@ -1114,6 +1139,16 @@ public struct GModMetalView:
                                 "worldTexturedFragmentMain"
                         ),
 
+                    let dynamicEntityTexturedFragmentFunction =
+                        library.makeFunction(
+                            name: "dynamicEntityTexturedFragmentMain"
+                        ),
+
+                    let dynamicEntityColorFragmentFunction =
+                        library.makeFunction(
+                            name: "dynamicEntityColorFragmentMain"
+                        ),
+
                     let worldLightmappedFragmentFunction =
                         library.makeFunction(
                             name:
@@ -1130,6 +1165,11 @@ public struct GModMetalView:
                         library.makeFunction(
                             name:
                                 "worldMissingMaterialFragmentMain"
+                        ),
+
+                    let dynamicEntityMissingMaterialFragmentFunction =
+                        library.makeFunction(
+                            name: "dynamicEntityMissingMaterialFragmentMain"
                         ),
 
                     let worldSkyboxFragmentFunction =
@@ -1276,34 +1316,56 @@ public struct GModMetalView:
                     descriptor: worldMissingDescriptor
                 )
 
-                let dynamicEntityTexturedDescriptor =
-                    MTLRenderPipelineDescriptor()
-                dynamicEntityTexturedDescriptor.vertexFunction =
-                    dynamicEntityVertexFunction
-                dynamicEntityTexturedDescriptor.fragmentFunction =
-                    worldTexturedFragmentFunction
-                dynamicEntityTexturedDescriptor.colorAttachments[0].pixelFormat =
-                    colorPixelFormat
-                dynamicEntityTexturedDescriptor.depthAttachmentPixelFormat =
-                    depthPixelFormat
-                dynamicEntityTexturedPipeline = try device.makeRenderPipelineState(
-                    descriptor: dynamicEntityTexturedDescriptor
-                )
-
-                let dynamicEntityMissingDescriptor =
-                    MTLRenderPipelineDescriptor()
-                dynamicEntityMissingDescriptor.vertexFunction =
-                    dynamicEntityVertexFunction
-                dynamicEntityMissingDescriptor.fragmentFunction =
-                    worldMissingMaterialFragmentFunction
-                dynamicEntityMissingDescriptor.colorAttachments[0].pixelFormat =
-                    colorPixelFormat
-                dynamicEntityMissingDescriptor.depthAttachmentPixelFormat =
-                    depthPixelFormat
-                dynamicEntityMissingMaterialPipeline =
-                    try device.makeRenderPipelineState(
-                        descriptor: dynamicEntityMissingDescriptor
+                func makeDynamicEntityPipelinePair(
+                    blendMode: GModMetalDynamicEntityBlendMode
+                ) throws -> DynamicEntityPipelinePair {
+                    let texturedDescriptor =
+                        Self.makeDynamicEntityPipelineDescriptor(
+                            vertexFunction: dynamicEntityVertexFunction,
+                            fragmentFunction:
+                                dynamicEntityTexturedFragmentFunction,
+                            blendMode: blendMode,
+                            colorPixelFormat: colorPixelFormat,
+                            depthPixelFormat: depthPixelFormat
+                        )
+                    let missingDescriptor =
+                        Self.makeDynamicEntityPipelineDescriptor(
+                            vertexFunction: dynamicEntityVertexFunction,
+                            fragmentFunction:
+                                dynamicEntityMissingMaterialFragmentFunction,
+                            blendMode: blendMode,
+                            colorPixelFormat: colorPixelFormat,
+                            depthPixelFormat: depthPixelFormat
+                        )
+                    return try DynamicEntityPipelinePair(
+                        textured: device.makeRenderPipelineState(
+                            descriptor: texturedDescriptor
+                        ),
+                        missingMaterial: device.makeRenderPipelineState(
+                            descriptor: missingDescriptor
+                        )
                     )
+                }
+                dynamicEntityPipelines = try DynamicEntityRenderPipelines(
+                    opaque: makeDynamicEntityPipelinePair(
+                        blendMode: .opaque
+                    ),
+                    sourceAlpha: makeDynamicEntityPipelinePair(
+                        blendMode: .sourceAlpha
+                    ),
+                    sourceColorAlpha: device.makeRenderPipelineState(
+                        descriptor: Self.makeDynamicEntityPipelineDescriptor(
+                            vertexFunction: dynamicEntityVertexFunction,
+                            fragmentFunction: dynamicEntityColorFragmentFunction,
+                            blendMode: .sourceAlpha,
+                            colorPixelFormat: colorPixelFormat,
+                            depthPixelFormat: depthPixelFormat
+                        )
+                    ),
+                    additive: makeDynamicEntityPipelinePair(
+                        blendMode: .additive
+                    )
+                )
 
                 let firstPersonViewModelDescriptor =
                     MTLRenderPipelineDescriptor()
@@ -2104,6 +2166,38 @@ public struct GModMetalView:
             return descriptor
         }
 
+        private static func makeDynamicEntityPipelineDescriptor(
+            vertexFunction: MTLFunction,
+            fragmentFunction: MTLFunction,
+            blendMode: GModMetalDynamicEntityBlendMode,
+            colorPixelFormat: MTLPixelFormat,
+            depthPixelFormat: MTLPixelFormat
+        ) -> MTLRenderPipelineDescriptor {
+            let descriptor = MTLRenderPipelineDescriptor()
+            descriptor.vertexFunction = vertexFunction
+            descriptor.fragmentFunction = fragmentFunction
+            descriptor.colorAttachments[0].pixelFormat = colorPixelFormat
+            descriptor.depthAttachmentPixelFormat = depthPixelFormat
+
+            guard blendMode != .opaque else { return descriptor }
+            let color = descriptor.colorAttachments[0]!
+            color.isBlendingEnabled = true
+            color.rgbBlendOperation = .add
+            color.alphaBlendOperation = .add
+            color.sourceRGBBlendFactor = .sourceAlpha
+            color.destinationRGBBlendFactor = blendMode == .additive
+                ? .one
+                : .oneMinusSourceAlpha
+            // The drawable alpha is not a Source render target contract. Keep
+            // it conventional for translucent composition and unchanged for
+            // additive color accumulation.
+            color.sourceAlphaBlendFactor = blendMode == .additive ? .zero : .one
+            color.destinationAlphaBlendFactor = blendMode == .additive
+                ? .one
+                : .oneMinusSourceAlpha
+            return descriptor
+        }
+
         private static func makeWorldWaterPipelineDescriptor(
             vertexFunction: MTLFunction,
             fragmentFunction: MTLFunction,
@@ -2717,8 +2811,7 @@ public struct GModMetalView:
                 let worldLightmappedPipeline,
                 let worldTexturedLightmappedPipeline,
                 let worldMissingMaterialPipeline,
-                let dynamicEntityTexturedPipeline,
-                let dynamicEntityMissingMaterialPipeline,
+                let dynamicEntityPipelines,
                 let firstPersonViewModelTexturedPipeline,
                 let worldSkyboxPipeline,
                 let worldSunSpritePipeline,
@@ -2973,9 +3066,7 @@ public struct GModMetalView:
                     lightmappedPipeline: worldLightmappedPipeline,
                     texturedLightmappedPipeline: worldTexturedLightmappedPipeline,
                     missingMaterialPipeline: worldMissingMaterialPipeline,
-                    dynamicEntityTexturedPipeline: dynamicEntityTexturedPipeline,
-                    dynamicEntityMissingMaterialPipeline:
-                        dynamicEntityMissingMaterialPipeline,
+                    dynamicEntityPipelines: dynamicEntityPipelines,
                     skyboxPipeline: worldSkyboxPipeline,
                     waterSolidPipeline: worldWaterSolidPipeline,
                     waterNormalPipeline: worldWaterNormalPipeline,
@@ -3107,9 +3198,7 @@ public struct GModMetalView:
                         texturedLightmappedPipeline:
                             worldTexturedLightmappedPipeline,
                         missingMaterialPipeline: worldMissingMaterialPipeline,
-                        dynamicEntityTexturedPipeline: dynamicEntityTexturedPipeline,
-                        dynamicEntityMissingMaterialPipeline:
-                            dynamicEntityMissingMaterialPipeline,
+                        dynamicEntityPipelines: dynamicEntityPipelines,
                         skyboxPipeline: worldSkyboxPipeline,
                         waterSolidPipeline: worldWaterSolidPipeline,
                         waterNormalPipeline: worldWaterNormalPipeline,
@@ -3223,10 +3312,7 @@ public struct GModMetalView:
                         texturedLightmappedPipeline:
                             worldTexturedLightmappedPipeline,
                         missingMaterialPipeline: worldMissingMaterialPipeline,
-                        dynamicEntityTexturedPipeline:
-                            dynamicEntityTexturedPipeline,
-                        dynamicEntityMissingMaterialPipeline:
-                            dynamicEntityMissingMaterialPipeline,
+                        dynamicEntityPipelines: dynamicEntityPipelines,
                         skyboxPipeline: worldSkyboxPipeline,
                         waterSolidPipeline: worldWaterSolidPipeline,
                         waterNormalPipeline: worldWaterNormalPipeline,
@@ -3782,8 +3868,7 @@ public struct GModMetalView:
             lightmappedPipeline: MTLRenderPipelineState,
             texturedLightmappedPipeline: MTLRenderPipelineState,
             missingMaterialPipeline: MTLRenderPipelineState,
-            dynamicEntityTexturedPipeline: MTLRenderPipelineState,
-            dynamicEntityMissingMaterialPipeline: MTLRenderPipelineState,
+            dynamicEntityPipelines: DynamicEntityRenderPipelines,
             skyboxPipeline: MTLRenderPipelineState,
             waterSolidPipeline: MTLRenderPipelineState,
             waterNormalPipeline: MTLRenderPipelineState,
@@ -4011,16 +4096,16 @@ public struct GModMetalView:
                 }
             }
 
-            // Source opaque entities share the ordinary-world depth lifetime:
-            // they draw after opaque BSP and before translucent water.
+            // Fixed-mode Source entities draw after opaque BSP. Normal models
+            // write world depth; supported translucent/additive models only
+            // test it. Water remains a later, separately composited pass.
             if drawsDynamicEntities, let dynamicScene = activeDynamicEntityScene {
                 drawDynamicEntities(
                     scene: dynamicScene,
                     device: device,
-                    texturedPipeline: dynamicEntityTexturedPipeline,
-                    missingMaterialPipeline:
-                        dynamicEntityMissingMaterialPipeline,
-                    depthState: worldDepthState,
+                    pipelines: dynamicEntityPipelines,
+                    opaqueDepthState: worldDepthState,
+                    translucentDepthState: waterDepthState,
                     encoder: encoder
                 )
                 // Water ranges are indexed against the BSP-local buffers.
@@ -4566,23 +4651,45 @@ public struct GModMetalView:
         private func drawDynamicEntities(
             scene: GModMetalDynamicEntityScene,
             device: MTLDevice,
-            texturedPipeline: MTLRenderPipelineState,
-            missingMaterialPipeline: MTLRenderPipelineState,
-            depthState: MTLDepthStencilState,
+            pipelines: DynamicEntityRenderPipelines,
+            opaqueDepthState: MTLDepthStencilState,
+            translucentDepthState: MTLDepthStencilState,
             encoder: MTLRenderCommandEncoder
         ) {
-            let referencedResourceIDs = Set(scene.instances.map(\.resourceID))
+            let renderableInstances: [(
+                instance: GModMetalDynamicEntityInstance,
+                blendMode: GModMetalDynamicEntityBlendMode,
+                fragmentMode: GModMetalDynamicEntityFragmentMode
+            )] = scene.instances.compactMap { instance in
+                guard case let .draw(blendMode, fragmentMode) =
+                        GModMetalDynamicEntityRenderContract.disposition(
+                            for: instance.renderMode
+                        ) else {
+                    return nil
+                }
+                return (instance, blendMode, fragmentMode)
+            }
+            let geometryResourceIDs = Set(
+                renderableInstances.map { $0.instance.resourceID }
+            )
+            let textureResourceIDs = Set(
+                renderableInstances.compactMap {
+                    $0.fragmentMode == .material
+                        ? $0.instance.resourceID
+                        : nil
+                }
+            )
             var geometryUploadBudget = DynamicEntityUploadBudget()
             var textureUploadBudget = DynamicEntityUploadBudget()
             uploadNextDynamicEntityGeometry(
                 scene: scene,
-                referencedResourceIDs: referencedResourceIDs,
+                referencedResourceIDs: geometryResourceIDs,
                 device: device,
                 uploadBudget: &geometryUploadBudget
             )
             uploadNextDynamicEntityTexture(
                 scene: scene,
-                referencedResourceIDs: referencedResourceIDs,
+                referencedResourceIDs: textureResourceIDs,
                 device: device,
                 uploadBudget: &textureUploadBudget
             )
@@ -4593,92 +4700,142 @@ public struct GModMetalView:
             var instanceDrawCount = 0
             var rangeDrawCount = 0
             var checkerRangeCount = 0
-            encoder.setDepthStencilState(depthState)
             encoder.setCullMode(.none)
 
-            for instance in scene.instances {
-                guard let resource = resources[instance.resourceID],
-                      let geometry = cachedDynamicEntityGeometry[
-                        instance.resourceID
-                      ],
-                      geometry.resourceID == instance.resourceID,
-                      geometry.vertexCount == resource.vertices.count,
-                      geometry.indexCount == resource.indices.count else {
-                    continue
-                }
-
-                // The scene's identity is a complete EHANDLE (entry + serial).
-                // It deliberately remains distinct even when an entry is reused.
-                _ = instance.identity.handle.rawValue
-                let transform = instance.metalTransform
-                var transformUniforms = DynamicEntityTransformUniforms(
-                    metalXAxis: SIMD4<Float>(transform.metalXAxis, 0),
-                    metalYAxis: SIMD4<Float>(transform.metalYAxis, 0),
-                    metalZAxis: SIMD4<Float>(transform.metalZAxis, 0),
-                    metalTranslation: SIMD4<Float>(transform.metalTranslation, 1)
+            // Source places opaque entities before translucent render groups.
+            // The supported translucent/additive routes depth-test against the
+            // completed opaque world but cannot occlude a later transparent
+            // range through a depth write.
+            for blendMode in GModMetalDynamicEntityBlendMode.allCases {
+                encoder.setDepthStencilState(
+                    blendMode == .opaque
+                        ? opaqueDepthState
+                        : translucentDepthState
                 )
-                encoder.setVertexBuffer(
-                    geometry.vertexBuffer,
-                    offset: 0,
-                    index: 0
-                )
-                withUnsafeBytes(of: &transformUniforms) { bytes in
-                    guard let address = bytes.baseAddress else { return }
-                    encoder.setVertexBytes(
-                        address,
-                        length: bytes.count,
-                        index: 2
-                    )
-                }
-
-                var drewInstance = false
-                for range in resource.drawRanges {
-                    var drawsChecker = true
-                    if case let .resolved(_, bitmap) =
-                        range.materialResolution,
-                       bitmap.alphaRepresentation == .straight {
-                        let key = Self.dynamicEntityTextureKey(
-                            bitmap: bitmap
-                        )
-                        if let cached = cachedDynamicEntityTextures[key],
-                           cached.bitmap == bitmap {
-                            encoder.setRenderPipelineState(texturedPipeline)
-                            encoder.setFragmentTexture(cached.texture, index: 0)
-                            let configuration =
-                                GModMetalWorldSamplerConfiguration(
-                                    bitmap: bitmap,
-                                    renderLayer: .world
-                                )
-                            encoder.setFragmentSamplerState(
-                                samplerStateForWorldTexture(
-                                    for: configuration,
-                                    device: device
-                                ),
-                                index: 0
-                            )
-                            drawsChecker = false
-                        }
+                let pipelinePair = pipelines.pair(for: blendMode)
+                for item in renderableInstances where
+                    item.blendMode == blendMode {
+                    let instance = item.instance
+                    guard let resource = resources[instance.resourceID],
+                          let geometry = cachedDynamicEntityGeometry[
+                            instance.resourceID
+                          ],
+                          geometry.resourceID == instance.resourceID,
+                          geometry.vertexCount == resource.vertices.count,
+                          geometry.indexCount == resource.indices.count else {
+                        continue
                     }
-                    if drawsChecker {
-                        // Missing, failed, unsupported-alpha, and upload-pending
-                        // Source materials all remain visible as the checker.
-                        encoder.setRenderPipelineState(missingMaterialPipeline)
+
+                    // The scene's identity is a complete EHANDLE (entry + serial).
+                    // It deliberately remains distinct when an entry is reused.
+                    _ = instance.identity.handle.rawValue
+                    let transform = instance.metalTransform
+                    var transformUniforms = DynamicEntityTransformUniforms(
+                        metalXAxis: SIMD4<Float>(transform.metalXAxis, 0),
+                        metalYAxis: SIMD4<Float>(transform.metalYAxis, 0),
+                        metalZAxis: SIMD4<Float>(transform.metalZAxis, 0),
+                        metalTranslation: SIMD4<Float>(
+                            transform.metalTranslation,
+                            1
+                        )
+                    )
+                    encoder.setVertexBuffer(
+                        geometry.vertexBuffer,
+                        offset: 0,
+                        index: 0
+                    )
+                    withUnsafeBytes(of: &transformUniforms) { bytes in
+                        guard let address = bytes.baseAddress else { return }
+                        encoder.setVertexBytes(
+                            address,
+                            length: bytes.count,
+                            index: 2
+                        )
+                    }
+                    var appearanceUniforms = DynamicEntityAppearanceUniforms(
+                        displayRGBAndAlpha:
+                            GModMetalDynamicEntityRenderContract
+                                .displayRGBAndAlpha(
+                                    color: instance.colorModulation,
+                                    blendMode: blendMode
+                                )
+                    )
+                    withUnsafeBytes(of: &appearanceUniforms) { bytes in
+                        guard let address = bytes.baseAddress else { return }
+                        encoder.setFragmentBytes(
+                            address,
+                            length: bytes.count,
+                            index: 2
+                        )
+                    }
+                    // The value survives into the renderer scene, but
+                    // unverified time-varying RenderFX is not synthesized.
+                    _ = instance.renderFX
+
+                    if item.fragmentMode == .constantColor {
+                        encoder.setRenderPipelineState(
+                            pipelines.sourceColorAlpha
+                        )
                         encoder.setFragmentTexture(nil, index: 0)
                         encoder.setFragmentSamplerState(nil, index: 0)
-                        checkerRangeCount += 1
                     }
-                    encoder.drawIndexedPrimitives(
-                        type: .triangle,
-                        indexCount: range.indexCount,
-                        indexType: .uint32,
-                        indexBuffer: geometry.indexBuffer,
-                        indexBufferOffset:
-                            range.firstIndex * MemoryLayout<UInt32>.stride
-                    )
-                    rangeDrawCount += 1
-                    drewInstance = true
+                    var drewInstance = false
+                    for range in resource.drawRanges {
+                        var drawsChecker = item.fragmentMode == .material
+                        if drawsChecker,
+                           case let .resolved(_, bitmap) =
+                            range.materialResolution,
+                           bitmap.alphaRepresentation == .straight {
+                            let key = Self.dynamicEntityTextureKey(
+                                bitmap: bitmap
+                            )
+                            if let cached = cachedDynamicEntityTextures[key],
+                               cached.bitmap == bitmap {
+                                encoder.setRenderPipelineState(
+                                    pipelinePair.textured
+                                )
+                                encoder.setFragmentTexture(
+                                    cached.texture,
+                                    index: 0
+                                )
+                                let configuration =
+                                    GModMetalWorldSamplerConfiguration(
+                                        bitmap: bitmap,
+                                        renderLayer: .world
+                                    )
+                                encoder.setFragmentSamplerState(
+                                    samplerStateForWorldTexture(
+                                        for: configuration,
+                                        device: device
+                                    ),
+                                    index: 0
+                                )
+                                drawsChecker = false
+                            }
+                        }
+                        if drawsChecker {
+                            // Missing, failed, unsupported-alpha, and
+                            // upload-pending materials remain checkered.
+                            encoder.setRenderPipelineState(
+                                pipelinePair.missingMaterial
+                            )
+                            encoder.setFragmentTexture(nil, index: 0)
+                            encoder.setFragmentSamplerState(nil, index: 0)
+                            checkerRangeCount += 1
+                        }
+                        encoder.drawIndexedPrimitives(
+                            type: .triangle,
+                            indexCount: range.indexCount,
+                            indexType: .uint32,
+                            indexBuffer: geometry.indexBuffer,
+                            indexBufferOffset:
+                                range.firstIndex * MemoryLayout<UInt32>.stride
+                        )
+                        rangeDrawCount += 1
+                        drewInstance = true
+                    }
+                    if drewInstance { instanceDrawCount += 1 }
                 }
-                if drewInstance { instanceDrawCount += 1 }
             }
 
             lastDynamicEntityInstanceDrawCount = instanceDrawCount
@@ -5612,6 +5769,11 @@ public struct GModMetalView:
             float4 metalTranslation;
         };
 
+        struct DynamicEntityAppearance
+        {
+            float4 displayRGBAndAlpha;
+        };
+
         struct WorldUniforms
         {
             float4x4 viewProjection;
@@ -5915,6 +6077,82 @@ public struct GModMetalView:
                 uniforms,
                 gmodDecodeDisplaySRGB(displayColor),
                 1.0
+            );
+        }
+
+        fragment float4 dynamicEntityTexturedFragmentMain(
+            WorldVertexOutput input [[stage_in]],
+
+            constant WorldUniforms &uniforms
+                [[buffer(1)]],
+
+            constant DynamicEntityAppearance &appearance
+                [[buffer(2)]],
+
+            texture2d<float> baseTexture [[texture(0)]],
+
+            sampler baseSampler [[sampler(0)]]
+        )
+        {
+            gmodApplyWorldClip(input, uniforms);
+            float4 sample = baseTexture.sample(baseSampler, input.uv);
+            float3 modulation = gmodDecodeDisplaySRGB(
+                appearance.displayRGBAndAlpha.rgb
+            );
+            return gmodWorldFogOutput(
+                input,
+                uniforms,
+                sample.rgb * modulation *
+                    gmodWorldEnvironmentLight(input.normal, uniforms),
+                appearance.displayRGBAndAlpha.a
+            );
+        }
+
+        fragment float4 dynamicEntityColorFragmentMain(
+            WorldVertexOutput input [[stage_in]],
+
+            constant WorldUniforms &uniforms
+                [[buffer(1)]],
+
+            constant DynamicEntityAppearance &appearance
+                [[buffer(2)]]
+        )
+        {
+            gmodApplyWorldClip(input, uniforms);
+            return gmodWorldFogOutput(
+                input,
+                uniforms,
+                gmodDecodeDisplaySRGB(
+                    appearance.displayRGBAndAlpha.rgb
+                ),
+                appearance.displayRGBAndAlpha.a
+            );
+        }
+
+        fragment float4 dynamicEntityMissingMaterialFragmentMain(
+            WorldVertexOutput input [[stage_in]],
+
+            constant WorldUniforms &uniforms
+                [[buffer(1)]],
+
+            constant DynamicEntityAppearance &appearance
+                [[buffer(2)]]
+        )
+        {
+            gmodApplyWorldClip(input, uniforms);
+            float2 tile = floor(input.uv * 8.0);
+            bool alternate = fmod(tile.x + tile.y, 2.0) != 0.0;
+            float3 displayColor = alternate
+                ? float3(0.92, 0.05, 0.72)
+                : float3(0.06, 0.01, 0.05);
+            float3 modulation = gmodDecodeDisplaySRGB(
+                appearance.displayRGBAndAlpha.rgb
+            );
+            return gmodWorldFogOutput(
+                input,
+                uniforms,
+                gmodDecodeDisplaySRGB(displayColor) * modulation,
+                appearance.displayRGBAndAlpha.a
             );
         }
 

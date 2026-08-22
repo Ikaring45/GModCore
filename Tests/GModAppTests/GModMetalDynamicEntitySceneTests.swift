@@ -18,6 +18,12 @@ final class GModMetalDynamicEntitySceneTests: XCTestCase {
             origin: SourceVector3(100, -50, 20),
             angles: SourceQAngle(pitch: 17, yaw: 81, roll: -23)
         )
+        let color = SourceEntityRenderColor(
+            red: 24,
+            green: 96,
+            blue: 192,
+            alpha: 128
+        )
 
         let scene = try GModMetalDynamicEntityScene(
             generation: generation(),
@@ -31,7 +37,10 @@ final class GModMetalDynamicEntitySceneTests: XCTestCase {
                 instance(
                     identity: earlierHandle,
                     resourceID: firstID,
-                    transform: transform
+                    transform: transform,
+                    colorModulation: color,
+                    renderMode: .transAdd,
+                    renderFX: .pulseFast
                 ),
             ],
             policy: generousPolicy()
@@ -46,6 +55,9 @@ final class GModMetalDynamicEntitySceneTests: XCTestCase {
         )
         XCTAssertEqual(scene.instances[0].identity.serialNumber, 11)
         XCTAssertEqual(scene.instances[1].identity.serialNumber, 3)
+        XCTAssertEqual(scene.instances[0].colorModulation, color)
+        XCTAssertEqual(scene.instances[0].renderMode, .transAdd)
+        XCTAssertEqual(scene.instances[0].renderFX, .pulseFast)
         XCTAssertGreaterThan(scene.retainedGeometryByteCount, 0)
         XCTAssertGreaterThan(scene.retainedMetadataUTF8ByteCount, 0)
 
@@ -82,6 +94,70 @@ final class GModMetalDynamicEntitySceneTests: XCTestCase {
             expectedSourceNormal.z
         ))
         assertEqual(actualNormal, expectedNormal)
+    }
+
+    func testRenderContractIsFailClosedAndUsesSourceColor32Alpha() {
+        XCTAssertEqual(
+            GModMetalDynamicEntityRenderContract.disposition(for: .normal),
+            .draw(blendMode: .opaque, fragmentMode: .material)
+        )
+        XCTAssertEqual(
+            GModMetalDynamicEntityRenderContract.disposition(
+                for: .transColor
+            ),
+            .draw(blendMode: .sourceAlpha, fragmentMode: .constantColor)
+        )
+        XCTAssertEqual(
+            GModMetalDynamicEntityRenderContract.disposition(
+                for: .transTexture
+            ),
+            .draw(blendMode: .sourceAlpha, fragmentMode: .material)
+        )
+        XCTAssertEqual(
+            GModMetalDynamicEntityRenderContract.disposition(for: .transAdd),
+            .draw(blendMode: .additive, fragmentMode: .material)
+        )
+        XCTAssertEqual(
+            GModMetalDynamicEntityRenderContract.disposition(for: .none),
+            .hidden
+        )
+        XCTAssertEqual(
+            GModMetalDynamicEntityRenderContract.disposition(
+                for: .environmental
+            ),
+            .hidden
+        )
+        for unsupported in [
+            SourceEntityRenderMode.glow,
+            .transAlpha,
+            .transAddFrameBlend,
+            .transAlphaAdd,
+            .worldGlow,
+        ] {
+            XCTAssertEqual(
+                GModMetalDynamicEntityRenderContract.disposition(
+                    for: unsupported
+                ),
+                .unsupported
+            )
+        }
+
+        let color = SourceEntityRenderColor(
+            red: 17,
+            green: 34,
+            blue: 51,
+            alpha: 96
+        )
+        let translucent = GModMetalDynamicEntityRenderContract
+            .displayRGBAndAlpha(color: color, blendMode: .sourceAlpha)
+        XCTAssertEqual(translucent.x, Float(17) / 255, accuracy: 0.000_001)
+        XCTAssertEqual(translucent.y, Float(34) / 255, accuracy: 0.000_001)
+        XCTAssertEqual(translucent.z, Float(51) / 255, accuracy: 0.000_001)
+        XCTAssertEqual(translucent.w, Float(96) / 255, accuracy: 0.000_001)
+
+        let opaque = GModMetalDynamicEntityRenderContract
+            .displayRGBAndAlpha(color: color, blendMode: .opaque)
+        XCTAssertEqual(opaque.w, 1)
     }
 
     func testTransformOnlyUpdateReusesResourcesWithinCompleteGeneration() throws {
@@ -517,13 +593,19 @@ private extension GModMetalDynamicEntitySceneTests {
         identity: SourceCanonicalEntityIdentity,
         resourceID: GModMetalDynamicEntityResourceID,
         transform: SourceEntityTransform = .identity,
-        sourceEntityRevision: UInt64 = 42
+        sourceEntityRevision: UInt64 = 42,
+        colorModulation: SourceEntityRenderColor = .white,
+        renderMode: SourceEntityRenderMode = .normal,
+        renderFX: SourceEntityRenderFX = .none
     ) -> GModMetalDynamicEntityInstanceInput {
         GModMetalDynamicEntityInstanceInput(
             identity: identity,
             sourceEntityRevision: sourceEntityRevision,
             transform: transform,
-            resourceID: resourceID
+            resourceID: resourceID,
+            colorModulation: colorModulation,
+            renderMode: renderMode,
+            renderFX: renderFX
         )
     }
 

@@ -407,7 +407,10 @@ private extension GModDynamicEntityMetalSceneBuilder {
                 checksum: source.resourceID.checksum,
                 bodyValue: source.resourceID.bodyValue,
                 skinFamilyIndex: source.resourceID.skinFamilyIndex
-            )
+            ),
+            colorModulation: source.colorModulation,
+            renderMode: source.renderMode,
+            renderFX: source.renderFX
         )
     }
 
@@ -425,7 +428,10 @@ private extension GModDynamicEntityMetalSceneBuilder {
         return zip(prior, sorted).allSatisfy { old, new in
             old.identity == new.identity &&
                 old.sourceTransform == new.transform &&
-                old.resourceID == new.resourceID
+                old.resourceID == new.resourceID &&
+                old.colorModulation == new.colorModulation &&
+                old.renderMode == new.renderMode &&
+                old.renderFX == new.renderFX
         }
     }
 

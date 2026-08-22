@@ -37,6 +37,14 @@ enum MetalPipelineSmoke {
                 named: "worldTexturedFragmentMain",
                 in: library
             )
+            let dynamicEntityTextured = try function(
+                named: "dynamicEntityTexturedFragmentMain",
+                in: library
+            )
+            let dynamicEntityColor = try function(
+                named: "dynamicEntityColorFragmentMain",
+                in: library
+            )
             let worldLightmapped = try function(
                 named: "worldLightmappedFragmentMain",
                 in: library
@@ -47,6 +55,10 @@ enum MetalPipelineSmoke {
             )
             let worldMissingMaterial = try function(
                 named: "worldMissingMaterialFragmentMain",
+                in: library
+            )
+            let dynamicEntityMissingMaterial = try function(
+                named: "dynamicEntityMissingMaterialFragmentMain",
                 in: library
             )
             let worldSkybox = try function(
@@ -128,14 +140,34 @@ enum MetalPipelineSmoke {
             try makePipeline(
                 device: device,
                 vertex: dynamicEntityVertex,
-                fragment: worldTextured,
+                fragment: dynamicEntityTextured,
                 blendMode: .none
             )
             try makePipeline(
                 device: device,
                 vertex: dynamicEntityVertex,
-                fragment: worldMissingMaterial,
+                fragment: dynamicEntityMissingMaterial,
                 blendMode: .none
+            )
+            for blendMode in [BlendMode.straightAlpha, .straightAdditive] {
+                try makePipeline(
+                    device: device,
+                    vertex: dynamicEntityVertex,
+                    fragment: dynamicEntityTextured,
+                    blendMode: blendMode
+                )
+                try makePipeline(
+                    device: device,
+                    vertex: dynamicEntityVertex,
+                    fragment: dynamicEntityMissingMaterial,
+                    blendMode: blendMode
+                )
+            }
+            try makePipeline(
+                device: device,
+                vertex: dynamicEntityVertex,
+                fragment: dynamicEntityColor,
+                blendMode: .straightAlpha
             )
             try makePipeline(
                 device: device,
@@ -193,7 +225,7 @@ enum MetalPipelineSmoke {
             )
 
             print(
-                "Runtime Metal library and sixteen render pipelines passed on "
+                "Runtime Metal library and twenty-one render pipelines passed on "
                     + device.name
             )
         } catch {
@@ -231,14 +263,30 @@ enum MetalPipelineSmoke {
             color.isBlendingEnabled = true
             color.rgbBlendOperation = .add
             color.alphaBlendOperation = .add
-            color.sourceRGBBlendFactor = .one
-            color.destinationRGBBlendFactor = blendMode == .additive
-                ? .one
-                : .oneMinusSourceAlpha
-            color.sourceAlphaBlendFactor = .one
-            color.destinationAlphaBlendFactor = blendMode == .additive
-                ? .one
-                : .oneMinusSourceAlpha
+            switch blendMode {
+            case .none:
+                preconditionFailure("handled above")
+            case .premultiplied:
+                color.sourceRGBBlendFactor = .one
+                color.destinationRGBBlendFactor = .oneMinusSourceAlpha
+                color.sourceAlphaBlendFactor = .one
+                color.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            case .additive:
+                color.sourceRGBBlendFactor = .one
+                color.destinationRGBBlendFactor = .one
+                color.sourceAlphaBlendFactor = .one
+                color.destinationAlphaBlendFactor = .one
+            case .straightAlpha:
+                color.sourceRGBBlendFactor = .sourceAlpha
+                color.destinationRGBBlendFactor = .oneMinusSourceAlpha
+                color.sourceAlphaBlendFactor = .one
+                color.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            case .straightAdditive:
+                color.sourceRGBBlendFactor = .sourceAlpha
+                color.destinationRGBBlendFactor = .one
+                color.sourceAlphaBlendFactor = .zero
+                color.destinationAlphaBlendFactor = .one
+            }
         }
 
         _ = try device.makeRenderPipelineState(descriptor: descriptor)
@@ -248,6 +296,8 @@ enum MetalPipelineSmoke {
         case none
         case premultiplied
         case additive
+        case straightAlpha
+        case straightAdditive
     }
 
     private static func writeStandardError(_ message: String) {
