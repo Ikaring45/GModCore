@@ -7,17 +7,26 @@ public struct GModWorldRenderVertex: Sendable, Equatable {
     public let normal: SourceVector3
     public let textureCoordinate: GModWorldTextureCoordinate
     public let lightmapCoordinate: GModWorldTextureCoordinate?
+    /// Exact `CDispVert::m_Alpha` value from `LUMP_DISP_VERTS`.
+    ///
+    /// Source's displacement material shader consumes this channel for
+    /// vertex-transition blending. Keep the authored float unchanged here;
+    /// shader-specific normalization belongs at the material/render boundary.
+    /// Ordinary brush and sky vertices carry zero.
+    public let sourceDisplacementAlpha: Float
 
     public init(
         position: SourceVector3,
         normal: SourceVector3,
         textureCoordinate: GModWorldTextureCoordinate = .zero,
-        lightmapCoordinate: GModWorldTextureCoordinate? = nil
+        lightmapCoordinate: GModWorldTextureCoordinate? = nil,
+        sourceDisplacementAlpha: Float = 0
     ) {
         self.position = position
         self.normal = normal
         self.textureCoordinate = textureCoordinate
         self.lightmapCoordinate = lightmapCoordinate
+        self.sourceDisplacementAlpha = sourceDisplacementAlpha
     }
 }
 
@@ -1253,7 +1262,9 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
                             position: sky3DContext.transform(vertex.position),
                             normal: vertex.normal,
                             textureCoordinate: vertex.textureCoordinate,
-                            lightmapCoordinate: vertex.lightmapCoordinate
+                            lightmapCoordinate: vertex.lightmapCoordinate,
+                            sourceDisplacementAlpha:
+                                vertex.sourceDisplacementAlpha
                         )
                     } else {
                         emittedVertex = vertex
@@ -1485,7 +1496,9 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
                     position: vertex.position,
                     normal: vertex.normal,
                     textureCoordinate: vertex.textureCoordinate,
-                    lightmapCoordinate: atlasCoordinate
+                    lightmapCoordinate: atlasCoordinate,
+                    sourceDisplacementAlpha:
+                        vertex.sourceDisplacementAlpha
                 )
             }
         } else {
@@ -1494,7 +1507,8 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
                     position: $0.position,
                     normal: $0.normal,
                     textureCoordinate: $0.textureCoordinate,
-                    lightmapCoordinate: nil
+                    lightmapCoordinate: nil,
+                    sourceDisplacementAlpha: $0.sourceDisplacementAlpha
                 )
             }
         }
@@ -2967,9 +2981,11 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
         var positions: [SourceVector3] = []
         var textureCoordinates: [GModWorldTextureCoordinate] = []
         var lightmapCoordinates: [GModWorldTextureCoordinate?] = []
+        var sourceDisplacementAlphas: [Float] = []
         positions.reserveCapacity(displacement.vertexCount)
         textureCoordinates.reserveCapacity(displacement.vertexCount)
         lightmapCoordinates.reserveCapacity(displacement.vertexCount)
+        sourceDisplacementAlphas.reserveCapacity(displacement.vertexCount)
         var maximumOffset: Float = 0
 
         for y in 0..<sideLength {
@@ -2997,6 +3013,7 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
                     )
                 }
                 positions.append(position)
+                sourceDisplacementAlphas.append(sourceVertex.alpha)
                 maximumOffset = Swift.max(maximumOffset, offset.length)
 
                 let uv = try textureCoordinate(
@@ -3066,7 +3083,8 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
                 position: positions[index],
                 normal: normal,
                 textureCoordinate: textureCoordinates[index],
-                lightmapCoordinate: lightmapCoordinates[index]
+                lightmapCoordinate: lightmapCoordinates[index],
+                sourceDisplacementAlpha: sourceDisplacementAlphas[index]
             )
         }
         return GeneratedDisplacementGeometry(

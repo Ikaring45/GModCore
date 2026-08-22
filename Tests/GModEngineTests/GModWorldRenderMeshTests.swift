@@ -999,6 +999,29 @@ final class GModWorldRenderMeshTests: XCTestCase {
             file: file,
             line: line
         )
+        XCTAssertEqual(
+            lowerLeft.sourceDisplacementAlpha,
+            rawField.alpha,
+            "the exact VBSP displacement blend channel must survive mesh compilation",
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(
+            lowerRight.sourceDisplacementAlpha,
+            bsp.displacementVertices[
+                firstDispVertex + sideLength - 1
+            ].alpha,
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(
+            upperLeft.sourceDisplacementAlpha,
+            bsp.displacementVertices[
+                firstDispVertex + sideLength * (sideLength - 1)
+            ].alpha,
+            file: file,
+            line: line
+        )
 
         guard let lightmap = bsp.lightmap(forFaceAt: faceIndex),
               let atlas = mesh.lightmapAtlas,
