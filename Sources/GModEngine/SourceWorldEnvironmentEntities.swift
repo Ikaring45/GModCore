@@ -226,6 +226,22 @@ public enum SourceWorldEnvironmentEntityError:
 /// contracts. Runtime inputs, target movement, and global compiler flags do not
 /// cross this boundary.
 public enum SourceWorldEnvironmentEntityCompiler {
+    /// Compiles only `env_sun` entities so an unrelated malformed
+    /// `sky_camera` cannot suppress an otherwise valid activated sun overlay.
+    public static func compileSuns(
+        parsedEntities: [SourceBSPParsedEntity]
+    ) throws -> [SourceEnvironmentSunEntityState] {
+        let entities = parsedEntities.enumerated().map {
+            SourceCanonicalMapEntityKeyValues(
+                sourceEntityIndex: $0.offset,
+                parsedEntity: $0.element
+            )
+        }
+        return try entities
+            .filter { isClass($0, "env_sun") }
+            .map { try compileSun($0, allEntities: entities) }
+    }
+
     public static func compile(
         parsedEntities: [SourceBSPParsedEntity],
         lightingMode: SourceWorldEnvironmentLightingMode

@@ -109,6 +109,40 @@ final class GModWorldRenderMeshTests: XCTestCase {
             targetDriven.status,
             .unavailableUnsupportedTargetDirection(entityIndex: 0)
         )
+
+        let staticTargetDriven = GModWorldRenderMesh.sunSprites(
+            from: try SourceBSPEntityText(
+                rawBytes: Data(
+                    """
+                    {
+                    "classname" "info_target"
+                    "targetname" "sun_focus"
+                    "origin" "0 0 0"
+                    }
+                    {
+                    "classname" "env_sun"
+                    "origin" "0 64 0"
+                    "target" "sun_focus"
+                    }
+                    \0
+                    """.utf8
+                )
+            ).parsedEntities()
+        )
+        XCTAssertEqual(
+            staticTargetDriven.status,
+            .available(entityCount: 1)
+        )
+        let staticSun = try XCTUnwrap(staticTargetDriven.sprites.first)
+        assertVector(
+            staticSun.sourceDirectionToSun,
+            equals: SourceVector3(0, 1, 0)
+        )
+        XCTAssertEqual(staticSun.core.size, 16)
+        XCTAssertEqual(
+            staticSun.core.materialName,
+            "sprites/light_glow02_add_noz"
+        )
     }
 
     func testBundledMapsUseCompiledHDRLightEnvironmentWorldLights() throws {

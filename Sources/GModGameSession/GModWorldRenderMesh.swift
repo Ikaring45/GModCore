@@ -745,8 +745,8 @@ public struct GModWorldSunSpriteLayer: Sendable, Equatable {
 }
 
 /// Static BSP entity-lump state needed to reproduce Source's directional sun.
-/// Target-driven `env_sun` entities are intentionally not represented until
-/// canonical entity target resolution can supply their activated direction.
+/// Angle-driven and exact-name static target-driven entities retain the
+/// direction produced by `CSun::Activate`; dynamic target names remain typed.
 public struct GModWorldSunSprite: Sendable, Equatable {
     /// `CSun::m_vDirection`: normalized direction from the camera to the sun.
     public let sourceDirectionToSun: SourceVector3
@@ -1650,10 +1650,9 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
         let status: GModWorldSunSpriteStatus
     }
 
-    /// Compiles only angle-driven `env_sun` entities. Source normally resolves
-    /// target-driven directions during `CSun::Activate`; doing that from the
-    /// static BSP text would bypass entity ownership and is therefore kept as
-    /// an explicit unsupported boundary.
+    /// Compiles angle-driven and exact-name static target-driven `env_sun`
+    /// entities. Dynamic/special target names remain an explicit unsupported
+    /// boundary because static BSP keyvalues cannot reproduce runtime motion.
     private static func sunSprites(
         in bsp: SourceBSP
     ) throws -> SunSpriteCompilationResult {
@@ -1663,125 +1662,68 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
     static func sunSprites(
         from entities: [SourceBSPParsedEntity]
     ) -> SunSpriteCompilationResult {
-        let sunEntities = entities.filter {
+        guard entities.contains(where: {
             $0.value(forKey: "classname")?
                 .caseInsensitiveCompare("env_sun") == .orderedSame
-        }
-        guard !sunEntities.isEmpty else {
+        }) else {
             return SunSpriteCompilationResult(
                 sprites: [],
                 status: .unavailableNoEntity
             )
         }
-
-        var sprites: [GModWorldSunSprite] = []
-        sprites.reserveCapacity(sunEntities.count)
-        for (entityIndex, entity) in sunEntities.enumerated() {
-            guard let rawUseAngles = entity.value(forKey: "use_angles"),
-                  Int(rawUseAngles.trimmingCharacters(in: .whitespacesAndNewlines)) == 1 else {
+        do {
+            let compiled = try SourceWorldEnvironmentEntityCompiler
+                .compileSuns(parsedEntities: entities)
+            let sprites = compiled.map { sun in
+                GModWorldSunSprite(
+                    sourceDirectionToSun: sun.sourceDirectionToSun,
+                    hdrColorScale: sun.hdrColorScale,
+                    core: GModWorldSunSpriteLayer(
+                        materialName: sun.core.materialName,
+                        displayRGB: sun.core.displayRGB,
+                        size: Float(sun.core.size)
+                    ),
+                    overlay: GModWorldSunSpriteLayer(
+                        materialName: sun.overlay.materialName,
+                        displayRGB: sun.overlay.displayRGB,
+                        size: Float(sun.overlay.size)
+                    )
+                )
+            }
+            return SunSpriteCompilationResult(
+                sprites: sprites,
+                status: .available(entityCount: sprites.count)
+            )
+        } catch let error as SourceWorldEnvironmentEntityError {
+            switch error {
+            case let .unsupportedDynamicTarget(entityIndex, _),
+                 let .unresolvedTarget(entityIndex, _):
                 return SunSpriteCompilationResult(
                     sprites: [],
                     status: .unavailableUnsupportedTargetDirection(
                         entityIndex: entityIndex
                     )
                 )
-            }
-            guard let anglesText = entity.value(forKey: "angles"),
-                  let angles = sourceVector(from: anglesText) else {
-                return invalidSun(entityIndex: entityIndex, key: "angles")
-            }
-            guard let pitchText = entity.value(forKey: "pitch"),
-                  let pitch = finiteFloat(pitchText) else {
-                return invalidSun(entityIndex: entityIndex, key: "pitch")
-            }
-            let angle: Float
-            if let angleText = entity.value(forKey: "angle") {
-                guard let parsed = finiteFloat(angleText), parsed != -1, parsed != -2 else {
-                    return invalidSun(entityIndex: entityIndex, key: "angle")
-                }
-                angle = parsed
-            } else {
-                // CSun initializes m_flYaw to zero. SetupLightNormalFromProps
-                // then selects the explicitly authored `angles` yaw.
-                angle = 0
-            }
-            guard let direction = angleDrivenSunDirection(
-                angles: angles,
-                angle: angle,
-                pitch: pitch
-            ) else {
-                return invalidSun(entityIndex: entityIndex, key: "angles/pitch")
-            }
-
-            guard let sizeText = entity.value(forKey: "size"),
-                  let sizeInteger = Int(
-                      sizeText.trimmingCharacters(in: .whitespacesAndNewlines)
-                  ), (1...1_023).contains(sizeInteger) else {
-                return invalidSun(entityIndex: entityIndex, key: "size")
-            }
-            let size = Float(sizeInteger)
-            guard let overlaySizeText = entity.value(forKey: "overlaysize"),
-                  let overlaySizeInteger = Int(
-                      overlaySizeText.trimmingCharacters(in: .whitespacesAndNewlines)
-                  ), overlaySizeInteger == -1 ||
-                    (1...1_023).contains(overlaySizeInteger) else {
-                return invalidSun(entityIndex: entityIndex, key: "overlaysize")
-            }
-            let overlaySize = overlaySizeInteger == -1
-                ? size
-                : Float(overlaySizeInteger)
-
-            guard let renderColorText = entity.value(forKey: "rendercolor"),
-                  let renderColor = sourceColor(from: renderColorText),
-                  max(renderColor.x, max(renderColor.y, renderColor.z)) > 0 else {
-                return invalidSun(entityIndex: entityIndex, key: "rendercolor")
-            }
-            let maximumColor = max(
-                renderColor.x,
-                max(renderColor.y, renderColor.z)
-            )
-            let coreColor = renderColor / maximumColor
-            guard let overlayColorText = entity.value(forKey: "overlaycolor"),
-                  let rawOverlayColor = sourceColor(from: overlayColorText) else {
-                return invalidSun(entityIndex: entityIndex, key: "overlaycolor")
-            }
-            let overlayColor = rawOverlayColor.lengthSquared > 0
-                ? rawOverlayColor / 255
-                : coreColor
-
-            guard let coreMaterialText = entity.value(forKey: "material"),
-                  let coreMaterial = normalizedMaterialName(coreMaterialText) else {
-                return invalidSun(entityIndex: entityIndex, key: "material")
-            }
-            guard let overlayMaterialText = entity.value(forKey: "overlaymaterial"),
-                  let overlayMaterial = normalizedMaterialName(overlayMaterialText) else {
-                return invalidSun(entityIndex: entityIndex, key: "overlaymaterial")
-            }
-            guard let hdrScaleText = entity.value(forKey: "HDRColorScale"),
-                  let hdrScale = finiteFloat(hdrScaleText),
-                  hdrScale >= 0, hdrScale <= 100 else {
-                return invalidSun(entityIndex: entityIndex, key: "HDRColorScale")
-            }
-
-            sprites.append(GModWorldSunSprite(
-                sourceDirectionToSun: direction,
-                hdrColorScale: hdrScale,
-                core: GModWorldSunSpriteLayer(
-                    materialName: coreMaterial,
-                    displayRGB: coreColor,
-                    size: size
-                ),
-                overlay: GModWorldSunSpriteLayer(
-                    materialName: overlayMaterial,
-                    displayRGB: overlayColor,
-                    size: overlaySize
+            case let .invalidValue(entityIndex, className, key, _)
+                where className.caseInsensitiveCompare("env_sun") ==
+                    .orderedSame && key == "target":
+                return SunSpriteCompilationResult(
+                    sprites: [],
+                    status: .unavailableUnsupportedTargetDirection(
+                        entityIndex: entityIndex
+                    )
                 )
-            ))
+            case let .invalidValue(entityIndex, _, key, _):
+                return invalidSun(entityIndex: entityIndex, key: key)
+            case let .zeroDirection(entityIndex, _):
+                return invalidSun(
+                    entityIndex: entityIndex,
+                    key: "angles/pitch/target"
+                )
+            }
+        } catch {
+            return invalidSun(entityIndex: 0, key: "env_sun")
         }
-        return SunSpriteCompilationResult(
-            sprites: sprites,
-            status: .available(entityCount: sunEntities.count)
-        )
     }
 
     private static func invalidSun(
