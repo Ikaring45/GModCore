@@ -180,6 +180,9 @@ public struct SourceWorldWalkConfiguration: Equatable, Sendable {
     public var standingViewOffsetZ: Float
     /// Ducking `CBasePlayer::GetViewOffset().z` sampled by `CheckWater`.
     public var duckViewOffsetZ: Float
+    /// Source `sv_noclipspeed`, `sv_noclipaccelerate`, `sv_maxspeed`, and
+    /// `sv_friction` values consumed only by `MOVETYPE_NOCLIP`.
+    public var noClipMovement: SourceNoClipMovementParameters
 
     public init(
         movement: SourceMovementParameters = SourceMovementParameters(),
@@ -188,7 +191,8 @@ public struct SourceWorldWalkConfiguration: Equatable, Sendable {
         jumpHeight: Float = 21,
         stepSize: Float = 18,
         standingViewOffsetZ: Float = 64,
-        duckViewOffsetZ: Float = 28
+        duckViewOffsetZ: Float = 28,
+        noClipMovement: SourceNoClipMovementParameters? = nil
     ) {
         self.movement = movement
         self.maximumSpeed = maximumSpeed
@@ -197,6 +201,10 @@ public struct SourceWorldWalkConfiguration: Equatable, Sendable {
         self.stepSize = stepSize
         self.standingViewOffsetZ = standingViewOffsetZ
         self.duckViewOffsetZ = duckViewOffsetZ
+        self.noClipMovement = noClipMovement ?? SourceNoClipMovementParameters(
+            frameTime: movement.frameTime,
+            friction: movement.friction
+        )
     }
 }
 
@@ -417,6 +425,29 @@ public struct SourceWorldWalkSolver: Sendable {
                 viewOffset: next.viewOffset
             )
             next.waterLevel = initialWater.level
+        }
+
+        // Source PlayerMove categorizes the player and runs Duck before the
+        // movement-type switch. LadderMove also runs here but returns false
+        // immediately for MOVETYPE_NOCLIP. FullNoClipMove then advances the
+        // origin without a displacement trace, gravity, or post-move
+        // categorization. Keep that exact boundary: pre-move water/ground and
+        // any duck endpoint traces above are observable, while noclip motion
+        // itself never clips against the BSP.
+        if next.moveType == .noClip {
+            SourceGameMovement.fullNoClipMove(
+                move: &next.movement,
+                command: movementCommand,
+                parameters: configuration.noClipMovement
+            )
+            try validate(state: next)
+            return SourceWorldWalkTick(
+                commandNumber: command.commandNumber,
+                state: next,
+                bumpCount: 0,
+                collisionCount: 0,
+                didSnapToGround: false
+            )
         }
 
         var diagnostics = MovementDiagnostics()
@@ -1477,6 +1508,21 @@ public struct SourceWorldWalkSolver: Sendable {
             throw SourceWorldWalkError.invalidConfiguration("frameTime/maximumVelocity")
         }
         for (name, value) in [
+            ("noClip frameTime", configuration.noClipMovement.frameTime),
+            ("noClip speedFactor", configuration.noClipMovement.speedFactor),
+            (
+                "noClip maximumAcceleration",
+                configuration.noClipMovement.maximumAcceleration
+            ),
+            ("noClip maximumSpeed", configuration.noClipMovement.maximumSpeed),
+            ("noClip friction", configuration.noClipMovement.friction),
+        ] where !value.isFinite {
+            throw SourceWorldWalkError.nonFinite("configuration \(name)")
+        }
+        guard configuration.noClipMovement.frameTime > 0 else {
+            throw SourceWorldWalkError.invalidConfiguration("noClip frameTime")
+        }
+        for (name, value) in [
             ("gravity per tick", parameters.gravity * parameters.frameTime),
             ("friction per tick", parameters.friction * parameters.frameTime),
             (
@@ -1579,7 +1625,9 @@ public struct SourceWorldWalkSolver: Sendable {
     }
 
     private func rejectUnsupportedState(_ state: SourceWorldWalkState) throws {
-        guard state.moveType == .walk || state.moveType == .ladder else {
+        guard state.moveType == .walk ||
+            state.moveType == .ladder ||
+            state.moveType == .noClip else {
             let feature: SourceWorldWalkUnsupportedFeature =
                 state.moveType == .vPhysics ? .vPhysics : .nonWalkMoveType
             throw SourceWorldWalkError.unsupported(feature)

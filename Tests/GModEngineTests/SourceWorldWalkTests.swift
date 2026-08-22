@@ -94,6 +94,46 @@ private enum WorldWalkInjectedTraceError: Error, Equatable {
     case stepUp
 }
 
+private final class NoClipRecordingProvider:
+    SourceWorldWalkCollisionProvider, @unchecked Sendable
+{
+    private let lock = NSLock()
+    private var storedTraceRays: [SourceRay] = []
+    private var storedPointQueries: [(SourceVector3, SourceContents)] = []
+
+    var traceRays: [SourceRay] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedTraceRays
+    }
+
+    var pointQueries: [(SourceVector3, SourceContents)] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedPointQueries
+    }
+
+    func traceWorldWalk(
+        _ ray: SourceRay,
+        mask _: SourceContents
+    ) throws -> SourceGameTrace {
+        lock.lock()
+        storedTraceRays.append(ray)
+        lock.unlock()
+        return SourceGameTrace(ray: ray)
+    }
+
+    func worldWalkPointContents(
+        at point: SourceVector3,
+        mask: SourceContents
+    ) throws -> SourceContents {
+        lock.lock()
+        storedPointQueries.append((point, mask))
+        lock.unlock()
+        return .empty
+    }
+}
+
 private struct LadderContactThrowingProvider: SourceWorldWalkCollisionProvider {
     func traceWorldWalk(
         _ ray: SourceRay,
@@ -474,6 +514,107 @@ final class SourceWorldWalkTests: XCTestCase {
         XCTAssertEqual(state.velocity.z, 0, accuracy: 0.000_1)
     }
 
+    func testNoClipUsesDedicatedSourcePathAndPersistsCanonicalMoveType() throws {
+        let provider = NoClipRecordingProvider()
+        let solver = SourceWorldWalkSolver(
+            collisionProvider: provider,
+            configuration: SourceWorldWalkConfiguration(
+                noClipMovement: SourceNoClipMovementParameters(
+                    frameTime: 0.015,
+                    speedFactor: 5,
+                    maximumAcceleration: 0,
+                    maximumSpeed: 320,
+                    friction: 4
+                )
+            )
+        )
+        var canonical = SourceCanonicalEntityState.defaults(for: .player)
+        canonical.moveType = .noClip
+        canonical.transform.origin = SourceVector3(10, 20, 30)
+        canonical.motion.linearVelocity = SourceVector3(9, 8, 7)
+
+        let first = try solver.simulate(
+            state: canonical.playerWalkState,
+            command: SourceUserCommand(
+                commandNumber: 1,
+                viewAngles: SourceQAngle(pitch: 90, yaw: 0),
+                forwardMove: 100,
+                sideMove: 20,
+                upMove: 10
+            )
+        )
+        canonical.applyPlayerWalkState(first.state)
+
+        XCTAssertEqual(first.bumpCount, 0)
+        XCTAssertEqual(first.collisionCount, 0)
+        XCTAssertFalse(first.didSnapToGround)
+        XCTAssertEqual(canonical.moveType, .noClip)
+        XCTAssertEqual(canonical.transform.origin.x, 10, accuracy: 0.000_01)
+        XCTAssertEqual(canonical.transform.origin.y, 18.5, accuracy: 0.000_01)
+        XCTAssertEqual(canonical.transform.origin.z, 23.25, accuracy: 0.000_01)
+        XCTAssertEqual(canonical.motion.linearVelocity.x, 0, accuracy: 0.000_1)
+        XCTAssertEqual(canonical.motion.linearVelocity.y, -100, accuracy: 0.000_01)
+        XCTAssertEqual(canonical.motion.linearVelocity.z, -450, accuracy: 0.000_01)
+        XCTAssertEqual(provider.pointQueries.count, 1)
+        XCTAssertEqual(provider.pointQueries[0].1, SourceMasks.water)
+        XCTAssertEqual(provider.traceRays.count, 1)
+        XCTAssertEqual(
+            provider.traceRays[0].delta,
+            SourceVector3(0, 0, -SourceWorldWalkSolver.groundProbeDistance)
+        )
+
+        let speedTick = try solver.simulate(
+            state: canonical.playerWalkState,
+            command: SourceUserCommand(
+                commandNumber: 2,
+                viewAngles: .zero,
+                forwardMove: 100,
+                buttons: [.speed]
+            )
+        )
+        canonical.applyPlayerWalkState(speedTick.state)
+        XCTAssertEqual(canonical.moveType, .noClip)
+        XCTAssertEqual(canonical.motion.linearVelocity, SourceVector3(250, 0, 0))
+        XCTAssertEqual(canonical.transform.origin.x, 13.75, accuracy: 0.000_01)
+        XCTAssertEqual(provider.pointQueries.count, 2)
+        XCTAssertEqual(provider.traceRays.count, 2)
+
+        let idleTick = try solver.simulate(
+            state: canonical.playerWalkState,
+            command: SourceUserCommand(commandNumber: 3)
+        )
+        canonical.applyPlayerWalkState(idleTick.state)
+        XCTAssertEqual(canonical.moveType, .noClip)
+        XCTAssertEqual(canonical.motion.linearVelocity, .zero)
+        XCTAssertEqual(canonical.transform.origin.x, 13.75, accuracy: 0.000_01)
+        XCTAssertEqual(canonical.transform.origin.y, 18.5, accuracy: 0.000_01)
+        XCTAssertEqual(canonical.transform.origin.z, 23.25, accuracy: 0.000_01)
+        XCTAssertEqual(provider.pointQueries.count, 3)
+        XCTAssertEqual(provider.traceRays.count, 3)
+
+        let duckTick = try solver.simulate(
+            state: canonical.playerWalkState,
+            command: SourceUserCommand(commandNumber: 4, buttons: [.duck])
+        )
+        canonical.applyPlayerWalkState(duckTick.state)
+        XCTAssertTrue(canonical.motion.isDucked)
+        XCTAssertEqual(canonical.viewOffset, SourceVector3(0, 0, 28))
+        XCTAssertEqual(canonical.moveType, .noClip)
+        XCTAssertEqual(canonical.transform.origin.z, 59.25, accuracy: 0.000_01)
+        // The initial PlayerMove categorization plus FinishDuck's
+        // recategorization are the only traces. LadderMove and the noclip
+        // displacement itself add none.
+        XCTAssertEqual(provider.pointQueries.count, 5)
+        XCTAssertEqual(provider.traceRays.count, 5)
+        XCTAssertTrue(provider.traceRays.allSatisfy {
+            $0.delta == SourceVector3(
+                0,
+                0,
+                -SourceWorldWalkSolver.groundProbeDistance
+            )
+        })
+    }
+
     func testDuckUsesHL2MPHullViewAndInstantEndpointTransitions() throws {
         XCTAssertEqual(
             SourceWorldWalkSolver.duckHullMins,
@@ -702,7 +843,7 @@ final class SourceWorldWalkTests: XCTestCase {
         }
 
         var nonWalk = state
-        nonWalk.moveType = .noClip
+        nonWalk.moveType = .fly
         XCTAssertThrowsError(
             try solver.simulate(state: nonWalk, command: SourceUserCommand(commandNumber: 1))
         ) {
