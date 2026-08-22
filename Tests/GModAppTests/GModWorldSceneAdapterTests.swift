@@ -7,6 +7,99 @@ import GModMetal
 @testable import GModGameSession
 
 final class GModWorldSceneAdapterTests: XCTestCase {
+    func testMakeWorldSceneChargesWaterNormalAgainstSharedRetentionBudget() throws {
+        let files: [String: Data] = [
+            "materials/water/bounded.vmt": Data(
+                """
+                "Water"
+                {
+                    "$abovewater" "1"
+                    "$fogcolor" "{ 7 58 66 }"
+                    "$reflectamount" ".4"
+                    "$normalmap" "water/normal"
+                }
+                """.utf8
+            ),
+            "materials/water/normal.vtf": makeRGBA8888VTF(
+                pixels: [127, 127, 255, 255]
+            ),
+        ]
+        let resolver = GModMetalSurfaceSourceMaterialResolver { logicalPath in
+            files[logicalPath.lowercased()]
+        }
+        XCTAssertNotNil(
+            try XCTUnwrap(
+                resolver.resolveWaterMaterial(named: "water/bounded")
+            ).normalBitmap
+        )
+        let mesh = GModWorldRenderMesh(
+            vertices: [
+                GModWorldRenderVertex(
+                    position: SourceVector3(0, 0, 0),
+                    normal: SourceVector3(0, 0, 1)
+                ),
+                GModWorldRenderVertex(
+                    position: SourceVector3(1, 0, 0),
+                    normal: SourceVector3(0, 0, 1)
+                ),
+                GModWorldRenderVertex(
+                    position: SourceVector3(0, 1, 0),
+                    normal: SourceVector3(0, 0, 1)
+                ),
+            ],
+            indices: [0, 1, 2],
+            minimum: SourceVector3(0, 0, 0),
+            maximum: SourceVector3(1, 1, 0),
+            materialRanges: [GModWorldMaterialRange(
+                materialName: "water/bounded",
+                firstIndex: 0,
+                indexCount: 3,
+                waterSurface: GModWorldWaterSurface(
+                    surfaceZ: 0,
+                    minimumZ: -64,
+                    sourceTextureInfoIndex: 0
+                )
+            )],
+            diagnostics: GModWorldRenderMeshDiagnostics(
+                sourceFaceCount: 1,
+                emittedFaceCount: 1,
+                degenerateFaceCount: 0,
+                displacementBaseFaceCount: 0
+            )
+        )
+
+        let scene = try GModGameSessionModel.makeWorldScene(
+            map: .construct,
+            sessionGeneration: 18,
+            mesh: mesh,
+            playerOrigin: SourceVector3(0, 0, 64),
+            viewAngles: SourceQAngle(pitch: 0, yaw: 0, roll: 0),
+            textureResolver: resolver,
+            maximumRetainedBitmapByteCount: 0
+        )
+
+        let range = try XCTUnwrap(scene.materialRanges.first)
+        let water = try XCTUnwrap(range.waterMaterial)
+        XCTAssertEqual(water.resourceIdentifier, "materials/water/bounded.vmt")
+        XCTAssertEqual(water.reflectionAmount, 0.4)
+        XCTAssertNil(water.normalBitmap)
+        guard case let .retentionCapacityExceeded(
+            requiredByteCount,
+            retainedByteCount,
+            maximumByteCount
+        ) = range.materialResolution else {
+            return XCTFail("expected water normal retention failure")
+        }
+        XCTAssertEqual(requiredByteCount, 4)
+        XCTAssertEqual(retainedByteCount, 0)
+        XCTAssertEqual(maximumByteCount, 0)
+        XCTAssertEqual(
+            scene.materialDiagnostics.retentionCapacityExceededMaterialNames,
+            ["water/bounded"]
+        )
+        XCTAssertEqual(scene.materialDiagnostics.resolvedWaterMaterialRangeCount, 1)
+    }
+
     func testMakeWorldSceneMapsEnvironmentAndSunMaterialOutcomes() throws {
         enum FixtureError: Error {
             case forcedDecodeFailure

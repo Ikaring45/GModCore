@@ -331,7 +331,7 @@ final class GModMetalWorldSceneTests: XCTestCase {
             renderLayer: .sky2D
         )
         XCTAssertEqual(anisotropicSky.mipFilter, .linear)
-        XCTAssertEqual(anisotropicSky.maximumAnisotropy, 8)
+        XCTAssertEqual(anisotropicSky.maximumAnisotropy, 16)
         XCTAssertEqual(anisotropicSky.sAddressMode, .clampToEdge)
         XCTAssertEqual(anisotropicSky.tAddressMode, .clampToEdge)
     }
@@ -375,6 +375,73 @@ final class GModMetalWorldSceneTests: XCTestCase {
         )
         XCTAssertFalse(budget.retain(other))
         XCTAssertEqual(budget.retainedByteCount, 4)
+    }
+
+    func testWorldTextureCacheDropsOnlyBindingsAbsentFromReplacementScene() throws {
+        let base = try fixtureBitmap(named: "base")
+        let normal = try fixtureBitmap(named: "normal")
+        let sunBitmap = try fixtureBitmap(named: "sun")
+        let water = GModMetalWorldWaterMaterial(
+            resourceIdentifier: "materials/water/cache.vmt",
+            isAboveWater: true,
+            fogColor: .zero,
+            fogStart: nil,
+            fogEnd: nil,
+            reflectionAmount: 0.4,
+            refractionAmount: 1,
+            normalBitmap: normal,
+            textureScrollRate: nil,
+            textureScrollAngleDegrees: nil,
+            unsupportedBumpTextureFormat: nil
+        )
+        let sunLayer = GModMetalWorldSunSpriteLayer(
+            materialName: "sprites/cache",
+            displayRGB: SIMD3<Float>(repeating: 1),
+            size: 16,
+            materialResolution: .resolved(sunBitmap)
+        )
+        let scene = fixtureScene(
+            materialRanges: [
+                GModMetalWorldMaterialRange(
+                    materialName: "world/base",
+                    firstIndex: 0,
+                    indexCount: 3,
+                    bitmap: base
+                ),
+                GModMetalWorldMaterialRange(
+                    materialName: "water/cache",
+                    firstIndex: 0,
+                    indexCount: 3,
+                    bitmap: nil,
+                    waterSurface: GModMetalWorldWaterSurface(
+                        surfaceZ: 0,
+                        minimumZ: -64
+                    ),
+                    waterMaterial: water
+                ),
+            ],
+            sunSprites: [GModMetalWorldSunSprite(
+                sourceDirectionToSun: SIMD3<Float>(0, 0, 1),
+                hdrColorScale: 1,
+                core: sunLayer,
+                overlay: sunLayer
+            )]
+        )
+        let retainedKeys = GModMetalWorldTextureCacheContract.retainedKeys(
+            for: scene
+        )
+        XCTAssertEqual(retainedKeys, Set([
+            "srgb:\(base.cacheIdentifier)",
+            "linear:\(normal.cacheIdentifier)",
+            "srgb:\(sunBitmap.cacheIdentifier)",
+        ]))
+        XCTAssertEqual(
+            GModMetalWorldTextureCacheContract.staleKeys(
+                cachedKeys: retainedKeys.union(["srgb:removed"]),
+                for: scene
+            ),
+            Set(["srgb:removed"])
+        )
     }
 
     func testMovingCameraBeyondSkyCubeCannotIntroduceSkyTranslationOrParallax() {

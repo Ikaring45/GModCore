@@ -183,6 +183,10 @@ final class GModMetalSurfaceSceneTests: XCTestCase {
         XCTAssertEqual(rectangles[1].magnificationFilter, .point)
         XCTAssertEqual(rectangles[2].minificationFilter, .some(.none))
         XCTAssertNil(rectangles[2].magnificationFilter)
+        XCTAssertEqual(
+            GModMetalSurfaceSamplerConfiguration.defaultMaximumAnisotropy,
+            16
+        )
 
         XCTAssertEqual(
             GModMetalSurfaceSamplerConfiguration.source(
