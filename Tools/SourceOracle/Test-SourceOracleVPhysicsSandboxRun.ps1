@@ -155,11 +155,35 @@ foreach ($required in @(
     'RedirectStandardOutput = true',
     'RedirectStandardError = true',
     'TailCharacters = 4096',
-    "'.pending-'"
+    "'.pending-'",
+    'function Get-GuestCopiedFileSHA256',
+    '[IO.FileShare]::None',
+    '[Security.Cryptography.SHA256]::Create()',
+    '$sha.ComputeHash($stream)',
+    '$copiedManifestFiles',
+    '$actualLocalHashes',
+    'Copied local input SHA-256 differs from manifest',
+    'Copied local input SHA-256 differs from fixed surface provenance'
 )) {
     Assert-RunStatic ($guestText.Contains($required)) `
         "Guest bootstrap is missing fixed token $required"
 }
+$copyIndex = $guestText.IndexOf(
+    '[IO.File]::Copy($source, $destination, $false)',
+    [StringComparison]::Ordinal
+)
+$rehashIndex = $guestText.IndexOf(
+    '$actualLocalHashes = @{}',
+    [StringComparison]::Ordinal
+)
+$launchIndex = $guestText.IndexOf(
+    '$processResult = [SourceOracleGuestProcessRunner]::Run(',
+    [StringComparison]::Ordinal
+)
+Assert-RunStatic (
+    $copyIndex -ge 0 -and $rehashIndex -gt $copyIndex -and
+    $launchIndex -gt $rehashIndex
+) 'Guest copied-file SHA-256 rehash is not ordered between copy and launch'
 
 $hostText = Get-Content -LiteralPath (
     Join-Path $toolRoot 'SourceOracleVPhysicsSandboxRun.ps1'

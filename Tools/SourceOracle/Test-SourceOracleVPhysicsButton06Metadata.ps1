@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Stop'
 $toolRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $toolRoot 'SourceOracleVPhysicsAttestationCommon.ps1')
+. (Join-Path $toolRoot 'SourceOracleVPhysicsSandboxRun.ps1')
 
 function Assert-Button06([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
@@ -45,32 +46,9 @@ Assert-SourceOracleVPhysicsObjectShape `
 Assert-Button06 (@($allowlist.models).Count -eq 1) `
     'Metadata must authorize exactly one model'
 $allowed = @($allowlist.models)[0]
-$request = [pscustomobject]@{
-    schema = [int64]1
-    request_id = '00000000000000000000000000000000'
-    model_path = $allowed.model_path
-    phy_path = $allowed.phy_path
-    expected_mdl_sha256 = $allowed.mdl_sha256
-    expected_phy_sha256 = $allowed.phy_sha256
-    ownership_reference = $allowed.ownership_reference
-    policy = [pscustomobject]@{
-        search_path = 'GAME'
-        allow_workshop = $false
-        allow_installed_addons = $false
-        allow_user_lua = $false
-        allow_network = $false
-    }
-    limits = [pscustomobject]@{
-        maximum_mdl_bytes = [int64]2540
-        maximum_phy_bytes = [int64]880
-        maximum_solids = [int64]1
-        maximum_convexes = [int64]1
-        maximum_vertices_per_convex = [int64]256
-        maximum_total_vertices = [int64]256
-        maximum_result_bytes = [int64]65536
-        timeout_seconds = [int64]20
-    }
-}
+$request = New-SourceOracleVPhysicsFixedRequest `
+    -RequestID '00000000000000000000000000000000' `
+    -Metadata $metadata
 [void](Assert-SourceOracleVPhysicsRequestObject `
     -Request $request -Allowlist $allowlist)
 

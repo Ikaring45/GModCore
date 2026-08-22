@@ -2,6 +2,7 @@ $ErrorActionPreference = 'Stop'
 $toolRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $common = Join-Path $toolRoot 'SourceOracleVPhysicsAttestationCommon.ps1'
 . $common
+. (Join-Path $toolRoot 'SourceOracleVPhysicsSandboxRun.ps1')
 
 function Assert-True([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
@@ -25,6 +26,13 @@ $ownership = 'synthetic-non-launch-fixture'
 $modelPath = 'models/owned_fixture/attested_prop.mdl'
 $phyPath = 'models/owned_fixture/attested_prop.phy'
 
+$fixedMetadata = Read-SourceOracleVPhysicsBoundedJSON `
+    -Path (Join-Path $toolRoot 'VPhysicsAttestation-Button06-AllowlistMetadata.json') `
+    -MaximumBytes 65536 `
+    -Field 'surface fixture metadata'
+$surfaceProbe = (New-SourceOracleVPhysicsFixedRequest `
+    -RequestID $requestID -Metadata $fixedMetadata).surface_probe
+
 $policy = [pscustomobject]@{
     search_path = 'GAME'
     allow_workshop = $false
@@ -43,7 +51,7 @@ $limits = [pscustomobject]@{
     timeout_seconds = [int64]20
 }
 $request = [pscustomobject]@{
-    schema = [int64]1
+    schema = [int64]2
     request_id = $requestID
     model_path = $modelPath
     phy_path = $phyPath
@@ -52,6 +60,7 @@ $request = [pscustomobject]@{
     ownership_reference = $ownership
     policy = $policy
     limits = $limits
+    surface_probe = Copy-JSONValue $surfaceProbe
 }
 $allowlist = [pscustomobject]@{
     schema = [int64]1
@@ -100,7 +109,7 @@ $v1 = [pscustomobject]@{ x = [double]-1; y = [double]-2; z = [double]0 }
 $v2 = [pscustomobject]@{ x = [double]1; y = [double]-2; z = [double]0 }
 $v3 = [pscustomobject]@{ x = [double]0; y = [double]2; z = [double]3 }
 $result = [pscustomobject]@{
-    schema = [int64]1
+    schema = [int64]2
     kind = 'owned-model-vphysics-attestation'
     enabled = $true
     command_line_enabled = $true
@@ -108,7 +117,7 @@ $result = [pscustomobject]@{
     command_line_run_id = $runID
     request_id = $requestID
     realm = 'SERVER'
-    finish_reason = 'vphysics-attestation-complete'
+    finish_reason = 'vphysics-attestation-partial'
     model_path = $modelPath
     phy_path = $phyPath
     policy = Copy-JSONValue $policy
@@ -170,6 +179,23 @@ $result = [pscustomobject]@{
         mass = [double]10
         material = 'metal'
         convexes = ,@($v1, $v2, $v3)
+    }
+    surface_response = [pscustomobject]@{
+        schema = [int64]1
+        kind = 'source-surface-material-response-attestation'
+        status = 'partial'
+        provenance = Copy-JSONValue $surfaceProbe.provenance
+        surface_lookups = @()
+        model_route = @()
+        world_traces = @()
+        controlled_pairs = @()
+        collision_samples = @()
+        cleanup = [pscustomobject]@{
+            spawned_entity_count = [int64]0
+            removed_entity_count = [int64]0
+            clean = $false
+        }
+        issues = @('surface-observation-unavailable')
     }
 }
 

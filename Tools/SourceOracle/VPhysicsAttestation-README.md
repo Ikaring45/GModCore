@@ -26,6 +26,14 @@ values. Convex positions remain grouped and ordered; each three entries are
 one triangle. The entity is removed before the result is handed off. No model,
 PHY, material, or other game asset bytes are written to the result.
 
+Request/result schema 2 also carries the separately versioned surface/material
+response described in `SurfaceMaterialResponseAttestation-README.md`. That
+extension binds the exact VPhysics, surface-property, and map hashes; records
+requested surface lookups, MDL/PHY/PhysObj/callback routes, fixed-map traces,
+controlled friction snapshots, and raw collision velocities; and proves
+next-tick cleanup before it may report `complete`. A `partial` surface response
+is retained as partial by the host and cannot be mislabeled as complete.
+
 ## Single-run isolation
 
 A real run uses `Invoke-SourceOracleVPhysicsSandboxRun.ps1` and remains

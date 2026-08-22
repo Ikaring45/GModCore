@@ -20,6 +20,16 @@ $fixedModel = 'models/maxofs2d/button_06.mdl'
 $fixedPHY = 'models/maxofs2d/button_06.phy'
 $fixedMDLSHA = '85dca39870932c39dd1bcd51afbb0fc09aaf8d90fadfeb222e7b49cd784e0f07'
 $fixedPHYSHA = '8901ecd8be29b5a3e5b688843bdbea13f34c7b76c5a63cb435f9ef1174527ef3'
+$fixedVPhysicsSHA = '4ebd6149f885dfc518a44dd32dda64cbd6ebb3f938d43bdead70e80771b7e414'
+$fixedMapSHA = '4dfd95ecb8f77a093e3079697b04c5be5675e8595c05639aaf57ad1541024d76'
+$fixedSurfaceInputs = [ordered]@{
+    'sourceengine/scripts/surfaceproperties_manifest.txt' =
+        'd8bead334f07cd9f7cdfa30d691076b242ee469727aa0f0dcb734f3699d92a11'
+    'sourceengine/scripts/surfaceproperties.txt' =
+        'b75f463e4a5b351c0f9a155c100659ae0384003ae910d092a07398e611056e32'
+    'sourceengine/scripts/surfaceproperties_hl2.txt' =
+        '6eb6c622f9d566515d0909d610c6f7213d327ed69545807696d74162ee3c0280'
+}
 $fixedOwnership =
     'user-owned-playable-manifest-sha256:' +
     '2755c232b55cfe6f466555c4e63d2c5b1c3a4c300910aaffdee5701a7e492045'
@@ -194,14 +204,47 @@ function Assert-GuestExactNames {
     }
 }
 
+function Get-GuestCopiedFileSHA256 {
+    param(
+        [Parameter(Mandatory)] [string]$Path,
+        [Parameter(Mandatory)] [int64]$ExpectedBytes,
+        [Parameter(Mandatory)] [string]$Field
+    )
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $info = Get-Item -LiteralPath $fullPath -Force
+    if (($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $info.PSIsContainer -or $info.Length -ne $ExpectedBytes) {
+        throw "$Field type or byte count changed before local rehash"
+    }
+    $stream = [IO.File]::Open(
+        $fullPath,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        [IO.FileShare]::None
+    )
+    try {
+        if ($stream.Length -ne $ExpectedBytes) {
+            throw "$Field byte count changed while opening for local rehash"
+        }
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+        } finally {
+            $sha.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
 function Assert-GuestFixedRequest {
     param([Parameter(Mandatory)] [object]$Request)
     Assert-GuestExactNames $Request @(
         'schema', 'request_id', 'model_path', 'phy_path',
         'expected_mdl_sha256', 'expected_phy_sha256', 'ownership_reference',
-        'policy', 'limits'
+        'policy', 'limits', 'surface_probe'
     ) 'request'
-    if ([int64]$Request.schema -ne 1 -or
+    if ([int64]$Request.schema -ne 2 -or
         [string]$Request.request_id -cnotmatch '^[0-9a-f]{32}$' -or
         [string]$Request.model_path -cne $fixedModel -or
         [string]$Request.phy_path -cne $fixedPHY -or
@@ -240,6 +283,101 @@ function Assert-GuestFixedRequest {
         if ([int64]$Request.limits.PSObject.Properties[$pair.Key].Value -ne $pair.Value) {
             throw "Request limit changed: $($pair.Key)"
         }
+    }
+
+    Assert-GuestExactNames $Request.surface_probe @(
+        'schema', 'provenance', 'requested_surface_names', 'world_traces',
+        'controlled_pair'
+    ) 'request.surface_probe'
+    if ([int64]$Request.surface_probe.schema -ne 1) {
+        throw 'Surface probe schema changed'
+    }
+    $provenance = $Request.surface_probe.provenance
+    Assert-GuestExactNames $provenance @(
+        'app_id', 'branch', 'build_id', 'request_id', 'vphysics',
+        'surface_inputs', 'map'
+    ) 'request.surface_probe.provenance'
+    if ([int64]$provenance.app_id -ne 4020 -or
+        [string]$provenance.branch -cne 'x86-64' -or
+        [string]$provenance.build_id -cne $fixedBuildID -or
+        [string]$provenance.request_id -cne [string]$Request.request_id) {
+        throw 'Surface provenance identity changed'
+    }
+    foreach ($binding in @(
+        @($provenance.vphysics, 'bin/win64/vphysics.dll', $fixedVPhysicsSHA),
+        @($provenance.map, 'garrysmod/maps/gm_flatgrass.bsp', $fixedMapSHA)
+    )) {
+        Assert-GuestExactNames $binding[0] @('path', 'sha256') `
+            'request.surface_probe.provenance file'
+        if ([string]$binding[0].path -cne [string]$binding[1] -or
+            [string]$binding[0].sha256 -cne [string]$binding[2]) {
+            throw 'Surface provenance file binding changed'
+        }
+    }
+    $surfaceInputs = @($provenance.surface_inputs)
+    if ($provenance.surface_inputs -isnot [array] -or
+        $surfaceInputs.Count -ne $fixedSurfaceInputs.Count) {
+        throw 'Surface provenance input count changed'
+    }
+    for ($index = 0; $index -lt $surfaceInputs.Count; $index++) {
+        $record = $surfaceInputs[$index]
+        $expected = @($fixedSurfaceInputs.GetEnumerator())[$index]
+        Assert-GuestExactNames $record @('path', 'sha256') `
+            'request.surface_probe.provenance.surface_inputs'
+        if ([string]$record.path -cne [string]$expected.Key -or
+            [string]$record.sha256 -cne [string]$expected.Value) {
+            throw 'Surface provenance input order or hash changed'
+        }
+    }
+    $requested = @($Request.surface_probe.requested_surface_names)
+    if ($Request.surface_probe.requested_surface_names -isnot [array] -or
+        $requested.Count -ne 2 -or [string]$requested[0] -cne 'plastic' -or
+        [string]$requested[1] -cne 'rubber') {
+        throw 'Requested surface list changed or contains duplicates'
+    }
+    $worldTraces = @($Request.surface_probe.world_traces)
+    $fixedTraces = @(
+        @('flatgrass-center', 0, 0),
+        @('flatgrass-offset', 1024, 1024)
+    )
+    if ($Request.surface_probe.world_traces -isnot [array] -or
+        $worldTraces.Count -ne $fixedTraces.Count) {
+        throw 'Fixed surface world traces changed'
+    }
+    for ($index = 0; $index -lt $worldTraces.Count; $index++) {
+        $trace = $worldTraces[$index]
+        $expected = $fixedTraces[$index]
+        Assert-GuestExactNames $trace @('id', 'start', 'end') `
+            'request.surface_probe.world_trace'
+        foreach ($endpoint in @('start', 'end')) {
+            Assert-GuestExactNames $trace.PSObject.Properties[$endpoint].Value `
+                @('x', 'y', 'z') "request.surface_probe.world_trace.$endpoint"
+        }
+        if ([string]$trace.id -cne [string]$expected[0] -or
+            [int64]$trace.start.x -ne [int64]$expected[1] -or
+            [int64]$trace.start.y -ne [int64]$expected[2] -or
+            [int64]$trace.start.z -ne 4096 -or
+            [int64]$trace.end.x -ne [int64]$expected[1] -or
+            [int64]$trace.end.y -ne [int64]$expected[2] -or
+            [int64]$trace.end.z -ne -4096) {
+            throw 'Fixed surface world trace coordinates changed'
+        }
+    }
+    $pair = $Request.surface_probe.controlled_pair
+    Assert-GuestExactNames $pair @(
+        'pair_id', 'moving_surface_name', 'fixed_surface_name',
+        'anchor_trace_id', 'separation_units', 'impact_speed_units_per_second',
+        'sample_delay_milliseconds', 'maximum_friction_snapshots'
+    ) 'request.surface_probe.controlled_pair'
+    if ([string]$pair.pair_id -cne 'plastic-against-rubber' -or
+        [string]$pair.moving_surface_name -cne 'plastic' -or
+        [string]$pair.fixed_surface_name -cne 'rubber' -or
+        [string]$pair.anchor_trace_id -cne 'flatgrass-center' -or
+        [int64]$pair.separation_units -ne 256 -or
+        [int64]$pair.impact_speed_units_per_second -ne 128 -or
+        [int64]$pair.sample_delay_milliseconds -ne 50 -or
+        [int64]$pair.maximum_friction_snapshots -ne 16) {
+        throw 'Controlled surface pair changed'
     }
 }
 
@@ -341,6 +479,8 @@ try {
         -Field 'input manifest'
     if ([int64]$manifest.schema -ne 1 -or
         [string]$manifest.kind -cne 'source-oracle-vphysics-sandbox-input-manifest' -or
+        [int64]$manifest.steam.app_id -ne 4020 -or
+        [string]$manifest.steam.branch -cne 'x86-64' -or
         [string]$manifest.steam.build_id -cne $fixedBuildID -or
         $manifest.files -isnot [array]) {
         throw 'Input manifest identity changed'
@@ -355,11 +495,14 @@ try {
     $probeCount = 0
     $bootstrapCount = 0
     $mapCount = 0
+    $manifestByPath = @{}
+    $copiedManifestFiles = [Collections.Generic.List[object]]::new()
     foreach ($record in $records) {
         $relative = [string]$record.path
         $role = [string]$record.role
         Assert-GuestRelativePath $relative
         if (-not $paths.Add($relative)) { throw "Duplicate manifest path $relative" }
+        $manifestByPath[$relative] = $record
         if ($relative -match '(?i)(^|/)addons(/|$)') {
             throw 'Manifest contains forbidden addons content'
         }
@@ -373,6 +516,10 @@ try {
         $source = Get-GuestChildPath $inputRoot $relative
         if (-not [IO.File]::Exists($source)) { throw "Missing manifest input $relative" }
         $expectedBytes = [int64]$record.byte_count
+        $expectedSHA = [string]$record.sha256
+        if ($expectedSHA -cnotmatch '^[0-9a-f]{64}$') {
+            throw "Manifest input SHA-256 is invalid: $relative"
+        }
         $sourceInfo = Get-Item -LiteralPath $source
         if ($expectedBytes -lt 1 -or $sourceInfo.Length -ne $expectedBytes -or
             ($sourceInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -381,9 +528,32 @@ try {
         $destination = Get-GuestChildPath $localRoot $relative
         [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($destination))
         [IO.File]::Copy($source, $destination, $false)
+        $copiedManifestFiles.Add([pscustomobject][ordered]@{
+            path = $relative
+            local_path = $destination
+            byte_count = $expectedBytes
+            manifest_sha256 = $expectedSHA
+        })
     }
     if ($probeCount -ne 1 -or $bootstrapCount -ne 1 -or $mapCount -ne 1) {
         throw 'Clean input manifest is missing the fixed probe, bootstrap, or map'
+    }
+    $provenanceBindings = [ordered]@{
+        'server/bin/win64/vphysics.dll' = $fixedVPhysicsSHA
+        'oracle_game/maps/gm_flatgrass.bsp' = $fixedMapSHA
+        'server/sourceengine/scripts/surfaceproperties_manifest.txt' =
+            [string]$fixedSurfaceInputs['sourceengine/scripts/surfaceproperties_manifest.txt']
+        'server/sourceengine/scripts/surfaceproperties.txt' =
+            [string]$fixedSurfaceInputs['sourceengine/scripts/surfaceproperties.txt']
+        'server/sourceengine/scripts/surfaceproperties_hl2.txt' =
+            [string]$fixedSurfaceInputs['sourceengine/scripts/surfaceproperties_hl2.txt']
+    }
+    foreach ($binding in $provenanceBindings.GetEnumerator()) {
+        if (-not $manifestByPath.ContainsKey([string]$binding.Key) -or
+            [string]$manifestByPath[[string]$binding.Key].sha256 -cne
+                [string]$binding.Value) {
+            throw "Input manifest is not bound to surface provenance $($binding.Key)"
+        }
     }
 
     $handoff = Join-Path $localRoot 'oracle_game\lua\garryspad_vphysics_attestation'
@@ -405,6 +575,28 @@ try {
         -not [IO.File]::Exists((Join-Path $gameRoot 'gameinfo.txt')) -or
         -not [IO.File]::Exists((Join-Path $gameRoot 'maps\gm_flatgrass.bsp'))) {
         throw 'Fixed executable, gameinfo, or map was not staged'
+    }
+
+    # Re-open and hash every file actually copied into the disposable run root
+    # immediately before srcds starts. This closes the mapped-input-to-local-copy
+    # interval instead of trusting the manifest declaration after File.Copy.
+    $actualLocalHashes = @{}
+    foreach ($copied in $copiedManifestFiles) {
+        $actualSHA = Get-GuestCopiedFileSHA256 `
+            -Path ([string]$copied.local_path) `
+            -ExpectedBytes ([int64]$copied.byte_count) `
+            -Field ("copied manifest input " + [string]$copied.path)
+        if ($actualSHA -cne [string]$copied.manifest_sha256) {
+            throw "Copied local input SHA-256 differs from manifest: $($copied.path)"
+        }
+        $actualLocalHashes[[string]$copied.path] = $actualSHA
+    }
+    foreach ($binding in $provenanceBindings.GetEnumerator()) {
+        if (-not $actualLocalHashes.ContainsKey([string]$binding.Key) -or
+            [string]$actualLocalHashes[[string]$binding.Key] -cne
+                [string]$binding.Value) {
+            throw "Copied local input SHA-256 differs from fixed surface provenance: $($binding.Key)"
+        }
     }
 
     $arguments = @(

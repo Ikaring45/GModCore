@@ -25,8 +25,25 @@ function New-SourceOracleVPhysicsFixedRequest {
     }
     $entry = @($Metadata.allowlist.models)
     if ($entry.Count -ne 1) { throw 'Fixed metadata must allow exactly one model' }
+    $surfaceInputs = @($script:SourceOracleSurfaceContract.SurfaceInputs | ForEach-Object {
+        [pscustomobject][ordered]@{
+            path = [string]$_.path
+            sha256 = [string]$_.sha256
+        }
+    })
+    $worldTraces = @($script:SourceOracleSurfaceContract.WorldTraces | ForEach-Object {
+        [pscustomobject][ordered]@{
+            id = [string]$_.id
+            start = [pscustomobject][ordered]@{
+                x = [int64]$_.start.x; y = [int64]$_.start.y; z = [int64]$_.start.z
+            }
+            end = [pscustomobject][ordered]@{
+                x = [int64]$_.end.x; y = [int64]$_.end.y; z = [int64]$_.end.z
+            }
+        }
+    })
     $request = [pscustomobject][ordered]@{
-        schema = [int64]1
+        schema = [int64]2
         request_id = $RequestID
         model_path = [string]$entry[0].model_path
         phy_path = [string]$entry[0].phy_path
@@ -49,6 +66,44 @@ function New-SourceOracleVPhysicsFixedRequest {
             maximum_total_vertices = [int64]256
             maximum_result_bytes = [int64]65536
             timeout_seconds = [int64]$script:VPhysicsSandboxRunProbeTimeoutSeconds
+        }
+        surface_probe = [pscustomobject][ordered]@{
+            schema = [int64]1
+            provenance = [pscustomobject][ordered]@{
+                app_id = [int64]$script:SourceOracleSurfaceContract.AppID
+                branch = [string]$script:SourceOracleSurfaceContract.Branch
+                build_id = [string]$script:SourceOracleSurfaceContract.BuildID
+                request_id = $RequestID
+                vphysics = [pscustomobject][ordered]@{
+                    path = [string]$script:SourceOracleSurfaceContract.VPhysicsPath
+                    sha256 = [string]$script:SourceOracleSurfaceContract.VPhysicsSHA256
+                }
+                surface_inputs = $surfaceInputs
+                map = [pscustomobject][ordered]@{
+                    path = [string]$script:SourceOracleSurfaceContract.MapPath
+                    sha256 = [string]$script:SourceOracleSurfaceContract.MapSHA256
+                }
+            }
+            requested_surface_names = @(
+                $script:SourceOracleSurfaceContract.RequestedSurfaceNames
+            )
+            world_traces = $worldTraces
+            controlled_pair = [pscustomobject][ordered]@{
+                pair_id = [string]$script:SourceOracleSurfaceContract.PairID
+                moving_surface_name =
+                    [string]$script:SourceOracleSurfaceContract.MovingSurfaceName
+                fixed_surface_name =
+                    [string]$script:SourceOracleSurfaceContract.FixedSurfaceName
+                anchor_trace_id = [string]$script:SourceOracleSurfaceContract.AnchorTraceID
+                separation_units =
+                    [int64]$script:SourceOracleSurfaceContract.SeparationUnits
+                impact_speed_units_per_second =
+                    [int64]$script:SourceOracleSurfaceContract.ImpactSpeedUnitsPerSecond
+                sample_delay_milliseconds =
+                    [int64]$script:SourceOracleSurfaceContract.SampleDelayMilliseconds
+                maximum_friction_snapshots =
+                    [int64]$script:SourceOracleSurfaceContract.MaximumFrictionSnapshots
+            }
         }
     }
     return Assert-SourceOracleVPhysicsRequestObject `
@@ -296,6 +351,27 @@ function Assert-SourceOracleVPhysicsSandboxRunBundle {
     })
     if ($bootstrap.Count -ne 1 -or $probe.Count -ne 1 -or $map.Count -ne 1) {
         throw 'Validated launch input is missing the exact bootstrap, probe, or map'
+    }
+    $provenanceBindings = [ordered]@{
+        'server/bin/win64/vphysics.dll' =
+            [string]$validatedRequest.surface_probe.provenance.vphysics.sha256
+        'oracle_game/maps/gm_flatgrass.bsp' =
+            [string]$validatedRequest.surface_probe.provenance.map.sha256
+    }
+    foreach ($surfaceInput in @(
+        $validatedRequest.surface_probe.provenance.surface_inputs
+    )) {
+        $provenanceBindings['server/' + [string]$surfaceInput.path] =
+            [string]$surfaceInput.sha256
+    }
+    foreach ($binding in $provenanceBindings.GetEnumerator()) {
+        $records = @($manifest.files | Where-Object {
+            [string]$_.path -ceq [string]$binding.Key
+        })
+        if ($records.Count -ne 1 -or
+            [string]$records[0].sha256 -cne [string]$binding.Value) {
+            throw "Validated launch input is not bound to surface provenance $($binding.Key)"
+        }
     }
 
     $xml = Read-SourceOracleSandboxXML -Path ([string]$Bundle.config_path)
@@ -546,6 +622,7 @@ function Invoke-SourceOracleVPhysicsPreparedSandboxSingleRun {
             build_id = [string]$bundle.state.build_id
             map = [string]$validated.runtime.map
             model_path = [string]$validated.model_path
+            attestation_status = [string]$validated.surface_response.status
             result_path = Join-Path ([string]$bundle.output_path) 'result.json'
             input_manifest_sha256 = [string]$bundle.state.input_manifest_sha256
             result = $validated

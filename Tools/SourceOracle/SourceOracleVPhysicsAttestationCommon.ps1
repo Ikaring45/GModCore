@@ -215,9 +215,9 @@ function Assert-SourceOracleVPhysicsRequestObject {
     Assert-SourceOracleVPhysicsObjectShape -InputObject $Request -Field 'request' -Names @(
         'schema', 'request_id', 'model_path', 'phy_path',
         'expected_mdl_sha256', 'expected_phy_sha256', 'ownership_reference',
-        'policy', 'limits'
+        'policy', 'limits', 'surface_probe'
     )
-    [void](Get-SourceOracleVPhysicsInteger -InputObject $Request -Name 'schema' -Minimum 1 -Maximum 1)
+    [void](Get-SourceOracleVPhysicsInteger -InputObject $Request -Name 'schema' -Minimum 2 -Maximum 2)
     $requestID = Get-SourceOracleVPhysicsString `
         -InputObject $Request -Name 'request_id' -MaximumLength 32
     if ($requestID -cnotmatch '^[0-9a-f]{32}$') {
@@ -242,6 +242,8 @@ function Assert-SourceOracleVPhysicsRequestObject {
         -InputObject $Request -Name 'ownership_reference' -MaximumLength 128
     Assert-SourceOracleVPhysicsPolicy -Policy $Request.policy
     [void](Assert-SourceOracleVPhysicsLimits -Limits $Request.limits)
+    [void](Assert-SourceOracleSurfaceProbeRequest `
+        -SurfaceProbe $Request.surface_probe -RequestID $requestID)
 
     Assert-SourceOracleVPhysicsObjectShape -InputObject $Allowlist -Field 'allowlist' -Names @(
         'schema', 'models'
@@ -341,6 +343,8 @@ function Assert-SourceOracleVPhysicsVector {
     }
 }
 
+. (Join-Path $PSScriptRoot 'SourceOracleSurfaceMaterialAttestationCommon.ps1')
+
 function Assert-SourceOracleVPhysicsResultObject {
     [CmdletBinding()]
     param(
@@ -356,9 +360,9 @@ function Assert-SourceOracleVPhysicsResultObject {
         'schema', 'kind', 'enabled', 'command_line_enabled', 'run_id',
         'command_line_run_id', 'request_id', 'realm', 'finish_reason',
         'model_path', 'phy_path', 'policy', 'runtime', 'files', 'validity',
-        'entity_collision', 'physics'
+        'entity_collision', 'physics', 'surface_response'
     )
-    [void](Get-SourceOracleVPhysicsInteger -InputObject $Result -Name 'schema' -Minimum 1 -Maximum 1)
+    [void](Get-SourceOracleVPhysicsInteger -InputObject $Result -Name 'schema' -Minimum 2 -Maximum 2)
     if ((Get-SourceOracleVPhysicsString -InputObject $Result -Name 'kind' -MaximumLength 64) `
         -cne 'owned-model-vphysics-attestation') {
         throw 'result.kind is unsupported'
@@ -379,10 +383,11 @@ function Assert-SourceOracleVPhysicsResultObject {
     }
     if ((Get-SourceOracleVPhysicsString -InputObject $Result -Name 'realm' -MaximumLength 8) `
         -cne 'SERVER') { throw 'result.realm must be SERVER' }
-    if ((Get-SourceOracleVPhysicsString -InputObject $Result -Name 'finish_reason' -MaximumLength 64) `
-        -cne 'vphysics-attestation-complete') {
-        throw 'result.finish_reason is not successful attestation completion'
-    }
+    $finishReason = Get-SourceOracleVPhysicsString `
+        -InputObject $Result -Name 'finish_reason' -MaximumLength 64
+    if ($finishReason -cnotin @(
+        'vphysics-attestation-complete', 'vphysics-attestation-partial'
+    )) { throw 'result.finish_reason is unsupported' }
     foreach ($pair in @(
         @('model_path', [string]$Request.model_path),
         @('phy_path', [string]$Request.phy_path)
@@ -560,6 +565,17 @@ function Assert-SourceOracleVPhysicsResultObject {
     }
     if ($total -ne $declaredTotal) {
         throw 'physics.total_vertex_count does not match convex topology'
+    }
+    $surfaceResponse = Assert-SourceOracleSurfaceMaterialAttestation `
+        -Result $Result.surface_response `
+        -SurfaceProbe $Request.surface_probe `
+        -RequestID ([string]$Request.request_id)
+    if ([string]$surfaceResponse.status -ceq 'complete') {
+        if ($finishReason -cne 'vphysics-attestation-complete') {
+            throw 'complete surface response is labeled partial by the outer result'
+        }
+    } elseif ($finishReason -cne 'vphysics-attestation-partial') {
+        throw 'partial or failed surface response is labeled complete by the outer result'
     }
     return $Result
 }
