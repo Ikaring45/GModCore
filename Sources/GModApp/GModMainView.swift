@@ -202,6 +202,18 @@ public struct GModMainView: View {
         localizationSelection.snapshot.appText(.reloadButton)
     }
 
+    private var localizedDuckButton: String {
+        localizationSelection.snapshot.appText(.duckButton)
+    }
+
+    private var localizedPreviousWeaponButton: String {
+        localizationSelection.snapshot.appText(.previousWeaponButton)
+    }
+
+    private var localizedNextWeaponButton: String {
+        localizationSelection.snapshot.appText(.nextWeaponButton)
+    }
+
     private var localizedDropWeaponButton: String {
         localizationSelection.snapshot.appText(.dropWeaponButton)
     }
@@ -428,6 +440,39 @@ public struct GModMainView: View {
                                                     )
                                                 }
                                                 GModTouchActionButton(
+                                                    label: localizedDuckButton,
+                                                    diameter: layout.heldActionDiameter,
+                                                    accessibilityIdentifier:
+                                                        "garryspad.control.duck"
+                                                ) { pressed in
+                                                    game.setWorldActionButton(
+                                                        .duck,
+                                                        pressed: pressed
+                                                    )
+                                                }
+                                                GModTouchActionButton(
+                                                    label: localizedJumpButton,
+                                                    diameter: layout.jumpDiameter,
+                                                    accessibilityIdentifier:
+                                                        "garryspad.control.jump"
+                                                ) { pressed in
+                                                    game.setJumpPressed(pressed)
+                                                }
+                                            }
+
+                                            HStack(spacing: 8) {
+                                                GModTouchActionButton(
+                                                    label:
+                                                        localizedPreviousWeaponButton,
+                                                    diameter: layout.heldActionDiameter,
+                                                    accessibilityIdentifier:
+                                                        "garryspad.control.previous-weapon"
+                                                ) { pressed in
+                                                    if pressed {
+                                                        game.selectPreviousWeapon()
+                                                    }
+                                                }
+                                                GModTouchActionButton(
                                                     label: localizedDropWeaponButton,
                                                     diameter: layout.heldActionDiameter,
                                                     accessibilityIdentifier:
@@ -435,6 +480,16 @@ public struct GModMainView: View {
                                                 ) { pressed in
                                                     if pressed {
                                                         game.dropActiveWeapon()
+                                                    }
+                                                }
+                                                GModTouchActionButton(
+                                                    label: localizedNextWeaponButton,
+                                                    diameter: layout.heldActionDiameter,
+                                                    accessibilityIdentifier:
+                                                        "garryspad.control.next-weapon"
+                                                ) { pressed in
+                                                    if pressed {
+                                                        game.selectNextWeapon()
                                                     }
                                                 }
                                                 GModTouchActionButton(
@@ -446,14 +501,6 @@ public struct GModMainView: View {
                                                     if pressed {
                                                         game.undoLastAction()
                                                     }
-                                                }
-                                                GModTouchActionButton(
-                                                    label: localizedJumpButton,
-                                                    diameter: layout.jumpDiameter,
-                                                    accessibilityIdentifier:
-                                                        "garryspad.control.jump"
-                                                ) { pressed in
-                                                    game.setJumpPressed(pressed)
                                                 }
                                             }
 

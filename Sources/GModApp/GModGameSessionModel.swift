@@ -739,6 +739,53 @@ final class GModGameSessionModel: ObservableObject {
         }
     }
 
+    func selectPreviousWeapon() {
+        requestAdjacentWeapon(next: false)
+    }
+
+    func selectNextWeapon() {
+        requestAdjacentWeapon(next: true)
+    }
+
+    private func requestAdjacentWeapon(next: Bool) {
+        guard acceptsWorldInput,
+              let requestedLaneGeneration = laneGeneration else {
+            rejectLateWorldInput()
+            return
+        }
+        let requestedGeneration = sessionGeneration
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let selected: String?
+                if next {
+                    selected = try await lane.requestNextWeapon(
+                        expectedGeneration: requestedLaneGeneration
+                    )
+                } else {
+                    selected = try await lane.requestPreviousWeapon(
+                        expectedGeneration: requestedLaneGeneration
+                    )
+                }
+                guard requestedGeneration == sessionGeneration, isReady else {
+                    return
+                }
+                if selected == nil {
+                    appendLog(
+                        "[CLIENT][WEAPON] No active owned weapon to cycle"
+                    )
+                }
+            } catch {
+                if requestedGeneration == sessionGeneration {
+                    appendLog(
+                        "[CLIENT][WEAPON] Selection failed: " +
+                            GMLuaRuntime.describe(error)
+                    )
+                }
+            }
+        }
+    }
+
     func undoLastAction() {
         guard acceptsWorldInput,
               let requestedLaneGeneration = laneGeneration else {

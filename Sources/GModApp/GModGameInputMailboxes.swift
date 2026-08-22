@@ -57,7 +57,9 @@ enum GModGameWorldInputPolicy {
         if sideAxis < 0 { buttons.insert(.moveLeft) }
         if jumpPressed { buttons.insert(.jump) }
         buttons.formUnion(
-            heldActionButtons.intersection([.attack, .attack2, .use, .reload])
+            heldActionButtons.intersection([
+                .attack, .attack2, .use, .reload, .duck,
+            ])
         )
         return GModPlayableMovementInput(
             viewAngles: viewAngles,
@@ -109,6 +111,7 @@ enum GModGameWorldActionButton: Sendable, Equatable {
     case attack2
     case use
     case reload
+    case duck
 
     var sourceButton: SourceInputButtons {
         switch self {
@@ -116,6 +119,7 @@ enum GModGameWorldActionButton: Sendable, Equatable {
         case .attack2: return .attack2
         case .use: return .use
         case .reload: return .reload
+        case .duck: return .duck
         }
     }
 }
