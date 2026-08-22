@@ -142,6 +142,18 @@ struct SourcePhysicsEnvironmentTests {
                 )
             )
         }
+        #expect(
+            throws: SourcePhysicsContractError.nonFinite(
+                field: "bodyMutation.centerTorqueImpulse"
+            )
+        ) {
+            _ = try SourcePhysicsBodyMutationCommand(
+                bodyID: bodyID,
+                mutation: .applyTorqueCenter(
+                    SourceVector3(0, 0, -.infinity)
+                )
+            )
+        }
     }
 
     @Test("indexed geometry is bounded before reaching a backend")

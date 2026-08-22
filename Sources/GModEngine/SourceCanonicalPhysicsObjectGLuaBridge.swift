@@ -355,6 +355,13 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
                 )
             )
         }
+        try setPhysicsMutationMethod("ApplyTorqueCenter") { arguments in
+            .applyTorqueCenter(try self.requiredVector(
+                arguments,
+                at: 1,
+                function: "PhysObj:ApplyTorqueCenter"
+            ))
+        }
     }
 
     private func setPhysicsMutationMethod(

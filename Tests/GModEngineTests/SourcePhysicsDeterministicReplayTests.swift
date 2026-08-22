@@ -87,7 +87,7 @@ struct SourcePhysicsDeterministicReplayTests {
             commandBatches: [batch],
             using: SourceDeterministicPhysicsEnvironment()
         )
-        #expect(SourcePhysicsReplayLog.formatVersion == 3)
+        #expect(SourcePhysicsReplayLog.formatVersion == 4)
 
         let decoded = try SourcePhysicsReplayLog(
             canonicalBytes: log.canonicalBytes
@@ -95,6 +95,52 @@ struct SourcePhysicsDeterministicReplayTests {
         guard case let .mutateBody(decodedMutation) =
                 decoded.frames[0].commandBatch.commands[1].payload else {
             Issue.record("decoded command lost offset-force mutation")
+            return
+        }
+        #expect(decodedMutation == mutation)
+        #expect(decoded == log)
+        _ = try harness.replay(
+            decoded,
+            using: SourceDeterministicPhysicsEnvironment()
+        )
+    }
+
+    @Test("center torque impulse round-trips through canonical replay bytes")
+    func centerTorqueImpulseMutationRoundTrips() throws {
+        let bodyID = try makeBodyID(entryIndex: 43, serialNumber: 9)
+        let creation = try makeCreation(bodyID: bodyID, x: 0)
+        let mutation = try SourcePhysicsBodyMutationCommand(
+            bodyID: bodyID,
+            mutation: .applyTorqueCenter(SourceVector3(7, 8, 9))
+        )
+        let batch = try SourcePhysicsCommandBatch(commands: [
+            SourcePhysicsCommand(
+                sequence: 1,
+                payload: .createBody(creation)
+            ),
+            SourcePhysicsCommand(
+                sequence: 2,
+                payload: .mutateBody(mutation)
+            ),
+            SourcePhysicsCommand(
+                sequence: 3,
+                payload: .simulate(SourcePhysicsSimulateCommand(
+                    simulationTick: 1
+                ))
+            ),
+        ])
+        let harness = SourcePhysicsDeterministicReplayHarness()
+        let log = try harness.record(
+            commandBatches: [batch],
+            using: SourceDeterministicPhysicsEnvironment()
+        )
+
+        let decoded = try SourcePhysicsReplayLog(
+            canonicalBytes: log.canonicalBytes
+        )
+        guard case let .mutateBody(decodedMutation) =
+                decoded.frames[0].commandBatch.commands[1].payload else {
+            Issue.record("decoded command lost center torque impulse")
             return
         }
         #expect(decodedMutation == mutation)

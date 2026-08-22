@@ -245,7 +245,7 @@ public struct SourcePhysicsReplayFrame: Equatable, Sendable {
 
 /// Decoded value transcript plus its canonical little-endian binary form.
 public struct SourcePhysicsReplayLog: Equatable, Sendable {
-    public static let formatVersion: UInt16 = 3
+    public static let formatVersion: UInt16 = 4
 
     public let fixedTimeStepSeconds: Float
     public let frames: [SourcePhysicsReplayFrame]
@@ -764,7 +764,8 @@ private struct SourcePhysicsReplayTranscriptValidator {
              .sleep,
              .applyCenterForce,
              .applyForceOffset,
-             .applyCenterImpulse:
+             .applyCenterImpulse,
+             .applyTorqueCenter:
             requiresEnabledDynamicMotion = true
         default:
             requiresEnabledDynamicMotion = false
@@ -799,7 +800,8 @@ private struct SourcePhysicsReplayTranscriptValidator {
              .sleep,
              .applyCenterForce,
              .applyForceOffset,
-             .applyCenterImpulse:
+             .applyCenterImpulse,
+             .applyTorqueCenter:
             break
         }
         liveBodies[bodyID] = body
@@ -1215,6 +1217,9 @@ private struct SourcePhysicsReplayEncoder {
                 worldPosition,
                 field: "mutation.offsetWorldPosition"
             )
+        case let .applyTorqueCenter(value):
+            try writeUInt8(12)
+            try write(value, field: "mutation.centerTorqueImpulse")
         }
     }
 
@@ -1663,6 +1668,10 @@ private struct SourcePhysicsReplayDecoder {
                     field: "mutation.offsetWorldPosition"
                 )
             )
+        case 12:
+            mutation = .applyTorqueCenter(try readVector(
+                field: "mutation.centerTorqueImpulse"
+            ))
         default:
             throw SourcePhysicsReplayError.invalidTag(
                 field: "bodyMutation",

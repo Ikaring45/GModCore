@@ -706,6 +706,11 @@ private final class RecordingPhysicsEnvironment: SourcePhysicsEnvironment {
             break
         case let .applyCenterImpulse(value):
             linearVelocity += value / body.massProperties.massKilograms
+        case let .applyTorqueCenter(value):
+            angularVelocity += inverseInertiaMultiply(
+                body: body,
+                worldVector: value
+            )
         }
         return try SourcePhysicsBodySnapshot(
             bodyID: body.bodyID,
@@ -722,6 +727,28 @@ private final class RecordingPhysicsEnvironment: SourcePhysicsEnvironment {
             isSleeping: isSleeping,
             simulationTick: body.simulationTick
         )
+    }
+
+    private func inverseInertiaMultiply(
+        body: SourcePhysicsBodySnapshot,
+        worldVector: SourceVector3
+    ) -> SourceVector3 {
+        let basis = body.transform.angles.sourceBasis
+        let localX = basis.forward
+        let localY = -basis.right
+        let localZ = basis.up
+        let local = SourceVector3(
+            worldVector.dot(localX),
+            worldVector.dot(localY),
+            worldVector.dot(localZ)
+        )
+        let inertia = body.massProperties.principalInertia
+        let scaled = SourceVector3(
+            local.x / inertia.x,
+            local.y / inertia.y,
+            local.z / inertia.z
+        )
+        return localX * scaled.x + localY * scaled.y + localZ * scaled.z
     }
 
     private func bodyPrecedes(

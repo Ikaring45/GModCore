@@ -852,6 +852,21 @@ public final class SourceDeterministicPhysicsEnvironment:
                 operation: "applyCenterImpulse"
             )
             wake(&body)
+        case let .applyTorqueCenter(torqueImpulse):
+            try requireEnabledDynamicMotion()
+            // Valve AngularImpulse is already expressed in HL/world axes as
+            // kilograms-degrees/second. Applying inverse principal inertia
+            // therefore yields the immediate degrees/second delta directly;
+            // unlike contact torque, there is no radians conversion here.
+            let angularVelocityDelta = inverseInertiaMultiply(
+                body: body,
+                worldVector: torqueImpulse
+            )
+            body.angularVelocity = try checked(
+                body.angularVelocity + angularVelocityDelta,
+                operation: "applyTorqueCenter"
+            )
+            wake(&body)
         }
     }
 

@@ -545,6 +545,55 @@ struct SourceDeterministicPhysicsEnvironmentTests {
         )
     }
 
+    @Test("center torque impulse is immediate in world axes and principal inertia")
+    func applyTorqueCenterUsesWorldAxesAndBodyInertiaFrame() throws {
+        let environment = SourceDeterministicPhysicsEnvironment()
+        let bodyID = try makeBodyID(entry: 83, serial: 23)
+        let creation = try makeCreation(
+            bodyID: bodyID,
+            shape: makeCubeShape(),
+            origin: SourceVector3(10, 20, 30),
+            motionType: .dynamicBody,
+            mass: 2,
+            inertia: SourceVector3(2, 4, 8),
+            material: 5,
+            gravity: false,
+            startsAwake: false,
+            angularVelocity: SourceVector3(1, 2, 3),
+            angles: SourceQAngle(yaw: 90)
+        )
+        let snapshot = try environment.execute(SourcePhysicsCommandBatch(
+            commands: [
+                SourcePhysicsCommand(
+                    sequence: 1,
+                    payload: .createBody(creation)
+                ),
+                SourcePhysicsCommand(
+                    sequence: 2,
+                    payload: .mutateBody(
+                        try SourcePhysicsBodyMutationCommand(
+                            bodyID: bodyID,
+                            mutation: .applyTorqueCenter(
+                                SourceVector3(8, 0, 0)
+                            )
+                        )
+                    )
+                ),
+            ]
+        ))
+
+        let body = try #require(snapshot.bodies.first)
+        // Yaw 90 maps world +X onto the body Y principal axis. Valve's
+        // AngularImpulse is already kilograms-degrees/second, so 8 / 4 adds
+        // exactly 2 degrees/second without a radians conversion or fixed tick.
+        #expect(abs(body.angularVelocity.x - 3) < 0.000_01)
+        #expect(abs(body.angularVelocity.y - 2) < 0.000_01)
+        #expect(abs(body.angularVelocity.z - 3) < 0.000_01)
+        #expect(body.transform == creation.transform)
+        #expect(!body.isSleeping)
+        #expect(body.simulationTick == 0)
+    }
+
     @Test("a later invalid body mutation rolls back earlier mutations")
     func bodyMutationRollback() throws {
         let environment = SourceDeterministicPhysicsEnvironment()

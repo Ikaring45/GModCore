@@ -90,6 +90,11 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
                 )
             end)
             assert(finite == false and finiteMessage ~= nil)
+            phys:ApplyTorqueCenter(Vector(14, 15, 16))
+            finite, finiteMessage = pcall(function()
+                phys:ApplyTorqueCenter(Vector(0, math.huge, 0))
+            end)
+            assert(finite == false and finiteMessage ~= nil)
 
             function FixInvalidPhysicsObject(prop)
                 local PhysObj = prop:GetPhysicsObject()
@@ -159,6 +164,10 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
                     force: SourceVector3(11, 12, 13),
                     worldPosition: SourceVector3(20, 30, 40)
                 )
+            ),
+            SourcePhysicsBodyMutationCommand(
+                bodyID: pending.bodyID,
+                mutation: .applyTorqueCenter(SourceVector3(14, 15, 16))
             ),
         ])
 
@@ -288,6 +297,11 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
                     Vector(1, 2, 3),
                     Vector(4, 5, 6)
                 )
+            end)
+            assert(ok == false)
+            assert(string.find(message, "live canonical PhysObj expected", 1, true))
+            ok, message = pcall(function()
+                FIRST_SOLID:ApplyTorqueCenter(Vector(1, 2, 3))
             end)
             assert(ok == false)
             assert(string.find(message, "live canonical PhysObj expected", 1, true))

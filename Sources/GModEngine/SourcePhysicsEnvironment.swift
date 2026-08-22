@@ -267,8 +267,8 @@ public struct SourcePhysicsBodyDeletionCommand: Equatable, Sendable {
 /// enter the host's global FIFO. `centerForce` is accumulated until the next
 /// fixed 0.015-second simulation command. `forceOffset` uses the same force
 /// unit and tick boundary while retaining the exact world application point;
-/// `centerImpulse` changes velocity at the mutation command's exact FIFO
-/// position.
+/// `centerImpulse` and `centerTorqueImpulse` change velocity at the mutation
+/// command's exact FIFO position.
 public enum SourcePhysicsBodyMutation: Equatable, Sendable {
     case wake
     case sleep
@@ -285,6 +285,8 @@ public enum SourcePhysicsBodyMutation: Equatable, Sendable {
         worldPosition: SourceVector3
     )
     case applyCenterImpulse(SourceVector3)
+    /// Valve `AngularImpulse`: HL/world axes, kilograms-degrees/second.
+    case applyTorqueCenter(SourceVector3)
 }
 
 public struct SourcePhysicsBodyMutationCommand: Equatable, Sendable {
@@ -334,6 +336,11 @@ public struct SourcePhysicsBodyMutationCommand: Equatable, Sendable {
             try sourcePhysicsRequireFinite(
                 value,
                 field: "bodyMutation.centerImpulse"
+            )
+        case let .applyTorqueCenter(value):
+            try sourcePhysicsRequireFinite(
+                value,
+                field: "bodyMutation.centerTorqueImpulse"
             )
         case .wake,
              .sleep,
