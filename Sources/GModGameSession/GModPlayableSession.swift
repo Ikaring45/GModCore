@@ -439,6 +439,7 @@ public final class GModPlayableSession {
         SourceCanonicalWeldConstraintGLuaBridge
     public let serverRopeConstraintBridge:
         SourceCanonicalRopeConstraintGLuaBridge
+    public let serverDuplicatorBridge: SourceCanonicalDuplicatorGLuaBridge
 
     let serverFileSystem: GMLuaMountedFileSystem
     let clientFileSystem: GMLuaMountedFileSystem
@@ -1122,6 +1123,12 @@ public final class GModPlayableSession {
                     constraintGraph: toolConstraintGraph,
                     worldPhysicsBodyID: loadedStaticWorldPhysicsScene.bodyID
                 )
+            let loadedServerDuplicatorBridge = try
+                SourceCanonicalDuplicatorGLuaBridge.install(
+                    into: server,
+                    host: sourceAdapter,
+                    constraintSource: toolConstraintGraph
+                )
             try SourceCanonicalPhysgunWeaponDefinition.install(
                 into: server,
                 host: sourceAdapter
@@ -1278,6 +1285,7 @@ public final class GModPlayableSession {
             clientToolActionBridge = loadedClientToolActionBridge
             serverWeldConstraintBridge = loadedServerWeldConstraintBridge
             serverRopeConstraintBridge = loadedServerRopeConstraintBridge
+            serverDuplicatorBridge = loadedServerDuplicatorBridge
             serverRopeConstraintCommandQueue =
                 loadedServerRopeConstraintCommandQueue
             propPhysicsCoordinator = loadedPropPhysicsCoordinator
