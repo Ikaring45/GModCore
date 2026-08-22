@@ -31,73 +31,41 @@ No skipped or unfinished feature is reported as a pass. See
 [`LUA51_CONFORMANCE_STATUS.md`](LUA51_CONFORMANCE_STATUS.md) for the exact
 verification boundary.
 
-The 0.1.56 release carries the canonical Source Entity path through the stock
-Sandbox prop and weapon command routes, replicated dynamic-model snapshots,
-and the Metal scene boundary. Home, Options, Problems, and Console now share
-the same Lua/Derma/Surface pipeline as gameplay VGUI. The stock Hint timers
-create real notification panels instead of stopping on missing Panel or Player
-methods. It owns one SERVER and one CLIENT, loads the
-original authorized Base/Sandbox/Derma/Spawnmenu Lua in measured order,
-creates the real `g_SpawnMenu`, and renders its Surface commands through the
-Metal overlay. The stock Weapons tab, tree categories, ContentIcons, tool
-controls, SpawnIcons, compact-layout scroll bar, and Lua callbacks are driven
-by actual pointer samples rather than a replacement Swift spawn menu.
+The 0.1.56 release extends the canonical Source Entity/session path through
+stock Sandbox prop and world-Weapon creation, pickup/drop, full-EHANDLE creator
+ownership, asset-backed OBB bounds, replicated dynamic models, and Metal scene
+projection. Canonical No-Collide and Thruster tool slices now own their real
+constraint/body commands, undo, cleanup, snapshots, and replay ordering.
+`PhysObj` reads authoritative body state and uses an independently attested
+surface-material name/index catalog; missing model, PHY, or material evidence
+continues to fail closed.
 
-A deterministic one-SERVER/many-CLIENT session now provides canonical Player
-mirrors, `LocalPlayer`, client-to-server and targeted server-to-client net
-delivery, forwarded console commands, generation-safe disconnect cleanup, and
-explicit host pumping. Entity-family userdata have realm-local Lua sidecar
-tables with exact `GetTable`/`SetTable` identity, method precedence, stale/NULL
-behavior, and GC roots. `Player(number)` correctly uses UserID while
-`Entity(number)` uses EntIndex.
+World rendering now includes full-resolution water reflection/refraction
+targets, normal/DuDv distortion, Fresnel and authored fog, reflected entities,
+Source UV/mip/anisotropy handling, terrain detail and vertex transitions,
+compiled sun lighting, and a 3D skybox transformed from the map's real
+`sky_camera` and culled by BSP visibility. Displacement geometry participates
+in the static terrain collision scene. Camera-only updates reuse immutable
+world resources, and touch-look samples are coalesced once per rendered frame.
 
-The Source compatibility adapter supplies generation-safe Entity handles,
-SERVER fixed ticks, independent CLIENT frame/fixed-tick clocks, world-brush
-traces, and a bounded ground-walk slice. World rendering now carries BSP
-texinfo UVs, generated-cubemap fallback, worldspawn sky, HDR lightmaps,
-recursive displacement meshes, and the dedicated construct water path into
-Metal. The authorized `gm_construct` and `gm_flatgrass` BSP/NAV/AIN fixtures
-are bundled and both run deterministic startup, trace, mesh, and movement
-regressions. The iPadOS 16 host lives under `Apps/GarrysPAD` and presents
-`GModMainView`; the package-only host is no longer the sole app entry point.
+Home, Options, Problems, and Console share the Lua/Derma/Surface MENU path with
+gameplay VGUI, including touch text input and window resizing. Stock Hint
+notifications create and animate real panels instead of stopping on missing
+Panel or active-weapon APIs. The Studio path decodes owned skeleton/animation
+data, loads bounded animation frames, and supplies CPU skinning inputs; this is
+not a claim that every Source animation feature or model is supported.
 
-The repository includes a manifest-locked subset of project-authorized base
-GMod content needed by this slice: fonts, client Lua, PNGs, 72 VMTs, 46 VTFs,
-and the two maps. It deliberately excludes Workshop/cache/addon content and
-does not broaden the bundle from arbitrary runtime paths. VMT/VTF and bitmap
-decoding, Surface capture, CPU caches, and per-frame GPU upload all have
-explicit allocation limits.
+0.1.56 is still not full Garry's Mod playability. The deterministic physics
+slice is not a general VPhysics backend; automatic buoyancy, ragdolls,
+vehicles, full rigid-body parity, the complete Physgun, and the complete
+Toolgun stool/constraint catalog remain unfinished. Arbitrary Workshop/addon
+mounting, multiplayer prediction, Steam services, and physical-device
+acceptance also remain outside this milestone.
 
-The app now mounts a user-selected content ZIP transactionally, validates its
-root manifest and critical hashes before activation, and can stream CRC and
-SHA-256 verification across every authorized payload with real progress and
-cancellation. Home, Loading, Pause, Options, Problems, audio, and normal-play
-controls are connected to that mounted source. Pinch/double-tap zoom is blocked
-in Home while taps, scrolling, Angular commands, and persisted English/Japanese
-selection remain live. Normal play does not expose the old Render Preview,
-map buttons, counters, Console, or diagnostic frame unless Developer
-diagnostics is explicitly enabled.
-
-This is not full Garry's Mod playability. Arbitrary addon mounting,
-Steam/authentication, sockets, prediction, displacement collision, complete
-step/water/ladder movement, a general rigid-body backend, and the complete
-Physgun/Toolgun action set remain explicit boundaries. The stock Spawnmenu
-weapon route now creates and selects a canonical replicated Weapon. Prop
-creation continues to require an exact validated Studio/VPhysics asset set;
-missing or unverified physics data is not replaced with a guessed body.
-
-The 0.1.56 focused gates cover canonical Entity/Weapon identity and
-replication, stock Hint-to-NoticePanel rendering, targeted Player console
-delivery, MENU Derma actions, dynamic model projection, and BSP trace workspace
-reuse with warnings treated as errors.
-The previously validated real 4.876 GB content pack validates all 2,641
-authorized payload SHA-256
-values and passes Home background, both maps, six-face painted sky, water,
-materials, Sandbox startup, and movement gates. That external pack was not
-re-read for the 0.1.56 correction. Embedded Metal source
-and pipeline contracts are checked locally, but the exact 0.1.56 Apple
-package/app/Metal build, Simulator launch, and physical-iPad behavior remain
-CI/device gates rather than inferred passes.
+Dedicated regression tests are checked in for the individual 0.1.56 slices,
+but release preparation did not rerun the complete Swift suite, Apple
+package/app/Metal build, Simulator launch, or physical-iPad interaction and
+performance gates. None of those unexecuted gates is reported as a pass.
 
 The released 0.1.45 commit separately passes 170/170 Swift tests and the complete Engine
 strict-concurrency gate with warnings treated as errors. Its GC-enabled
