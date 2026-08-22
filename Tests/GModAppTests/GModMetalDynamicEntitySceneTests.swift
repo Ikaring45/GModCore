@@ -493,6 +493,113 @@ final class GModMetalDynamicEntitySceneTests: XCTestCase {
             )
         }
     }
+
+    func testAnimatedPoseIdentityReplacesGeometryButRetainsAppearance() throws {
+        let bindPose = resourceID()
+        let frameThree = resourceID(
+            geometryIdentity: .animated(
+                sequenceIndex: 2,
+                blendIndex: 1,
+                animationIndex: 5,
+                frame: 3
+            )
+        )
+        let frameFour = resourceID(
+            geometryIdentity: .animated(
+                sequenceIndex: 2,
+                blendIndex: 1,
+                animationIndex: 5,
+                frame: 4
+            )
+        )
+
+        XCTAssertTrue(GModMetalStudioGeometryCacheContract.hasSameAppearance(
+            frameThree,
+            frameFour
+        ))
+        XCTAssertTrue(GModMetalStudioGeometryCacheContract.canReuseGeometry(
+            cachedID: bindPose,
+            cachedVertexCount: 3,
+            cachedIndexCount: 3,
+            publishedID: bindPose,
+            publishedVertexCount: 3,
+            publishedIndexCount: 3
+        ))
+        XCTAssertFalse(GModMetalStudioGeometryCacheContract.canReuseGeometry(
+            cachedID: frameThree,
+            cachedVertexCount: 3,
+            cachedIndexCount: 3,
+            publishedID: frameFour,
+            publishedVertexCount: 3,
+            publishedIndexCount: 3
+        ))
+
+        let scene = try GModMetalDynamicEntityScene(
+            generation: generation(),
+            revision: 1,
+            resources: [resource(id: frameFour), resource(id: frameThree)],
+            instances: [
+                instance(identity: identity(entry: 1, serial: 1), resourceID: frameThree),
+                instance(identity: identity(entry: 2, serial: 1), resourceID: frameFour),
+            ],
+            policy: generousPolicy()
+        )
+        XCTAssertEqual(scene.resources.map(\.id), [frameThree, frameFour])
+        XCTAssertEqual(scene.instances.map(\.resourceID), [frameThree, frameFour])
+
+        let limits = GModMetalStudioGeometryUploadContract.limits(
+            for: [frameThree, frameFour]
+        )
+        XCTAssertEqual(limits.maximumResourceCount, 2)
+        XCTAssertEqual(
+            limits.maximumByteCount,
+            GModMetalStudioGeometryUploadContract.animatedMaximumByteCount
+        )
+    }
+
+    func testAnimatedIdentityAndLODAreFailClosed() {
+        let invalidPose = resourceID(
+            geometryIdentity: .animated(
+                sequenceIndex: -1,
+                blendIndex: 0,
+                animationIndex: 0,
+                frame: 0
+            )
+        )
+        XCTAssertThrowsError(try GModMetalDynamicEntityScene(
+            generation: generation(),
+            revision: 1,
+            resources: [resource(id: invalidPose)],
+            instances: [],
+            policy: generousPolicy()
+        )) { error in
+            XCTAssertEqual(
+                error as? GModMetalDynamicEntitySceneError,
+                .invalidResourceIdentity(
+                    id: invalidPose,
+                    field: "animation geometry identity"
+                )
+            )
+        }
+
+        let lodOne = resourceID(lodIndex: 1)
+        XCTAssertThrowsError(try GModMetalDynamicEntityScene(
+            generation: generation(),
+            revision: 1,
+            resources: [resource(id: lodOne, compiledLODIndex: 0)],
+            instances: [],
+            policy: generousPolicy()
+        )) { error in
+            XCTAssertEqual(
+                error as? GModMetalDynamicEntitySceneError,
+                .invalidResourceIdentity(id: lodOne, field: "LOD index")
+            )
+        }
+        XCTAssertFalse(GModMetalStudioGeometryCacheContract.hasSameAppearance(
+            resourceID(lodIndex: 0),
+            lodOne
+        ))
+    }
 }
 
 private extension GModMetalDynamicEntitySceneTests {
@@ -507,14 +614,18 @@ private extension GModMetalDynamicEntitySceneTests {
     func resourceID(
         path: String = "models/props/test.mdl",
         checksum: Int32 = 10,
+        lodIndex: Int = 0,
         bodyValue: Int = 0,
-        skinFamilyIndex: Int = 0
+        skinFamilyIndex: Int = 0,
+        geometryIdentity: GModMetalStudioGeometryIdentity = .bindPose
     ) -> GModMetalDynamicEntityResourceID {
         GModMetalDynamicEntityResourceID(
             normalizedModelPath: path,
             checksum: checksum,
+            lodIndex: lodIndex,
             bodyValue: bodyValue,
-            skinFamilyIndex: skinFamilyIndex
+            skinFamilyIndex: skinFamilyIndex,
+            geometryIdentity: geometryIdentity
         )
     }
 
@@ -562,6 +673,7 @@ private extension GModMetalDynamicEntitySceneTests {
     func resource(
         id: GModMetalDynamicEntityResourceID,
         compiledChecksum: Int32? = nil,
+        compiledLODIndex: Int? = nil,
         vertices: [GModMetalDynamicEntitySourceVertex]? = nil,
         indices: [UInt32] = [0, 1, 2],
         drawRanges: [GModMetalDynamicEntityDrawRange]? = nil
@@ -570,7 +682,7 @@ private extension GModMetalDynamicEntitySceneTests {
             id: id,
             checksum: compiledChecksum ?? id.checksum,
             modelName: id.normalizedModelPath,
-            lodIndex: 0,
+            lodIndex: compiledLODIndex ?? id.lodIndex,
             bodyValue: id.bodyValue,
             skinFamilyIndex: id.skinFamilyIndex,
             vertices: vertices ?? sourceVertices(),
