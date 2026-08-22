@@ -144,6 +144,15 @@ final class SourceCanonicalEntityTests: XCTestCase {
 
         XCTAssertThrowsError(
             try store.update(player.identity) { state in
+                state.motion.ladderNormal.z = .nan
+            }
+        ) { error in
+            XCTAssertEqual(error as? SourceCanonicalEntityError, .invalidMotion)
+        }
+        XCTAssertEqual(store.snapshot(for: player.identity), player)
+
+        XCTAssertThrowsError(
+            try store.update(player.identity) { state in
                 state.transform.angles.roll = .infinity
             }
         ) { error in
@@ -188,7 +197,8 @@ final class SourceCanonicalEntityTests: XCTestCase {
                 isDead: false
             ),
             viewAngles: SourceQAngle(pitch: 11, yaw: 22, roll: 3),
-            moveType: .walk
+            moveType: .ladder,
+            ladderNormal: SourceVector3(0, -1, 0)
         )
 
         var canonical = SourceCanonicalEntityState.defaults(for: .player)
@@ -199,6 +209,7 @@ final class SourceCanonicalEntityTests: XCTestCase {
         XCTAssertEqual(canonical.transform.origin, walk.origin)
         XCTAssertEqual(canonical.transform.angles, walk.viewAngles)
         XCTAssertEqual(canonical.motion.linearVelocity, walk.velocity)
+        XCTAssertEqual(canonical.motion.ladderNormal, walk.ladderNormal)
         XCTAssertEqual(canonical.motion.angularVelocity, SourceVector3(0, 0, 4))
         XCTAssertTrue(canonical.motion.isAlive)
     }

@@ -69,6 +69,10 @@ public struct SourceEntityMotionState: Equatable, Sendable {
     public var entityGravity: Float
     public var surfaceFriction: Float
     public var waterJumpTime: Float
+    /// Last world ladder plane retained by Source player movement while
+    /// `MOVETYPE_LADDER` is active. This lives in the canonical Player motion
+    /// snapshot so the next fixed tick does not depend on a host-side mirror.
+    public var ladderNormal: SourceVector3
     public var isAlive: Bool
 
     public init(
@@ -80,6 +84,7 @@ public struct SourceEntityMotionState: Equatable, Sendable {
         entityGravity: Float = 0,
         surfaceFriction: Float = 1,
         waterJumpTime: Float = 0,
+        ladderNormal: SourceVector3 = .zero,
         isAlive: Bool = true
     ) {
         self.linearVelocity = linearVelocity
@@ -90,6 +95,7 @@ public struct SourceEntityMotionState: Equatable, Sendable {
         self.entityGravity = entityGravity
         self.surfaceFriction = surfaceFriction
         self.waterJumpTime = waterJumpTime
+        self.ladderNormal = ladderNormal
         self.isAlive = isAlive
     }
 
@@ -98,6 +104,7 @@ public struct SourceEntityMotionState: Equatable, Sendable {
             Self.isFinite(angularVelocity) &&
             Self.isFinite(baseVelocity) &&
             Self.isFinite(outputWishVelocity) &&
+            Self.isFinite(ladderNormal) &&
             entityGravity.isFinite &&
             surfaceFriction.isFinite && surfaceFriction >= 0 &&
             waterJumpTime.isFinite && waterJumpTime >= 0
@@ -731,7 +738,8 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
                 isDead: !motion.isAlive
             ),
             viewAngles: transform.angles,
-            moveType: moveType
+            moveType: moveType,
+            ladderNormal: motion.ladderNormal
         )
     }
 
@@ -748,6 +756,7 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
         motion.entityGravity = walkState.movement.entityGravity
         motion.surfaceFriction = walkState.movement.surfaceFriction
         motion.waterJumpTime = walkState.movement.waterJumpTime
+        motion.ladderNormal = walkState.ladderNormal
         motion.isAlive = !walkState.movement.isDead
         moveType = walkState.moveType
     }

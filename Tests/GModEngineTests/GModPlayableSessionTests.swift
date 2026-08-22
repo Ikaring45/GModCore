@@ -72,74 +72,50 @@ final class GModPlayableSessionTests: XCTestCase {
         )
     }
 
-    func testWaterMovesAndLadderRejectsWhileBothRealmClocksAdvance() throws {
-        let cases: [(SourceContents, SourceWorldWalkUnsupportedFeature)] = [
-            (.water, .water),
-            (.ladder, .ladder),
-        ]
+    func testWaterMovesWhileBothRealmClocksAdvance() throws {
+        let session = try GModPlayableSession(
+            configuration: GModPlayableSessionConfiguration(map: .construct),
+            textMeasurer: nil,
+            logger: { _, _ in },
+            worldWalkCollisionProvider:
+                UnsupportedContentsPlayableWalkProvider(contents: .water)
+        )
+        defer { _ = try? session.close() }
+        let stateBeforeTick = session.playerWalkState
+        let serverTimeBefore = try XCTUnwrap(
+            session.serverRuntime.timerScheduler
+        ).currentTime
+        let clientTimeBefore = try XCTUnwrap(
+            session.clientRuntime.timerScheduler
+        ).currentTime
 
-        for (contents, feature) in cases {
-            let session = try GModPlayableSession(
-                configuration: GModPlayableSessionConfiguration(
-                    map: .construct
-                ),
-                textMeasurer: nil,
-                logger: { _, _ in },
-                worldWalkCollisionProvider:
-                    UnsupportedContentsPlayableWalkProvider(
-                        contents: contents
-                    )
+        let report = try session.runFixedTick(
+            movementInput: GModPlayableMovementInput(
+                forwardMove: 200,
+                buttons: [.forward]
             )
-            let stateBeforeTick = session.playerWalkState
-            let serverTimeBefore = try XCTUnwrap(
-                session.serverRuntime.timerScheduler
-            ).currentTime
-            let clientTimeBefore = try XCTUnwrap(
-                session.clientRuntime.timerScheduler
-            ).currentTime
+        )
 
-            let report = try session.runFixedTick(
-                movementInput: GModPlayableMovementInput(
-                    forwardMove: 200,
-                    buttons: [.forward]
-                )
-            )
-
-            if feature == .water {
-                guard case let .advanced(tick) = report.movement else {
-                    _ = try? session.close()
-                    return XCTFail("bounded water movement was rejected")
-                }
-                XCTAssertEqual(tick.commandNumber, 1)
-                XCTAssertNotEqual(tick.state, stateBeforeTick)
-                XCTAssertEqual(report.movement.state, tick.state)
-                XCTAssertEqual(session.playerWalkState, tick.state)
-            } else {
-                guard case let .rejected(rejection) = report.movement else {
-                    _ = try? session.close()
-                    return XCTFail("\(feature) was reported as a successful move")
-                }
-                XCTAssertEqual(rejection.commandNumber, 1)
-                XCTAssertEqual(rejection.reason, .feature(feature))
-                XCTAssertEqual(rejection.preservedState, stateBeforeTick)
-                XCTAssertEqual(report.movement.state, stateBeforeTick)
-                XCTAssertEqual(session.playerWalkState, stateBeforeTick)
-            }
-            XCTAssertEqual(report.server.kind, .serverFixedTick)
-            XCTAssertEqual(report.client.kind, .clientFixedTick)
-            XCTAssertEqual(session.sourceAdapter.serverGlobals.tickCount, 1)
-            let oneTick = Double(SourceGlobalVars.intervalPerTick)
-            XCTAssertEqual(
-                try XCTUnwrap(session.serverRuntime.timerScheduler).currentTime,
-                serverTimeBefore + oneTick
-            )
-            XCTAssertEqual(
-                try XCTUnwrap(session.clientRuntime.timerScheduler).currentTime,
-                clientTimeBefore + oneTick
-            )
-            XCTAssertFalse(session.isClosed)
-            _ = try session.close()
+        guard case let .advanced(tick) = report.movement else {
+            return XCTFail("bounded water movement was rejected")
         }
+        XCTAssertEqual(tick.commandNumber, 1)
+        XCTAssertNotEqual(tick.state, stateBeforeTick)
+        XCTAssertEqual(report.movement.state, tick.state)
+        XCTAssertEqual(session.playerWalkState, tick.state)
+        XCTAssertEqual(report.server.kind, .serverFixedTick)
+        XCTAssertEqual(report.client.kind, .clientFixedTick)
+        XCTAssertEqual(session.sourceAdapter.serverGlobals.tickCount, 1)
+        let oneTick = Double(SourceGlobalVars.intervalPerTick)
+        XCTAssertEqual(
+            try XCTUnwrap(session.serverRuntime.timerScheduler).currentTime,
+            serverTimeBefore + oneTick
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(session.clientRuntime.timerScheduler).currentTime,
+            clientTimeBefore + oneTick
+        )
+        XCTAssertFalse(session.isClosed)
     }
 
     func testNonFiniteMovementRemainsFatalAfterWaterMovement() throws {

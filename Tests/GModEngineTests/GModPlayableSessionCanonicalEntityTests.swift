@@ -2,24 +2,6 @@ import XCTest
 @testable import GModEngine
 @testable import GModGameSession
 
-private struct CanonicalPlayableLadderProvider:
-    SourceWorldWalkCollisionProvider
-{
-    func traceWorldWalk(
-        _ ray: SourceRay,
-        mask _: SourceContents
-    ) throws -> SourceGameTrace {
-        SourceGameTrace(ray: ray)
-    }
-
-    func worldWalkPointContents(
-        at _: SourceVector3,
-        mask _: SourceContents
-    ) throws -> SourceContents {
-        .ladder
-    }
-}
-
 final class GModPlayableSessionCanonicalEntityTests: XCTestCase {
     func testStartupAndMovementUseOneCanonicalPlayerAcrossFIFORealms() throws {
         let configuration = GModPlayableSessionConfiguration(
@@ -105,50 +87,105 @@ final class GModPlayableSessionCanonicalEntityTests: XCTestCase {
         XCTAssertEqual(movedServerPlayer.transform.angles, advanced.state.viewAngles)
         XCTAssertEqual(session.playerWalkState, advanced.state)
         XCTAssertEqual(session.sharedSession.netTransport.pendingDeliveryCount, 0)
-        _ = try session.close()
+    }
 
-        let rejected = try GModPlayableSession(
-            configuration: GModPlayableSessionConfiguration(map: .construct),
-            textMeasurer: nil,
-            logger: { _, _ in },
-            worldWalkCollisionProvider: CanonicalPlayableLadderProvider()
+    func testConstructLadderStatePersistsInCanonicalPlayerAcrossTicksAndFIFO()
+        throws
+    {
+        let session = try GModPlayableSession(
+            configuration: GModPlayableSessionConfiguration(map: .construct)
         )
-        defer { _ = try? rejected.close() }
-        let rejectedServerRegistry = try XCTUnwrap(
-            rejected.serverRuntime.entityRegistry
+        defer { _ = try? session.close() }
+        let serverRegistry = try XCTUnwrap(session.serverRuntime.entityRegistry)
+        let clientRegistry = try XCTUnwrap(session.clientRuntime.entityRegistry)
+        let playerIndex = session.configuration.playerEntityIndex
+        let player = try XCTUnwrap(
+            serverRegistry.canonicalSnapshot(at: playerIndex)
         )
-        let rejectedClientRegistry = try XCTUnwrap(
-            rejected.clientRuntime.entityRegistry
-        )
-        let playerIndex = rejected.configuration.playerEntityIndex
-        let beforeServer = try XCTUnwrap(
-            rejectedServerRegistry.canonicalSnapshot(at: playerIndex)
-        )
-        let beforeClient = try XCTUnwrap(
-            rejectedClientRegistry.canonicalSnapshot(at: playerIndex)
-        )
-        let preservedState = rejected.playerWalkState
+        let ladderOrigin = SourceVector3(-2920, -1075, -95)
+        let facingLadder = SourceQAngle(pitch: 0, yaw: 90, roll: 0)
+        _ = try session.sourceAdapter.updateCanonicalEntity(player.identity) {
+            $0.applyPlayerWalkState(SourceWorldWalkState(
+                origin: ladderOrigin,
+                viewAngles: facingLadder
+            ))
+        }
 
-        let rejectedTick = try rejected.runFixedTick(
+        let climbedReport = try session.runFixedTick(
             movementInput: GModPlayableMovementInput(
+                viewAngles: facingLadder,
                 forwardMove: 200,
                 buttons: [.forward]
             )
         )
-        guard case let .rejected(rejection) = rejectedTick.movement else {
-            return XCTFail("ladder movement advanced canonical Player")
+        guard case let .advanced(climbedTick) = climbedReport.movement else {
+            return XCTFail("authored gm_construct ladder climb was rejected")
         }
-        XCTAssertEqual(rejection.reason, .feature(.ladder))
-        XCTAssertEqual(rejection.preservedState, preservedState)
-        XCTAssertEqual(rejected.playerWalkState, preservedState)
+        XCTAssertEqual(climbedTick.state.moveType, .ladder)
         XCTAssertEqual(
-            rejectedServerRegistry.canonicalSnapshot(at: playerIndex),
-            beforeServer
+            climbedTick.state.ladderNormal,
+            SourceVector3(0, -1, 0)
         )
+        XCTAssertEqual(climbedTick.state.velocity.z, 200, accuracy: 0.000_01)
         XCTAssertEqual(
-            rejectedClientRegistry.canonicalSnapshot(at: playerIndex),
-            beforeClient
+            climbedTick.state.origin.z - ladderOrigin.z,
+            SourceWorldWalkSolver.maximumClimbSpeed *
+                SourceGlobalVars.intervalPerTick,
+            accuracy: 0.000_001
         )
-        XCTAssertEqual(rejected.sharedSession.netTransport.pendingDeliveryCount, 0)
+        XCTAssertEqual(session.playerWalkState, climbedTick.state)
+        let climbedServer = try XCTUnwrap(
+            serverRegistry.canonicalSnapshot(at: playerIndex)
+        )
+        let climbedClient = try XCTUnwrap(
+            clientRegistry.canonicalSnapshot(at: playerIndex)
+        )
+        XCTAssertEqual(climbedServer, climbedClient)
+        XCTAssertEqual(climbedServer.moveType, .ladder)
+        XCTAssertEqual(
+            climbedServer.motion.ladderNormal,
+            SourceVector3(0, -1, 0)
+        )
+
+        let descendedReport = try session.runFixedTick(
+            movementInput: GModPlayableMovementInput(
+                viewAngles: facingLadder,
+                forwardMove: -200,
+                buttons: [.back]
+            )
+        )
+        guard case let .advanced(descendedTick) = descendedReport.movement else {
+            return XCTFail("canonical ladder descent was rejected")
+        }
+        XCTAssertEqual(descendedTick.state.moveType, .ladder)
+        XCTAssertEqual(
+            descendedTick.state.ladderNormal,
+            climbedTick.state.ladderNormal
+        )
+        XCTAssertEqual(descendedTick.state.velocity.z, -200, accuracy: 0.000_01)
+        XCTAssertEqual(descendedTick.state.origin.z, ladderOrigin.z, accuracy: 0.000_001)
+        XCTAssertEqual(session.playerWalkState, descendedTick.state)
+
+        let jumpedReport = try session.runFixedTick(
+            movementInput: GModPlayableMovementInput(
+                viewAngles: facingLadder,
+                buttons: [.jump]
+            )
+        )
+        guard case let .advanced(jumpedTick) = jumpedReport.movement else {
+            return XCTFail("canonical ladder jump-off was rejected")
+        }
+        XCTAssertEqual(jumpedTick.state.moveType, .walk)
+        XCTAssertEqual(
+            jumpedTick.state.velocity.y,
+            -SourceWorldWalkSolver.ladderJumpOffSpeed
+        )
+        XCTAssertLessThan(jumpedTick.state.origin.y, descendedTick.state.origin.y)
+        XCTAssertEqual(session.playerWalkState, jumpedTick.state)
+        XCTAssertEqual(
+            clientRegistry.canonicalSnapshot(at: playerIndex),
+            serverRegistry.canonicalSnapshot(at: playerIndex)
+        )
+        XCTAssertEqual(session.sharedSession.netTransport.pendingDeliveryCount, 0)
     }
 }

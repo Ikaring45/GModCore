@@ -2,26 +2,6 @@ import XCTest
 @testable import GModEngine
 @testable import GModGameSession
 
-private struct UnsupportedContentsLaneWalkProvider:
-    SourceWorldWalkCollisionProvider
-{
-    let contents: SourceContents
-
-    func traceWorldWalk(
-        _ ray: SourceRay,
-        mask _: SourceContents
-    ) throws -> SourceGameTrace {
-        SourceGameTrace(ray: ray)
-    }
-
-    func worldWalkPointContents(
-        at _: SourceVector3,
-        mask _: SourceContents
-    ) throws -> SourceContents {
-        contents
-    }
-}
-
 private final class LaneShutdownCleanupRecorder: @unchecked Sendable {
     private let condition = NSCondition()
     private var storage: [
@@ -184,62 +164,99 @@ final class GModPlayableSessionLaneTests: XCTestCase {
         XCTAssertEqual(identityAfterFlatgrassClose, identity)
     }
 
-    func testUnsupportedMovementIsReportedWhileLaneAndRealmTimeContinue() async throws {
-        let lane = GModPlayableSessionLane(
-            worldWalkCollisionProvider:
-                UnsupportedContentsLaneWalkProvider(contents: .ladder)
-        )
+    func testConstructLadderUsesLaneInputForClimbDescentAndJumpOff()
+        async throws
+    {
+        let lane = GModPlayableSessionLane()
         let snapshot = try await lane.start(
             configuration: GModPlayableSessionConfiguration(map: .construct)
         )
+        try await lane.execute(
+            """
+            local ply = Player(1)
+            ply:SetPos(Vector(-2920, -1075, -95))
+            ply:SetAngles(Angle(0, 90, 0))
+            """,
+            sourceName: "=(construct authored ladder start)",
+            expectedGeneration: snapshot.generation
+        )
+        let facingLadder = SourceQAngle(pitch: 0, yaw: 90, roll: 0)
 
         let first = try await lane.runHostFrame(
-            fixedTickCount: 2,
+            fixedTickCount: 1,
             renderClientFrame: true,
             movementInput: GModPlayableMovementInput(
+                viewAngles: facingLadder,
                 forwardMove: 200,
                 buttons: [.forward]
             ),
             expectedGeneration: snapshot.generation,
             expectedInputEpoch: snapshot.inputEpoch
         )
-        XCTAssertEqual(first.fixedTicks.count, 2)
-        XCTAssertEqual(first.movementRejections.map(\.commandNumber), [1, 2])
-        XCTAssertTrue(first.movementRejections.allSatisfy {
-            $0.reason == .feature(.ladder) &&
-                $0.preservedState == snapshot.playerWalkState
-        })
-        XCTAssertTrue(first.fixedTicks.allSatisfy {
-            if case .rejected = $0.movement { return true }
-            return false
-        })
-        XCTAssertEqual(first.playerWalkState, snapshot.playerWalkState)
+        XCTAssertEqual(first.fixedTicks.count, 1)
+        XCTAssertEqual(first.movementRejections, [])
+        XCTAssertEqual(first.playerWalkState.moveType, .ladder)
+        XCTAssertEqual(
+            first.playerWalkState.ladderNormal,
+            SourceVector3(0, -1, 0)
+        )
+        XCTAssertEqual(first.playerWalkState.velocity.z, 200, accuracy: 0.000_01)
+        XCTAssertEqual(first.playerWalkState.origin.z, -92, accuracy: 0.000_001)
         XCTAssertEqual(first.clientFrame?.kind, .clientFrame)
         try await lane.execute(
-            "assert(math.abs(CurTime() - 0.03) < 0.000001)",
+            "assert(Player(1):GetMoveType() == MOVETYPE_LADDER and Player(1):KeyDown(IN_FORWARD))",
             expectedGeneration: snapshot.generation
         )
         try await lane.execute(
-            "assert(math.abs(CurTime() - 0.03) < 0.000001)",
+            "assert(LocalPlayer():GetMoveType() == MOVETYPE_LADDER and LocalPlayer():KeyDown(IN_FORWARD))",
             realm: .client,
             expectedGeneration: snapshot.generation
         )
 
-        let later = try await lane.runHostFrame(
+        let descended = try await lane.runHostFrame(
             fixedTickCount: 1,
-            renderClientFrame: true,
+            renderClientFrame: false,
+            movementInput: GModPlayableMovementInput(
+                viewAngles: facingLadder,
+                forwardMove: -200,
+                buttons: [.back]
+            ),
             expectedGeneration: snapshot.generation,
             expectedInputEpoch: snapshot.inputEpoch
         )
-        XCTAssertEqual(later.movementRejections.map(\.commandNumber), [3])
-        XCTAssertEqual(later.playerWalkState, snapshot.playerWalkState)
-        XCTAssertEqual(later.clientFrame?.kind, .clientFrame)
+        XCTAssertEqual(descended.movementRejections, [])
+        XCTAssertEqual(descended.playerWalkState.moveType, .ladder)
+        XCTAssertEqual(
+            descended.playerWalkState.ladderNormal,
+            first.playerWalkState.ladderNormal
+        )
+        XCTAssertEqual(descended.playerWalkState.velocity.z, -200, accuracy: 0.000_01)
+        XCTAssertEqual(descended.playerWalkState.origin.z, -95, accuracy: 0.000_001)
+
+        let jumped = try await lane.runHostFrame(
+            fixedTickCount: 1,
+            renderClientFrame: true,
+            movementInput: GModPlayableMovementInput(
+                viewAngles: facingLadder,
+                buttons: [.jump]
+            ),
+            expectedGeneration: snapshot.generation,
+            expectedInputEpoch: snapshot.inputEpoch
+        )
+        XCTAssertEqual(jumped.movementRejections, [])
+        XCTAssertEqual(jumped.playerWalkState.moveType, .walk)
+        XCTAssertEqual(
+            jumped.playerWalkState.velocity.y,
+            -SourceWorldWalkSolver.ladderJumpOffSpeed
+        )
+        XCTAssertLessThan(jumped.playerWalkState.origin.y, -1075)
+        XCTAssertEqual(jumped.clientFrame?.kind, .clientFrame)
         try await lane.execute(
-            "assert(math.abs(CurTime() - 0.045) < 0.000001)",
+            "assert(math.abs(CurTime() - 0.045) < 0.000001 and Player(1):GetMoveType() == MOVETYPE_WALK and Player(1):KeyDown(IN_JUMP))",
             expectedGeneration: snapshot.generation
         )
         try await lane.execute(
-            "assert(math.abs(CurTime() - 0.045) < 0.000001)",
+            "assert(math.abs(CurTime() - 0.045) < 0.000001 and LocalPlayer():GetMoveType() == MOVETYPE_WALK and LocalPlayer():KeyDown(IN_JUMP))",
             realm: .client,
             expectedGeneration: snapshot.generation
         )
