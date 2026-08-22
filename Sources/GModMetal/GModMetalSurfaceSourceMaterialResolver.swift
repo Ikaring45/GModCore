@@ -141,6 +141,18 @@ public final class GModMetalSurfaceSourceMaterialResolver:
         }
     }
 
+    /// Returns the ordered entity-colour proxy declarations from the same
+    /// resolved Studio VMT. Bitmap caching remains independent because two
+    /// VMTs may share one VTF while binding different material variables.
+    public func resolveStudioEntityColorProxies(
+        named logicalName: String
+    ) throws -> [GMLuaSourceEntityColorProxy] {
+        try sourceMaterialResolver.resolve(
+            named: logicalName,
+            mipPolicy: .authoredChain
+        ).entityColorProxies
+    }
+
     private func resolveTexture(
         named logicalName: String,
         retainingAuthoredMipChain: Bool

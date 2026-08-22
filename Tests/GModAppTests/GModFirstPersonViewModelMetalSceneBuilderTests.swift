@@ -29,6 +29,7 @@ final class GModFirstPersonViewModelMetalSceneBuilderTests: XCTestCase {
         XCTAssertEqual(scene.weaponIdentity, projection.weaponIdentity)
         XCTAssertEqual(scene.normalizedViewModelPath, projection.viewModel.path)
         XCTAssertEqual(scene.sourceFieldOfViewDegrees, 62)
+        XCTAssertEqual(scene.weaponColor, SourceVector3(0.3, 1.8, 2.1))
         XCTAssertEqual(
             scene.resource.drawRanges.first?.materialResolution,
             .sourceMissing
@@ -36,6 +37,65 @@ final class GModFirstPersonViewModelMetalSceneBuilderTests: XCTestCase {
         XCTAssertEqual(
             probe.calls,
             ["materials/models/weapons/v_toolgun.vmt"]
+        )
+    }
+
+    func testExactPlayerWeaponColorProxyMarksOnlyResolvedRange() throws {
+        let bitmap = try GModMetalSurfaceBitmap(
+            resourceIdentifier: "materials/models/weapons/v_toolgun.vtf",
+            width: 1,
+            height: 1,
+            premultipliedRGBA8: Data([255, 255, 255, 255]),
+            alphaRepresentation: .straight
+        )
+        let builder = try GModFirstPersonViewModelMetalSceneBuilder(
+            resolveMaterial: { _ in .resolved(bitmap) },
+            resolveEntityColorProxies: { _ in [
+                GMLuaSourceEntityColorProxy(
+                    kind: .playerWeaponColor,
+                    resultVariable: "$color2"
+                ),
+            ] }
+        )
+
+        let scene = try XCTUnwrap(builder.build(
+            from: GModFirstPersonViewModelSceneSnapshot(
+                revision: 1,
+                sourceProjectionCursor: cursor(sequence: 1),
+                projection: makeProjection(),
+                status: .available
+            ),
+            applicationGeneration: 1,
+            laneGeneration: 1
+        ))
+
+        XCTAssertTrue(
+            try XCTUnwrap(scene.resource.drawRanges.first)
+                .usesPlayerWeaponColor
+        )
+
+        let wrongResultBuilder = try GModFirstPersonViewModelMetalSceneBuilder(
+            resolveMaterial: { _ in .resolved(bitmap) },
+            resolveEntityColorProxies: { _ in [
+                GMLuaSourceEntityColorProxy(
+                    kind: .playerWeaponColor,
+                    resultVariable: "$color"
+                ),
+            ] }
+        )
+        let untinted = try XCTUnwrap(wrongResultBuilder.build(
+            from: GModFirstPersonViewModelSceneSnapshot(
+                revision: 1,
+                sourceProjectionCursor: cursor(sequence: 1),
+                projection: makeProjection(),
+                status: .available
+            ),
+            applicationGeneration: 1,
+            laneGeneration: 1
+        ))
+        XCTAssertFalse(
+            try XCTUnwrap(untinted.resource.drawRanges.first)
+                .usesPlayerWeaponColor
         )
     }
 
@@ -119,6 +179,7 @@ final class GModFirstPersonViewModelMetalSceneBuilderTests: XCTestCase {
                 "models/weapons/w_toolgun.mdl"
             ),
             viewModelFieldOfViewDegrees: 62,
+            weaponColor: SourceVector3(0.3, 1.8, 2.1),
             resource: resource
         )
     }

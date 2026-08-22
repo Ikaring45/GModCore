@@ -41,6 +41,7 @@ final class GModFirstPersonViewModelSceneTests: XCTestCase {
         XCTAssertEqual(projection.viewModel, definition.viewModel)
         XCTAssertEqual(projection.worldModel, definition.worldModel)
         XCTAssertEqual(projection.viewModelFieldOfViewDegrees, 62)
+        XCTAssertEqual(projection.weaponColor, SourceVector3(1, 1, 1))
         XCTAssertEqual(
             projection.resource.id.normalizedModelPath,
             "models/weapons/c_toolgun.mdl"
@@ -152,6 +153,43 @@ final class GModFirstPersonViewModelSceneTests: XCTestCase {
         XCTAssertEqual(resolver.requests, [])
     }
 
+    func testCanonicalWeaponColorChangePublishesNewVisualProjection() throws {
+        let resolver = ViewModelResolverProbe()
+        let projector = GModFirstPersonViewModelSceneProjector(
+            resolver: resolver
+        )
+        let weapon = weaponSnapshot(index: 18, revision: 1)
+        let initialPlayer = playerSnapshot(index: 1, activeWeapon: weapon)
+        _ = try projector.update(
+            clientEntities: [initialPlayer, weapon],
+            localPlayerEntryIndex: 1,
+            cursor: cursor(sequence: 1),
+            definitionResolver: { _ in self.definition() }
+        )
+        let initial = try XCTUnwrap(projector.snapshot(ifChangedFrom: nil))
+
+        let coloredPlayer = playerSnapshot(
+            index: 1,
+            activeWeapon: weapon,
+            weaponColor: SourceVector3(0.3, 1.8, 2.1)
+        )
+        XCTAssertTrue(try projector.update(
+            clientEntities: [coloredPlayer, weapon],
+            localPlayerEntryIndex: 1,
+            cursor: cursor(sequence: 2),
+            definitionResolver: { _ in self.definition() }
+        ))
+
+        let colored = try XCTUnwrap(projector.snapshot(
+            ifChangedFrom: initial.revision
+        ))
+        XCTAssertEqual(colored.revision, initial.revision + 1)
+        XCTAssertEqual(
+            colored.projection?.weaponColor,
+            SourceVector3(0.3, 1.8, 2.1)
+        )
+    }
+
     private func definition() -> GMLuaScriptedWeaponRenderDefinition {
         GMLuaScriptedWeaponRenderDefinition(
             className: "gmod_tool",
@@ -176,7 +214,8 @@ final class GModFirstPersonViewModelSceneTests: XCTestCase {
 
     private func playerSnapshot(
         index: Int,
-        activeWeapon: SourceCanonicalEntitySnapshot?
+        activeWeapon: SourceCanonicalEntitySnapshot?,
+        weaponColor: SourceVector3 = SourceVector3(1, 1, 1)
     ) -> SourceCanonicalEntitySnapshot {
         let inventory: SourceCanonicalWeaponInventory
         if let activeWeapon {
@@ -202,6 +241,9 @@ final class GModFirstPersonViewModelSceneTests: XCTestCase {
             lifecycle: .active,
             isNetworkable: true,
             revision: 1,
+            playerColorState: SourceCanonicalPlayerColorState(
+                weaponColor: weaponColor
+            ),
             weaponInventory: inventory
         )
     }

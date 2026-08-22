@@ -45,6 +45,28 @@ public enum GMLuaSourceMaterialError: Error, Sendable, Equatable,
     }
 }
 
+public enum GMLuaSourceEntityColorProxyKind: Sendable, Equatable {
+    case playerColor
+    case playerWeaponColor
+}
+
+/// Ordered Source material-proxy binding retained from the resolved VMT.
+/// The renderer may implement only variables whose shader contract it owns;
+/// retaining the exact `resultvar` prevents a similarly named proxy from
+/// becoming blanket model tinting.
+public struct GMLuaSourceEntityColorProxy: Sendable, Equatable {
+    public let kind: GMLuaSourceEntityColorProxyKind
+    public let resultVariable: String
+
+    public init(
+        kind: GMLuaSourceEntityColorProxyKind,
+        resultVariable: String
+    ) {
+        self.kind = kind
+        self.resultVariable = resultVariable
+    }
+}
+
 /// Complete static result shared by GLua resource handles and renderer adapters.
 /// `rgbaBytes == nil` is intentional for real VMTs whose base texture is an
 /// engine render target or is absent from the mounted search paths.
@@ -57,18 +79,23 @@ public struct GMLuaResolvedSourceMaterial: Sendable, Equatable {
     /// Every authored VTF mip, largest first. Imported PNGs have one level.
     /// These are the real file levels; the renderer must not synthesize blur.
     public let mipImages: [SourceVTFDecodedImage]
+    /// Exact supported entity-colour proxy declarations from the resolved VMT.
+    /// They remain ordered because duplicate Source proxy blocks are legal.
+    public let entityColorProxies: [GMLuaSourceEntityColorProxy]
 
     public init(
         metadata: GMLuaMaterialMetadata,
         rgbaBytes: Data?,
         sourceTextureFormat: SourceVTFImageFormat? = nil,
         sourceTextureFlags: SourceVTFTextureFlags? = nil,
-        mipImages: [SourceVTFDecodedImage] = []
+        mipImages: [SourceVTFDecodedImage] = [],
+        entityColorProxies: [GMLuaSourceEntityColorProxy] = []
     ) {
         self.metadata = metadata
         self.rgbaBytes = rgbaBytes
         self.sourceTextureFormat = sourceTextureFormat
         self.sourceTextureFlags = sourceTextureFlags
+        self.entityColorProxies = entityColorProxies
         if mipImages.isEmpty,
            let dimensions = metadata.dimensions,
            let rgbaBytes {
@@ -153,10 +180,11 @@ public struct GMLuaResolvedSourceWaterMaterial: Sendable, Equatable {
     public let textureScroll: GMLuaSourceTextureScroll?
 }
 
-/// Bounded Source VMT/VTF material resolver. It resolves only the explicit
-/// VMT `$basetexture` binding (or an explicitly imported PNG); proxies,
-/// animation frames, cubemap faces, environment maps, and wrap behavior are
-/// deliberately left to later renderer contracts.
+/// Bounded Source VMT/VTF material resolver. It resolves the explicit VMT
+/// `$basetexture` binding (or an explicitly imported PNG) and retains exact
+/// supported entity-colour proxy declarations. Proxy evaluation, animation
+/// frames, cubemap faces, environment maps, and wrap behavior belong to their
+/// renderer contracts.
 public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
     @unchecked Sendable
 {
@@ -409,6 +437,7 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
             return missingMaterial(logicalPath)
         }
         let shader = LuaString(document.shader)
+        let entityColorProxies = Self.entityColorProxies(in: document)
         guard let baseTextureValue = try document.string(named: "$basetexture"),
               !baseTextureValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return GMLuaResolvedSourceMaterial(
@@ -420,7 +449,8 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
                     isError: false,
                     status: .materialWithoutBaseTexture
                 ),
-                rgbaBytes: nil
+                rgbaBytes: nil,
+                entityColorProxies: entityColorProxies
             )
         }
         guard let baseTexturePath = try Self.normalizedVTFPath(baseTextureValue) else {
@@ -436,7 +466,8 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
                     isError: false,
                     status: .baseTextureMissing
                 ),
-                rgbaBytes: nil
+                rgbaBytes: nil,
+                entityColorProxies: entityColorProxies
             )
         }
 
@@ -462,8 +493,37 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
             rgbaBytes: image.rgbaBytes,
             sourceTextureFormat: vtf.imageFormat,
             sourceTextureFlags: vtf.flags,
-            mipImages: mipImages
+            mipImages: mipImages,
+            entityColorProxies: entityColorProxies
         )
+    }
+
+    private static func entityColorProxies(
+        in document: SourceVMTDocument
+    ) -> [GMLuaSourceEntityColorProxy] {
+        document.proxies.compactMap { proxy in
+            let kind: GMLuaSourceEntityColorProxyKind
+            if proxy.name.caseInsensitiveCompare("PlayerColor") == .orderedSame {
+                kind = .playerColor
+            } else if proxy.name.caseInsensitiveCompare("PlayerWeaponColor") ==
+                        .orderedSame {
+                kind = .playerWeaponColor
+            } else {
+                return nil
+            }
+            guard let result = proxy.parameters.first(where: {
+                $0.key.caseInsensitiveCompare("resultvar") == .orderedSame
+            }), case let .string(resultVariable) = result.value,
+               !resultVariable.trimmingCharacters(
+                in: .whitespacesAndNewlines
+               ).isEmpty else {
+                return nil
+            }
+            return GMLuaSourceEntityColorProxy(
+                kind: kind,
+                resultVariable: resultVariable
+            )
+        }
     }
 
     private func loadVMTDocument(

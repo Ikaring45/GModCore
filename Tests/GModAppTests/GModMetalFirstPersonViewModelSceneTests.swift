@@ -14,6 +14,7 @@ final class GModMetalFirstPersonViewModelSceneTests: XCTestCase {
             sourceWeaponRevision: 9,
             normalizedViewModelPath: source.id.normalizedModelPath,
             sourceFieldOfViewDegrees: 62,
+            weaponColor: SourceVector3(0.3, 1.8, 2.1),
             resource: source
         )
 
@@ -22,6 +23,7 @@ final class GModMetalFirstPersonViewModelSceneTests: XCTestCase {
         XCTAssertEqual(scene.resource.indices, [0, 1, 2])
         XCTAssertEqual(scene.resource.drawRanges.count, 1)
         XCTAssertEqual(scene.sourceFieldOfViewDegrees, 62)
+        XCTAssertEqual(scene.weaponColor, SourceVector3(0.3, 1.8, 2.1))
         XCTAssertEqual(scene.sourceWeaponRevision, 9)
         XCTAssertGreaterThan(scene.retainedGeometryByteCount, 0)
         let vertical = try XCTUnwrap(
@@ -39,6 +41,24 @@ final class GModMetalFirstPersonViewModelSceneTests: XCTestCase {
             GModMetalFirstPersonViewModelRenderContract
                 .substitutesMissingSourceMaterials
         )
+        XCTAssertEqual(
+            GModMetalFirstPersonViewModelRenderContract
+                .playerWeaponColorMultiplier(
+                    weaponColor: scene.weaponColor,
+                    sourceFixedTime: 0
+                ),
+            SIMD3<Float>(0.45, 2.7, 3.15)
+        )
+        let peak = try XCTUnwrap(
+            GModMetalFirstPersonViewModelRenderContract
+                .playerWeaponColorMultiplier(
+                    weaponColor: scene.weaponColor,
+                    sourceFixedTime: .pi / 10
+                )
+        )
+        XCTAssertEqual(peak.x, 0.6, accuracy: 0.000_001)
+        XCTAssertEqual(peak.y, 3.6, accuracy: 0.000_001)
+        XCTAssertEqual(peak.z, 4.2, accuracy: 0.000_001)
     }
 
     func testRejectsResourceFromDifferentViewModel() throws {
@@ -52,6 +72,7 @@ final class GModMetalFirstPersonViewModelSceneTests: XCTestCase {
             sourceWeaponRevision: 1,
             normalizedViewModelPath: "models/weapons/c_pistol.mdl",
             sourceFieldOfViewDegrees: 62,
+            weaponColor: SourceVector3(1, 1, 1),
             resource: source
         )) { error in
             XCTAssertEqual(
@@ -75,9 +96,31 @@ final class GModMetalFirstPersonViewModelSceneTests: XCTestCase {
             sourceWeaponRevision: 1,
             normalizedViewModelPath: source.id.normalizedModelPath,
             sourceFieldOfViewDegrees: .nan,
+            weaponColor: SourceVector3(1, 1, 1),
             resource: source
         )) { error in
             guard case .invalidSourceFieldOfView =
+                    error as? GModMetalFirstPersonViewModelSceneError else {
+                return XCTFail("unexpected error: \(error)")
+            }
+        }
+    }
+
+    func testRejectsNonFiniteWeaponColor() throws {
+        let source = resourceInput()
+        XCTAssertThrowsError(try GModMetalFirstPersonViewModelScene(
+            generation: generation(),
+            revision: 1,
+            playerIdentity: identity(index: 1, serial: 1),
+            weaponIdentity: identity(index: 4, serial: 1),
+            weaponClassName: "weapon_pistol",
+            sourceWeaponRevision: 1,
+            normalizedViewModelPath: source.id.normalizedModelPath,
+            sourceFieldOfViewDegrees: 62,
+            weaponColor: SourceVector3(.nan, 1, 1),
+            resource: source
+        )) { error in
+            guard case .invalidWeaponColor =
                     error as? GModMetalFirstPersonViewModelSceneError else {
                 return XCTFail("unexpected error: \(error)")
             }

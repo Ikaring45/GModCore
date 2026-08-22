@@ -11,6 +11,9 @@ public struct GModFirstPersonViewModelProjection: Sendable, Equatable {
     public let viewModel: SourceEntityModelReference
     public let worldModel: SourceEntityModelReference?
     public let viewModelFieldOfViewDegrees: Float
+    /// Canonical `Player:GetWeaponColor()` value consumed only by materials
+    /// that bind the stock `PlayerWeaponColor` proxy to `$color2`.
+    public let weaponColor: SourceVector3
     public let resource: GModStudioRenderableModelResource
 }
 
@@ -18,6 +21,7 @@ public enum GModFirstPersonViewModelProjectionStatus: Sendable, Equatable {
     case unavailableReset
     case unavailableNoLocalPlayer(entryIndex: Int)
     case unavailableLocalPlayerLifecycle(SourceCanonicalEntityIdentity)
+    case unavailablePlayerColorState(SourceCanonicalEntityIdentity)
     case unavailableNoActiveWeapon(SourceCanonicalEntityIdentity)
     case unavailableActiveWeaponSnapshot(SourceCanonicalEntityIdentity)
     case unavailableInvalidActiveWeapon(SourceCanonicalEntityIdentity)
@@ -231,6 +235,12 @@ private extension GModFirstPersonViewModelSceneProjector {
                 status: .unavailableLocalPlayerLifecycle(player.identity)
             )
         }
+        guard let playerColorState = player.playerColorState else {
+            return Candidate(
+                projection: nil,
+                status: .unavailablePlayerColorState(player.identity)
+            )
+        }
         guard let weaponIdentity = player.weaponInventory.activeWeapon else {
             return Candidate(
                 projection: nil,
@@ -330,6 +340,7 @@ private extension GModFirstPersonViewModelSceneProjector {
                     worldModel: definition.worldModel,
                     viewModelFieldOfViewDegrees:
                         definition.viewModelFieldOfViewDegrees,
+                    weaponColor: playerColorState.weaponColor,
                     resource: resource
                 ),
                 status: .available
@@ -378,6 +389,7 @@ private extension GModFirstPersonViewModelSceneProjector {
                 old.worldModel == new.worldModel &&
                 old.viewModelFieldOfViewDegrees ==
                     new.viewModelFieldOfViewDegrees &&
+                old.weaponColor == new.weaponColor &&
                 old.resource.id == new.resource.id
         case (nil, _?), (_?, nil):
             return false

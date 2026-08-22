@@ -15,6 +15,9 @@ public struct GModMetalFirstPersonViewModelScene: Sendable, Equatable {
     public let normalizedViewModelPath: String
     /// Raw Source `ViewModelFOV`: a horizontal angle for the 4:3 base view.
     public let sourceFieldOfViewDegrees: Float
+    /// Canonical Source Player weapon-colour vector. It is evaluated only for
+    /// draw ranges carrying the exact supported material-proxy binding.
+    public let weaponColor: SourceVector3
     public let resource: GModMetalDynamicEntityResource
     public let retainedGeometryByteCount: Int
     public let retainedMetadataUTF8ByteCount: Int
@@ -28,6 +31,7 @@ public struct GModMetalFirstPersonViewModelScene: Sendable, Equatable {
         sourceWeaponRevision: UInt64,
         normalizedViewModelPath: String,
         sourceFieldOfViewDegrees: Float,
+        weaponColor: SourceVector3,
         resource sourceResource: GModMetalDynamicEntityResourceInput,
         policy: GModMetalDynamicEntityScenePolicy = .initialIpadPropScene
     ) throws {
@@ -47,6 +51,12 @@ public struct GModMetalFirstPersonViewModelScene: Sendable, Equatable {
         ) != nil else {
             throw GModMetalFirstPersonViewModelSceneError
                 .invalidSourceFieldOfView(sourceFieldOfViewDegrees)
+        }
+        guard weaponColor.x.isFinite,
+              weaponColor.y.isFinite,
+              weaponColor.z.isFinite else {
+            throw GModMetalFirstPersonViewModelSceneError
+                .invalidWeaponColor(weaponColor)
         }
         guard normalizedViewModelPath ==
                 sourceResource.id.normalizedModelPath else {
@@ -80,6 +90,7 @@ public struct GModMetalFirstPersonViewModelScene: Sendable, Equatable {
         self.sourceWeaponRevision = sourceWeaponRevision
         self.normalizedViewModelPath = normalizedViewModelPath
         self.sourceFieldOfViewDegrees = sourceFieldOfViewDegrees
+        self.weaponColor = weaponColor
         self.resource = resource
         retainedGeometryByteCount = validated.retainedGeometryByteCount
         retainedMetadataUTF8ByteCount =
@@ -96,6 +107,7 @@ public enum GModMetalFirstPersonViewModelSceneError:
     case invalidRevision(UInt64)
     case invalidWeaponClass(String)
     case invalidSourceFieldOfView(Float)
+    case invalidWeaponColor(SourceVector3)
     case viewModelResourceMismatch(expected: String, received: String)
     case validatedResourceUnavailable
 
@@ -107,6 +119,8 @@ public enum GModMetalFirstPersonViewModelSceneError:
             return "invalid first-person Weapon class '\(value)'"
         case let .invalidSourceFieldOfView(value):
             return "invalid first-person Source ViewModelFOV \(value)"
+        case let .invalidWeaponColor(value):
+            return "invalid first-person Source weapon color \(value)"
         case let .viewModelResourceMismatch(expected, received):
             return "first-person viewmodel resource '\(received)' does not match '\(expected)'"
         case .validatedResourceUnavailable:
@@ -128,6 +142,24 @@ enum GModMetalFirstPersonViewModelRenderContract {
     ) -> Float? {
         GModMetalSourceFOVContract.verticalRadians(
             baseHorizontalDegrees: scene.sourceFieldOfViewDegrees
+        )
+    }
+
+    /// Exact stock `player_weapon_color.lua` animation:
+    /// `col + col * ((1 + sin(CurTime() * 5)) * 0.5)`.
+    static func playerWeaponColorMultiplier(
+        weaponColor: SourceVector3,
+        sourceFixedTime: Float
+    ) -> SIMD3<Float>? {
+        guard weaponColor.x.isFinite,
+              weaponColor.y.isFinite,
+              weaponColor.z.isFinite,
+              sourceFixedTime.isFinite else { return nil }
+        let scale = 1.5 + 0.5 * sin(sourceFixedTime * 5)
+        return SIMD3<Float>(
+            weaponColor.x * scale,
+            weaponColor.y * scale,
+            weaponColor.z * scale
         )
     }
 }

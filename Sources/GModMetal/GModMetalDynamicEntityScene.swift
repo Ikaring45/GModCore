@@ -152,6 +152,10 @@ public struct GModMetalDynamicEntityDrawRange: Sendable, Equatable {
     public let indexCount: Int
     public let material: GModMetalDynamicEntityMaterialBinding
     public let materialResolution: GModMetalDynamicEntityMaterialResolution
+    /// True only when the resolved VMT declares PlayerWeaponColor with
+    /// `resultvar "$color2"`. Viewmodel rendering evaluates that exact
+    /// proxy; ordinary ranges remain untinted.
+    public let usesPlayerWeaponColor: Bool
 
     public init(
         bodyPartIndex: Int,
@@ -161,7 +165,8 @@ public struct GModMetalDynamicEntityDrawRange: Sendable, Equatable {
         indexCount: Int,
         material: GModMetalDynamicEntityMaterialBinding,
         materialResolution: GModMetalDynamicEntityMaterialResolution =
-            .unresolved
+            .unresolved,
+        usesPlayerWeaponColor: Bool = false
     ) {
         self.bodyPartIndex = bodyPartIndex
         self.submodelIndex = submodelIndex
@@ -170,6 +175,7 @@ public struct GModMetalDynamicEntityDrawRange: Sendable, Equatable {
         self.indexCount = indexCount
         self.material = material
         self.materialResolution = materialResolution
+        self.usesPlayerWeaponColor = usesPlayerWeaponColor
     }
 }
 

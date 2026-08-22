@@ -364,6 +364,34 @@ final class GMLuaPlatformImageAndVPKTests: XCTestCase {
         }
     }
 
+    func testSourceMaterialResolverRetainsExactEntityColorProxyBindings() throws {
+        let files: [String: Data] = [
+            "materials/synthetic/player_weapon.vmt": Data(
+                #""VertexLitGeneric" { "$basetexture" "synthetic/white" "Proxies" { "PlayerWeaponColor" { "resultvar" "$color2" } "PlayerColor" { "resultvar" "$color" } "Sine" { "resultvar" "$alpha" } } }"#.utf8
+            ),
+            "materials/synthetic/white.vtf": makeRGBA8888VTF(
+                width: 1,
+                height: 1,
+                pixels: [255, 255, 255, 255]
+            ),
+        ]
+        let resolver = GMLuaSourceMaterialResolver { path in
+            files[path.lowercased()]
+        }
+
+        let resolved = try resolver.resolve(named: "synthetic/player_weapon")
+        XCTAssertEqual(resolved.entityColorProxies, [
+            GMLuaSourceEntityColorProxy(
+                kind: .playerWeaponColor,
+                resultVariable: "$color2"
+            ),
+            GMLuaSourceEntityColorProxy(
+                kind: .playerColor,
+                resultVariable: "$color"
+            ),
+        ])
+    }
+
     func testSourceMaterialResolverRetainsAuthoredVTFMipChainAndFlags() throws {
         let base = Array(repeating: UInt8(10), count: 4 * 4 * 4)
         let mip1 = Array(repeating: UInt8(20), count: 2 * 2 * 4)

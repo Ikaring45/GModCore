@@ -561,6 +561,12 @@ public struct GModMetalView:
             let displayRGBAndAlpha: SIMD4<Float>
         }
 
+        private struct FirstPersonViewModelMaterialUniforms {
+            /// Raw linear multiplier written by the supported Source material
+            /// proxy. This is intentionally distinct from Entity color32.
+            let playerWeaponColorMultiplier: SIMD4<Float>
+        }
+
         private struct DynamicEntityPipelinePair {
             let textured: MTLRenderPipelineState
             let missingMaterial: MTLRenderPipelineState
@@ -1142,6 +1148,11 @@ public struct GModMetalView:
                                 "worldTexturedFragmentMain"
                         ),
 
+                    let firstPersonViewModelTexturedFragmentFunction =
+                        library.makeFunction(
+                            name: "firstPersonViewModelTexturedFragmentMain"
+                        ),
+
                     let dynamicEntityTexturedFragmentFunction =
                         library.makeFunction(
                             name: "dynamicEntityTexturedFragmentMain"
@@ -1375,7 +1386,7 @@ public struct GModMetalView:
                 firstPersonViewModelDescriptor.vertexFunction =
                     firstPersonViewModelVertexFunction
                 firstPersonViewModelDescriptor.fragmentFunction =
-                    worldTexturedFragmentFunction
+                    firstPersonViewModelTexturedFragmentFunction
                 firstPersonViewModelDescriptor.colorAttachments[0].pixelFormat =
                     colorPixelFormat
                 firstPersonViewModelDescriptor.depthAttachmentPixelFormat =
@@ -3395,6 +3406,7 @@ public struct GModMetalView:
             if let viewModel = activeFirstPersonViewModelScene {
                 drawFirstPersonViewModel(
                     scene: viewModel,
+                    sourceFixedTime: activeWorldScene?.sourceFixedTime ?? 0,
                     viewport: drawableViewport,
                     device: device,
                     texturedPipeline: firstPersonViewModelTexturedPipeline,
@@ -4443,6 +4455,7 @@ public struct GModMetalView:
 
         private func drawFirstPersonViewModel(
             scene: GModMetalFirstPersonViewModelScene,
+            sourceFixedTime: Float,
             viewport: SIMD2<Int>,
             device: MTLDevice,
             texturedPipeline: MTLRenderPipelineState,
@@ -4513,6 +4526,24 @@ public struct GModMetalView:
                       cached.bitmap == bitmap else { continue }
                 encoder.setRenderPipelineState(texturedPipeline)
                 encoder.setFragmentTexture(cached.texture, index: 0)
+                let multiplier = range.usesPlayerWeaponColor
+                    ? GModMetalFirstPersonViewModelRenderContract
+                        .playerWeaponColorMultiplier(
+                            weaponColor: scene.weaponColor,
+                            sourceFixedTime: sourceFixedTime
+                        ) ?? SIMD3<Float>(repeating: 1)
+                    : SIMD3<Float>(repeating: 1)
+                var materialUniforms = FirstPersonViewModelMaterialUniforms(
+                    playerWeaponColorMultiplier: SIMD4<Float>(multiplier, 1)
+                )
+                withUnsafeBytes(of: &materialUniforms) { bytes in
+                    guard let address = bytes.baseAddress else { return }
+                    encoder.setFragmentBytes(
+                        address,
+                        length: bytes.count,
+                        index: 2
+                    )
+                }
                 let sampler = samplerStateForWorldTexture(
                     for: GModMetalWorldSamplerConfiguration(
                         bitmap: bitmap,
@@ -5782,6 +5813,11 @@ public struct GModMetalView:
             float4 displayRGBAndAlpha;
         };
 
+        struct FirstPersonViewModelMaterial
+        {
+            float4 playerWeaponColorMultiplier;
+        };
+
         struct WorldUniforms
         {
             float4x4 viewProjection;
@@ -6085,6 +6121,28 @@ public struct GModMetalView:
                 uniforms,
                 gmodDecodeDisplaySRGB(displayColor),
                 1.0
+            );
+        }
+
+        fragment float4 firstPersonViewModelTexturedFragmentMain(
+            WorldVertexOutput input [[stage_in]],
+
+            constant WorldUniforms &uniforms
+                [[buffer(1)]],
+
+            constant FirstPersonViewModelMaterial &material
+                [[buffer(2)]],
+
+            texture2d<float> baseTexture [[texture(0)]],
+
+            sampler baseSampler [[sampler(0)]]
+        )
+        {
+            gmodApplyWorldClip(input, uniforms);
+            float4 sample = baseTexture.sample(baseSampler, input.uv);
+            return gmodWorldOutput(
+                sample.rgb * material.playerWeaponColorMultiplier.rgb,
+                sample.a
             );
         }
 

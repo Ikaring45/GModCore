@@ -70,6 +70,9 @@ public final class GModFirstPersonViewModelMetalSceneBuilder:
     public typealias MaterialResolver = @Sendable (
         _ orderedVMTCandidate: String
     ) throws -> GModMetalStudioMaterialCandidateResolution
+    public typealias EntityColorProxyResolver = @Sendable (
+        _ resolvedVMTCandidate: String
+    ) throws -> [GMLuaSourceEntityColorProxy]
 
     private struct State {
         let scene: GModMetalFirstPersonViewModelScene
@@ -79,13 +82,15 @@ public final class GModFirstPersonViewModelMetalSceneBuilder:
     private let lock = NSLock()
     private let policy: GModFirstPersonViewModelMetalSceneBuilderPolicy
     private let resolveMaterial: MaterialResolver
+    private let resolveEntityColorProxies: EntityColorProxyResolver
     private var epoch: UInt64 = 0
     private var state: State?
 
     public init(
         policy: GModFirstPersonViewModelMetalSceneBuilderPolicy =
             .initialIpadViewModel,
-        resolveMaterial: @escaping MaterialResolver
+        resolveMaterial: @escaping MaterialResolver,
+        resolveEntityColorProxies: @escaping EntityColorProxyResolver = { _ in [] }
     ) throws {
         guard policy.maximumRetainedBitmapByteCount >= 0 else {
             throw GModFirstPersonViewModelMetalSceneBuilderError
@@ -95,6 +100,7 @@ public final class GModFirstPersonViewModelMetalSceneBuilder:
         }
         self.policy = policy
         self.resolveMaterial = resolveMaterial
+        self.resolveEntityColorProxies = resolveEntityColorProxies
     }
 
     public convenience init(
@@ -102,9 +108,19 @@ public final class GModFirstPersonViewModelMetalSceneBuilder:
             .initialIpadViewModel,
         textureResolver: GModMetalSurfaceSourceMaterialResolver
     ) throws {
-        try self.init(policy: policy) { [textureResolver] candidate in
-            try textureResolver.resolveStudioMaterialCandidate(named: candidate)
-        }
+        try self.init(
+            policy: policy,
+            resolveMaterial: { [textureResolver] candidate in
+                try textureResolver.resolveStudioMaterialCandidate(
+                    named: candidate
+                )
+            },
+            resolveEntityColorProxies: { [textureResolver] candidate in
+                try textureResolver.resolveStudioEntityColorProxies(
+                    named: candidate
+                )
+            }
+        )
     }
 
     public var currentScene: GModMetalFirstPersonViewModelScene? {
@@ -201,7 +217,8 @@ public final class GModFirstPersonViewModelMetalSceneBuilder:
         let resource = Self.resourceInput(
             projection.resource,
             retentionBudget: &retentionBudget,
-            resolveMaterial: resolveMaterial
+            resolveMaterial: resolveMaterial,
+            resolveEntityColorProxies: resolveEntityColorProxies
         )
         let candidate = State(
             scene: try GModMetalFirstPersonViewModelScene(
@@ -215,6 +232,7 @@ public final class GModFirstPersonViewModelMetalSceneBuilder:
                     projection.resource.id.normalizedModelPath,
                 sourceFieldOfViewDegrees:
                     projection.viewModelFieldOfViewDegrees,
+                weaponColor: projection.weaponColor,
                 resource: resource,
                 policy: policy.metalScene
             ),
@@ -272,6 +290,7 @@ private extension GModFirstPersonViewModelMetalSceneBuilder {
                 projection.resource.id.normalizedModelPath &&
             scene.sourceFieldOfViewDegrees ==
                 projection.viewModelFieldOfViewDegrees &&
+            scene.weaponColor == projection.weaponColor &&
             scene.resource.id.normalizedModelPath ==
                 projection.resource.id.normalizedModelPath
     }
@@ -279,7 +298,8 @@ private extension GModFirstPersonViewModelMetalSceneBuilder {
     static func resourceInput(
         _ source: GModStudioRenderableModelResource,
         retentionBudget: inout GModMetalWorldBitmapRetentionBudget,
-        resolveMaterial: MaterialResolver
+        resolveMaterial: MaterialResolver,
+        resolveEntityColorProxies: EntityColorProxyResolver
     ) -> GModMetalDynamicEntityResourceInput {
         let id = GModMetalDynamicEntityResourceID(
             normalizedModelPath: source.id.normalizedModelPath,
@@ -298,7 +318,13 @@ private extension GModFirstPersonViewModelMetalSceneBuilder {
             )
         }
         let ranges = source.model.drawRanges.map { range in
-            GModMetalDynamicEntityDrawRange(
+            let resolved = materialResolution(
+                candidates: range.material.vmtCandidates,
+                retentionBudget: &retentionBudget,
+                resolveMaterial: resolveMaterial,
+                resolveEntityColorProxies: resolveEntityColorProxies
+            )
+            return GModMetalDynamicEntityDrawRange(
                 bodyPartIndex: range.bodyPartIndex,
                 submodelIndex: range.submodelIndex,
                 meshIndex: range.meshIndex,
@@ -311,11 +337,8 @@ private extension GModFirstPersonViewModelMetalSceneBuilder {
                     textureName: range.material.textureName,
                     vmtCandidates: range.material.vmtCandidates
                 ),
-                materialResolution: materialResolution(
-                    candidates: range.material.vmtCandidates,
-                    retentionBudget: &retentionBudget,
-                    resolveMaterial: resolveMaterial
-                )
+                materialResolution: resolved.resolution,
+                usesPlayerWeaponColor: resolved.usesPlayerWeaponColor
             )
         }
         return GModMetalDynamicEntityResourceInput(
@@ -334,8 +357,12 @@ private extension GModFirstPersonViewModelMetalSceneBuilder {
     static func materialResolution(
         candidates: [String],
         retentionBudget: inout GModMetalWorldBitmapRetentionBudget,
-        resolveMaterial: MaterialResolver
-    ) -> GModMetalDynamicEntityMaterialResolution {
+        resolveMaterial: MaterialResolver,
+        resolveEntityColorProxies: EntityColorProxyResolver
+    ) -> (
+        resolution: GModMetalDynamicEntityMaterialResolution,
+        usesPlayerWeaponColor: Bool
+    ) {
         for candidate in candidates {
             do {
                 let resolution = try resolveMaterial(candidate)
@@ -344,37 +371,59 @@ private extension GModFirstPersonViewModelMetalSceneBuilder {
                     case .materialMissing:
                         continue
                     case .materialWithoutBaseTexture:
-                        return .materialWithoutBaseTexture(candidate: candidate)
+                        return (
+                            .materialWithoutBaseTexture(candidate: candidate),
+                            false
+                        )
                     case .baseTextureMissing:
-                        return .baseTextureMissing(candidate: candidate)
+                        return (.baseTextureMissing(candidate: candidate), false)
                     case .resolved:
                         preconditionFailure("handled above")
                     }
                 }
                 guard bitmap.alphaRepresentation == .straight else {
-                    return .decodeFailed(
-                        candidate: candidate,
-                        detail: "material resolver returned non-straight alpha"
+                    return (
+                        .decodeFailed(
+                            candidate: candidate,
+                            detail: "material resolver returned non-straight alpha"
+                        ),
+                        false
                     )
+                }
+                let usesPlayerWeaponColor = try resolveEntityColorProxies(
+                    candidate
+                ).contains {
+                    $0.kind == .playerWeaponColor &&
+                        $0.resultVariable.caseInsensitiveCompare("$color2") ==
+                            .orderedSame
                 }
                 let required = bitmap.totalByteCount
                 guard retentionBudget.retain(bitmap) else {
-                    return .retentionCapacityExceeded(
-                        candidate: candidate,
-                        requiredByteCount: required,
-                        retainedByteCount: retentionBudget.retainedByteCount,
-                        maximumByteCount: retentionBudget.maximumByteCount
+                    return (
+                        .retentionCapacityExceeded(
+                            candidate: candidate,
+                            requiredByteCount: required,
+                            retainedByteCount: retentionBudget.retainedByteCount,
+                            maximumByteCount: retentionBudget.maximumByteCount
+                        ),
+                        false
                     )
                 }
-                return .resolved(candidate: candidate, bitmap: bitmap)
+                return (
+                    .resolved(candidate: candidate, bitmap: bitmap),
+                    usesPlayerWeaponColor
+                )
             } catch {
-                return .decodeFailed(
-                    candidate: candidate,
-                    detail: boundedDescription(error)
+                return (
+                    .decodeFailed(
+                        candidate: candidate,
+                        detail: boundedDescription(error)
+                    ),
+                    false
                 )
             }
         }
-        return .sourceMissing
+        return (.sourceMissing, false)
     }
 
     static func boundedDescription(_ error: Error) -> String {
