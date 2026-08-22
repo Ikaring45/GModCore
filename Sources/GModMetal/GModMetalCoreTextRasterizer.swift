@@ -274,6 +274,18 @@ public final class GModMetalCoreTextRasterizer:
             throw GModMetalCoreTextRasterizerError.contextCreationFailed
         }
 
+        // The flipped Quartz CTM places multiline bands in top-down order, but
+        // CoreText rasterizes each band's glyph scanlines bottom-up. Surface
+        // textures and Metal UVs are top-left-origin, so normalize each line
+        // once here. Reversing the complete bitmap would incorrectly swap the
+        // order of multiline labels.
+        Self.flipLineRowsToTopLeft(
+            in: &bytes,
+            width: width,
+            height: height,
+            lineHeight: max(1, descriptor.size)
+        )
+
         let bitmap = try GModMetalSurfaceBitmap(
             resourceIdentifier: "coretext:\(postScriptName):\(descriptor.size)",
             width: width,
@@ -282,6 +294,34 @@ public final class GModMetalCoreTextRasterizer:
         )
         storeCachedBitmap(bitmap, for: cacheKey)
         return bitmap
+    }
+
+    private static func flipLineRowsToTopLeft(
+        in bytes: inout Data,
+        width: Int,
+        height: Int,
+        lineHeight: Int
+    ) {
+        guard width > 0, height > 1, lineHeight > 0 else { return }
+        let bytesPerRow = width * 4
+        bytes.withUnsafeMutableBytes { rawBytes in
+            let pixels = rawBytes.bindMemory(to: UInt8.self)
+            for lineStart in stride(from: 0, to: height, by: lineHeight) {
+                let retainedLineHeight = min(lineHeight, height - lineStart)
+                for localTopRow in 0..<(retainedLineHeight / 2) {
+                    let topRow = lineStart + localTopRow
+                    let bottomRow = lineStart + retainedLineHeight - localTopRow - 1
+                    let topOffset = topRow * bytesPerRow
+                    let bottomOffset = bottomRow * bytesPerRow
+                    for byteOffset in 0..<bytesPerRow {
+                        pixels.swapAt(
+                            topOffset + byteOffset,
+                            bottomOffset + byteOffset
+                        )
+                    }
+                }
+            }
+        }
     }
 
     private func cachedBitmap(

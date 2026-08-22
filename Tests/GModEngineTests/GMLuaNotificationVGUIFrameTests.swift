@@ -28,6 +28,15 @@ final class GMLuaNotificationVGUIFrameTests: XCTestCase {
             HIDDEN:SetVisible(false)
             HIDDEN:SetTerm(0.5)
             function HIDDEN:Think() HIDDEN_THINKS = HIDDEN_THINKS + 1 end
+
+            HIDDEN_PARENT = assert(vgui.Create("Panel", GetOverlayPanel()))
+            HIDDEN_PARENT:SetVisible(false)
+            HIDDEN_CHILD_THINKS = 0
+            HIDDEN_CHILD = assert(vgui.Create("Panel", HIDDEN_PARENT))
+            HIDDEN_CHILD:SetSize(32, 16)
+            function HIDDEN_CHILD:Think()
+                HIDDEN_CHILD_THINKS = HIDDEN_CHILD_THINKS + 1
+            end
             """,
             sourceName: "=(live VGUI animation callbacks)"
         )
@@ -40,7 +49,8 @@ final class GMLuaNotificationVGUIFrameTests: XCTestCase {
         )
         try runtime.execute(
             "assert(PANEL_THINKS == 1 and PANEL:GetAlpha() == 255); " +
-                "assert(HIDDEN_THINKS == 0 and IsValid(HIDDEN))"
+                "assert(HIDDEN_THINKS == 0 and IsValid(HIDDEN)); " +
+                "assert(HIDDEN_CHILD_THINKS == 0)"
         )
 
         clock.set(100.5)
@@ -91,6 +101,18 @@ final class GMLuaNotificationVGUIFrameTests: XCTestCase {
             "assert(not IsValid(HIDDEN) and HIDDEN_THINKS == 0)",
             sourceName: "=(hidden VGUI animation resumes when visible)"
         )
+
+        try runtime.execute("HIDDEN_PARENT:SetVisible(true)")
+        _ = try registry.renderFrame(
+            surface: surface,
+            viewportWidth: 320,
+            viewportHeight: 180,
+            scope: .overlay
+        )
+        try runtime.execute(
+            "assert(HIDDEN_CHILD_THINKS == 1)",
+            sourceName: "=(VGUI child resumes with visible parent)"
+        )
     }
 
     func testStockNotificationUsesOverlayLayoutAndExpiresFromThink() throws {
@@ -139,6 +161,34 @@ final class GMLuaNotificationVGUIFrameTests: XCTestCase {
             "hook.Run('Think'); assert(IsValid(STOCK_NOTICE))",
             sourceName: "=(stock notification live Think)"
         )
+
+        // Advance ordinary CLIENT frame deltas while the notice is alive.
+        // The stock panel begins beyond ScrW; it must actually enter the
+        // viewport and emit its text, not merely exist and play its UI sound.
+        for frame in 1...10 {
+            clock.set(200.5 + Double(frame) * 0.016)
+            try runtime.execute("hook.Run('Think')")
+        }
+        try runtime.execute(
+            """
+            local x, y = STOCK_NOTICE:GetPos()
+            assert(x < ScrW() and x + STOCK_NOTICE:GetWide() > 0)
+            assert(y < ScrH() and y + STOCK_NOTICE:GetTall() > 0)
+            """,
+            sourceName: "=(stock notification entered viewport)"
+        )
+        let visibleFrame = try registry.renderFrame(
+            surface: surface,
+            viewportWidth: 320,
+            viewportHeight: 180,
+            scope: .overlay
+        )
+        XCTAssertTrue(visibleFrame.commands.contains { command in
+            guard case let .text(value, _, _, _, _) = command else {
+                return false
+            }
+            return value.utf8String == "stock hint"
+        })
 
         clock.set(201.1)
         try runtime.execute(

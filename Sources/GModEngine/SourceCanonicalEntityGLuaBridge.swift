@@ -231,6 +231,28 @@ public enum SourceCanonicalEntityGLuaBridge {
             return host
         }
 
+        guard case let .table(gameTable) = state.getGlobal("game") else {
+            throw SourceCanonicalEntityGLuaBridgeError.missingRuntimeSurface(
+                "the game library"
+            )
+        }
+        try state.setRawTableValue(
+            native("game.GetWorld") { _ in
+                guard let registry = registryBox.value else {
+                    throw LuaError.runtime(
+                        "game.GetWorld canonical Entity registry is unavailable"
+                    )
+                }
+                // The Source world is the generation-safe Entity(0) already
+                // projected by this registry. Resolving on every call keeps
+                // CLIENT attachment/teardown honest and never fabricates a
+                // second Lua table when the canonical world is unavailable.
+                return [registry.entity(at: 0)]
+            },
+            for: .string("GetWorld"),
+            in: gameTable
+        )
+
         func requiredSnapshot(
             _ value: LuaValue?,
             function: String,

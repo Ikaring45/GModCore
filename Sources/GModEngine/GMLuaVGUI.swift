@@ -2030,13 +2030,44 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     /// existing deletion pass.
     private func dispatchVisiblePanelFrameCallbacks() throws {
         lock.lock()
-        let identifiers = panels.compactMap { identifier, value -> Int? in
+        let liveDescriptors = panels.compactMap {
+            identifier, value -> (Int, GMLuaPanelValue)? in
             guard let descriptor = panelDescriptor(from: value),
-                  descriptor.isVisible,
                   GMLuaTypeSystem.typedObject(from: value)?.isValid == true else {
                 return nil
             }
-            return identifier
+            return (identifier, descriptor)
+        }
+        let descriptors = Dictionary(uniqueKeysWithValues: liveDescriptors)
+        var visibility: [Int: Bool] = [:]
+        var visiting: Set<Int> = []
+        func isVisibleInLiveHierarchy(_ identifier: Int) -> Bool {
+            if let cached = visibility[identifier] { return cached }
+            guard !visiting.contains(identifier),
+                  let descriptor = descriptors[identifier],
+                  descriptor.isVisible else {
+                visibility[identifier] = false
+                return false
+            }
+            visiting.insert(identifier)
+            let result: Bool
+            if let parentIdentifier = descriptor.parentIdentifier {
+                if parentIdentifier == Self.overlayPanelIdentifier {
+                    result = overlayPanelDescriptor.isVisible
+                } else if parentIdentifier == Self.worldPanelIdentifier {
+                    result = worldPanelDescriptor.isVisible
+                } else {
+                    result = isVisibleInLiveHierarchy(parentIdentifier)
+                }
+            } else {
+                result = true
+            }
+            visiting.remove(identifier)
+            visibility[identifier] = result
+            return result
+        }
+        let identifiers = descriptors.keys.filter {
+            isVisibleInLiveHierarchy($0)
         }.sorted()
         lock.unlock()
 

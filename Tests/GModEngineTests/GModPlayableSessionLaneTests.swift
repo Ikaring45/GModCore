@@ -559,7 +559,9 @@ final class GModPlayableSessionLaneTests: XCTestCase {
         XCTAssertNil(opened.lifecycleFailure)
         try await lane.execute(
             "assert(type(g_SpawnMenu) == 'Panel' and " +
-                "IsValid(g_SpawnMenu) and g_SpawnMenu:IsVisible())",
+                "IsValid(g_SpawnMenu) and g_SpawnMenu:IsVisible()); " +
+                "assert(game.GetWorld() == Entity(0) and " +
+                "game.GetWorld():IsWorld())",
             realm: .client,
             expectedGeneration: snapshot.generation
         )

@@ -786,6 +786,34 @@ final class GModMetalSurfaceSceneTests: XCTestCase {
             "the immutable glyph cache should return identical pixels"
         )
 
+        let asymmetric = try XCTUnwrap(
+            rasterizer.rasterizeSurfaceText("L", font: descriptor)
+        )
+        XCTAssertGreaterThan(
+            alphaSum(
+                in: asymmetric,
+                rows: (asymmetric.height / 2)..<asymmetric.height
+            ),
+            alphaSum(
+                in: asymmetric,
+                rows: 0..<(asymmetric.height / 2)
+            ),
+            "top-left Surface pixels must keep the L baseline below its stem"
+        )
+
+        let multiline = try XCTUnwrap(
+            rasterizer.rasterizeSurfaceText("MMMM\nI", font: descriptor)
+        )
+        XCTAssertEqual(multiline.height, descriptor.size * 2)
+        XCTAssertGreaterThan(
+            alphaSum(in: multiline, rows: 0..<descriptor.size),
+            alphaSum(
+                in: multiline,
+                rows: descriptor.size..<(descriptor.size * 2)
+            ),
+            "normalizing glyph rows must not reverse multiline label order"
+        )
+
         let japanese = try XCTUnwrap(
             rasterizer.rasterizeSurfaceText("武器", font: descriptor)
         )
@@ -817,6 +845,20 @@ final class GModMetalSurfaceSceneTests: XCTestCase {
             }
         }
         return rows
+    }
+
+    private func alphaSum(
+        in bitmap: GModMetalSurfaceBitmap,
+        rows: Range<Int>
+    ) -> Int {
+        rows.reduce(0) { sum, row in
+            let firstPixel = row * bitmap.width
+            return sum + (0..<bitmap.width).reduce(0) { rowSum, column in
+                rowSum + Int(bitmap.premultipliedRGBA8[
+                    (firstPixel + column) * 4 + 3
+                ])
+            }
+        }
     }
 #endif
 
