@@ -149,12 +149,16 @@ public final class GModMetalSurfaceSourceMaterialResolver:
                 : .mipZeroOnly
         )
         guard let dimensions = resolved.metadata.dimensions,
-              let rgbaBytes = resolved.rgbaBytes else {
+              let rgbaBytes = resolved.rgbaBytes,
+              let baseTextureName = resolved.metadata.baseTextureName else {
             store(.missing, for: key)
             return nil
         }
+        // Source paths are case-insensitive. Use the normalized VTF path, not
+        // the referring VMT path, as the immutable payload identity.
+        let canonicalTexturePath = baseTextureName.utf8String.lowercased()
         let bitmap = try makeBitmap(
-            resourceIdentifier: resolved.metadata.materialPath.utf8String,
+            resourceIdentifier: canonicalTexturePath,
             width: dimensions.width,
             height: dimensions.height,
             rgbaBytes: rgbaBytes,
@@ -280,7 +284,10 @@ public final class GModMetalSurfaceSourceMaterialResolver:
                     : rgbaBytes
             )]
         } else {
-            retainedMipLevels = mipImages.map {
+            let retainedSourceMips = flags?.contains(.noMip) == true
+                ? mipImages.prefix(1)
+                : mipImages[...]
+            retainedMipLevels = retainedSourceMips.map {
                 GModMetalSurfaceMipLevel(
                     width: $0.width,
                     height: $0.height,

@@ -456,7 +456,7 @@ final class GModMetalSurfaceSceneTests: XCTestCase {
             return XCTFail("expected a VMT-backed textured rectangle")
         }
         XCTAssertEqual(command.textureName, "gui/synthetic_toggle")
-        XCTAssertEqual(command.bitmap.resourceIdentifier, "materials/gui/synthetic_toggle.vmt")
+        XCTAssertEqual(command.bitmap.resourceIdentifier, "materials/gui/synthetic_toggle.vtf")
         XCTAssertEqual(command.bitmap.width, 2)
         XCTAssertEqual(command.bitmap.height, 1)
         XCTAssertEqual(
@@ -525,6 +525,79 @@ final class GModMetalSurfaceSceneTests: XCTestCase {
             resolver.cachedTextureByteCount,
             surface.totalByteCount + world.totalByteCount
         )
+    }
+
+    func testSourceMaterialResolverDeduplicatesVMTAliasesByVTFIdentity() throws {
+        let pixels = [UInt8](repeating: 0x7F, count: 2 * 2 * 4)
+        let files: [String: Data] = [
+            "materials/alias/first.vmt": Data(
+                "\"UnlitGeneric\" { \"$basetexture\" \"shared/payload\" }".utf8
+            ),
+            "materials/alias/second.vmt": Data(
+                (
+                    "\"LightmappedGeneric\" { \"$basetexture\" " +
+                        "\"MATERIALS/SHARED/PAYLOAD.VTF\" }"
+                ).utf8
+            ),
+            "materials/shared/payload.vtf": makeSurfaceRGBA8888VTF(
+                width: 2,
+                height: 2,
+                pixels: pixels
+            ),
+        ]
+        let resolver = GModMetalSurfaceSourceMaterialResolver {
+            files[$0.lowercased()]
+        }
+
+        let first = try XCTUnwrap(
+            resolver.resolveWorldTexture(named: "alias/first")
+        )
+        let second = try XCTUnwrap(
+            resolver.resolveWorldTexture(named: "alias/second")
+        )
+
+        XCTAssertEqual(first.resourceIdentifier, "materials/shared/payload.vtf")
+        XCTAssertEqual(second.resourceIdentifier, first.resourceIdentifier)
+        XCTAssertEqual(second.cacheIdentifier, first.cacheIdentifier)
+        XCTAssertEqual(second, first)
+        var budget = GModMetalWorldBitmapRetentionBudget(
+            maximumByteCount: first.totalByteCount
+        )
+        XCTAssertTrue(budget.retain(first))
+        XCTAssertTrue(budget.retain(second))
+        XCTAssertEqual(budget.retainedByteCount, first.totalByteCount)
+    }
+
+    func testSourceMaterialResolverRetainsOnlyMipZeroForNoMipVTF() throws {
+        let base = [UInt8](repeating: 0x40, count: 4 * 4 * 4)
+        let mip1 = [UInt8](repeating: 0x80, count: 2 * 2 * 4)
+        let mip2 = [UInt8](repeating: 0xC0, count: 1 * 1 * 4)
+        let files: [String: Data] = [
+            "materials/gui/no_mip.vmt": Data(
+                "\"LightmappedGeneric\" { \"$basetexture\" \"gui/no_mip\" }".utf8
+            ),
+            "materials/gui/no_mip.vtf": makeSurfaceRGBA8888VTF(
+                width: 4,
+                height: 4,
+                pixels: base,
+                mipPixelsByLevel: [mip1, mip2],
+                flags: [.noMip]
+            ),
+        ]
+        let resolver = GModMetalSurfaceSourceMaterialResolver {
+            files[$0.lowercased()]
+        }
+
+        let world = try XCTUnwrap(
+            resolver.resolveWorldTexture(named: "gui/no_mip")
+        )
+
+        XCTAssertEqual(world.resourceIdentifier, "materials/gui/no_mip.vtf")
+        XCTAssertEqual(world.mipLevels.map(\.width), [4])
+        XCTAssertEqual(world.mipLevels[0].premultipliedRGBA8, Data(base))
+        XCTAssertEqual(world.totalByteCount, base.count)
+        XCTAssertTrue(try XCTUnwrap(world.sourceTextureFlags).contains(.noMip))
+        XCTAssertEqual(resolver.cachedTextureByteCount, base.count)
     }
 
     func testSceneBoundsUniqueBitmapRetentionWithoutReordering() throws {
@@ -752,7 +825,8 @@ private func makeSurfaceRGBA8888VTF(
     width: Int,
     height: Int,
     pixels: [UInt8],
-    mipPixelsByLevel: [[UInt8]] = []
+    mipPixelsByLevel: [[UInt8]] = [],
+    flags: SourceVTFTextureFlags = []
 ) -> Data {
     precondition(width > 0 && height > 0 && pixels.count == width * height * 4)
     for (offset, mip) in mipPixelsByLevel.enumerated() {
@@ -778,6 +852,7 @@ private func makeSurfaceRGBA8888VTF(
     write(UInt32(80), at: 12)
     write(UInt16(width), at: 16)
     write(UInt16(height), at: 18)
+    write(flags.rawValue, at: 20)
     write(UInt16(1), at: 24)
     write(Float(1).bitPattern, at: 48)
     write(UInt32(bitPattern: SourceVTFImageFormat.rgba8888.rawValue), at: 52)
