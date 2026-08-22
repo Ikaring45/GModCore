@@ -235,7 +235,7 @@ public final class GModFirstPersonViewModelMetalSceneBuilder:
 }
 
 private extension GModFirstPersonViewModelMetalSceneBuilder {
-    func publish(
+    private func publish(
         candidate: State?,
         capturedEpoch: UInt64
     ) throws -> GModMetalFirstPersonViewModelScene? {
