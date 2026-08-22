@@ -556,7 +556,7 @@ final class SourceWorldWalkTests: XCTestCase {
         XCTAssertEqual(canonical.motion.linearVelocity.y, -100, accuracy: 0.000_01)
         XCTAssertEqual(canonical.motion.linearVelocity.z, -450, accuracy: 0.000_01)
         XCTAssertEqual(provider.pointQueries.count, 1)
-        XCTAssertEqual(provider.pointQueries[0].1, SourceMasks.water)
+        XCTAssertEqual(provider.pointQueries[0].1, SourceMasks.all)
         XCTAssertEqual(provider.traceRays.count, 1)
         XCTAssertEqual(
             provider.traceRays[0].delta,
@@ -821,7 +821,7 @@ final class SourceWorldWalkTests: XCTestCase {
         )
         XCTAssertTrue(SourceWorldWalkSolver.unsupportedFeatures.contains(.duckJump))
         XCTAssertTrue(SourceWorldWalkSolver.unsupportedFeatures.contains(.waterJump))
-        XCTAssertTrue(SourceWorldWalkSolver.unsupportedFeatures.contains(.waterCurrent))
+        XCTAssertFalse(SourceWorldWalkSolver.unsupportedFeatures.contains(.waterCurrent))
         XCTAssertTrue(
             SourceWorldWalkSolver.unsupportedFeatures.contains(.dynamicWaterVolume)
         )
@@ -998,23 +998,165 @@ final class SourceWorldWalkTests: XCTestCase {
         XCTAssertEqual(tick.state.velocity.z, -6, accuracy: 0.000_01)
     }
 
-    func testWaterCurrentRemainsAnExplicitTransactionalCapabilityMiss() throws {
-        let solver = makeSolver(
-            world: waterWorld(contents: [.water, .current0]),
-            maximumSpeed: 200
-        )
-        let state = SourceWorldWalkState(origin: .zero)
+    func testWaterCurrentSixSDKDirectionsUseUnnormalizedBaseVelocity() throws {
+        let cases: [(String, SourceContents, SourceVector3)] = [
+            ("CURRENT_0", .current0, SourceVector3(1, 0, 0)),
+            ("CURRENT_90", .current90, SourceVector3(0, 1, 0)),
+            ("CURRENT_180", .current180, SourceVector3(-1, 0, 0)),
+            ("CURRENT_270", .current270, SourceVector3(0, -1, 0)),
+            ("CURRENT_UP", .currentUp, SourceVector3(0, 0, 1)),
+            ("CURRENT_DOWN", .currentDown, SourceVector3(0, 0, -1)),
+        ]
 
-        XCTAssertThrowsError(try solver.simulate(
-            state: state,
-            command: SourceUserCommand(commandNumber: 1)
-        )) {
-            XCTAssertEqual(
-                $0 as? SourceWorldWalkError,
-                .unsupported(.waterCurrent)
+        for (name, current, direction) in cases {
+            let solver = makeCurrentSolver(
+                world: waterWorld(contents: [.water, current])
             )
+            let state = try solver.simulate(
+                state: SourceWorldWalkState(origin: .zero),
+                command: SourceUserCommand(commandNumber: 1)
+            ).state
+
+            // PlayerMove and FullWalkMove each call CheckWater before
+            // WaterMove, so 2 * (50 * WL_Eyes) moves this command. The final
+            // CategorizePosition contributes the third persistent current.
+            XCTAssertEqual(state.origin.x, direction.x * 4.5, accuracy: 0.000_01, name)
+            XCTAssertEqual(state.origin.y, direction.y * 4.5, accuracy: 0.000_01, name)
+            XCTAssertEqual(state.origin.z, direction.z * 4.5, accuracy: 0.000_01, name)
+            XCTAssertEqual(state.velocity.x, 0, accuracy: 0.000_01, name)
+            XCTAssertEqual(state.velocity.y, 0, accuracy: 0.000_01, name)
+            XCTAssertEqual(state.velocity.z, 0, accuracy: 0.000_01, name)
+            XCTAssertEqual(
+                state.movement.baseVelocity.x,
+                direction.x * 450,
+                accuracy: 0.000_01,
+                name
+            )
+            XCTAssertEqual(
+                state.movement.baseVelocity.y,
+                direction.y * 450,
+                accuracy: 0.000_01,
+                name
+            )
+            XCTAssertEqual(
+                state.movement.baseVelocity.z,
+                direction.z * 450,
+                accuracy: 0.000_01,
+                name
+            )
+            XCTAssertEqual(state.waterCurrentBaseVelocity, state.movement.baseVelocity)
+            XCTAssertEqual(state.waterLevel, .eyes)
         }
-        XCTAssertEqual(state, SourceWorldWalkState(origin: .zero))
+    }
+
+    func testWaterCurrentBitsCombineInSDKStatementOrderWithoutNormalization() throws {
+        let contents: SourceContents = [
+            .water,
+            .current0,
+            .current90,
+            .current180,
+            .currentUp,
+        ]
+        let state = try makeCurrentSolver(
+            world: waterWorld(contents: contents)
+        ).simulate(
+            state: SourceWorldWalkState(origin: .zero),
+            command: SourceUserCommand(commandNumber: 1)
+        ).state
+
+        XCTAssertEqual(state.origin.x, 0, accuracy: 0.000_01)
+        XCTAssertEqual(state.origin.y, 4.5, accuracy: 0.000_01)
+        XCTAssertEqual(state.origin.z, 4.5, accuracy: 0.000_01)
+        XCTAssertEqual(state.movement.baseVelocity, SourceVector3(0, 450, 450))
+        XCTAssertEqual(state.waterCurrentBaseVelocity, SourceVector3(0, 450, 450))
+    }
+
+    func testWaistAndFeetCurrentsUseLastProbeAndMovementBoundary() throws {
+        var waistWorld = waterWorld(
+            maximumZ: 50,
+            contents: [.water, .current0]
+        )
+        waistWorld.addAxisAlignedBox(
+            SourceAABBCollider(
+                mins: SourceVector3(-100, -100, 60),
+                maxs: SourceVector3(100, 100, 70),
+                contents: .current90,
+                entityHandle: worldHandle
+            )
+        )
+        let waist = try makeCurrentSolver(world: waistWorld).simulate(
+            state: SourceWorldWalkState(origin: .zero),
+            command: SourceUserCommand(commandNumber: 1)
+        ).state
+
+        // Eye is dry but its complete contents are the final CheckWater probe.
+        // WL_Waist swims and therefore moves with CURRENT_90, not the feet
+        // volume's CURRENT_0.
+        XCTAssertEqual(waist.waterLevel, .waist)
+        XCTAssertEqual(waist.origin.x, 0, accuracy: 0.000_01)
+        XCTAssertEqual(waist.origin.y, 3, accuracy: 0.000_01)
+        XCTAssertEqual(waist.movement.baseVelocity, SourceVector3(0, 300, 0))
+
+        var feetWorld = waterWorld(
+            maximumZ: 20,
+            contents: [.water, .current0]
+        )
+        feetWorld.addAxisAlignedBox(
+            SourceAABBCollider(
+                mins: SourceVector3(-100, -100, 30),
+                maxs: SourceVector3(100, 100, 40),
+                contents: .current180,
+                entityHandle: worldHandle
+            )
+        )
+        let feet = try makeCurrentSolver(world: feetWorld).simulate(
+            state: SourceWorldWalkState(origin: .zero),
+            command: SourceUserCommand(commandNumber: 2)
+        ).state
+
+        // WL_Feet does not enter WaterMove. Its two pre-move current samples
+        // still displace AirMove, followed by post-move and gravity-decision
+        // CheckWater samples that persist for the next command.
+        XCTAssertEqual(feet.waterLevel, .feet)
+        XCTAssertEqual(feet.origin.x, -1.5, accuracy: 0.000_01)
+        XCTAssertEqual(feet.origin.z, -0.09, accuracy: 0.000_01)
+        XCTAssertEqual(feet.velocity, SourceVector3(0, 0, -12))
+        XCTAssertEqual(feet.movement.baseVelocity, SourceVector3(-200, 0, 0))
+        XCTAssertEqual(feet.waterCurrentBaseVelocity, SourceVector3(-200, 0, 0))
+    }
+
+    func testWaterCurrentCanonicalRoundTripTransfersPriorMomentum() throws {
+        let solver = makeCurrentSolver(
+            world: waterWorld(contents: [.water, .current0])
+        )
+        var canonical = SourceCanonicalEntityState.defaults(for: .player)
+
+        let first = try solver.simulate(
+            state: canonical.playerWalkState,
+            command: SourceUserCommand(commandNumber: 1)
+        )
+        canonical.applyPlayerWalkState(first.state)
+        XCTAssertEqual(canonical.motion.baseVelocity, SourceVector3(450, 0, 0))
+        XCTAssertEqual(
+            canonical.motion.waterCurrentBaseVelocity,
+            SourceVector3(450, 0, 0)
+        )
+
+        let second = try solver.simulate(
+            state: canonical.playerWalkState,
+            command: SourceUserCommand(commandNumber: 2)
+        )
+        canonical.applyPlayerWalkState(second.state)
+
+        // CheckMovingGround transfers the unflagged prior base velocity with
+        // Source's (1 + frametime * 0.5) factor before this command's currents.
+        XCTAssertEqual(canonical.motion.linearVelocity.x, 453.375, accuracy: 0.000_01)
+        XCTAssertEqual(canonical.transform.origin.x, 15.800_625, accuracy: 0.000_01)
+        XCTAssertEqual(canonical.motion.baseVelocity, SourceVector3(450, 0, 0))
+        XCTAssertEqual(
+            canonical.motion.waterCurrentBaseVelocity,
+            SourceVector3(450, 0, 0)
+        )
     }
 
     func testBundledConstructWaterLeafDrivesWorldOnlySwimming() throws {
@@ -1489,6 +1631,22 @@ final class SourceWorldWalkTests: XCTestCase {
         SourceWorldWalkSolver(
             collisionProvider: CollisionWorldWalkProvider(world: world),
             configuration: SourceWorldWalkConfiguration(maximumSpeed: maximumSpeed)
+        )
+    }
+
+    private func makeCurrentSolver(
+        world: SourceCollisionWorld
+    ) -> SourceWorldWalkSolver {
+        SourceWorldWalkSolver(
+            collisionProvider: CollisionWorldWalkProvider(world: world),
+            configuration: SourceWorldWalkConfiguration(
+                movement: SourceMovementParameters(
+                    friction: 0,
+                    acceleration: 0,
+                    airAcceleration: 0
+                ),
+                maximumSpeed: 200
+            )
         )
     }
 

@@ -64,6 +64,12 @@ public struct SourceEntityMotionState: Equatable, Sendable {
     public var linearVelocity: SourceVector3
     public var angularVelocity: SourceVector3
     public var baseVelocity: SourceVector3
+    /// Portion of `baseVelocity` authored by BSP `CONTENTS_CURRENT_*` during
+    /// the previous PlayerMove. Source's pre-command moving-ground phase
+    /// transfers this unflagged current momentum into velocity on the next
+    /// tick; retaining the provenance keeps dynamic ground velocity outside
+    /// the world-only movement slice.
+    public var waterCurrentBaseVelocity: SourceVector3
     public var outputWishVelocity: SourceVector3
     public var isOnGround: Bool
     public var entityGravity: Float
@@ -83,6 +89,7 @@ public struct SourceEntityMotionState: Equatable, Sendable {
         linearVelocity: SourceVector3 = .zero,
         angularVelocity: SourceVector3 = .zero,
         baseVelocity: SourceVector3 = .zero,
+        waterCurrentBaseVelocity: SourceVector3 = .zero,
         outputWishVelocity: SourceVector3 = .zero,
         isOnGround: Bool = false,
         entityGravity: Float = 0,
@@ -96,6 +103,7 @@ public struct SourceEntityMotionState: Equatable, Sendable {
         self.linearVelocity = linearVelocity
         self.angularVelocity = angularVelocity
         self.baseVelocity = baseVelocity
+        self.waterCurrentBaseVelocity = waterCurrentBaseVelocity
         self.outputWishVelocity = outputWishVelocity
         self.isOnGround = isOnGround
         self.entityGravity = entityGravity
@@ -111,6 +119,7 @@ public struct SourceEntityMotionState: Equatable, Sendable {
         Self.isFinite(linearVelocity) &&
             Self.isFinite(angularVelocity) &&
             Self.isFinite(baseVelocity) &&
+            Self.isFinite(waterCurrentBaseVelocity) &&
             Self.isFinite(outputWishVelocity) &&
             Self.isFinite(ladderNormal) &&
             entityGravity.isFinite &&
@@ -748,6 +757,7 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
             viewAngles: transform.angles,
             moveType: moveType,
             waterLevel: motion.waterLevel,
+            waterCurrentBaseVelocity: motion.waterCurrentBaseVelocity,
             isDucked: motion.isDucked,
             viewOffset: viewOffset,
             ladderNormal: motion.ladderNormal
@@ -768,6 +778,7 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
         motion.surfaceFriction = walkState.movement.surfaceFriction
         motion.waterJumpTime = walkState.movement.waterJumpTime
         motion.waterLevel = walkState.waterLevel
+        motion.waterCurrentBaseVelocity = walkState.waterCurrentBaseVelocity
         motion.isDucked = walkState.isDucked
         motion.ladderNormal = walkState.ladderNormal
         motion.isAlive = !walkState.movement.isDead
