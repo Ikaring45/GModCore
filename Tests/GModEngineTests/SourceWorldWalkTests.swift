@@ -310,7 +310,7 @@ final class SourceWorldWalkTests: XCTestCase {
         XCTAssertTrue(SourceWorldWalkSolver.unsupportedFeatures.contains(.duck))
         XCTAssertTrue(SourceWorldWalkSolver.unsupportedFeatures.contains(.water))
         XCTAssertTrue(SourceWorldWalkSolver.unsupportedFeatures.contains(.ladder))
-        XCTAssertTrue(
+        XCTAssertFalse(
             SourceWorldWalkSolver.unsupportedFeatures.contains(.displacementCollision)
         )
         XCTAssertTrue(
@@ -397,15 +397,11 @@ final class SourceWorldWalkTests: XCTestCase {
         }
     }
 
-    func testProviderCannotInjectDynamicDisplacementOrIdentitylessHits() throws {
+    func testProviderCannotInjectDynamicOrIdentitylessHits() throws {
         for (mode, expected) in [
             (
                 ForcedWorldWalkProvider.Mode.dynamicEntity,
                 SourceWorldWalkError.unsupportedDynamicEntity(7)
-            ),
-            (
-                .displacement,
-                .unsupported(.displacementCollision)
             ),
             (
                 .missingIdentity,
@@ -432,6 +428,18 @@ final class SourceWorldWalkTests: XCTestCase {
                 XCTAssertEqual($0 as? SourceWorldWalkError, expected)
             }
         }
+    }
+
+    func testProviderMayReturnRealDisplacementSurfaceFlags() throws {
+        let solver = SourceWorldWalkSolver(
+            collisionProvider: ForcedWorldWalkProvider(mode: .displacement)
+        )
+        let tick = try solver.simulate(
+            state: SourceWorldWalkState(origin: SourceVector3(0, 0, 10)),
+            command: SourceUserCommand(commandNumber: 1)
+        )
+
+        XCTAssertTrue(tick.state.isOnGround)
     }
 
     func testEmbeddedAndNonFiniteInputsAreTransactionalFailures() throws {

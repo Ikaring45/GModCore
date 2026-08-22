@@ -1993,16 +1993,26 @@ public final class SourceDeterministicPhysicsEnvironment:
             let radius: Float = abs(axis.x) * extents.x +
                 abs(axis.y) * extents.y +
                 abs(axis.z) * extents.z
-            let intervalMinimum: Float = triangleMinimum - radius - overlapEpsilon
-            let intervalMaximum: Float = triangleMaximum + radius + overlapEpsilon
+            // Time of impact uses the exact Minkowski interval. Expanding it
+            // here makes a hull resting on a displacement surface appear to
+            // begin inside that surface on its next ground probe.
+            let intervalMinimum: Float = triangleMinimum - radius
+            let intervalMaximum: Float = triangleMaximum + radius
             let startProjection: Float = centeredStart.dot(axis)
             let endProjection: Float = centeredEnd.dot(axis)
             let startInside = startProjection >= intervalMinimum &&
                 startProjection <= intervalMaximum
-            let endInside = endProjection >= intervalMinimum &&
-                endProjection <= intervalMaximum
-            startsOverlapping = startsOverlapping && startInside
-            endsOverlapping = endsOverlapping && endInside
+            // StartSolid means positive-volume penetration, not boundary
+            // contact. This keeps a standing Source hull grounded without
+            // classifying its bottom face touching terrain as embedded.
+            let startPenetrating =
+                startProjection > intervalMinimum + overlapEpsilon &&
+                startProjection < intervalMaximum - overlapEpsilon
+            let endPenetrating =
+                endProjection > intervalMinimum + overlapEpsilon &&
+                endProjection < intervalMaximum - overlapEpsilon
+            startsOverlapping = startsOverlapping && startPenetrating
+            endsOverlapping = endsOverlapping && endPenetrating
 
             let projectedMotion: Float = motion.dot(axis)
             if abs(projectedMotion) <= parallelEpsilon {
@@ -2025,7 +2035,9 @@ public final class SourceDeterministicPhysicsEnvironment:
                     projectedMotion
                 nearNormal = axis
             }
-            if nearFraction > enterFraction {
+            if nearFraction > enterFraction ||
+                (nearFraction == enterFraction &&
+                    enterNormal.lengthSquared == 0) {
                 enterFraction = nearFraction
                 enterNormal = nearNormal
             }

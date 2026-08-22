@@ -257,7 +257,6 @@ public struct SourceWorldWalkSolver: Sendable {
         .verticalMove,
         .water,
         .ladder,
-        .displacementCollision,
         .dynamicEntityCollision,
         .movingGround,
         .vPhysics,
@@ -664,9 +663,6 @@ public struct SourceWorldWalkSolver: Sendable {
         }
         guard trace.fractionLeftSolid >= 0, trace.fractionLeftSolid <= 1 else {
             throw SourceWorldWalkError.inconsistentTrace("FractionLeftSolid")
-        }
-        guard trace.displacementFlags == 0 else {
-            throw SourceWorldWalkError.unsupported(.displacementCollision)
         }
         if trace.startSolid || trace.allSolid {
             throw SourceWorldWalkError.embeddedInWorld(allSolid: trace.allSolid)

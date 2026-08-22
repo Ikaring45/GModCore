@@ -137,6 +137,52 @@ struct SourceDeterministicPhysicsOpenTriangleMeshTests {
         #expect(leavingHit.normal == .zero)
     }
 
+    @Test("boundary contact is not StartSolid and downward motion hits at zero")
+    func restingBoundaryContact() throws {
+        let environment = try makeEnvironment(
+            worldID: bodyID(entry: 0, serial: 92)
+        )
+        let stationary = try SourcePhysicsQueryCommand(
+            queryID: 12,
+            geometry: .sweptHull(
+                start: SourceVector3(-2, -2, 1),
+                end: SourceVector3(-2, -2, 1),
+                minimums: SourceVector3(-1, -1, -1),
+                maximums: SourceVector3(1, 1, 1)
+            ),
+            contentsMask: SourceContents.solid.rawValue,
+            collisionGroup: 0,
+            scope: .staticOnly,
+            ignoredEntities: []
+        )
+        let intoSurface = try SourcePhysicsQueryCommand(
+            queryID: 13,
+            geometry: .sweptHull(
+                start: SourceVector3(-2, -2, 1),
+                end: SourceVector3(-2, -2, 0.5),
+                minimums: SourceVector3(-1, -1, -1),
+                maximums: SourceVector3(1, 1, 1)
+            ),
+            contentsMask: SourceContents.solid.rawValue,
+            collisionGroup: 0,
+            scope: .staticOnly,
+            ignoredEntities: []
+        )
+        let snapshot = try environment.execute(SourcePhysicsCommandBatch(
+            commands: [
+                SourcePhysicsCommand(sequence: 12, payload: .query(stationary)),
+                SourcePhysicsCommand(sequence: 13, payload: .query(intoSurface)),
+            ]
+        ))
+
+        #expect(snapshot.queryResults[0].hit == nil)
+        let contact = try #require(snapshot.queryResults[1].hit)
+        #expect(contact.fraction == 0)
+        #expect(!contact.startedSolid)
+        #expect(!contact.allSolid)
+        #expect(contact.normal == SourceVector3(0, 0, 1))
+    }
+
     @Test("fast verified prop CCD lands on an open displacement triangle")
     func dynamicCCDAndContact() throws {
         let worldID = try bodyID(entry: 0, serial: 117)
