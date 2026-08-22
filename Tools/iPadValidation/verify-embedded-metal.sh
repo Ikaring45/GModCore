@@ -148,7 +148,8 @@ required_pipeline_contract = {
     "compositeDescriptor.colorAttachments[0].loadAction = .load",
     "float fresnel = pow(1.0 - normalDotEye, 5.0)",
     "float2 normalOffset = tangentNormal.xy * normalAlpha",
-    "float2 reflectionUV = baseUV + normalOffset * amounts.x",
+    "float2 reflectionBase = float2(baseUV.x, 1.0 - baseUV.y)",
+    "float2 reflectionUV = reflectionBase + normalOffset * amounts.x",
     "float2 refractionUV = baseUV + normalOffset * amounts.y",
 }
 missing_contract = sorted(

@@ -481,6 +481,19 @@ struct GModMetalWaterDependentTextureCoordinates: Sendable, Equatable {
 /// as independent, signed distortion scales. They are not opacity values and
 /// are not normalized by render-target dimensions.
 enum GModMetalWaterSamplingContract {
+    /// Metal window coordinates and normalized 2D texture coordinates both use
+    /// a top-left origin. The reflected camera projects the same water point to
+    /// the opposite NDC Y, so its render-target lookup must invert screen Y;
+    /// the ordinary refraction view remains screen-aligned.
+    static func renderTargetBases(
+        screenUV: SIMD2<Float>
+    ) -> GModMetalWaterDependentTextureCoordinates {
+        GModMetalWaterDependentTextureCoordinates(
+            reflection: SIMD2<Float>(screenUV.x, 1 - screenUV.y),
+            refraction: screenUV
+        )
+    }
+
     /// Mirrors `water_ps2x_helper.h`: the tangent-space eye vector has already
     /// been normalized before `saturate(dot(eye, normal))` is evaluated.
     static func fresnel(
@@ -525,6 +538,14 @@ struct GModMetalWaterRenderTargetPlan: Sendable, Equatable {
     let sourceSurfaceZ: Float
     let requiresReflection: Bool
     let requiresRefraction: Bool
+
+    func targetFlags(for material: GModMetalWorldWaterMaterial) -> UInt32 {
+        let reflection: UInt32 = requiresReflection &&
+            material.reflectionAmount != nil ? 1 : 0
+        let refraction: UInt32 = requiresRefraction &&
+            material.refractionAmount != nil ? 2 : 0
+        return reflection | refraction
+    }
 }
 
 enum GModMetalWaterRenderTargetContract {
@@ -550,15 +571,18 @@ enum GModMetalWaterRenderTargetContract {
         guard let first = visible.first else { return nil }
         let surfaceBits = Set(visible.map { $0.surface.surfaceZ.bitPattern })
         guard surfaceBits.count == 1 else { return nil }
+        // `CUnderWaterView` creates only an out-of-water refraction view;
+        // Source's reflected view belongs to `CAboveWaterView`.
+        let requiresReflection = cameraZ >= first.surface.surfaceZ &&
+            visible.contains { $0.material.reflectionAmount != nil }
+        let requiresRefraction = visible.contains {
+            $0.material.refractionAmount != nil
+        }
+        guard requiresReflection || requiresRefraction else { return nil }
         return GModMetalWaterRenderTargetPlan(
             sourceSurfaceZ: first.surface.surfaceZ,
-            // `CUnderWaterView` creates only an out-of-water refraction view;
-            // Source's reflected view belongs to `CAboveWaterView`.
-            requiresReflection: cameraZ >= first.surface.surfaceZ &&
-                visible.contains { $0.material.reflectionAmount != nil },
-            requiresRefraction: visible.contains {
-                $0.material.refractionAmount != nil
-            }
+            requiresReflection: requiresReflection,
+            requiresRefraction: requiresRefraction
         )
     }
 }

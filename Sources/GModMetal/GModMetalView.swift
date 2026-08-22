@@ -4128,9 +4128,7 @@ public struct GModMetalView:
                     cos(angleRadians),
                     sin(angleRadians)
                 )
-                let targetFlags: Float =
-                    (material.reflectionAmount == nil ? 0 : 1) +
-                    (material.refractionAmount == nil ? 0 : 2)
+                let targetFlags = Float(plan.targetFlags(for: material))
                 var waterUniforms = WorldWaterUniforms(
                     fogColorAndAlpha: SIMD4<Float>(
                         material.fogColor,
@@ -5895,7 +5893,8 @@ public struct GModMetalView:
             float2 baseUV = input.position.xy / viewport;
             float2 amounts = water.sourceAmountsAndViewport.xy;
             float2 normalOffset = tangentNormal.xy * normalAlpha;
-            float2 reflectionUV = baseUV + normalOffset * amounts.x;
+            float2 reflectionBase = float2(baseUV.x, 1.0 - baseUV.y);
+            float2 reflectionUV = reflectionBase + normalOffset * amounts.x;
             float2 refractionUV = baseUV + normalOffset * amounts.y;
             float3 refracted = gmodDecodeDisplaySRGB(
                 refractionColor.sample(sceneSampler, refractionUV).rgb
