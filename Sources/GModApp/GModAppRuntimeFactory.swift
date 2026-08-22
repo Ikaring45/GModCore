@@ -232,6 +232,7 @@ public final class GModAppRuntimeFactory: @unchecked Sendable {
         initialViewport: GMLuaViewportSize = .logicalDesktopDefault,
         languageConfiguration: GMLuaLanguageConfiguration = .empty,
         permissionsHost: GMLuaPermissionsHost? = nil,
+        permissionSessionTransport: GMLuaPermissionSessionTransport? = nil,
         logger: @escaping (String) -> Void
     ) -> GMLuaMenuSession {
         GMLuaMenuSession(
@@ -240,6 +241,7 @@ public final class GModAppRuntimeFactory: @unchecked Sendable {
             textMeasurer: textMeasurer,
             languageConfiguration: languageConfiguration,
             permissionsHost: permissionsHost,
+            permissionSessionTransport: permissionSessionTransport,
             logger: logger
         )
     }

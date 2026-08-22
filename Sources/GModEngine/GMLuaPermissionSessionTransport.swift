@@ -3,7 +3,12 @@ import Foundation
 /// The two gameplay realms which receive one single-player permission session.
 /// MENU remains the sole owner of permission decisions and never appears as a
 /// destination in this transport.
-public enum GMLuaPermissionSessionDestination: String, Sendable, CaseIterable {
+public enum GMLuaPermissionSessionDestination:
+    String,
+    Sendable,
+    CaseIterable,
+    Hashable
+{
     case server
     case client
 }

@@ -205,6 +205,7 @@ public final class GMLuaMenuSession: @unchecked Sendable {
     private let hostState = GMLuaMenuHostState()
     private let runtime: GMLuaRuntime
     private let permissionsHost: GMLuaPermissionsHost?
+    private let permissionSessionTransport: GMLuaPermissionSessionTransport?
     private var started = false
     private var closed = false
 
@@ -214,9 +215,11 @@ public final class GMLuaMenuSession: @unchecked Sendable {
         textMeasurer: (any GMLuaTextMeasurer)? = nil,
         languageConfiguration: GMLuaLanguageConfiguration = .empty,
         permissionsHost: GMLuaPermissionsHost? = nil,
+        permissionSessionTransport: GMLuaPermissionSessionTransport? = nil,
         logger: @escaping (String) -> Void
     ) {
         self.permissionsHost = permissionsHost
+        self.permissionSessionTransport = permissionSessionTransport
         runtime = GMLuaRuntime(
             realm: .menu,
             logger: logger,
@@ -400,6 +403,7 @@ public final class GMLuaMenuSession: @unchecked Sendable {
                 into: state,
                 realm: .menu,
                 host: permissionsHost,
+                sessionTransport: permissionSessionTransport,
                 onPermissionsChanged: { [weak runtime] in
                     _ = runtime?.dispatchContainedHostHook(
                         named: "OnPermissionsChanged"

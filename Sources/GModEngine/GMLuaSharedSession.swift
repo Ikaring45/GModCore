@@ -54,6 +54,32 @@ public enum GMLuaSharedSessionError: Error, CustomStringConvertible {
 /// enter Lua only when the host calls ``pump``.
 public final class GMLuaSharedSession: @unchecked Sendable {
     public let netTransport: GMLuaNetTransport
+    public let serverPermissionProjection: GMLuaPermissionRealmProjection
+    public let clientPermissionProjection: GMLuaPermissionRealmProjection
+    public let permissionSessionTransport: GMLuaPermissionSessionTransport
+
+    private final class PermissionTransportReference: @unchecked Sendable {
+        private let lock = NSLock()
+        private weak var storage: GMLuaPermissionSessionTransport?
+
+        func install(_ transport: GMLuaPermissionSessionTransport) {
+            lock.lock()
+            storage = transport
+            lock.unlock()
+        }
+
+        func deliver(_ delivery: GMLuaPermissionSessionDelivery) throws {
+            lock.lock()
+            let transport = storage
+            lock.unlock()
+            guard let transport else {
+                throw LuaError.runtime(
+                    "permission session transport is no longer available"
+                )
+            }
+            _ = try transport.deliver(delivery)
+        }
+    }
 
     private final class ConnectionRecord: @unchecked Sendable {
         weak var server: GMLuaRuntime?
@@ -150,6 +176,34 @@ public final class GMLuaSharedSession: @unchecked Sendable {
 
     public init(netTransport: GMLuaNetTransport = GMLuaNetTransport()) {
         self.netTransport = netTransport
+        let serverProjection = GMLuaPermissionRealmProjection(
+            destination: .server
+        )
+        let clientProjection = GMLuaPermissionRealmProjection(
+            destination: .client
+        )
+        serverPermissionProjection = serverProjection
+        clientPermissionProjection = clientProjection
+        let transportReference = PermissionTransportReference()
+        let permissionTransport = GMLuaPermissionSessionTransport(
+            fifo: GMLuaPermissionSharedFIFO { [weak netTransport] batch in
+                guard let netTransport else {
+                    throw GMLuaPermissionFIFOTransportError.serverUnavailable
+                }
+                try netTransport.enqueuePermissionSessionDeliveries(
+                    batch,
+                    deliver: { delivery in
+                        try transportReference.deliver(delivery)
+                    }
+                )
+            },
+            endpoints: GMLuaPermissionSessionEndpoints(
+                server: { try serverProjection.apply($0) },
+                client: { try clientProjection.apply($0) }
+            )
+        )
+        transportReference.install(permissionTransport)
+        permissionSessionTransport = permissionTransport
         netTransport.requireExplicitClientConnections()
     }
 

@@ -131,6 +131,18 @@ private struct GMLuaGameplayEventPacket: Sendable {
     let payload: GMLuaGameplayEventPayload
 }
 
+/// One MENU-owned permission projection delivered through the gameplay
+/// transport's existing total order. The callback enters only the
+/// generation-safe permission transport; it never executes Lua directly.
+private struct GMLuaPermissionSessionPacket: Sendable {
+    let sequence: UInt64
+    let sourceEndpointID: Int
+    let destinationEndpointID: Int
+    let connectionGeneration: UInt64?
+    let delivery: GMLuaPermissionSessionDelivery
+    let deliver: @Sendable (GMLuaPermissionSessionDelivery) throws -> Void
+}
+
 /// One member of an atomic SERVER entity-replication fan-out. SharedSession
 /// builds the complete batch before any destination receives a FIFO entry.
 struct GMLuaEntityReplicationEnqueueRequest: Sendable {
@@ -146,6 +158,7 @@ private enum GMLuaTransportDelivery: Sendable {
     case clientLua(GMLuaClientLuaPacket)
     case entity(GMLuaEntityReplicationDelivery)
     case gameplayEvent(GMLuaGameplayEventPacket)
+    case permissionSession(GMLuaPermissionSessionPacket)
 
     var sequence: UInt64 {
         switch self {
@@ -156,6 +169,7 @@ private enum GMLuaTransportDelivery: Sendable {
         case let .clientLua(packet): return packet.sequence
         case let .entity(delivery): return delivery.sequence
         case let .gameplayEvent(packet): return packet.sequence
+        case let .permissionSession(packet): return packet.sequence
         }
     }
 
@@ -168,6 +182,7 @@ private enum GMLuaTransportDelivery: Sendable {
         case let .clientLua(packet): return packet.sourceEndpointID
         case let .entity(delivery): return delivery.sourceEndpointID
         case let .gameplayEvent(packet): return packet.sourceEndpointID
+        case let .permissionSession(packet): return packet.sourceEndpointID
         }
     }
 
@@ -180,6 +195,32 @@ private enum GMLuaTransportDelivery: Sendable {
         case let .clientLua(packet): return packet.destinationEndpointID
         case let .entity(delivery): return delivery.destinationEndpointID
         case let .gameplayEvent(packet): return packet.destinationEndpointID
+        case let .permissionSession(packet): return packet.destinationEndpointID
+        }
+    }
+}
+
+public enum GMLuaPermissionFIFOTransportError: Error, Equatable, Sendable {
+    case incompleteRealmBatch
+    case serverUnavailable
+    case localClientUnavailable
+    case multipleLocalClients(Int)
+    case sequenceExhausted
+}
+
+extension GMLuaPermissionFIFOTransportError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .incompleteRealmBatch:
+            return "permission FIFO batch must contain SERVER and CLIENT exactly once"
+        case .serverUnavailable:
+            return "permission FIFO SERVER endpoint is unavailable"
+        case .localClientUnavailable:
+            return "permission FIFO local CLIENT endpoint is unavailable"
+        case let .multipleLocalClients(count):
+            return "permission FIFO requires one local CLIENT, got \(count)"
+        case .sequenceExhausted:
+            return "permission FIFO sequence exhausted"
         }
     }
 }
@@ -2057,6 +2098,74 @@ public final class GMLuaNetTransport: @unchecked Sendable,
         appendDeliveriesLocked(batch)
     }
 
+    /// Appends one complete MENU permission fan-out to the same deferred FIFO
+    /// as net, console, canonical Entity replication and gameplay events.
+    /// The local session contract has exactly one authoritative SERVER and
+    /// one connected CLIENT; multiplayer permission routing remains an honest
+    /// unsupported boundary instead of silently choosing a recipient.
+    func enqueuePermissionSessionDeliveries(
+        _ permissionDeliveries: [GMLuaPermissionSessionDelivery],
+        deliver: @escaping @Sendable (
+            GMLuaPermissionSessionDelivery
+        ) throws -> Void
+    ) throws {
+        guard permissionDeliveries.count
+                == GMLuaPermissionSessionDestination.allCases.count,
+              Set(permissionDeliveries.map(\.destination))
+                == Set(GMLuaPermissionSessionDestination.allCases) else {
+            throw GMLuaPermissionFIFOTransportError.incompleteRealmBatch
+        }
+
+        lock.lock()
+        defer { lock.unlock() }
+        guard let sourceID = serverEndpointID,
+              endpoints[sourceID]?.state != nil else {
+            throw GMLuaPermissionFIFOTransportError.serverUnavailable
+        }
+        let localClients = clientConnectionsByEndpoint.values
+            .filter { endpoints[$0.endpointID]?.state != nil }
+            .sorted { $0.endpointID < $1.endpointID }
+        guard !localClients.isEmpty else {
+            throw GMLuaPermissionFIFOTransportError.localClientUnavailable
+        }
+        guard localClients.count == 1 else {
+            throw GMLuaPermissionFIFOTransportError.multipleLocalClients(
+                localClients.count
+            )
+        }
+        let client = localClients[0]
+        let requested = UInt64(permissionDeliveries.count)
+        guard requested <= UInt64.max - nextSequence else {
+            throw GMLuaPermissionFIFOTransportError.sequenceExhausted
+        }
+
+        var batch: [GMLuaTransportDelivery] = []
+        batch.reserveCapacity(permissionDeliveries.count)
+        for (offset, permissionDelivery) in
+            permissionDeliveries.enumerated() {
+            let destinationID: Int
+            let connectionGeneration: UInt64?
+            switch permissionDelivery.destination {
+            case .server:
+                destinationID = sourceID
+                connectionGeneration = nil
+            case .client:
+                destinationID = client.endpointID
+                connectionGeneration = client.generation
+            }
+            batch.append(.permissionSession(GMLuaPermissionSessionPacket(
+                sequence: nextSequence + UInt64(offset) + 1,
+                sourceEndpointID: sourceID,
+                destinationEndpointID: destinationID,
+                connectionGeneration: connectionGeneration,
+                delivery: permissionDelivery,
+                deliver: deliver
+            )))
+        }
+        nextSequence += requested
+        appendDeliveriesLocked(batch)
+    }
+
     /// Requires `lock`. Sequence reservation remains global even when the
     /// resulting delivery is current-thread staged, so concurrent producers
     /// retain one total ordering and rollback never rewinds their clock.
@@ -2273,6 +2382,13 @@ public final class GMLuaNetTransport: @unchecked Sendable,
                 )
                 try endpoint.invokeGameplayEvent(packet)
                 successful += 1
+            case let .permissionSession(packet):
+                try validatePermissionSessionConnection(
+                    endpoint: endpoint,
+                    packet: packet
+                )
+                try packet.deliver(packet.delivery)
+                successful += 1
             }
             if case .net = delivery { successful += 1 }
             processed += 1
@@ -2282,6 +2398,42 @@ public final class GMLuaNetTransport: @unchecked Sendable,
             successfulDeliveries: successful,
             forwardedConsoleFailures: consoleFailures
         )
+    }
+
+    private func validatePermissionSessionConnection(
+        endpoint: GMLuaNetEndpoint,
+        packet: GMLuaPermissionSessionPacket
+    ) throws {
+        lock.lock()
+        let sourceIsCurrentServer = serverEndpointID == packet.sourceEndpointID
+            && endpoints[packet.sourceEndpointID]?.state != nil
+        let clientConnection =
+            clientConnectionsByEndpoint[packet.destinationEndpointID]
+        lock.unlock()
+        guard sourceIsCurrentServer,
+              endpoint.identifier == packet.destinationEndpointID else {
+            throw LuaError.runtime(
+                "queued permission delivery belongs to detached endpoints"
+            )
+        }
+        switch packet.delivery.destination {
+        case .server:
+            guard endpoint.realm == .server,
+                  packet.connectionGeneration == nil else {
+                throw LuaError.runtime(
+                    "queued SERVER permission delivery has invalid routing"
+                )
+            }
+        case .client:
+            guard endpoint.realm == .client,
+                  let clientConnection,
+                  clientConnection.generation
+                    == packet.connectionGeneration else {
+                throw LuaError.runtime(
+                    "queued CLIENT permission delivery belongs to a stale connection"
+                )
+            }
+        }
     }
 
     private func validateConnectionGeneration(
