@@ -291,6 +291,8 @@ final class GModGameSessionModel: ObservableObject {
     @Published private(set) var isStarting = false
     @Published private(set) var isDisconnecting = false
     @Published private(set) var isReady = false
+    @Published private(set) var permissionSessionTransport:
+        GMLuaPermissionSessionTransport?
     @Published private(set) var fixedTickCount: UInt64 = 0
     @Published private(set) var lastDeliveredMessages = 0
     @Published private(set) var recentLogs: [String] = []
@@ -376,6 +378,10 @@ final class GModGameSessionModel: ObservableObject {
 
     var hasActiveSession: Bool {
         isReady && activeMap != nil
+    }
+
+    var permissionSessionTransportIdentity: ObjectIdentifier? {
+        permissionSessionTransport.map(ObjectIdentifier.init)
     }
 
     var isSpawnMenuOpen: Bool { activeClientMenu == .spawn }
@@ -487,6 +493,7 @@ final class GModGameSessionModel: ObservableObject {
         loadingState = GModPlayableSessionLoadingState()
         startFailure = nil
         isReady = false
+        permissionSessionTransport = nil
         activeMap = nil
         loadingMap = map
         worldScene = nil
@@ -552,6 +559,10 @@ final class GModGameSessionModel: ObservableObject {
                 let mapPakFileSystem = try await lane.mapPakFileSystem(
                     expectedGeneration: snapshot.generation
                 )
+                let permissionTransport = try await lane
+                    .permissionSessionTransport(
+                        expectedGeneration: snapshot.generation
+                    )
                 guard requestedGeneration == sessionGeneration else {
                     _ = try? await lane.close(
                         expectedGeneration: snapshot.generation
@@ -569,6 +580,7 @@ final class GModGameSessionModel: ObservableObject {
                 laneGeneration = snapshot.generation
                 pointerEpoch = snapshot.pointerEpoch
                 inputEpoch = snapshot.inputEpoch
+                permissionSessionTransport = permissionTransport
                 isReady = true
                 fixedTickCount = 0
                 lastDeliveredMessages = snapshot.startup.deliveredMessages
@@ -620,6 +632,7 @@ final class GModGameSessionModel: ObservableObject {
                 loadingState = failedLoadingState
                 activeMap = nil
                 isReady = false
+                permissionSessionTransport = nil
                 isInputSuspended = true
                 frameMailbox.disable()
                 pointerMailbox.setEnabled(false)
@@ -933,6 +946,7 @@ final class GModGameSessionModel: ObservableObject {
 
         isStarting = false
         isReady = false
+        permissionSessionTransport = nil
         isInputSuspended = true
         pauseMenuNotificationPending = false
         clearHeldWorldInput()
@@ -1021,6 +1035,7 @@ final class GModGameSessionModel: ObservableObject {
         firstWorldFrameGate.reset()
 
         isReady = false
+        permissionSessionTransport = nil
         activeMap = nil
         loadingMap = nil
         loadingState = GModPlayableSessionLoadingState()

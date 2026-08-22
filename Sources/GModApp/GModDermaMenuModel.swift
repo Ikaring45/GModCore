@@ -20,6 +20,7 @@ final class GModDermaMenuModel: ObservableObject {
     private var session: GMLuaMenuSession?
     private var mountGeneration: UInt64?
     private var languageConfiguration: GMLuaLanguageConfiguration?
+    private var permissionSessionTransportIdentity: ObjectIdentifier?
     private var viewport = GMLuaViewportSize(width: 1_024, height: 768)
     private var pendingFrame = false
     private var buildInFlight = false
@@ -44,11 +45,16 @@ final class GModDermaMenuModel: ObservableObject {
         mountGeneration: UInt64,
         phrases: [String: String],
         problemLines: [String],
-        consoleLines: [String]
+        consoleLines: [String],
+        permissionSessionTransport: GMLuaPermissionSessionTransport?
     ) {
         let configuration = GMLuaLanguageConfiguration(phrases: phrases)
+        let permissionIdentity = permissionSessionTransport.map(
+            ObjectIdentifier.init
+        )
         let requiresNewSession = self.mountGeneration != mountGeneration
             || languageConfiguration != configuration
+            || permissionSessionTransportIdentity != permissionIdentity
         if requiresNewSession {
             session?.close()
             session = nil
@@ -63,6 +69,7 @@ final class GModDermaMenuModel: ObservableObject {
             self.consoleLines = []
             self.mountGeneration = mountGeneration
             languageConfiguration = configuration
+            permissionSessionTransportIdentity = permissionIdentity
 
             do {
                 let files = try GMLuaHostDirectoryFileSystem(
@@ -74,6 +81,7 @@ final class GModDermaMenuModel: ObservableObject {
                     initialViewport: viewport,
                     languageConfiguration: configuration,
                     permissionsHost: permissionStore.makeLuaPermissionsHost(),
+                    permissionSessionTransport: permissionSessionTransport,
                     logger: { _ in }
                 )
                 _ = try replacement.start()

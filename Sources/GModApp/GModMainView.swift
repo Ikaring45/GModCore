@@ -942,6 +942,9 @@ public struct GModMainView: View {
                 .onChange(of: localizationSelection.snapshot) { _ in
                     activateDermaMenu()
                 }
+                .onChange(of: game.permissionSessionTransportIdentity) { _ in
+                    activateDermaMenu()
+                }
                 .onChange(of: currentProblemSnapshot) { _ in
                     dermaMenu.replaceProblems(dermaProblemLines)
                 }
@@ -1102,7 +1105,8 @@ public struct GModMainView: View {
             mountGeneration: content.activeMountGeneration,
             phrases: localizationSelection.snapshot.phrases,
             problemLines: dermaProblemLines,
-            consoleLines: dermaConsoleLines
+            consoleLines: dermaConsoleLines,
+            permissionSessionTransport: game.permissionSessionTransport
         )
     }
 

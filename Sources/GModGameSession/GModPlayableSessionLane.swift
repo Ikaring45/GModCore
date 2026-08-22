@@ -889,6 +889,21 @@ public actor GModPlayableSessionLane {
         }
     }
 
+    /// Returns the thread-safe MENU-facing permission transport only. No Lua
+    /// state, Entity registry, BSP provider, or gameplay endpoint crosses the
+    /// actor boundary; all resulting work is deferred into the lane-owned
+    /// shared-session FIFO.
+    public func permissionSessionTransport(
+        expectedGeneration: UInt64? = nil
+    ) throws -> GMLuaPermissionSessionTransport {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        return session.sharedSession.permissionSessionTransport
+    }
+
     @discardableResult
     public func close(
         expectedGeneration: UInt64? = nil
