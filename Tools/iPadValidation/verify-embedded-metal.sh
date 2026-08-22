@@ -86,8 +86,14 @@ expected_functions = {
     "worldTexturedLightmappedFragmentMain",
     "worldMissingMaterialFragmentMain",
     "worldSkyboxFragmentMain",
+    "worldSunSpriteVertexMain",
+    "worldSunSpriteFragmentMain",
     "worldWaterSolidFragmentMain",
     "worldWaterNormalFragmentMain",
+    "worldWaterCompositeSolidFragmentMain",
+    "worldWaterCompositeNormalFragmentMain",
+    "worldSceneCopyVertexMain",
+    "worldSceneCopyFragmentMain",
     "surfaceVertexMain",
     "surfaceSolidFragmentMain",
     "surfaceTexturedFragmentMain",
@@ -136,6 +142,14 @@ required_pipeline_contract = {
     "resourceID: GModMetalDynamicEntityResourceID",
     "instance.identity.handle.rawValue",
     "constant DynamicEntityTransform &model [[buffer(2)]]",
+    "var worldUploadBudget = WorldUploadBudget()",
+    "clipPlane: GModMetalWaterClipPlaneContract.disabled",
+    "draws3DSky: false",
+    "compositeDescriptor.colorAttachments[0].loadAction = .load",
+    "float fresnel = pow(1.0 - normalDotEye, 5.0)",
+    "float2 normalOffset = tangentNormal.xy * normalAlpha",
+    "float2 reflectionUV = baseUV + normalOffset * amounts.x",
+    "float2 refractionUV = baseUV + normalOffset * amounts.y",
 }
 missing_contract = sorted(
     phrase for phrase in required_pipeline_contract if phrase not in normalized_swift
@@ -156,6 +170,15 @@ if texture_key_match is None:
 if "resourceID" in texture_key_match.group(1):
     raise SystemExit(
         "Dynamic textures must deduplicate by bitmap digest, not resource ID"
+    )
+
+if swift_source.count("WorldUploadBudget()") != 1:
+    raise SystemExit(
+        "World texture upload budget must be created exactly once per frame"
+    )
+if "compositeEncoder.setRenderPipelineState(worldSceneCopyPipeline)" in normalized_swift:
+    raise SystemExit(
+        "Water targets must not replace the ordinary drawable scene"
     )
 
 opaque_loop = normalized_swift.find(
