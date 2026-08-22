@@ -223,10 +223,10 @@ public final class GModAppRuntimeFactory: @unchecked Sendable {
         )
     }
 
-    /// Builds the trusted MENU realm with the same CoreText measurement
-    /// boundary used by gameplay VGUI. Home, Options, Problems, and Console
-    /// therefore share one Derma layout contract instead of falling back to
-    /// logical glyph estimates.
+    /// Builds the trusted MENU utility realm with the same CoreText
+    /// measurement boundary used by gameplay VGUI. The original Home DHTML is
+    /// hosted separately; Settings, Problems, and Console therefore avoid
+    /// falling back to logical glyph estimates.
     public func makeMenuSession(
         fileSystem: any LuaVirtualFileSystem & Sendable,
         initialViewport: GMLuaViewportSize = .logicalDesktopDefault,

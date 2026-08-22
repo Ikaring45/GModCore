@@ -577,7 +577,8 @@ struct GModHomeMenuView: UIViewRepresentable {
                 onSelectMap(map)
             case let .setLanguage(rawCode):
                 selectLanguage(rawCode, in: webView)
-            case .hideGameUI, .openOptions, .openProblems, .disconnect, .quit:
+            case .hideGameUI, .openOptions, .openProblems, .openConsole,
+                 .disconnect, .quit:
                 guard onMenuAction != nil else {
                     print(
                         "[Garry's PAD][Menu][integration] parent callback required for \(action)"

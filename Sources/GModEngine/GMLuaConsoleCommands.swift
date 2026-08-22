@@ -293,6 +293,33 @@ public final class GMLuaConsoleCommandDispatcher: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Parses one user-entered Source console line into the exact command and
+    /// argument values accepted by this runtime's `RunConsoleCommand` global.
+    /// The caller remains responsible for invoking that live global on the
+    /// serialized runtime lane; this helper never turns console text into Lua
+    /// source. Parsing the complete line first also prevents an invalid quoted
+    /// argument or NUL byte in a later command from partially executing an
+    /// earlier command.
+    func parseInteractiveConsoleCommandLine(
+        _ source: String
+    ) throws -> [GMLuaConsoleCommandInvocation] {
+        guard !source.contains("\0") else {
+            throw LuaError.runtime(
+                "interactive console command line cannot contain NUL bytes"
+            )
+        }
+        return try Self.parseConsoleCommandLine(
+            source,
+            function: "interactive console"
+        ).map {
+            GMLuaConsoleCommandInvocation(
+                realm: realm,
+                command: $0.command,
+                arguments: $0.arguments
+            )
+        }
+    }
+
     /// Registers an engine-owned command that remains available before the
     /// Lua `concommand` module is bootstrapped. The embedding host still gets
     /// first refusal; this handler owns the command only when that host reports

@@ -479,6 +479,21 @@ public actor GModPlayableSessionLane {
         try session.requestToggleNoClip()
     }
 
+    /// Dispatches one user-entered Source console line on the actor lane that
+    /// owns CLIENT Lua and the shared CLIENT-to-SERVER command FIFO.
+    @discardableResult
+    public func executeClientConsoleCommandLine(
+        _ source: String,
+        expectedGeneration: UInt64? = nil
+    ) throws -> Int {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        return try session.executeClientConsoleCommandLine(source)
+    }
+
     /// Shares the session's already-validated, immutable BSP pak index with
     /// the App renderer. Returning this Sendable read-only object avoids a
     /// second 40+ MB map read and keeps Lua and Metal on the same GAME layer.
@@ -571,6 +586,7 @@ public actor GModPlayableSessionLane {
     }
 
     public func renderClientVGUIFrame(
+        scope: GMLuaVGUIRenderScope = .all,
         expectedGeneration: UInt64? = nil
     ) throws -> GMLuaSurfaceFrameSnapshot {
         dedicatedExecutor.preconditionIsCurrentWorker()
@@ -578,7 +594,18 @@ public actor GModPlayableSessionLane {
             throw GModPlayableSessionLaneError.notStarted
         }
         try validate(expectedGeneration: expectedGeneration)
-        return try session.renderClientVGUIFrame()
+        return try session.renderClientVGUIFrame(scope: scope)
+    }
+
+    public func hasVisibleClientOverlayPanels(
+        expectedGeneration: UInt64? = nil
+    ) throws -> Bool {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        return try session.hasVisibleClientOverlayPanels()
     }
 
     @discardableResult

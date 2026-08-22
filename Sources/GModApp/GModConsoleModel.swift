@@ -15,7 +15,8 @@ private final class GModConsoleLogSink {
 final class GModConsoleModel: ObservableObject {
     enum Submission {
         case clear
-        case source(String)
+        case commandLine(String)
+        case luaSource(String)
     }
     struct Line: Identifiable, Equatable {
         enum Kind {
@@ -34,7 +35,10 @@ final class GModConsoleModel: ObservableObject {
 
     @Published var lines: [Line] = [
         Line(text: "GModLua Console initialized", kind: .info),
-        Line(text: "Lua 5.1 runtime ready. Type Lua directly or use lua_run <code>.", kind: .normal)
+        Line(
+            text: "Source commands use the active CLIENT; explicit Lua uses lua_run <code>.",
+            kind: .normal
+        )
     ]
     @Published var input = ""
     @Published var removeContaining = ""
@@ -138,12 +142,20 @@ final class GModConsoleModel: ObservableObject {
 
     func submit() {
         guard let submission = takeSubmission() else { return }
-        guard case let .source(source) = submission else { return }
-
-        do {
-            try runtime.execute(source, sourceName: "=Console")
-        } catch {
-            append("[ERROR] \(error)")
+        switch submission {
+        case .clear:
+            return
+        case let .commandLine(line):
+            append(
+                "[ERROR] No active CLIENT console for '\(line)'. " +
+                    "Start or resume Sandbox, or use lua_run for the isolated Lua console."
+            )
+        case let .luaSource(source):
+            do {
+                try runtime.execute(source, sourceName: "=Console")
+            } catch {
+                append("[ERROR] \(error)")
+            }
         }
     }
 
@@ -159,9 +171,9 @@ final class GModConsoleModel: ObservableObject {
         }
 
         if raw.hasPrefix("lua_run ") {
-            return .source(String(raw.dropFirst("lua_run ".count)))
+            return .luaSource(String(raw.dropFirst("lua_run ".count)))
         }
-        return .source(raw)
+        return .commandLine(raw)
     }
 
     func advanceSimulation(ticks: Int) {

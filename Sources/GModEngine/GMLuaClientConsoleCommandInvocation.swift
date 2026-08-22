@@ -9,6 +9,7 @@ public enum GMLuaClientConsoleCommandInvocationError:
     case runtimeClosed
     case clientRealmRequired(actualRealm: String)
     case runConsoleCommandUnavailable(actualType: String)
+    case consoleCommandDispatcherUnavailable
 
     public var description: String {
         switch self {
@@ -18,6 +19,8 @@ public enum GMLuaClientConsoleCommandInvocationError:
             return "CLIENT RunConsoleCommand requires CLIENT, got \(actualRealm)"
         case let .runConsoleCommandUnavailable(actualType):
             return "CLIENT global RunConsoleCommand is unavailable (got \(actualType))"
+        case .consoleCommandDispatcherUnavailable:
+            return "CLIENT console command dispatcher is unavailable"
         }
     }
 }
@@ -58,5 +61,38 @@ public extension GMLuaRuntime {
                 .string(LuaString($0))
             }
         )
+    }
+
+    /// Executes one user-entered Source console line through the live CLIENT
+    /// `RunConsoleCommand` bridge. The dispatcher's existing tokenizer retains
+    /// quoted arguments and semicolon/newline command ordering, while every
+    /// value crosses into Lua as a separate string instead of executable source.
+    /// The caller must invoke this on the runtime's serialized lane.
+    @discardableResult
+    func invokeClientConsoleCommandLine(_ source: String) throws -> Int {
+        guard !isClosed else {
+            throw GMLuaClientConsoleCommandInvocationError.runtimeClosed
+        }
+        switch realm {
+        case .client:
+            break
+        case .server, .menu:
+            throw GMLuaClientConsoleCommandInvocationError
+                .clientRealmRequired(actualRealm: realm.rawValue)
+        }
+        guard let consoleCommandDispatcher else {
+            throw GMLuaClientConsoleCommandInvocationError
+                .consoleCommandDispatcherUnavailable
+        }
+
+        let invocations = try consoleCommandDispatcher
+            .parseInteractiveConsoleCommandLine(source)
+        for invocation in invocations {
+            try invokeClientRunConsoleCommand(
+                command: invocation.command,
+                arguments: invocation.arguments
+            )
+        }
+        return invocations.count
     }
 }

@@ -70,20 +70,30 @@ enum GModGameWorldInputPolicy {
     }
 }
 
-/// The native Surface scene currently represents the foreground Q/C panel
-/// tree. CLIENT Lua continues to tick when neither menu is visible, but there
-/// is no renderer-facing panel capture to rebuild in that state.
+/// The native Surface scene represents either the foreground Q/C tree or the
+/// engine-owned OverlayPanel subtree used by stock notification/hint Lua.
 enum GModGameClientSurfaceCapturePolicy {
     static func shouldCapture(
         activeMenu: GModGameClientMenu?,
-        transitioningMenu: GModGameClientMenu?
+        transitioningMenu: GModGameClientMenu?,
+        hasVisibleOverlayPanels: Bool = false
     ) -> Bool {
-        activeMenu != nil && transitioningMenu == nil
+        transitioningMenu == nil &&
+            (activeMenu != nil || hasVisibleOverlayPanels)
     }
 }
 
 struct GModGameSurfaceRefreshRequest: Sendable, Equatable {
     let generation: GModGameSessionGenerationToken
+    let scope: GMLuaVGUIRenderScope
+
+    init(
+        generation: GModGameSessionGenerationToken,
+        scope: GMLuaVGUIRenderScope = .all
+    ) {
+        self.generation = generation
+        self.scope = scope
+    }
 }
 
 /// One renderer refresh can be expensive while pointer callbacks must remain

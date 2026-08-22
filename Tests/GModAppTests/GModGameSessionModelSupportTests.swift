@@ -74,6 +74,10 @@ final class GModGameSessionModelSupportTests: XCTestCase {
             []
         )
         XCTAssertEqual(
+            state.reduce(.homeMenuAction(.openConsole)),
+            []
+        )
+        XCTAssertEqual(
             state.reduce(.homeMenuAction(.quit)),
             [.presentQuitUnavailable]
         )
@@ -471,10 +475,15 @@ final class GModGameSessionModelSupportTests: XCTestCase {
         ))
     }
 
-    func testSurfaceCaptureRunsOnlyForStableForegroundClientMenu() {
+    func testSurfaceCaptureRunsForStableForegroundMenuOrVisibleOverlay() {
         XCTAssertFalse(GModGameClientSurfaceCapturePolicy.shouldCapture(
             activeMenu: nil,
             transitioningMenu: nil
+        ))
+        XCTAssertTrue(GModGameClientSurfaceCapturePolicy.shouldCapture(
+            activeMenu: nil,
+            transitioningMenu: nil,
+            hasVisibleOverlayPanels: true
         ))
         XCTAssertTrue(GModGameClientSurfaceCapturePolicy.shouldCapture(
             activeMenu: .spawn,
@@ -487,6 +496,11 @@ final class GModGameSessionModelSupportTests: XCTestCase {
         XCTAssertFalse(GModGameClientSurfaceCapturePolicy.shouldCapture(
             activeMenu: .spawn,
             transitioningMenu: .context
+        ))
+        XCTAssertFalse(GModGameClientSurfaceCapturePolicy.shouldCapture(
+            activeMenu: nil,
+            transitioningMenu: .spawn,
+            hasVisibleOverlayPanels: true
         ))
     }
 
@@ -518,6 +532,13 @@ final class GModGameSessionModelSupportTests: XCTestCase {
         queue.submit(first)
         queue.removeAll()
         XCTAssertNil(queue.takeLatest())
+
+        let overlay = GModGameSurfaceRefreshRequest(
+            generation: latestGeneration,
+            scope: .overlay
+        )
+        queue.submit(overlay)
+        XCTAssertEqual(queue.takeLatest(), overlay)
     }
 
     func testPointerQueueIsBoundedCoalescesMovesAndRetainsCriticalOrder() {

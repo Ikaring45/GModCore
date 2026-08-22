@@ -3,7 +3,7 @@ import GModEngine
 import GModGameAssets
 
 final class GMLuaMenuSessionTests: XCTestCase {
-    func testShippedMenuDermaRendersAndRoutesHomeOptionsProblemsAndConsole()
+    func testDermaUtilitiesRenderHostStateAndRouteSettingsProblemsAndConsole()
         throws
     {
         let files = try GMLuaHostDirectoryFileSystem(
@@ -20,50 +20,51 @@ final class GMLuaMenuSessionTests: XCTestCase {
         let report = try session.start()
         XCTAssertEqual(report.loadedPaths.first, "lua/includes/init.lua")
         XCTAssertEqual(report.loadedPaths.last, "lua/skins/default.lua")
-        XCTAssertGreaterThanOrEqual(report.rootPanelCount, 4)
+        XCTAssertGreaterThanOrEqual(report.rootPanelCount, 3)
 
         var frame = try session.renderFrame(
             viewportWidth: 1_024,
             viewportHeight: 768
         )
-        XCTAssertTrue(texts(in: frame).contains("Garry's PAD"))
-        XCTAssertTrue(texts(in: frame).contains("gm_construct"))
-        XCTAssertTrue(texts(in: frame).contains("Options"))
-        XCTAssertTrue(texts(in: frame).contains("Problems"))
-        XCTAssertTrue(texts(in: frame).contains("Console"))
+        XCTAssertFalse(texts(in: frame).contains("Garry's PAD"))
 
-        try tap(x: 275, y: 227, in: session)
-        XCTAssertEqual(session.drainActions(), [.startMap("gm_construct")])
-
-        try tap(x: 523, y: 227, in: session)
+        try session.updateSettings(GMLuaMenuSettingsSnapshot(
+            audioEnabled: true,
+            menuBackgroundsEnabled: false,
+            preferredFramesPerSecond: 60,
+            invertTouchLookY: true,
+            touchLookSensitivity: 0.34
+        ))
+        try session.present(.settings)
         frame = try session.renderFrame(viewportWidth: 1_024, viewportHeight: 768)
-        XCTAssertTrue(texts(in: frame).contains("Toggle Audio"))
-        try tap(x: 401, y: 351, in: session)
+        XCTAssertTrue(texts(in: frame).contains("Settings"))
+        XCTAssertTrue(texts(in: frame).contains("Menu backgrounds: Off"))
+        XCTAssertTrue(texts(in: frame).contains("Invert touch look Y: On"))
+        try tap(x: 250, y: 270, in: session)
         XCTAssertEqual(session.drainActions(), [.setAudioEnabled(false)])
-        try tap(x: 600, y: 475, in: session)
 
         try session.updateProblems([
-            "Lua: no current timer failures",
+            "Lua: 現在のtimer failureはありません",
             "Renderer: physical iPad validation pending",
         ])
-        try tap(x: 523, y: 279, in: session)
+        try session.present(.problems)
         frame = try session.renderFrame(viewportWidth: 1_024, viewportHeight: 768)
         let renderedText = texts(in: frame)
         XCTAssertTrue(renderedText.contains(where: {
             $0.contains("physical iPad validation pending")
         }))
-        try tap(x: 700, y: 553, in: session)
+        XCTAssertTrue(renderedText.contains(where: {
+            $0.contains("現在のtimer failureはありません")
+        }))
 
-        // Raising Console after the other frames exercises real Derma popup
-        // ordering instead of bypassing VGUI with a direct native call.
         try session.updateConsoleLines([
             "GModLua Console initialized",
-            "[CLIENT][VGUI] original Surface route ready",
+            "[CLIENT][VGUI] Surface route ready 日本語",
         ])
-        try tap(x: 523, y: 331, in: session)
+        try session.present(.console)
         frame = try session.renderFrame(viewportWidth: 1_024, viewportHeight: 768)
         XCTAssertTrue(texts(in: frame).contains(where: {
-            $0.contains("original Surface route ready")
+            $0.contains("Surface route ready 日本語")
         }))
         XCTAssertNotNil(try session.insertText("status日本"))
         XCTAssertNotNil(try session.deleteTextBackward())
@@ -73,6 +74,13 @@ final class GMLuaMenuSessionTests: XCTestCase {
             session.drainActions(),
             [.executeConsoleLine("status")]
         )
+
+        // Focus may remain on the DTextEntry object after Console is hidden,
+        // but native input must follow visible ancestry rather than target the
+        // hidden utility.
+        try session.present(.problems)
+        XCTAssertNil(try session.insertText(""))
+        XCTAssertNil(try session.submitFocusedTextEntry())
     }
 
     func testMenuSessionIsSingleUseAndBoundsHostRetainedTextAndActions() throws {
