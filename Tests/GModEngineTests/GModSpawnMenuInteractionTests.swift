@@ -657,7 +657,13 @@ final class GModSpawnMenuInteractionTests: XCTestCase {
                 $0.requestedClassName == "DVScrollBar" &&
                 $0.clipRect.width > 0 && $0.clipRect.height > 0
         }))
-        XCTAssertNil(compactTreeByIdentifier[balloonPropSelect.identifier])
+        // Apple and Windows can disagree by one boundary pixel after the
+        // stock Derma layout is rounded. Either fully clipped or a one-pixel
+        // sliver still establishes the pre-scroll state without weakening
+        // the later assertion that scrolling reveals more of PropSelect.
+        let compactPropSelectHeightBefore =
+            compactTreeByIdentifier[balloonPropSelect.identifier]?.clipRect.height ?? 0
+        XCTAssertLessThanOrEqual(compactPropSelectHeightBefore, 1)
 
         let wheelX = stockBalloonVBar.clipRect.x + stockBalloonVBar.clipRect.width / 2
         var wheelPoint: (x: Double, y: Double)?
@@ -743,7 +749,10 @@ final class GModSpawnMenuInteractionTests: XCTestCase {
         let revealedPropSelect = try XCTUnwrap(compactTreeAfter.first(where: {
             $0.identifier == balloonPropSelect.identifier
         }))
-        XCTAssertGreaterThan(revealedPropSelect.clipRect.height, 0)
+        XCTAssertGreaterThan(
+            revealedPropSelect.clipRect.height,
+            compactPropSelectHeightBefore
+        )
         XCTAssertLessThan(revealedPropSelect.clipRect.height, revealedPropSelect.frame.height)
 
         try session.setSpawnMenuOpen(false)

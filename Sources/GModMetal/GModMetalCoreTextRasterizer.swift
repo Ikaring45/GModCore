@@ -274,16 +274,15 @@ public final class GModMetalCoreTextRasterizer:
             throw GModMetalCoreTextRasterizerError.contextCreationFailed
         }
 
-        // The flipped Quartz CTM places multiline bands in top-down order, but
-        // CoreText rasterizes each band's glyph scanlines bottom-up. Surface
-        // textures and Metal UVs are top-left-origin, so normalize each line
-        // once here. Reversing the complete bitmap would incorrectly swap the
-        // order of multiline labels.
-        Self.flipLineRowsToTopLeft(
+        // Quartz exposes this raw bitmap bottom-row first after CoreText draws
+        // through the flipped CTM. That reverses both each glyph and the order
+        // of multiline bands when Metal samples it as a top-left-origin
+        // Surface texture. Normalize the complete bitmap once so both axes of
+        // that vertical reversal are corrected together.
+        Self.flipRowsToTopLeft(
             in: &bytes,
             width: width,
-            height: height,
-            lineHeight: max(1, descriptor.size)
+            height: height
         )
 
         let bitmap = try GModMetalSurfaceBitmap(
@@ -296,29 +295,24 @@ public final class GModMetalCoreTextRasterizer:
         return bitmap
     }
 
-    private static func flipLineRowsToTopLeft(
+    private static func flipRowsToTopLeft(
         in bytes: inout Data,
         width: Int,
-        height: Int,
-        lineHeight: Int
+        height: Int
     ) {
-        guard width > 0, height > 1, lineHeight > 0 else { return }
+        guard width > 0, height > 1 else { return }
         let bytesPerRow = width * 4
         bytes.withUnsafeMutableBytes { rawBytes in
             let pixels = rawBytes.bindMemory(to: UInt8.self)
-            for lineStart in stride(from: 0, to: height, by: lineHeight) {
-                let retainedLineHeight = min(lineHeight, height - lineStart)
-                for localTopRow in 0..<(retainedLineHeight / 2) {
-                    let topRow = lineStart + localTopRow
-                    let bottomRow = lineStart + retainedLineHeight - localTopRow - 1
-                    let topOffset = topRow * bytesPerRow
-                    let bottomOffset = bottomRow * bytesPerRow
-                    for byteOffset in 0..<bytesPerRow {
-                        pixels.swapAt(
-                            topOffset + byteOffset,
-                            bottomOffset + byteOffset
-                        )
-                    }
+            for topRow in 0..<(height / 2) {
+                let bottomRow = height - topRow - 1
+                let topOffset = topRow * bytesPerRow
+                let bottomOffset = bottomRow * bytesPerRow
+                for byteOffset in 0..<bytesPerRow {
+                    pixels.swapAt(
+                        topOffset + byteOffset,
+                        bottomOffset + byteOffset
+                    )
                 }
             }
         }
