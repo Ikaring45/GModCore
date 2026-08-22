@@ -607,7 +607,34 @@ public final class SourceBSPTraceWorkspace: @unchecked Sendable {
         public fileprivate(set) var storageGrowthCount: UInt64 = 0
     }
 
+    /// Actual reusable buffer retention after a trace. Capacities are exposed
+    /// only so focused performance tests can prove that a warmed lane does not
+    /// retain progressively more storage. They do not affect trace results.
+    public struct RetainedStorage: Sendable, Equatable {
+        public let nodeGenerationCapacity: Int
+        public let leafGenerationCapacity: Int
+        public let brushGenerationCapacity: Int
+        public let pendingChildCapacity: Int
+        public let candidateBrushCapacity: Int
+
+        public var totalElementCapacity: Int {
+            nodeGenerationCapacity + leafGenerationCapacity +
+                brushGenerationCapacity + pendingChildCapacity +
+                candidateBrushCapacity
+        }
+    }
+
     public private(set) var metrics = Metrics()
+
+    public var retainedStorage: RetainedStorage {
+        RetainedStorage(
+            nodeGenerationCapacity: nodeGenerations.capacity,
+            leafGenerationCapacity: leafGenerations.capacity,
+            brushGenerationCapacity: brushGenerations.capacity,
+            pendingChildCapacity: pendingChildren.capacity,
+            candidateBrushCapacity: candidateBrushIndices.capacity
+        )
+    }
 
     private var generation: UInt32 = 0
     private var nodeGenerations: ContiguousArray<UInt32> = []
@@ -626,6 +653,10 @@ public final class SourceBSPTraceWorkspace: @unchecked Sendable {
         prepareMarks(&nodeGenerations, count: nodeCount)
         prepareMarks(&leafGenerations, count: leafCount)
         prepareMarks(&brushGenerations, count: brushCount)
+        prepareTraversalBuffers(
+            nodeCount: nodeCount,
+            brushCount: brushCount
+        )
 
         // A wrap is practically unreachable in a game session, but clearing
         // the existing backing buffers keeps the identity exact even then.
@@ -692,6 +723,24 @@ public final class SourceBSPTraceWorkspace: @unchecked Sendable {
         guard marks.count != count else { return }
         marks = ContiguousArray(repeating: 0, count: count)
         metrics.storageGrowthCount &+= 1
+    }
+
+    private func prepareTraversalBuffers(
+        nodeCount: Int,
+        brushCount: Int
+    ) {
+        // One visited node can leave at most one additional sibling pending,
+        // so nodeCount + the root bounds the DFS stack even for shared-child
+        // BSP graphs. Brush generation marks bound the candidate list.
+        let pendingMinimum = max(1, nodeCount + 1)
+        if pendingChildren.capacity < pendingMinimum {
+            pendingChildren.reserveCapacity(pendingMinimum)
+            metrics.storageGrowthCount &+= 1
+        }
+        if candidateBrushIndices.capacity < brushCount {
+            candidateBrushIndices.reserveCapacity(brushCount)
+            metrics.storageGrowthCount &+= 1
+        }
     }
 }
 
