@@ -1,3 +1,4 @@
+import Dispatch
 import Foundation
 import XCTest
 import GModEngine
@@ -407,6 +408,79 @@ final class GMLuaPlatformImageAndVPKTests: XCTestCase {
         )
     }
 
+    func testSourceMaterialCacheCannotPublishDelayedOldMountAfterSwap() throws {
+        let materialPath = "materials/synthetic/epoch_race.vmt"
+        let texturePath = "materials/synthetic/epoch_race.vtf"
+        let material = Data(
+            "\"UnlitGeneric\" { \"$basetexture\" \"synthetic/epoch_race\" }".utf8
+        )
+        let oldPixels = [UInt8](arrayLiteral: 255, 0, 0, 255)
+        let newPixels = [UInt8](arrayLiteral: 0, 0, 255, 255)
+        let source = DelayedSourceMaterialMount(
+            files: [
+                materialPath: material,
+                texturePath: makeRGBA8888VTF(
+                    width: 1,
+                    height: 1,
+                    pixels: oldPixels
+                ),
+            ],
+            delayedPath: texturePath
+        )
+        let resolver = GMLuaSourceMaterialResolver(
+            maximumCachedEntryCount: 1,
+            maximumCachedByteCount: 64,
+            contentEpochProvider: { source.contentEpoch },
+            loader: { source.data(for: $0) }
+        )
+        let oldResolution = SourceMaterialAsyncResult()
+        let workerFinished = DispatchSemaphore(value: 0)
+
+        DispatchQueue(
+            label: "GMLuaPlatformImageAndVPKTests.oldMountDecode"
+        ).async {
+            oldResolution.record(Result {
+                try resolver.resolve(named: "synthetic/epoch_race")
+            })
+            workerFinished.signal()
+        }
+        guard source.delayedReadStarted.wait(timeout: .now() + 10) == .success
+        else {
+            source.releaseDelayedRead.signal()
+            return XCTFail("old-map VTF decode did not reach its deterministic gate")
+        }
+
+        source.swap(to: [
+            materialPath: material,
+            texturePath: makeRGBA8888VTF(
+                width: 1,
+                height: 1,
+                pixels: newPixels
+            ),
+        ])
+        resolver.removeAllCachedMaterials()
+        XCTAssertEqual(
+            try resolver.resolve(named: "synthetic/epoch_race").rgbaBytes,
+            Data(newPixels)
+        )
+
+        source.releaseDelayedRead.signal()
+        guard workerFinished.wait(timeout: .now() + 10) == .success else {
+            return XCTFail("delayed old-map decode did not finish")
+        }
+        XCTAssertEqual(
+            try XCTUnwrap(oldResolution.value).get().rgbaBytes,
+            Data(oldPixels)
+        )
+        XCTAssertEqual(
+            try resolver.resolve(named: "synthetic/epoch_race").rgbaBytes,
+            Data(newPixels),
+            "the delayed old cache entry must be unreachable after the swap"
+        )
+        XCTAssertLessThanOrEqual(resolver.cachedEntryCount, 1)
+        XCTAssertLessThanOrEqual(resolver.cachedImageByteCount, 64)
+    }
+
     func testVPKRejectsChecksumMismatchAndV2FileDataSectionOverrun() throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -604,6 +678,76 @@ private final class SourceMaterialLoadRecorder: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return counts[path] ?? 0
+    }
+}
+
+private final class SourceMaterialAsyncResult: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: Result<GMLuaResolvedSourceMaterial, Error>?
+
+    func record(_ result: Result<GMLuaResolvedSourceMaterial, Error>) {
+        lock.lock()
+        storage = result
+        lock.unlock()
+    }
+
+    var value: Result<GMLuaResolvedSourceMaterial, Error>? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+}
+
+private final class DelayedSourceMaterialMount: @unchecked Sendable {
+    let delayedReadStarted = DispatchSemaphore(value: 0)
+    let releaseDelayedRead = DispatchSemaphore(value: 0)
+
+    private let lock = NSLock()
+    private let delayedPath: String
+    private var files: [String: Data]
+    private var epochStorage: UInt64 = 1
+    private var shouldDelay = true
+
+    init(files: [String: Data], delayedPath: String) {
+        self.files = Dictionary(
+            uniqueKeysWithValues: files.map { ($0.key.lowercased(), $0.value) }
+        )
+        self.delayedPath = delayedPath.lowercased()
+    }
+
+    var contentEpoch: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return epochStorage
+    }
+
+    func data(for logicalPath: String) -> Data? {
+        let key = logicalPath.lowercased()
+        lock.lock()
+        let result = files[key]
+        let delayThisRead = key == delayedPath && shouldDelay
+        if delayThisRead {
+            shouldDelay = false
+        }
+        lock.unlock()
+
+        if delayThisRead {
+            delayedReadStarted.signal()
+            releaseDelayedRead.wait()
+        }
+        return result
+    }
+
+    func swap(to replacement: [String: Data]) {
+        lock.lock()
+        precondition(epochStorage < UInt64.max)
+        files = Dictionary(
+            uniqueKeysWithValues: replacement.map {
+                ($0.key.lowercased(), $0.value)
+            }
+        )
+        epochStorage += 1
+        lock.unlock()
     }
 }
 

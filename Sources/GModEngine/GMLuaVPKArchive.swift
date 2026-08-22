@@ -60,6 +60,11 @@ public final class GMLuaVPKArchive: @unchecked Sendable {
     public let directoryFileURL: URL
     public let version: UInt32
     public let fileCount: Int
+    /// Exact normalized archive paths in deterministic byte order. VPK names
+    /// are byte strings rather than guaranteed UTF-8, so callers that project
+    /// them into a host `String` filesystem must explicitly reject names that
+    /// are not valid UTF-8 instead of silently replacing bytes.
+    public let logicalFilePaths: [LuaString]
 
     private let directoryDataOffset: UInt64
     private let directoryFilePath: String
@@ -266,6 +271,11 @@ public final class GMLuaVPKArchive: @unchecked Sendable {
         }
         entries = parsedEntries
         fileCount = parsedEntries.count
+        logicalFilePaths = parsedEntries.keys.sorted {
+            $0.lexicographicallyPrecedes($1)
+        }.map {
+            LuaString(bytes: Array($0))
+        }
     }
 
     public func contains(_ logicalPath: LuaString) -> Bool {
@@ -560,6 +570,16 @@ public final class GMLuaVPKMaterialPixelResolver: GMLuaMaterialMetadataResolver,
         try sourceMaterialResolver.resolve(
             named: materialName,
             encodedParameters: encodedParameters
+        )
+    }
+
+    public func resolveTexture(
+        named textureName: String,
+        mipPolicy: GMLuaSourceTextureMipPolicy = .mipZeroOnly
+    ) throws -> GMLuaResolvedSourceTexture? {
+        try sourceMaterialResolver.resolveTexture(
+            named: textureName,
+            mipPolicy: mipPolicy
         )
     }
 

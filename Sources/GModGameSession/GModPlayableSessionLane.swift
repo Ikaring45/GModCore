@@ -401,6 +401,20 @@ public actor GModPlayableSessionLane {
         return session.clientCanonicalEntitySnapshots
     }
 
+    /// Shares the session's already-validated, immutable BSP pak index with
+    /// the App renderer. Returning this Sendable read-only object avoids a
+    /// second 40+ MB map read and keeps Lua and Metal on the same GAME layer.
+    public func mapPakFileSystem(
+        expectedGeneration: UInt64? = nil
+    ) throws -> SourceBSPPakFileSystem {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        return session.mapPakFileSystem
+    }
+
     /// Returns the renderer-neutral dynamic prop scene only when its visual
     /// revision differs from the caller's last consumed revision.
     public func clientDynamicEntityRenderScene(

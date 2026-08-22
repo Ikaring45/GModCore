@@ -392,6 +392,10 @@ public final class GModPlayableSession {
     public let attestedPropPhysicsAssetResolver:
         GModAttestedPropPhysicsAssetResolver?
     public let bsp: SourceBSP
+    /// One immutable index shared by both Lua realms and reusable by the App
+    /// material loader. The BSP pak is never reparsed per realm or renderer.
+    public let mapPakFileSystem: SourceBSPPakFileSystem
+    public let clientMaterialResolver: GMLuaVPKMaterialPixelResolver
     public let worldMesh: GModWorldRenderMesh
     public let worldIdentity: GMLuaSourceEntityIdentity
     public let spawnPoint: GModMapSpawnPoint
@@ -401,8 +405,8 @@ public final class GModPlayableSession {
     public let serverToolActionBridge: SourceCanonicalToolActionBridge
     public let clientToolActionBridge: SourceCanonicalToolActionBridge
 
-    private let serverFileSystem: GMLuaMountedFileSystem
-    private let clientFileSystem: GMLuaMountedFileSystem
+    let serverFileSystem: GMLuaMountedFileSystem
+    let clientFileSystem: GMLuaMountedFileSystem
     private let worldWalkSolver: SourceWorldWalkSolver
     private let playerIdentity: SourceCanonicalEntityIdentity
     private let studioRenderableModelCache: GModStudioRenderableModelCache?
@@ -619,6 +623,10 @@ public final class GModPlayableSession {
         let bspSHA256 = bspHasher.hexadecimalDigest()
         progress(.init(stage: .parsingWorld))
         let loadedBSP = try SourceBSP(data: bspData)
+        let loadedMapPakFileSystem = try SourceBSPPakFileSystem(bsp: loadedBSP)
+        let loadedContentPackGameFileSystem = try loadedContentPackAssetSource.map {
+            try GModContentPackGameFileSystem(source: $0)
+        }
         progress(.init(stage: .buildingWorldGeometry))
         let loadedWorldMesh = try GModWorldRenderMesh.build(
             from: loadedBSP,
@@ -666,8 +674,14 @@ public final class GModPlayableSession {
         progress(.init(stage: .startingServerLua))
         let systemTime = GMLuaMonotonicSystemTimeSource()
         let session = GMLuaSharedSession()
-        let serverFiles = try Self.makeMountedContentFileSystem()
-        let clientFiles = try Self.makeMountedContentFileSystem()
+        let serverFiles = try Self.makeMountedContentFileSystem(
+            mapPakFileSystem: loadedMapPakFileSystem,
+            contentPackFileSystem: loadedContentPackGameFileSystem
+        )
+        let clientFiles = try Self.makeMountedContentFileSystem(
+            mapPakFileSystem: loadedMapPakFileSystem,
+            contentPackFileSystem: loadedContentPackGameFileSystem
+        )
         let environment = try GMLuaGameEnvironmentConfiguration(
             maxPlayers: configuration.maxPlayers,
             mapName: configuration.map.rawValue,
@@ -739,11 +753,12 @@ public final class GModPlayableSession {
                 }
                 return .handled
             }
+            let loadedClientMaterialResolver = GMLuaVPKMaterialPixelResolver(
+                looseFileSystem: clientFiles,
+                archivesInPriorityOrder: []
+            )
             client.resourceRegistry?.setMaterialPixelResolver(
-                GMLuaVPKMaterialPixelResolver(
-                    looseFileSystem: clientFiles,
-                    archivesInPriorityOrder: []
-                )
+                loadedClientMaterialResolver
             )
 
             let activeModelValidator: SourceCanonicalModelValidator?
@@ -956,6 +971,8 @@ public final class GModPlayableSession {
             attestedPropPhysicsAssetResolver =
                 loadedAttestedPropPhysicsAssetResolver
             bsp = loadedBSP
+            mapPakFileSystem = loadedMapPakFileSystem
+            clientMaterialResolver = loadedClientMaterialResolver
             worldMesh = loadedWorldMesh
             worldIdentity = sourceWorldIdentity
             spawnPoint = loadedSpawn
@@ -1396,15 +1413,24 @@ public final class GModPlayableSession {
         ).playerWalkState
     }
 
-    private static func makeMountedContentFileSystem() throws
+    static func makeMountedContentFileSystem(
+        mapPakFileSystem: SourceBSPPakFileSystem,
+        contentPackFileSystem: GModContentPackGameFileSystem? = nil,
+        bundledFileSystemForTesting: (any LuaVirtualFileSystem)? = nil
+    ) throws
         -> GMLuaMountedFileSystem
     {
-        let bundled = try GMLuaHostDirectoryFileSystem(
-            rootURL: GModGameAssets.clientContentRootURL(),
-            writable: false
-        )
+        let bundled: any LuaVirtualFileSystem
+        if let bundledFileSystemForTesting {
+            bundled = bundledFileSystemForTesting
+        } else {
+            bundled = try GMLuaHostDirectoryFileSystem(
+                rootURL: GModGameAssets.clientContentRootURL(),
+                writable: false
+            )
+        }
         let writable = try LuaMemoryFileSystem()
-        return GMLuaMountedFileSystem(mounts: [
+        var mounts = [
             try GMLuaFileMount(
                 name: "runtime-data",
                 priority: 1_000,
@@ -1412,12 +1438,29 @@ public final class GModPlayableSession {
                 fileSystem: writable
             ),
             try GMLuaFileMount(
+                name: "map-pakfile",
+                priority: 500,
+                writable: false,
+                fileSystem: mapPakFileSystem
+            ),
+        ]
+        if let contentPackFileSystem {
+            mounts.append(try GMLuaFileMount(
+                name: "content-pack-game",
+                priority: 250,
+                writable: false,
+                fileSystem: contentPackFileSystem
+            ))
+        }
+        mounts.append(
+            try GMLuaFileMount(
                 name: "bundled-gmod-base",
                 priority: 0,
                 writable: false,
                 fileSystem: bundled
-            ),
-        ])
+            )
+        )
+        return GMLuaMountedFileSystem(mounts: mounts)
     }
 
     private static func drain(

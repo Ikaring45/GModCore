@@ -161,6 +161,9 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
     @unchecked Sendable
 {
     public typealias Loader = @Sendable (_ logicalPath: String) throws -> Data?
+    /// Monotonic identity of the loader's active content/search-path mount.
+    /// A request retains the value captured before its first cache lookup.
+    public typealias ContentEpochProvider = @Sendable () -> UInt64
 
     public static let defaultMaximumEncodedMaterialByteCount = 1 * 1_024 * 1_024
     public static let defaultMaximumEncodedTextureByteCount = 16 * 1_024 * 1_024
@@ -172,12 +175,14 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
     public static let defaultMaximumDecodedTextureByteCount = 16 * 1_024 * 1_024
 
     private struct Key: Hashable {
+        let contentEpoch: UInt64
         let canonicalMaterialPath: String
         let encodedParameters: LuaString?
         let mipPolicy: GMLuaSourceTextureMipPolicy
     }
 
     private let loader: Loader
+    private let contentEpochProvider: ContentEpochProvider
     private let maximumPatchDepth: Int
     private let maximumEncodedMaterialByteCount: Int
     private let maximumTextureWidth: Int
@@ -206,6 +211,7 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
             GMLuaSourceMaterialResolver.defaultMaximumTexturePixelCount,
         maximumDecodedTextureByteCount: Int =
             GMLuaSourceMaterialResolver.defaultMaximumDecodedTextureByteCount,
+        contentEpochProvider: @escaping ContentEpochProvider = { 0 },
         loader: @escaping Loader
     ) {
         self.maximumPatchDepth = max(0, maximumPatchDepth)
@@ -219,6 +225,7 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
             maximumPixelCount: max(1, maximumTexturePixelCount),
             maximumDecodedBytes: max(1, maximumDecodedTextureByteCount)
         )
+        self.contentEpochProvider = contentEpochProvider
         self.loader = loader
     }
 
@@ -296,7 +303,11 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
               let logicalPath = try Self.normalizedMaterialPath(sourceName) else {
             throw GMLuaSourceMaterialError.unsafeLogicalPath(sourceName)
         }
+        // Capture the mount identity before touching either cache or loader.
+        // A concurrent content swap can let this request finish, but its old-
+        // epoch result can never satisfy a lookup begun against the new mount.
         let key = Key(
+            contentEpoch: contentEpochProvider(),
             canonicalMaterialPath: logicalPath.lowercased(),
             encodedParameters: encodedParameters,
             mipPolicy: mipPolicy
@@ -317,6 +328,15 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
         }
         store(resolved, for: key)
         return resolved
+    }
+
+    /// Resolves one explicit Source VTF through the same bounded loader used
+    /// by material base textures and Water normal maps.
+    public func resolveTexture(
+        named textureName: String,
+        mipPolicy: GMLuaSourceTextureMipPolicy = .mipZeroOnly
+    ) throws -> GMLuaResolvedSourceTexture? {
+        try resolveSourceTexture(named: textureName, mipPolicy: mipPolicy)
     }
 
     public func resolveWater(
