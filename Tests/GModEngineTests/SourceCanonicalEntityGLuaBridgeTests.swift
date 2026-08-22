@@ -14,13 +14,27 @@ final class SourceCanonicalEntityGLuaBridgeTests: XCTestCase {
             modelPath: acceptedModel.path
         )
         let bodyGroupMesh = makeBodyGroupMesh()
+        let appearance = try SourceStudioModelAppearanceLayout(
+            checksum: bodyGroupMesh.checksum,
+            modelName: bodyGroupMesh.modelName,
+            skinFamilyCount: 4,
+            bodyGroups: bodyGroupMesh.bodyParts.map { bodyPart in
+                SourceStudioBodyGroupAppearance(
+                    id: bodyPart.index,
+                    name: bodyPart.name,
+                    modelSelectionBase: bodyPart.modelSelectionBase,
+                    submodelNames: bodyPart.models.map(\.name)
+                )
+            }
+        )
         let bodyGroupLayout = try SourceStudioBodyGroupLayout(
             bodyParts: bodyGroupMesh.bodyParts.map {
                 SourceStudioBodyGroupSelectionDescriptor(
                     modelSelectionBase: $0.modelSelectionBase,
                     modelCount: $0.models.count
                 )
-            }
+            },
+            appearance: appearance
         )
         let adapter = try GMLuaSourceRuntimeAdapter(
             serverRuntime: runtime,
@@ -90,8 +104,17 @@ final class SourceCanonicalEntityGLuaBridgeTests: XCTestCase {
             prop:SetModel("models/props_c17/oildrum001.mdl")
             prop:SetSkin(3)
             assert(prop:GetSkin() == 3)
+            assert(prop:SkinCount() == 4)
             prop:SetBodyGroups("12")
             assert(prop:GetNumBodyGroups() == 2)
+            assert(prop:GetBodygroupName(0) == "body_0")
+            assert(prop:GetBodygroupCount(1) == 3)
+            local bodygroups = prop:GetBodyGroups()
+            assert(#bodygroups == 2)
+            assert(bodygroups[1].id == 0)
+            assert(bodygroups[1].name == "body_0")
+            assert(bodygroups[1].num == 2)
+            assert(bodygroups[1].submodels[0] == "model_0")
             assert(prop:GetBodygroup(0) == 1)
             assert(prop:GetBodygroup(1) == 2)
             assert(prop:GetBodygroup(-1) == 0)

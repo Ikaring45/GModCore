@@ -50,6 +50,15 @@ public protocol SourceCanonicalEntityLuaHost: AnyObject {
         for model: SourceEntityModelReference
     ) throws -> SourceStudioBodyGroupLayout
 
+    func canonicalModelAppearance(
+        for model: SourceEntityModelReference
+    ) throws -> SourceStudioModelAppearanceLayout
+
+    func setCanonicalSkin(
+        _ skinFamily: Int,
+        for identity: SourceCanonicalEntityIdentity
+    ) throws -> SourceCanonicalEntitySnapshot
+
     func setCanonicalBodyGroup(
         _ bodyGroupID: Int,
         selection: Int,
@@ -775,6 +784,16 @@ public enum SourceCanonicalEntityGLuaBridge {
             let snapshot = try requiredSnapshot(arguments.first, function: "Entity:GetSkin")
             return [.number(Double(snapshot.skin))]
         }
+        try setMethod("Entity:SkinCount", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Entity:SkinCount"
+            )
+            guard let model = snapshot.model else { return [.number(0)] }
+            let appearance = try requiredHost("Entity:SkinCount")
+                .canonicalModelAppearance(for: model)
+            return [.number(Double(appearance.skinFamilyCount))]
+        }
         try setMethod("Entity:GetMaterial", on: entityMetatable) { arguments in
             let snapshot = try requiredSnapshot(
                 arguments.first,
@@ -809,6 +828,90 @@ public enum SourceCanonicalEntityGLuaBridge {
                 forBodyGroupID: bodyGroupID,
                 bodyValue: snapshot.bodyValue
             )))]
+        }
+        try setMethod("Entity:GetBodygroupCount", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Entity:GetBodygroupCount"
+            )
+            let bodyGroupID = try requiredSignedInteger(
+                arguments,
+                index: 1,
+                function: "Entity:GetBodygroupCount"
+            )
+            guard let model = snapshot.model else { return [.number(0)] }
+            let layout = try requiredHost("Entity:GetBodygroupCount")
+                .canonicalBodyGroupLayout(for: model)
+            guard layout.bodyParts.indices.contains(bodyGroupID) else {
+                return [.number(0)]
+            }
+            return [.number(Double(layout.bodyParts[bodyGroupID].modelCount))]
+        }
+        try setMethod("Entity:GetBodygroupName", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Entity:GetBodygroupName"
+            )
+            let bodyGroupID = try requiredSignedInteger(
+                arguments,
+                index: 1,
+                function: "Entity:GetBodygroupName"
+            )
+            guard let model = snapshot.model else {
+                return [.string(LuaString(""))]
+            }
+            let appearance = try requiredHost("Entity:GetBodygroupName")
+                .canonicalModelAppearance(for: model)
+            return [.string(LuaString(
+                appearance.bodyGroup(id: bodyGroupID)?.name ?? ""
+            ))]
+        }
+        try setMethod("Entity:GetBodyGroups", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Entity:GetBodyGroups"
+            )
+            let result = LuaTable()
+            guard let model = snapshot.model else { return [.table(result)] }
+            let appearance = try requiredHost("Entity:GetBodyGroups")
+                .canonicalModelAppearance(for: model)
+            for bodyGroup in appearance.bodyGroups {
+                let entry = LuaTable()
+                try state.setRawTableValue(
+                    .number(Double(bodyGroup.id)),
+                    for: .string(LuaString("id")),
+                    in: entry
+                )
+                try state.setRawTableValue(
+                    .string(LuaString(bodyGroup.name)),
+                    for: .string(LuaString("name")),
+                    in: entry
+                )
+                try state.setRawTableValue(
+                    .number(Double(bodyGroup.modelCount)),
+                    for: .string(LuaString("num")),
+                    in: entry
+                )
+                let submodels = LuaTable()
+                for (submodelID, name) in bodyGroup.submodelNames.enumerated() {
+                    try state.setRawTableValue(
+                        .string(LuaString(name)),
+                        for: .number(Double(submodelID)),
+                        in: submodels
+                    )
+                }
+                try state.setRawTableValue(
+                    .table(submodels),
+                    for: .string(LuaString("submodels")),
+                    in: entry
+                )
+                try state.setRawTableValue(
+                    .table(entry),
+                    for: .number(Double(bodyGroup.id + 1)),
+                    in: result
+                )
+            }
+            return [.table(result)]
         }
         // `lua/includes/extensions/entity.lua` implements the public
         // Entity:GetColor/SetColor methods over these native four-part APIs.
@@ -1456,10 +1559,10 @@ public enum SourceCanonicalEntityGLuaBridge {
         try setMethod("Entity:SetSkin", on: entityMetatable) { arguments in
             let snapshot = try requiredSnapshot(arguments.first, function: "Entity:SetSkin")
             let skin = try requiredInteger(arguments, index: 1, function: "Entity:SetSkin")
-            let host = try requiredHost("Entity:SetSkin")
-            _ = try host.updateCanonicalEntity(snapshot.identity) { candidate in
-                candidate.skin = skin
-            }
+            _ = try requiredHost("Entity:SetSkin").setCanonicalSkin(
+                skin,
+                for: snapshot.identity
+            )
             return []
         }
         try setMethod("Entity:SetMaterial", on: entityMetatable) { arguments in

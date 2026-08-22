@@ -50,6 +50,8 @@ public enum GMLuaSourceRuntimeAdapterError: Error, CustomStringConvertible {
     case canonicalBodyGroupLayoutResolverUnavailable
     case canonicalBodyGroupLayoutUnavailable(SourceEntityModelReference)
     case canonicalBodyGroupModelMissing(SourceCanonicalEntityIdentity)
+    case canonicalAppearanceUnavailable(SourceEntityModelReference)
+    case canonicalSkinModelMissing(SourceCanonicalEntityIdentity)
     case canonicalMaterialOverrideResolverUnavailable
     case canonicalPhysicsBodyAlreadyRegistered(SourcePhysicsBodyID)
     case canonicalPhysicsBodyMissing(SourcePhysicsBodyID)
@@ -94,6 +96,10 @@ public enum GMLuaSourceRuntimeAdapterError: Error, CustomStringConvertible {
             return "canonical Studio body-group layout is unavailable for \(model.path)"
         case let .canonicalBodyGroupModelMissing(identity):
             return "Source entity EHANDLE \(identity.handle.rawValue) has no Studio model for body-group resolution"
+        case let .canonicalAppearanceUnavailable(model):
+            return "canonical Studio appearance metadata is unavailable for \(model.path)"
+        case let .canonicalSkinModelMissing(identity):
+            return "Source entity EHANDLE \(identity.handle.rawValue) has no Studio model for skin-family resolution"
         case .canonicalMaterialOverrideResolverUnavailable:
             return "canonical Source GAME material override resolver is unavailable"
         case let .canonicalPhysicsBodyAlreadyRegistered(bodyID):
@@ -1117,6 +1123,65 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
             defer { mutationLock.unlock() }
             try ensureOpenLocked()
             return try resolvedCanonicalBodyGroupLayoutLocked(for: model)
+        }
+    }
+
+    /// Returns names, submodel names, and skin-family count from the exact
+    /// Studio asset already selected by the body-group resolver. An attested
+    /// base/count-only layout cannot be promoted to full appearance metadata.
+    public func canonicalModelAppearance(
+        for model: SourceEntityModelReference
+    ) throws -> SourceStudioModelAppearanceLayout {
+        try netTransport.withExclusiveLifecycleBoundary {
+            mutationLock.lock()
+            defer { mutationLock.unlock() }
+            try ensureOpenLocked()
+            let layout = try resolvedCanonicalBodyGroupLayoutLocked(for: model)
+            guard let appearance = layout.appearance else {
+                throw GMLuaSourceRuntimeAdapterError
+                    .canonicalAppearanceUnavailable(model)
+            }
+            return appearance
+        }
+    }
+
+    /// Validates one Studio skin-family index against the current model before
+    /// committing the canonical state and its SERVER replication journal.
+    /// Rejected values consume neither a revision nor a FIFO operation.
+    @discardableResult
+    public func setCanonicalSkin(
+        _ skinFamily: Int,
+        for identity: SourceCanonicalEntityIdentity
+    ) throws -> SourceCanonicalEntitySnapshot {
+        try withMutationBoundary {
+            try requireCanonicalServerProjectionLocked(identity)
+            guard let current = canonicalEntities.snapshot(for: identity) else {
+                throw GMLuaSourceRuntimeAdapterError.unknownEntity(identity)
+            }
+            guard let model = current.model else {
+                throw GMLuaSourceRuntimeAdapterError
+                    .canonicalSkinModelMissing(identity)
+            }
+            let layout = try resolvedCanonicalBodyGroupLayoutLocked(for: model)
+            guard let appearance = layout.appearance else {
+                throw GMLuaSourceRuntimeAdapterError
+                    .canonicalAppearanceUnavailable(model)
+            }
+            try appearance.validateSkinFamily(skinFamily)
+            guard current.skin != skinFamily else { return current }
+
+            try preflightCanonicalMutationJournalLocked(additionalOperations: 1)
+            return try canonicalEntities.update(
+                identity,
+                { candidate in
+                    candidate.skin = skinFamily
+                },
+                publishing: { [unowned self] snapshot in
+                    _ = try self.requiredServerRegistryLocked()
+                        .applyAuthoritativeSnapshot(snapshot)
+                    self.canonicalMutationJournal.append(.update(snapshot))
+                }
+            )
         }
     }
 

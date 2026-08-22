@@ -132,6 +132,15 @@ final class GModStudioModelRepositoryTests: XCTestCase {
             .init(modelSelectionBase: 1, modelCount: 2),
             .init(modelSelectionBase: 2, modelCount: 3),
         ])
+        XCTAssertEqual(layout.appearance?.skinFamilyCount, 0)
+        XCTAssertEqual(
+            layout.appearance?.bodyGroups.map(\.name),
+            ["body_0", "body_1"]
+        )
+        XCTAssertEqual(
+            layout.appearance?.bodyGroups[1].submodelNames,
+            ["model_0", "model_1", "model_2"]
+        )
         XCTAssertEqual(
             try repository.bodyValue(
                 for: model,

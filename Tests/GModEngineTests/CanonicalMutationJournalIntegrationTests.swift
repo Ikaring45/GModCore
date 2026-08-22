@@ -15,6 +15,16 @@ final class CanonicalMutationJournalIntegrationTests: XCTestCase {
         let propAsset = try makeAttestedPropPhysicsTestAsset(
             modelPath: acceptedModel.path
         )
+        let appearance = try SourceStudioModelAppearanceLayout(
+            checksum: propAsset.studioChecksum,
+            modelName: acceptedModel.path,
+            skinFamilyCount: 3,
+            bodyGroups: []
+        )
+        let appearanceLayout = try SourceStudioBodyGroupLayout(
+            bodyParts: [],
+            appearance: appearance
+        )
         let session = try GModPlayableSession(
             configuration: GModPlayableSessionConfiguration(map: .construct),
             textMeasurer: nil,
@@ -24,7 +34,10 @@ final class CanonicalMutationJournalIntegrationTests: XCTestCase {
                 model == acceptedModel && kind == .propPhysics ? .valid : .invalid
             },
             canonicalPropPhysicsAssetResolverForTesting:
-                makeAttestedPropPhysicsTestResolver(asset: propAsset)
+                makeAttestedPropPhysicsTestResolver(asset: propAsset),
+            canonicalBodyGroupLayoutResolverForTesting: { model in
+                model == acceptedModel ? appearanceLayout : nil
+            }
         )
         defer { _ = try? session.close() }
 

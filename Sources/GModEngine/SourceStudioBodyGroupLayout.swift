@@ -8,13 +8,20 @@ public enum SourceStudioBodyGroupLayoutError: Error, Equatable, Sendable {
     case negativeBodyValue(Int)
     case negativeSelection(Int)
     case bodyValueOverflow
+    case appearanceBodyGroupCountMismatch(layout: Int, appearance: Int)
+    case appearanceBodyGroupMismatch(bodyGroupID: Int)
 }
 
 public struct SourceStudioBodyGroupLayout: Equatable, Sendable {
     public let bodyParts: [SourceStudioBodyGroupSelectionDescriptor]
+    /// Full names and skin-family metadata when the resolver decoded the real
+    /// render asset. Exact body selection can still be supported by separately
+    /// attested metadata while richer appearance queries fail closed.
+    public let appearance: SourceStudioModelAppearanceLayout?
 
     public init(
-        bodyParts: [SourceStudioBodyGroupSelectionDescriptor]
+        bodyParts: [SourceStudioBodyGroupSelectionDescriptor],
+        appearance: SourceStudioModelAppearanceLayout? = nil
     ) throws {
         for (bodyGroupID, bodyPart) in bodyParts.enumerated() {
             guard bodyPart.modelCount > 0 else {
@@ -31,7 +38,26 @@ public struct SourceStudioBodyGroupLayout: Equatable, Sendable {
                     )
             }
         }
+        if let appearance {
+            guard appearance.bodyGroups.count == bodyParts.count else {
+                throw SourceStudioBodyGroupLayoutError
+                    .appearanceBodyGroupCountMismatch(
+                        layout: bodyParts.count,
+                        appearance: appearance.bodyGroups.count
+                    )
+            }
+            for (bodyGroupID, bodyPart) in bodyParts.enumerated() {
+                guard appearance.bodyGroups[bodyGroupID]
+                        .selectionDescriptor == bodyPart else {
+                    throw SourceStudioBodyGroupLayoutError
+                        .appearanceBodyGroupMismatch(
+                            bodyGroupID: bodyGroupID
+                        )
+                }
+            }
+        }
         self.bodyParts = bodyParts
+        self.appearance = appearance
     }
 
     public var bodyGroupCount: Int { bodyParts.count }

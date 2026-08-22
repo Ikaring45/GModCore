@@ -57,6 +57,8 @@ public enum GModStudioBodyGroupResolutionError: Error, Sendable, Equatable,
     case assetUnavailable(SourceStudioModelAssetUnavailable)
     case unsupportedMetadata(SourceStudioMeshUnsupportedFeature)
     case meshDecode(SourceStudioModelMeshDecodeError)
+    case materialDecode(SourceStudioModelMaterialDecodeError)
+    case appearance(SourceStudioModelAppearanceLayoutError)
     case inconsistentChecksum(expected: Int32, actual: Int32)
     case inconsistentModelName(expected: String, actual: String)
     case layout(SourceStudioBodyGroupLayoutError)
@@ -71,6 +73,10 @@ public enum GModStudioBodyGroupResolutionError: Error, Sendable, Equatable,
             return "unsupported Studio body-group metadata: \(feature)"
         case let .meshDecode(error):
             return "Studio body-group mesh decode failed: \(error)"
+        case let .materialDecode(error):
+            return "Studio appearance material decode failed: \(error)"
+        case let .appearance(error):
+            return "Studio appearance metadata failed: \(error)"
         case let .inconsistentChecksum(expected, actual):
             return "Studio body-group checksum \(actual) does not match \(expected)"
         case let .inconsistentModelName(expected, actual):
@@ -235,6 +241,25 @@ public final class GModStudioModelRepository: @unchecked Sendable {
             for: model,
             compilePolicy: compilePolicy
         )
+        let asset = try validatedBodyGroupAsset(for: model)
+        let materials: SourceStudioModelMaterialTableSnapshot
+        do {
+            materials = try SourceStudioModelMaterialDecoder.decode(
+                asset.renderPayload,
+                budget: compilePolicy.materialDecodeBudget
+            )
+        } catch let error as SourceStudioModelMaterialDecodeError {
+            throw GModStudioBodyGroupResolutionError.materialDecode(error)
+        }
+        let appearance: SourceStudioModelAppearanceLayout
+        do {
+            appearance = try SourceStudioModelAppearanceLayout(
+                mesh: mesh,
+                materials: materials
+            )
+        } catch let error as SourceStudioModelAppearanceLayoutError {
+            throw GModStudioBodyGroupResolutionError.appearance(error)
+        }
         do {
             return try SourceStudioBodyGroupLayout(
                 bodyParts: mesh.bodyParts.map {
@@ -242,7 +267,8 @@ public final class GModStudioModelRepository: @unchecked Sendable {
                         modelSelectionBase: $0.modelSelectionBase,
                         modelCount: $0.models.count
                     )
-                }
+                },
+                appearance: appearance
             )
         } catch let error as SourceStudioBodyGroupLayoutError {
             throw GModStudioBodyGroupResolutionError.layout(error)
@@ -257,13 +283,7 @@ public final class GModStudioModelRepository: @unchecked Sendable {
         for model: SourceEntityModelReference,
         compilePolicy: GModStudioRenderableModelCompilePolicy
     ) throws -> SourceStudioModelMeshSnapshot {
-        let asset: SourceStudioModelAsset
-        switch renderAsset(for: model) {
-        case let .loaded(loaded):
-            asset = loaded
-        case let .unavailable(reason):
-            throw GModStudioBodyGroupResolutionError.assetUnavailable(reason)
-        }
+        let asset = try validatedBodyGroupAsset(for: model)
 
         let mesh: SourceStudioModelMeshSnapshot
         do {
@@ -298,6 +318,17 @@ public final class GModStudioModelRepository: @unchecked Sendable {
             )
         }
         return mesh
+    }
+
+    private func validatedBodyGroupAsset(
+        for model: SourceEntityModelReference
+    ) throws -> SourceStudioModelAsset {
+        switch renderAsset(for: model) {
+        case let .loaded(asset):
+            return asset
+        case let .unavailable(reason):
+            throw GModStudioBodyGroupResolutionError.assetUnavailable(reason)
+        }
     }
 
     private func outcome(
