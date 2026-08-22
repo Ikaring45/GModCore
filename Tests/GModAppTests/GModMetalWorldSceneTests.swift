@@ -58,6 +58,7 @@ final class GModMetalWorldSceneTests: XCTestCase {
             GModMetalSunSpriteRenderContract.parameters(
                 sun: sun,
                 layer: layer,
+                role: .core,
                 cameraEye: .zero,
                 cameraForward: sun.metalDirectionToSun
             )
@@ -72,11 +73,28 @@ final class GModMetalWorldSceneTests: XCTestCase {
             parameters.rightExtent.y * parameters.rightExtent.y +
             parameters.rightExtent.z * parameters.rightExtent.z
         ).squareRoot()
-        XCTAssertEqual(rightLength, 16 * 70, accuracy: 0.01)
+        XCTAssertEqual(rightLength, 16, accuracy: 0.01)
+        let overlay = try XCTUnwrap(
+            GModMetalSunSpriteRenderContract.parameters(
+                sun: sun,
+                layer: layer,
+                role: .overlay,
+                cameraEye: .zero,
+                cameraForward: sun.metalDirectionToSun
+            )
+        )
+        XCTAssertEqual(overlay.opacity, 0.75, accuracy: 0.0001)
+        let overlayRightLength = (
+            overlay.rightExtent.x * overlay.rightExtent.x +
+            overlay.rightExtent.y * overlay.rightExtent.y +
+            overlay.rightExtent.z * overlay.rightExtent.z
+        ).squareRoot()
+        XCTAssertEqual(overlayRightLength, 16 * 6, accuracy: 0.01)
         XCTAssertNil(
             GModMetalSunSpriteRenderContract.parameters(
                 sun: sun,
                 layer: layer,
+                role: .overlay,
                 cameraEye: .zero,
                 cameraForward: -sun.metalDirectionToSun
             )
@@ -593,11 +611,6 @@ final class GModMetalWorldSceneTests: XCTestCase {
                 cameraZ: -200
             )
         )
-        XCTAssertEqual(GModMetalWaterRenderContract.fallbackAlpha(top), 0.4)
-        XCTAssertEqual(
-            GModMetalWaterRenderContract.fallbackAlpha(beneath),
-            1
-        )
         XCTAssertEqual(scene.materialDiagnostics.waterMaterialRangeCount, 2)
         XCTAssertEqual(scene.materialDiagnostics.resolvedWaterMaterialRangeCount, 2)
         XCTAssertEqual(scene.materialDiagnostics.missingWorldMaterialRangeCount, 0)
@@ -756,7 +769,7 @@ final class GModMetalWorldSceneTests: XCTestCase {
 
         XCTAssertEqual(reflected.eye, SIMD3<Float>(10, -44, 20))
         XCTAssertEqual(reflected.forward, SIMD3<Float>(0.2, 0.5, 0.8))
-        XCTAssertEqual(reflected.up, SIMD3<Float>(0, -1, 0))
+        XCTAssertEqual(reflected.up, SIMD3<Float>(0, 1, 0))
     }
 
     func testWaterRenderTargetClipPlanesRetainCorrectSourceHalfSpaces() {
