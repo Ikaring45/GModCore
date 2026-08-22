@@ -199,6 +199,8 @@ final class SourceCanonicalEntityTests: XCTestCase {
             viewAngles: SourceQAngle(pitch: 11, yaw: 22, roll: 3),
             moveType: .ladder,
             waterLevel: .eyes,
+            isDucked: true,
+            viewOffset: SourceVector3(0, 0, 28),
             ladderNormal: SourceVector3(0, -1, 0)
         )
 
@@ -211,6 +213,8 @@ final class SourceCanonicalEntityTests: XCTestCase {
         XCTAssertEqual(canonical.transform.angles, walk.viewAngles)
         XCTAssertEqual(canonical.motion.linearVelocity, walk.velocity)
         XCTAssertEqual(canonical.motion.waterLevel, .eyes)
+        XCTAssertTrue(canonical.motion.isDucked)
+        XCTAssertEqual(canonical.viewOffset, SourceVector3(0, 0, 28))
         XCTAssertEqual(canonical.motion.ladderNormal, walk.ladderNormal)
         XCTAssertEqual(canonical.motion.angularVelocity, SourceVector3(0, 0, 4))
         XCTAssertTrue(canonical.motion.isAlive)

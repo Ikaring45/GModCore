@@ -474,14 +474,192 @@ final class SourceWorldWalkTests: XCTestCase {
         XCTAssertEqual(state.velocity.z, 0, accuracy: 0.000_1)
     }
 
+    func testDuckUsesHL2MPHullViewAndInstantEndpointTransitions() throws {
+        XCTAssertEqual(
+            SourceWorldWalkSolver.duckHullMins,
+            SourceVector3(-16, -16, 0)
+        )
+        XCTAssertEqual(
+            SourceWorldWalkSolver.duckHullMaxs,
+            SourceVector3(16, 16, 36)
+        )
+
+        let solver = makeSolver(world: floorWorld(), maximumSpeed: 200)
+        let standing = SourceWorldWalkState(
+            origin: SourceVector3(
+                0,
+                0,
+                SourceCollisionConstants.distanceEpsilon
+            ),
+            isOnGround: true
+        )
+        let ducked = try solver.simulate(
+            state: standing,
+            command: SourceUserCommand(commandNumber: 1, buttons: [.duck])
+        ).state
+        XCTAssertTrue(ducked.isDucked)
+        XCTAssertEqual(ducked.viewOffset, SourceVector3(0, 0, 28))
+        XCTAssertEqual(ducked.origin, standing.origin)
+
+        let stood = try solver.simulate(
+            state: ducked,
+            command: SourceUserCommand(commandNumber: 2)
+        ).state
+        XCTAssertFalse(stood.isDucked)
+        XCTAssertEqual(stood.viewOffset, SourceVector3(0, 0, 64))
+        XCTAssertEqual(stood.origin, standing.origin)
+    }
+
+    func testFullyDuckedGroundInputUsesExactSDKOneThirdCrop() throws {
+        let solver = makeSolver(world: floorWorld(), maximumSpeed: 200)
+        let ducked = SourceWorldWalkState(
+            movement: SourceMoveData(
+                origin: SourceVector3(
+                    0,
+                    0,
+                    SourceCollisionConstants.distanceEpsilon
+                ),
+                isOnGround: true
+            ),
+            isDucked: true,
+            viewOffset: SourceVector3(0, 0, 28)
+        )
+
+        let moved = try solver.simulate(
+            state: ducked,
+            command: SourceUserCommand(
+                commandNumber: 1,
+                forwardMove: 200,
+                buttons: [.duck, .forward]
+            )
+        ).state
+
+        XCTAssertTrue(moved.isDucked)
+        XCTAssertEqual(moved.velocity.x, 10, accuracy: 0.000_01)
+        XCTAssertEqual(moved.origin.x, 0.15, accuracy: 0.000_01)
+        XCTAssertEqual(
+            moved.movement.outputWishVelocity.x,
+            66.666_664,
+            accuracy: 0.000_01
+        )
+    }
+
+    func testStandingHullCeilingTraceBlocksUnduckTransactionally() throws {
+        var lowCeiling = floorWorld()
+        lowCeiling.addAxisAlignedBox(
+            SourceAABBCollider(
+                mins: SourceVector3(-100, -100, 50),
+                maxs: SourceVector3(100, 100, 100),
+                contents: .solid,
+                entityHandle: worldHandle
+            )
+        )
+        let ducked = SourceWorldWalkState(
+            movement: SourceMoveData(
+                origin: SourceVector3(
+                    0,
+                    0,
+                    SourceCollisionConstants.distanceEpsilon
+                ),
+                isOnGround: true
+            ),
+            isDucked: true,
+            viewOffset: SourceVector3(0, 0, 28)
+        )
+
+        let blocked = try makeSolver(
+            world: lowCeiling,
+            maximumSpeed: 200
+        ).simulate(
+            state: ducked,
+            command: SourceUserCommand(commandNumber: 1)
+        ).state
+        XCTAssertTrue(blocked.isDucked)
+        XCTAssertEqual(blocked.origin, ducked.origin)
+        XCTAssertEqual(blocked.viewOffset, ducked.viewOffset)
+
+        let clear = try makeSolver(
+            world: floorWorld(),
+            maximumSpeed: 200
+        ).simulate(
+            state: blocked,
+            command: SourceUserCommand(commandNumber: 2)
+        ).state
+        XCTAssertFalse(clear.isDucked)
+        XCTAssertEqual(clear.viewOffset, SourceVector3(0, 0, 64))
+    }
+
+    func testAirDuckKeepsHullTopFixedAcrossBothEndpoints() throws {
+        let solver = SourceWorldWalkSolver(
+            collisionProvider: CollisionWorldWalkProvider(world: SourceCollisionWorld()),
+            configuration: SourceWorldWalkConfiguration(
+                movement: SourceMovementParameters(gravity: 0),
+                maximumSpeed: 200
+            )
+        )
+        let standing = SourceWorldWalkState(origin: SourceVector3(0, 0, 100))
+
+        let ducked = try solver.simulate(
+            state: standing,
+            command: SourceUserCommand(commandNumber: 1, buttons: [.duck])
+        ).state
+        XCTAssertTrue(ducked.isDucked)
+        XCTAssertEqual(ducked.origin.z, 136, accuracy: 0.000_01)
+        XCTAssertEqual(
+            ducked.origin.z + SourceWorldWalkSolver.duckHullMaxs.z,
+            standing.origin.z + SourceWorldWalkSolver.standingHullMaxs.z,
+            accuracy: 0.000_01
+        )
+
+        let stood = try solver.simulate(
+            state: ducked,
+            command: SourceUserCommand(commandNumber: 2)
+        ).state
+        XCTAssertFalse(stood.isDucked)
+        XCTAssertEqual(stood.origin, standing.origin)
+    }
+
+    func testDuckEyeOffsetDrivesSourceWaterLevelSampling() throws {
+        var shallowWater = floorWorld()
+        shallowWater.addAxisAlignedBox(
+            SourceAABBCollider(
+                mins: SourceVector3(-100, -100, 0),
+                maxs: SourceVector3(100, 100, 30),
+                contents: .water,
+                entityHandle: worldHandle
+            )
+        )
+        let solver = makeSolver(
+            world: shallowWater,
+            maximumSpeed: 200
+        )
+        let origin = SourceVector3(
+            0,
+            0,
+            SourceCollisionConstants.distanceEpsilon
+        )
+        let standing = try solver.simulate(
+            state: SourceWorldWalkState(origin: origin, isOnGround: true),
+            command: SourceUserCommand(commandNumber: 1)
+        ).state
+        XCTAssertEqual(standing.waterLevel, .feet)
+
+        let ducked = try solver.simulate(
+            state: SourceWorldWalkState(origin: origin, isOnGround: true),
+            command: SourceUserCommand(commandNumber: 2, buttons: [.duck])
+        ).state
+        XCTAssertTrue(ducked.isDucked)
+        XCTAssertEqual(ducked.waterLevel, .eyes)
+    }
+
     func testUnsupportedCommandAndWorldFeaturesFailExplicitly() throws {
         let solver = makeSolver(world: floorWorld(), maximumSpeed: 200)
         let state = SourceWorldWalkState(origin: SourceVector3(0, 0, 1))
 
         let unsupportedCommands: [(SourceUserCommand, SourceWorldWalkError)] = [
             (
-                SourceUserCommand(commandNumber: 1, buttons: [.duck]),
-                .unsupported(.duck)
+                SourceUserCommand(commandNumber: 1, buttons: [.duck, .jump]),
+                .unsupported(.duckJump)
             ),
             (
                 SourceUserCommand(commandNumber: 1, upMove: 1),
@@ -497,7 +675,10 @@ final class SourceWorldWalkTests: XCTestCase {
 
         XCTAssertFalse(SourceWorldWalkSolver.unsupportedFeatures.contains(.stepUp))
         XCTAssertFalse(SourceWorldWalkSolver.unsupportedFeatures.contains(.jump))
-        XCTAssertTrue(SourceWorldWalkSolver.unsupportedFeatures.contains(.duck))
+        XCTAssertTrue(
+            SourceWorldWalkSolver.unsupportedFeatures.contains(.duckTransition)
+        )
+        XCTAssertTrue(SourceWorldWalkSolver.unsupportedFeatures.contains(.duckJump))
         XCTAssertTrue(SourceWorldWalkSolver.unsupportedFeatures.contains(.waterJump))
         XCTAssertTrue(SourceWorldWalkSolver.unsupportedFeatures.contains(.waterCurrent))
         XCTAssertTrue(

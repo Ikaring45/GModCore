@@ -70,6 +70,9 @@ public struct SourceEntityMotionState: Equatable, Sendable {
     public var surfaceFriction: Float
     public var waterJumpTime: Float
     public var waterLevel: SourcePlayerWaterLevel
+    /// Fully-ducked Source Player state. Timed transition and duck-jump state
+    /// remain movement capability boundaries rather than hidden host mirrors.
+    public var isDucked: Bool
     /// Last world ladder plane retained by Source player movement while
     /// `MOVETYPE_LADDER` is active. This lives in the canonical Player motion
     /// snapshot so the next fixed tick does not depend on a host-side mirror.
@@ -86,6 +89,7 @@ public struct SourceEntityMotionState: Equatable, Sendable {
         surfaceFriction: Float = 1,
         waterJumpTime: Float = 0,
         waterLevel: SourcePlayerWaterLevel = .notInWater,
+        isDucked: Bool = false,
         ladderNormal: SourceVector3 = .zero,
         isAlive: Bool = true
     ) {
@@ -98,6 +102,7 @@ public struct SourceEntityMotionState: Equatable, Sendable {
         self.surfaceFriction = surfaceFriction
         self.waterJumpTime = waterJumpTime
         self.waterLevel = waterLevel
+        self.isDucked = isDucked
         self.ladderNormal = ladderNormal
         self.isAlive = isAlive
     }
@@ -743,6 +748,8 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
             viewAngles: transform.angles,
             moveType: moveType,
             waterLevel: motion.waterLevel,
+            isDucked: motion.isDucked,
+            viewOffset: viewOffset,
             ladderNormal: motion.ladderNormal
         )
     }
@@ -761,8 +768,10 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
         motion.surfaceFriction = walkState.movement.surfaceFriction
         motion.waterJumpTime = walkState.movement.waterJumpTime
         motion.waterLevel = walkState.waterLevel
+        motion.isDucked = walkState.isDucked
         motion.ladderNormal = walkState.ladderNormal
         motion.isAlive = !walkState.movement.isDead
+        viewOffset = walkState.viewOffset
         moveType = walkState.moveType
     }
 
