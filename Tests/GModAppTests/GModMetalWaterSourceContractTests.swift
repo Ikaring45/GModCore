@@ -101,6 +101,37 @@ final class GModMetalWaterSourceContractTests: XCTestCase {
 
         XCTAssertFalse(plan.requiresReflection)
         XCTAssertTrue(plan.requiresRefraction)
+        XCTAssertEqual(plan.targetFlags(for: beneath), 2)
+
+        XCTAssertNil(GModMetalWaterRenderTargetContract.plan(
+            materialRanges: [range(material: material(
+                isAboveWater: false,
+                reflectionAmount: 0.4,
+                refractionAmount: nil
+            ))],
+            cameraZ: 0
+        ))
+    }
+
+    func testRenderTargetFlagsIntersectMaterialKeysWithRenderedPasses() throws {
+        let reflectionOnly = material(
+            reflectionAmount: -0.4,
+            refractionAmount: nil
+        )
+        let both = material(
+            reflectionAmount: 0,
+            refractionAmount: -1.2
+        )
+        let plan = try XCTUnwrap(GModMetalWaterRenderTargetContract.plan(
+            materialRanges: [
+                range(material: reflectionOnly),
+                range(material: both),
+            ],
+            cameraZ: 300
+        ))
+
+        XCTAssertEqual(plan.targetFlags(for: reflectionOnly), 1)
+        XCTAssertEqual(plan.targetFlags(for: both), 3)
     }
 
     func testSourceFresnelUsesFifthPowerOfOneMinusSaturatedNDotV() {
@@ -149,6 +180,15 @@ final class GModMetalWaterSourceContractTests: XCTestCase {
         XCTAssertEqual(coordinates.reflection.y, 0.83, accuracy: 0.000_001)
         XCTAssertEqual(coordinates.refraction.x, 1.08, accuracy: 0.000_001)
         XCTAssertEqual(coordinates.refraction.y, -0.04, accuracy: 0.000_001)
+    }
+
+    func testMetalReflectionRenderTargetInvertsScreenYOnly() {
+        let bases = GModMetalWaterSamplingContract.renderTargetBases(
+            screenUV: SIMD2<Float>(0.25, 0.75)
+        )
+
+        XCTAssertEqual(bases.reflection, SIMD2<Float>(0.25, 0.25))
+        XCTAssertEqual(bases.refraction, SIMD2<Float>(0.25, 0.75))
     }
 
     private func material(
