@@ -996,6 +996,21 @@ public final class GModPlayableSession {
                 host: sourceAdapter,
                 playerInfoResolver: { _, name in
                     clientConVars.currentValue(for: name)
+                },
+                playerRespawnResolver: { player in
+                    let canonicalDefaults = SourceCanonicalEntityState
+                        .defaults(for: .player)
+                    return SourceCanonicalPlayerRespawnRequest(
+                        transform: SourceEntityTransform(
+                            origin: loadedSpawn.origin,
+                            angles: loadedSpawn.angles
+                        ),
+                        viewOffset: canonicalDefaults.viewOffset,
+                        moveType: canonicalDefaults.moveType,
+                        health: player.combat.maximumHealth,
+                        armor: 0,
+                        observerState: .notObserving
+                    )
                 }
             )
             let toolConstraintGraph = SourceCanonicalConstraintGraph()

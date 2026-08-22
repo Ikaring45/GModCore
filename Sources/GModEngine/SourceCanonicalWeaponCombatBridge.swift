@@ -69,7 +69,7 @@ private final class SourceCanonicalWeaponCombatWeakRegistry:
     }
 }
 
-private final class SourceCanonicalDamageInfoValue: @unchecked Sendable {
+final class SourceCanonicalDamageInfoValue: @unchecked Sendable {
     var damage: Float = 0
     var force: SourceVector3 = .zero
     var position: SourceVector3 = .zero
@@ -1164,13 +1164,33 @@ public enum SourceCanonicalWeaponCombatBridge {
                     max(Double(Int32.min), remaining)
                 )
                 let health = Int32(bounded.rounded(.towardZero))
-                _ = try requiredHost("Entity:TakeDamageInfo")
+                let authoritativeHost = try requiredHost(
+                    "Entity:TakeDamageInfo"
+                )
+                let damagedEntity = try authoritativeHost
                     .updateCanonicalEntity(entity.identity) {
                         $0.combat.health = health
                         if entity.kind == .player {
                             $0.motion.isAlive = health > 0
                         }
                     }
+                if let physicsHost = authoritativeHost as?
+                    any SourceCanonicalPhysicsObjectLuaHost
+                {
+                    do {
+                        _ = try SourceCanonicalDamagePhysicsImpulse.enqueue(
+                            target: damagedEntity,
+                            impulse: info.force,
+                            worldPosition: info.position,
+                            physicsHost: physicsHost
+                        )
+                    } catch {
+                        throw LuaError.runtime(
+                            "Entity:TakeDamageInfo VPhysics impulse failed: " +
+                                String(describing: error)
+                        )
+                    }
+                }
                 return [.number(1)]
             }
         }

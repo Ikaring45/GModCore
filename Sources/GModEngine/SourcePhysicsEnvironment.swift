@@ -319,10 +319,13 @@ public struct SourcePhysicsBodyDeletionCommand: Equatable, Sendable {
 ///
 /// Vector-bearing operations are validated at construction, before they can
 /// enter the host's global FIFO. `centerForce` is accumulated until the next
-/// fixed 0.015-second simulation command. `forceOffset` uses the same force
-/// unit and tick boundary while retaining the exact world application point;
-/// `centerImpulse` and `centerTorqueImpulse` change velocity at the mutation
-/// command's exact FIFO position.
+/// fixed 0.015-second simulation command (the established backend-neutral
+/// center-force contract). Valve's VPhysics `ApplyForceOffset` input is an
+/// impulse in kg*in/s; that offset operation therefore changes linear/angular
+/// velocity at its exact FIFO position while retaining the world application
+/// point. The explicit
+/// `centerImpulse` spelling is kept for backend-neutral callers which already
+/// distinguish an impulse from the tick-accumulated center-force operation.
 public enum SourcePhysicsBodyMutation: Equatable, Sendable {
     case wake
     case sleep

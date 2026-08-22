@@ -710,8 +710,20 @@ private final class RecordingPhysicsEnvironment: SourcePhysicsEnvironment {
             angularVelocity = value
         case let .addAngularVelocity(value):
             angularVelocity += value
-        case .applyCenterForce, .applyForceOffset:
+        case .applyCenterForce:
             break
+        case let .applyForceOffset(force, worldPosition):
+            linearVelocity += force / body.massProperties.massKilograms
+            let offset = worldPosition - body.transform.origin
+            let angularImpulse = SourceVector3(
+                offset.y * force.z - offset.z * force.y,
+                offset.z * force.x - offset.x * force.z,
+                offset.x * force.y - offset.y * force.x
+            )
+            angularVelocity += inverseInertiaMultiply(
+                body: body,
+                worldVector: angularImpulse
+            ) * (180 / Float.pi)
         case let .applyCenterImpulse(value):
             linearVelocity += value / body.massProperties.massKilograms
         case let .applyTorqueCenter(value):

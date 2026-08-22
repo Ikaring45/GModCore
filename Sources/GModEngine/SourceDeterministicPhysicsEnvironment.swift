@@ -921,20 +921,28 @@ public final class SourceDeterministicPhysicsEnvironment:
                 worldPosition - body.transform.origin,
                 operation: "applyForceOffsetWorldOffset"
             )
-            let torque = try checked(
+            let angularImpulse = try checked(
                 offset.cross(force),
-                operation: "applyForceOffsetTorque"
+                operation: "applyForceOffsetAngularImpulse"
             )
-            let accumulatedForce = try checked(
-                body.accumulatedCenterForce + force,
-                operation: "applyForceOffsetCenterForce"
+            body.linearVelocity = try checked(
+                body.linearVelocity + force /
+                    body.massProperties.massKilograms,
+                operation: "applyForceOffsetLinearVelocity"
             )
-            let accumulatedTorque = try checked(
-                body.accumulatedCenterTorque + torque,
-                operation: "applyForceOffsetAccumulatedTorque"
+            // r x impulse / inertia is radians/second. Source publishes
+            // angular velocity in degrees/second, matching the contact solver.
+            let angularVelocityDelta = try checked(
+                inverseInertiaMultiply(
+                    body: body,
+                    worldVector: angularImpulse
+                ) * (180 / Float.pi),
+                operation: "applyForceOffsetAngularVelocityDelta"
             )
-            body.accumulatedCenterForce = accumulatedForce
-            body.accumulatedCenterTorque = accumulatedTorque
+            body.angularVelocity = try checked(
+                body.angularVelocity + angularVelocityDelta,
+                operation: "applyForceOffsetAngularVelocity"
+            )
             wake(&body)
         case let .applyCenterImpulse(impulse):
             try requireEnabledDynamicMotion()

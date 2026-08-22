@@ -103,7 +103,8 @@ public enum SourceCanonicalWeaponGameplayBridge {
     public static func install(
         into runtime: GMLuaRuntime,
         host: (any SourceCanonicalEntityLuaHost)? = nil,
-        playerInfoResolver: SourceCanonicalPlayerInfoResolver? = nil
+        playerInfoResolver: SourceCanonicalPlayerInfoResolver? = nil,
+        playerRespawnResolver: SourceCanonicalPlayerRespawnResolver? = nil
     ) throws {
         guard let typeSystem = runtime.typeSystem else {
             throw LuaError.runtime("canonical Weapon gameplay requires the GLua type system")
@@ -582,6 +583,13 @@ public enum SourceCanonicalWeaponGameplayBridge {
             into: runtime,
             host: host
         )
+        if runtime.realm == .server, let host {
+            try SourceCanonicalPlayerLifecycleGLuaBridge.install(
+                into: runtime,
+                host: host,
+                respawnResolver: playerRespawnResolver
+            )
+        }
         try SourceCanonicalWeaponReloadBridge.install(
             into: runtime,
             host: host

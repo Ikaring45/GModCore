@@ -731,7 +731,7 @@ struct SourceDeterministicPhysicsEnvironmentTests {
         #expect(body.transform.origin.z < frozenOrigin.z)
     }
 
-    @Test("world offset force integrates linear and principal-inertia angular acceleration")
+    @Test("world offset force applies the VPhysics impulse immediately")
     func applyForceOffsetUsesWorldPointAndBodyInertiaFrame() throws {
         let environment = SourceDeterministicPhysicsEnvironment()
         let bodyID = try makeBodyID(entry: 82, serial: 23)
@@ -777,18 +777,16 @@ struct SourceDeterministicPhysicsEnvironmentTests {
         ))
 
         let body = try #require(snapshot.bodies.first)
-        // Linear force uses the existing fixed-tick ApplyForceCenter unit:
-        // dv = F / m * 0.015.
+        // VPhysics ApplyForceOffset is an impulse in kg*in/s, so it is not
+        // multiplied by interval_per_tick: dv = impulse / mass.
         #expect(abs(body.linearVelocity.x) < 0.000_001)
-        #expect(abs(body.linearVelocity.y - 0.075) < 0.000_001)
+        #expect(abs(body.linearVelocity.y - 5) < 0.000_001)
         #expect(abs(body.linearVelocity.z) < 0.000_001)
 
         // r x F is (-10, 0, 0) in world space. At yaw 90 that axis maps to
         // the body's principal Y inertia (4), then radians/s becomes the
         // Source angular-velocity degrees/s contract.
-        let expectedAngularX = (-10 / Float(4)) *
-            SourcePhysicsContract.fixedTimeStepSeconds *
-            (180 / Float.pi)
+        let expectedAngularX = (-10 / Float(4)) * (180 / Float.pi)
         #expect(abs(body.angularVelocity.x - expectedAngularX) < 0.000_01)
         #expect(abs(body.angularVelocity.y) < 0.000_01)
         #expect(abs(body.angularVelocity.z) < 0.000_01)

@@ -266,6 +266,9 @@ public final class SourceCanonicalFireBulletsGLuaBridge:
                         try Self.applyDamage(
                             request.damage,
                             trace: trace,
+                            bulletDirection: direction,
+                            forceScale: request.forceScale,
+                            ammoType: request.ammoType,
                             attacker: request.attacker,
                             inflictor: request.inflictor,
                             state: state,
@@ -786,6 +789,9 @@ public final class SourceCanonicalFireBulletsGLuaBridge:
     private static func applyDamage(
         _ damage: Float,
         trace: SourceGameTrace,
+        bulletDirection: SourceVector3,
+        forceScale: Float,
+        ammoType: SourceCanonicalDefaultAmmoType,
         attacker: SourceCanonicalEntityIdentity,
         inflictor: SourceCanonicalEntityIdentity?,
         state: LuaState,
@@ -797,6 +803,22 @@ public final class SourceCanonicalFireBulletsGLuaBridge:
         let targetIdentity = SourceCanonicalEntityIdentity(handle: targetHandle)
         guard let target = host.canonicalSnapshot(for: targetIdentity),
               target.combat.takeDamageMode != 0 else { return }
+
+        let physicsPushScale = try sourcePhysicsPushScale(state: state)
+        let damageForce: SourceVector3
+        do {
+            damageForce = try SourceCanonicalBulletDamageForce.impulse(
+                ammoTypeName: ammoType.name,
+                direction: bulletDirection,
+                forceScale: forceScale,
+                physicsPushScale: physicsPushScale
+            )
+        } catch {
+            throw LuaError.runtime(
+                "Entity:FireBullets damage force failed: " +
+                    String(describing: error)
+            )
+        }
 
         let targetValue = try liveEntityValue(
             targetIdentity,
@@ -842,6 +864,13 @@ public final class SourceCanonicalFireBulletsGLuaBridge:
             state: state
         )
         try callMethod(
+            "SetDamageForce",
+            on: damageMetatable,
+            receiver: damageInfo,
+            arguments: [try luaVector(damageForce, typeSystem: typeSystem)],
+            state: state
+        )
+        try callMethod(
             "SetDamagePosition",
             on: damageMetatable,
             receiver: damageInfo,
@@ -881,6 +910,34 @@ public final class SourceCanonicalFireBulletsGLuaBridge:
             arguments: [damageInfo],
             state: state
         )
+    }
+
+    /// Source's calculator reads the live replicated ConVar. Missing or
+    /// non-finite state is a compatibility failure, not an implicit scale 1.
+    private static func sourcePhysicsPushScale(
+        state: LuaState
+    ) throws -> Float {
+        let getter = state.getGlobal("GetConVarNumber")
+        switch getter {
+        case .luaFunction, .nativeFunction:
+            break
+        default:
+            throw LuaError.runtime(
+                "GetConVarNumber is \(getter.typeName), expected function"
+            )
+        }
+        let value = try state.call(
+            getter,
+            arguments: [.string("phys_pushscale")]
+        ).first ?? .nilValue
+        guard case let .number(number) = value,
+              number.isFinite,
+              abs(number) <= Double(Float.greatestFiniteMagnitude) else {
+            throw LuaError.runtime(
+                "phys_pushscale must resolve to a finite Source Float"
+            )
+        }
+        return Float(number)
     }
 
     private static func callMethod(
