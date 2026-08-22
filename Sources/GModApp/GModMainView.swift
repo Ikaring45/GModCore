@@ -127,6 +127,7 @@ public struct GModMainView: View {
     @StateObject private var console: GModConsoleModel
     @StateObject private var game: GModGameSessionModel
     @StateObject private var content: GModPlaygroundContentModel
+    @StateObject private var dermaMenu: GModDermaMenuModel
     @StateObject private var developerDiagnostics:
         GModDeveloperDiagnosticsSettingsStore
     @StateObject private var localizationSelection:
@@ -143,7 +144,7 @@ public struct GModMainView: View {
     @State private var presentation = GModGamePresentationState()
     @State private var showingQuitUnavailable = false
     @State private var isChoosingContentPack = false
-    @State private var activeUtilityWindow: GModUtilityWindowKind?
+    @State private var menuVolumeBeforeMute: Double
     @State private var pendingContentManagementAction:
         GModPendingContentManagementAction?
     @State private var contentActionAfterDisconnect:
@@ -233,6 +234,9 @@ public struct GModMainView: View {
                 settingsStore: contentSettingsStore
             )
         )
+        _dermaMenu = StateObject(
+            wrappedValue: GModDermaMenuModel(runtimeFactory: factory)
+        )
         _developerDiagnostics = StateObject(
             wrappedValue: GModDeveloperDiagnosticsSettingsStore.shared
         )
@@ -241,6 +245,11 @@ public struct GModMainView: View {
         )
         _menuAudio = StateObject(
             wrappedValue: audioSettingsStore
+        )
+        _menuVolumeBeforeMute = State(
+            initialValue: audioSettingsStore.settings.menuVolume > 0
+                ? audioSettingsStore.settings.menuVolume
+                : 1
         )
         _inputVideoSettings = StateObject(
             wrappedValue: inputVideoSettingsStore
@@ -531,15 +540,12 @@ public struct GModMainView: View {
 
             contentOverlay
 
-            utilityOverlay
-
             if game.isStarting {
                 loadingOverlay
             }
         }
         .preferredColorScheme(.dark)
         .onAppear {
-            game.setHostPopupPresented(activeUtilityWindow != nil)
             if scenePhase == .active && !presentation.showsHomeMenu {
                 game.resumeInput()
             } else {
@@ -562,9 +568,6 @@ public struct GModMainView: View {
             @unknown default:
                 game.suspendInput()
             }
-        }
-        .onChange(of: activeUtilityWindow) { window in
-            game.setHostPopupPresented(window != nil)
         }
         .alert(
             localizationSelection.snapshot.phrase("quit"),
@@ -792,90 +795,34 @@ public struct GModMainView: View {
                 ),
                 showsForgetAction: true
             )
-        case let .ready(pack, background, logo):
+        case let .ready(pack, _, _):
             if presentation.showsHomeMenu {
-                GModHomeMenuView(
-                    pack: pack,
-                    assetSource: content.assetSource,
-                    backgroundJPEG: background,
-                    logoPNG: logo,
-                    onSelectMap: { map in
-                        handlePresentationEvent(
-                            .validatedMapSelected(map),
-                            contentPackURL: pack.archiveURL
-                        )
-                    },
-                    isInGame: game.hasActiveSession,
-                    preferredLanguageCode: localizationSelection.snapshot.code,
-                    menuBackgroundsEnabled: contentSettings.menuBackgroundsEnabled,
-                    problemCount: currentProblemSnapshot.problems.count,
-                    problemSeverity: currentProblemSeverity,
-                    onMenuAction: { action in
-                        handlePresentationEvent(
-                            .homeMenuAction(action),
-                            contentPackURL: pack.archiveURL
-                        )
-                    },
-                    onLanguageChange: { snapshot in
-                        publishHomeLanguageSelection(snapshot, from: pack)
-                    },
-                    onDiagnostic: { record in diagnostics.record(record) },
-                    audioController: game.audioController
+                GModDermaMenuSurface(
+                    model: dermaMenu,
+                    preferredFramesPerSecond:
+                        inputVideoSettings.preferredFramesPerSecond,
+                    onActions: { actions in
+                        handleDermaMenuActions(actions, pack: pack)
+                    }
                 )
-                // The coordinator owns an immutable WKURLSchemeHandler,
-                // language catalog and audio resolver for exactly one
-                // validated mount. Recreate that complete boundary only after
-                // ContentModel commits a successful candidate; failed
-                // replacements intentionally preserve the current identity.
-                .id(content.activeMountGeneration)
                 .ignoresSafeArea()
                 .transition(.opacity)
+                .onAppear {
+                    activateDermaMenu()
+                }
+                .onChange(of: content.activeMountGeneration) { _ in
+                    activateDermaMenu()
+                }
+                .onChange(of: localizationSelection.snapshot) { _ in
+                    activateDermaMenu()
+                }
+                .onChange(of: currentProblemSnapshot) { _ in
+                    dermaMenu.replaceProblems(dermaProblemLines)
+                }
+            } else {
+                Color.clear
+                    .onAppear { dermaMenu.deactivate() }
             }
-        }
-    }
-
-    @ViewBuilder
-    private var utilityOverlay: some View {
-        switch activeUtilityWindow {
-        case .options:
-            GModOptionsWindow(
-                localization: localizationSelection.snapshot,
-                audio: menuAudio,
-                inputVideo: inputVideoSettings,
-                developerDiagnostics: developerDiagnostics,
-                contentSettings: contentSettings,
-                content: content,
-                permissions: permissions,
-                currentMap: game.activeMap?.rawValue,
-                onClose: { activeUtilityWindow = nil },
-                onLanguageChange: { @MainActor languageCode in
-                    selectLanguageFromOptions(languageCode)
-                },
-                onChooseZIP: {
-                    requestContentManagementAction(.chooseZIP)
-                },
-                onUnmountZIP: {
-                    requestContentManagementAction(.unmountZIP)
-                },
-                onRevalidateZIP: {
-                    requestContentManagementAction(.revalidateZIP)
-                },
-                onClearCaches: { content.clearCaches() },
-                onDumpDiagnostics: dumpContentDiagnostics
-            )
-            .zIndex(500)
-
-        case .problems:
-            GModProblemsWindow(
-                localization: localizationSelection.snapshot,
-                snapshot: currentProblemSnapshot,
-                onClose: { activeUtilityWindow = nil },
-                onRevokePermission: revokePermission
-            )
-            .zIndex(500)
-
-        case nil:
-            EmptyView()
         }
     }
 
@@ -991,18 +938,85 @@ public struct GModMainView: View {
         return pack.archiveURL
     }
 
+    private var dermaProblemLines: [String] {
+        let snapshot = currentProblemSnapshot
+        if snapshot.problems.isEmpty {
+            return ["No current problems."]
+        }
+        return snapshot.problems.map { problem in
+            let severity: String
+            switch problem.severity {
+            case .information:
+                severity = "INFO"
+            case .warning:
+                severity = "WARNING"
+            case .error:
+                severity = "ERROR"
+            }
+            let title = problem.localizedTitle(
+                using: localizationSelection.snapshot
+            )
+            let detail = problem.localizedDetail(
+                using: localizationSelection.snapshot
+            )
+            let source = problem.source.map { " (\($0))" } ?? ""
+            return "[\(severity)] \(title): \(detail)\(source)"
+        }
+    }
+
+    private func activateDermaMenu() {
+        dermaMenu.activate(
+            mountGeneration: content.activeMountGeneration,
+            phrases: localizationSelection.snapshot.phrases,
+            problemLines: dermaProblemLines
+        )
+    }
+
+    private func handleDermaMenuActions(
+        _ actions: [GMLuaMenuAction],
+        pack: GarrysPADContentPack
+    ) {
+        for action in actions {
+            switch action {
+            case let .startMap(rawMap):
+                guard let map = GModBundledMap(rawValue: rawMap) else { continue }
+                handlePresentationEvent(
+                    .validatedMapSelected(map),
+                    contentPackURL: pack.archiveURL
+                )
+
+            case .resumeGame:
+                handlePresentationEvent(.homeMenuAction(.hideGameUI))
+
+            case let .setAudioEnabled(enabled):
+                if enabled {
+                    menuAudio.setMenuVolume(menuVolumeBeforeMute)
+                } else {
+                    let currentVolume = menuAudio.settings.menuVolume
+                    if currentVolume > 0 {
+                        menuVolumeBeforeMute = currentVolume
+                    }
+                    menuAudio.setMenuVolume(0)
+                }
+
+            case let .executeConsoleLine(line):
+                console.input = line
+                submitConsole()
+
+            case .disconnect:
+                handlePresentationEvent(.homeMenuAction(.disconnect))
+
+            case .quit:
+                handlePresentationEvent(.homeMenuAction(.quit))
+            }
+        }
+        dermaMenu.replaceProblems(dermaProblemLines)
+    }
+
     private func handlePresentationEvent(
         _ event: GModGamePresentationEvent,
         contentPackURL: URL? = nil
     ) {
-        if case .homeMenuAction(.openOptions) = event {
-            activeUtilityWindow = .options
-            return
-        }
-        if case .homeMenuAction(.openProblems) = event {
-            activeUtilityWindow = .problems
-            return
-        }
         var replacement = presentation
         let effects = replacement.reduce(event)
         presentation = replacement
@@ -1076,10 +1090,6 @@ public struct GModMainView: View {
                 source: "permissions"
             )
         }
-    }
-
-    private var currentProblemSeverity: Int {
-        currentProblemSnapshot.problems.map(\.severity.rawValue).max() ?? 0
     }
 
     private func selectLanguageFromOptions(_ rawCode: String) {
@@ -1173,7 +1183,6 @@ public struct GModMainView: View {
         case .chooseZIP:
             isChoosingContentPack = true
         case .unmountZIP:
-            activeUtilityWindow = nil
             content.forgetSelection()
         case .revalidateZIP:
             content.revalidateActiveSelection()
