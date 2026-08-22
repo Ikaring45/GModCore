@@ -3,7 +3,7 @@ import Testing
 
 @Suite("Source no-collide deterministic replay")
 struct SourcePhysicsNoCollideReplayTests {
-    @Test("command, snapshot, event, and deletion round-trip in replay v10")
+    @Test("command, snapshot, event, and deletion round-trip in replay v11")
     func canonicalRoundTripRetainsFullAuthoredBodyIDs() throws {
         // Deliberately author the endpoints in descending handle order and use
         // nonzero solid indices. No-collide matching is symmetric, but the
@@ -36,8 +36,8 @@ struct SourcePhysicsNoCollideReplayTests {
             using: try makeEnvironment()
         )
 
-        #expect(SourcePhysicsReplayLog.formatVersion == 10)
-        #expect(Array(log.canonicalBytes[4 ... 5]) == [10, 0])
+        #expect(SourcePhysicsReplayLog.formatVersion == 11)
+        #expect(Array(log.canonicalBytes[4 ... 5]) == [11, 0])
         #expect(log.frames.count == 2)
         #expect(log.frames[0].environmentSnapshot.noCollideConstraints == [
             SourcePhysicsNoCollideConstraintSnapshot(

@@ -286,7 +286,7 @@ public struct SourcePhysicsReplayFrame: Equatable, Sendable {
 
 /// Decoded value transcript plus its canonical little-endian binary form.
 public struct SourcePhysicsReplayLog: Equatable, Sendable {
-    public static let formatVersion: UInt16 = 10
+    public static let formatVersion: UInt16 = 11
 
     public let fixedTimeStepSeconds: Float
     public let frames: [SourcePhysicsReplayFrame]
@@ -449,6 +449,9 @@ private struct SourcePhysicsReplayLiveBody {
     var massProperties: SourcePhysicsMassProperties
     var pendingMassKilograms: Float?
     var damping: SourcePhysicsDamping
+    var materialIndex: Int
+    var isDragEnabled: Bool
+    var buoyancyRatio: SourcePhysicsBuoyancyRatio
     var isMotionEnabled: Bool
     var isGravityEnabled: Bool
     var isCollisionEnabled: Bool
@@ -458,6 +461,9 @@ private struct SourcePhysicsReplayLiveBody {
         massProperties = creation.massProperties
         pendingMassKilograms = nil
         damping = creation.damping
+        materialIndex = creation.materialIndex
+        isDragEnabled = creation.isDragEnabled
+        buoyancyRatio = creation.buoyancyRatio
         isMotionEnabled = creation.motionType != .staticBody
         isGravityEnabled = creation.isGravityEnabled
         isCollisionEnabled = creation.isCollisionEnabled
@@ -1047,6 +1053,15 @@ private struct SourcePhysicsReplayTranscriptValidator {
             // inertia after SetMass remains backend-authored until its first
             // validated snapshot, then becomes exact replay state.
             body.pendingMassKilograms = massKilograms
+            body.buoyancyRatio = .automatic
+        case let .setMaterialIndex(materialIndex):
+            body.materialIndex = materialIndex
+        case let .setDragEnabled(enabled):
+            body.isDragEnabled = enabled
+        case let .setBuoyancyRatio(ratio):
+            body.buoyancyRatio = try SourcePhysicsBuoyancyRatio(
+                explicit: ratio
+            )
         case .setLinearVelocity,
              .addLinearVelocity,
              .setAngularVelocity,
@@ -1128,8 +1143,10 @@ private struct SourcePhysicsReplayTranscriptValidator {
             guard
                 body.shape == liveBody.creation.shape,
                 body.motionType == liveBody.creation.motionType,
-                body.materialIndex == liveBody.creation.materialIndex,
+                body.materialIndex == liveBody.materialIndex,
                 body.damping == liveBody.damping,
+                body.isDragEnabled == liveBody.isDragEnabled,
+                body.buoyancyRatio == liveBody.buoyancyRatio,
                 body.isMotionEnabled == liveBody.isMotionEnabled,
                 body.isGravityEnabled == liveBody.isGravityEnabled,
                 body.isCollisionEnabled == liveBody.isCollisionEnabled
@@ -1669,6 +1686,18 @@ private struct SourcePhysicsReplayEncoder {
         case let .setAngles(angles):
             try writeUInt8(16)
             try write(angles, field: "mutation.angles")
+        case let .setMaterialIndex(materialIndex):
+            try writeUInt8(17)
+            try writeNonnegativeInt(
+                materialIndex,
+                field: "mutation.materialIndex"
+            )
+        case let .setDragEnabled(enabled):
+            try writeUInt8(18)
+            try writeBool(enabled)
+        case let .setBuoyancyRatio(ratio):
+            try writeUInt8(19)
+            try writeFloat(ratio, field: "mutation.buoyancyRatio")
         }
     }
 
@@ -1691,6 +1720,8 @@ private struct SourcePhysicsReplayEncoder {
         try writeBool(creation.isGravityEnabled)
         try writeBool(creation.isCollisionEnabled)
         try writeBool(creation.startsAwake)
+        try writeBool(creation.isDragEnabled)
+        try write(creation.buoyancyRatio, field: "buoyancyRatio")
     }
 
     private mutating func write(_ query: SourcePhysicsQueryCommand) throws {
@@ -1788,6 +1819,20 @@ private struct SourcePhysicsReplayEncoder {
         try writeBool(body.isCollisionEnabled)
         try writeBool(body.isSleeping)
         try writeUInt64(body.simulationTick)
+        try writeBool(body.isDragEnabled)
+        try write(body.buoyancyRatio, field: "body.buoyancyRatio")
+    }
+
+    private mutating func write(
+        _ ratio: SourcePhysicsBuoyancyRatio,
+        field: String
+    ) throws {
+        if let value = ratio.explicitValue {
+            try writeUInt8(1)
+            try writeFloat(value, field: field)
+        } else {
+            try writeUInt8(0)
+        }
     }
 
     private mutating func write(
@@ -2278,6 +2323,18 @@ private struct SourcePhysicsReplayDecoder {
             )
         case 16:
             mutation = .setAngles(try readAngles(field: "mutation.angles"))
+        case 17:
+            mutation = .setMaterialIndex(try readNonnegativeInt(
+                field: "mutation.materialIndex"
+            ))
+        case 18:
+            mutation = .setDragEnabled(try readBool(
+                field: "mutation.dragEnabled"
+            ))
+        case 19:
+            mutation = .setBuoyancyRatio(try readFloat(
+                field: "mutation.buoyancyRatio"
+            ))
         default:
             throw SourcePhysicsReplayError.invalidTag(
                 field: "bodyMutation",
@@ -2308,7 +2365,9 @@ private struct SourcePhysicsReplayDecoder {
             materialIndex: readNonnegativeInt(field: "materialIndex"),
             isGravityEnabled: readBool(field: "isGravityEnabled"),
             isCollisionEnabled: readBool(field: "isCollisionEnabled"),
-            startsAwake: readBool(field: "startsAwake")
+            startsAwake: readBool(field: "startsAwake"),
+            isDragEnabled: readBool(field: "isDragEnabled"),
+            buoyancyRatio: readBuoyancyRatio(field: "buoyancyRatio")
         )
     }
 
@@ -2466,8 +2525,29 @@ private struct SourcePhysicsReplayDecoder {
             isGravityEnabled: readBool(field: "body.isGravityEnabled"),
             isCollisionEnabled: readBool(field: "body.isCollisionEnabled"),
             isSleeping: readBool(field: "body.isSleeping"),
-            simulationTick: readUInt64()
+            simulationTick: readUInt64(),
+            isDragEnabled: readBool(field: "body.isDragEnabled"),
+            buoyancyRatio: readBuoyancyRatio(field: "body.buoyancyRatio")
         )
+    }
+
+    private mutating func readBuoyancyRatio(
+        field: String
+    ) throws -> SourcePhysicsBuoyancyRatio {
+        let tag = try readUInt8()
+        switch tag {
+        case 0:
+            return .automatic
+        case 1:
+            return try SourcePhysicsBuoyancyRatio(
+                explicit: readFloat(field: field)
+            )
+        default:
+            throw SourcePhysicsReplayError.invalidTag(
+                field: field,
+                value: tag
+            )
+        }
     }
 
     private mutating func readFixedConstraintCreation() throws

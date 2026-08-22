@@ -293,6 +293,9 @@ public final class SourceDeterministicPhysicsEnvironment:
         var linearVelocity: SourceVector3
         var angularVelocity: SourceVector3
         var damping: SourcePhysicsDamping
+        var materialIndex: Int
+        var isDragEnabled: Bool
+        var buoyancyRatio: SourcePhysicsBuoyancyRatio
         var accumulatedCenterForce: SourceVector3
         var accumulatedCenterTorque: SourceVector3
         var isMotionEnabled: Bool
@@ -749,6 +752,9 @@ public final class SourceDeterministicPhysicsEnvironment:
                     linearVelocity: creation.linearVelocity,
                     angularVelocity: creation.angularVelocity,
                     damping: creation.damping,
+                    materialIndex: creation.materialIndex,
+                    isDragEnabled: creation.isDragEnabled,
+                    buoyancyRatio: creation.buoyancyRatio,
                     accumulatedCenterForce: .zero,
                     accumulatedCenterTorque: .zero,
                     isMotionEnabled: creation.motionType != .staticBody,
@@ -1152,6 +1158,18 @@ public final class SourceDeterministicPhysicsEnvironment:
             body.massProperties = try SourcePhysicsMassProperties(
                 massKilograms: massKilograms,
                 principalInertia: authored.principalInertia * scale
+            )
+            // Garry's Mod recalculates the material/object-density buoyancy
+            // after SetMass. Keep that unresolved automatic state distinct
+            // from a user-authored SetBuoyancyRatio override.
+            body.buoyancyRatio = .automatic
+        case let .setMaterialIndex(materialIndex):
+            body.materialIndex = materialIndex
+        case let .setDragEnabled(enabled):
+            body.isDragEnabled = enabled
+        case let .setBuoyancyRatio(ratio):
+            body.buoyancyRatio = try SourcePhysicsBuoyancyRatio(
+                explicit: ratio
             )
         case let .setPosition(position, teleport):
             // IPhysicsObject exposes SetPosition on every body, independent
@@ -1691,7 +1709,7 @@ public final class SourceDeterministicPhysicsEnvironment:
                 firstBodyID: scene.bodyID,
                 secondBodyID: body.bodyID,
                 firstMaterialIndex: hit.materialIndex,
-                secondMaterialIndex: body.creation.materialIndex,
+                secondMaterialIndex: body.materialIndex,
                 normal: hit.normal,
                 position: contactPoint,
                 penetration: 0
@@ -1755,10 +1773,10 @@ public final class SourceDeterministicPhysicsEnvironment:
                   firstShape.bounds.intersects(secondShape.bounds),
                   let contact = contact(
                       firstID: firstID,
-                      firstMaterialIndex: first.creation.materialIndex,
+                      firstMaterialIndex: first.materialIndex,
                       firstShape: firstShape,
                       secondID: secondID,
-                      secondMaterialIndex: second.creation.materialIndex,
+                      secondMaterialIndex: second.materialIndex,
                       secondShape: secondShape
                   ) else { continue }
             contacts.append(contact)
@@ -1776,7 +1794,7 @@ public final class SourceDeterministicPhysicsEnvironment:
                           sceneID: scene.bodyID,
                           sceneShape: sceneShape,
                           bodyID: bodyID,
-                          bodyMaterialIndex: body.creation.materialIndex,
+                          bodyMaterialIndex: body.materialIndex,
                           bodyShape: bodyShape
                       ) else { continue }
                 contacts.append(sceneContact)
@@ -2590,7 +2608,7 @@ public final class SourceDeterministicPhysicsEnvironment:
             bodyID: body.bodyID,
             shape: body.creation.shape,
             transform: body.transform,
-            materialIndex: body.creation.materialIndex
+            materialIndex: body.materialIndex
         )
     }
 
@@ -3237,12 +3255,14 @@ public final class SourceDeterministicPhysicsEnvironment:
                     angularVelocity: body.angularVelocity,
                     damping: body.damping,
                     motionType: body.motionType,
-                    materialIndex: body.creation.materialIndex,
+                    materialIndex: body.materialIndex,
                     isMotionEnabled: body.isMotionEnabled,
                     isGravityEnabled: body.isGravityEnabled,
                     isCollisionEnabled: body.isCollisionEnabled,
                     isSleeping: body.isSleeping,
-                    simulationTick: body.simulationTick
+                    simulationTick: body.simulationTick,
+                    isDragEnabled: body.isDragEnabled,
+                    buoyancyRatio: body.buoyancyRatio
                 )
             }
         let constraintSnapshots = try fixedConstraints.values

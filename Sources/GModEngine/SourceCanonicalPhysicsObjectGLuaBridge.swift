@@ -16,10 +16,13 @@ public struct SourceCanonicalPhysicsObjectSnapshot: Equatable, Sendable {
     public let angularVelocity: SourceVector3
     public let damping: SourcePhysicsDamping
     public let motionType: SourcePhysicsMotionType
+    public let materialIndex: Int
     public let isMotionEnabled: Bool
     public let isGravityEnabled: Bool
     public let isCollisionEnabled: Bool
     public let isSleeping: Bool
+    public let isDragEnabled: Bool
+    public let buoyancyRatio: SourcePhysicsBuoyancyRatio
 
     /// Builds the truthful pre-simulation view of a spawned canonical prop.
     /// `SourceCanonicalPropPhysicsInput` performs the same model, solid,
@@ -44,10 +47,13 @@ public struct SourceCanonicalPhysicsObjectSnapshot: Equatable, Sendable {
         angularVelocity = entity.motion.angularVelocity
         damping = definition.damping
         motionType = definition.motionType
+        materialIndex = definition.materialIndex
         isMotionEnabled = definition.motionType != .staticBody
         isGravityEnabled = definition.isGravityEnabled
         isCollisionEnabled = definition.isCollisionEnabled
         isSleeping = !definition.startsAwake
+        isDragEnabled = true
+        buoyancyRatio = .automatic
     }
 
     /// Builds the post-simulation view without replacing any solver-authored
@@ -61,10 +67,13 @@ public struct SourceCanonicalPhysicsObjectSnapshot: Equatable, Sendable {
         angularVelocity = body.angularVelocity
         damping = body.damping
         motionType = body.motionType
+        materialIndex = body.materialIndex
         isMotionEnabled = body.isMotionEnabled
         isGravityEnabled = body.isGravityEnabled
         isCollisionEnabled = body.isCollisionEnabled
         isSleeping = body.isSleeping
+        isDragEnabled = body.isDragEnabled
+        buoyancyRatio = body.buoyancyRatio
     }
 
     private static func bounds(
@@ -160,6 +169,7 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
     private let typeSystem: GMLuaTypeSystem
     private let entityRegistry: GMLuaEntityRegistry
     private let host: SourceCanonicalPhysicsObjectLuaWeakHost
+    private let materialNames: SourcePhysicsMaterialNameTable?
     private let owner = SourceCanonicalPhysicsObjectLuaOwner()
     private let cacheLock = NSLock()
     private var valuesByBodyID: [SourcePhysicsBodyID: LuaValue] = [:]
@@ -168,18 +178,21 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
         state: LuaState,
         typeSystem: GMLuaTypeSystem,
         entityRegistry: GMLuaEntityRegistry,
-        host: any SourceCanonicalPhysicsObjectLuaHost
+        host: any SourceCanonicalPhysicsObjectLuaHost,
+        materialNames: SourcePhysicsMaterialNameTable?
     ) {
         self.state = state
         self.typeSystem = typeSystem
         self.entityRegistry = entityRegistry
         self.host = SourceCanonicalPhysicsObjectLuaWeakHost(host)
+        self.materialNames = materialNames
     }
 
     @discardableResult
     public static func install(
         into runtime: GMLuaRuntime,
-        host: any SourceCanonicalPhysicsObjectLuaHost
+        host: any SourceCanonicalPhysicsObjectLuaHost,
+        materialNames: SourcePhysicsMaterialNameTable? = nil
     ) throws -> SourceCanonicalPhysicsObjectGLuaBridge {
         guard !runtime.isClosed else {
             throw SourceCanonicalPhysicsObjectGLuaBridgeError
@@ -197,7 +210,8 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
             state: runtime.state,
             typeSystem: typeSystem,
             entityRegistry: entityRegistry,
-            host: host
+            host: host,
+            materialNames: materialNames
         )
         try bridge.installMethods()
         return bridge
@@ -417,6 +431,28 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
         try setPhysicsReadMethod("GetRotDamping") { snapshot in
             [.number(Double(snapshot.damping.angular))]
         }
+        try setPhysicsReadMethod("GetMaterial") { snapshot in
+            guard let materialNames = self.materialNames,
+                  let name = materialNames.name(for: snapshot.materialIndex) else {
+                throw LuaError.runtime(
+                    "PhysObj:GetMaterial requires an authenticated " +
+                    "VPhysics material name/index table"
+                )
+            }
+            return [.string(LuaString(name))]
+        }
+        try setPhysicsReadMethod("IsDragEnabled") { snapshot in
+            [.boolean(snapshot.isDragEnabled)]
+        }
+        try setPhysicsReadMethod("GetBuoyancyRatio") { snapshot in
+            guard let ratio = snapshot.buoyancyRatio.explicitValue else {
+                throw LuaError.runtime(
+                    "PhysObj:GetBuoyancyRatio is unavailable until the " +
+                    "automatic material/fluid density ratio is resolved"
+                )
+            }
+            return [.number(Double(ratio))]
+        }
         try setPhysicsReadMethod("IsMotionEnabled") { snapshot in
             [.boolean(snapshot.isMotionEnabled)]
         }
@@ -533,6 +569,36 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
                 arguments,
                 at: 1,
                 function: "PhysObj:SetMass"
+            )))
+        }
+        try setPhysicsMutationMethod("SetMaterial") { arguments in
+            let name = try self.requiredString(
+                arguments,
+                at: 1,
+                function: "PhysObj:SetMaterial"
+            )
+            guard let materialNames = self.materialNames,
+                  let materialIndex = materialNames.materialIndex(named: name)
+            else {
+                throw LuaError.runtime(
+                    "PhysObj:SetMaterial could not resolve authenticated " +
+                    "VPhysics material '\(name)'"
+                )
+            }
+            return .setMaterialIndex(materialIndex)
+        }
+        try setPhysicsMutationMethod("EnableDrag") { arguments in
+            .setDragEnabled(try self.requiredBoolean(
+                arguments,
+                at: 1,
+                function: "PhysObj:EnableDrag"
+            ))
+        }
+        try setPhysicsMutationMethod("SetBuoyancyRatio") { arguments in
+            .setBuoyancyRatio(Float(try self.requiredNumber(
+                arguments,
+                at: 1,
+                function: "PhysObj:SetBuoyancyRatio"
             )))
         }
         try setPhysicsMutationMethod("SetPos") { arguments in
@@ -757,6 +823,24 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
             )
         }
         return value
+    }
+
+    private func requiredString(
+        _ arguments: [LuaValue],
+        at index: Int,
+        function: String
+    ) throws -> String {
+        guard arguments.indices.contains(index),
+              case let .string(value) = arguments[index] else {
+            let actual = arguments.indices.contains(index)
+                ? arguments[index].typeName
+                : "no value"
+            throw LuaError.runtime(
+                "bad argument #\(index) to '\(function)' " +
+                "(string expected, got \(actual))"
+            )
+        }
+        return value.utf8String
     }
 
     private func requiredVector(

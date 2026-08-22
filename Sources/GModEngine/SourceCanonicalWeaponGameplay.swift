@@ -546,6 +546,10 @@ public enum SourceCanonicalWeaponGameplayBridge {
                     candidate.transform.origin = target
                     candidate.transform.angles = player.transform.angles
                     candidate.motion.linearVelocity = velocity
+                    // The same full EHANDLE re-enters the world. The following
+                    // Player inventory removal is appended immediately after
+                    // this state in the adapter's ordered replication FIFO.
+                    candidate.isNotSolid = false
                 }
                 _ = try host.updateCanonicalEntity(player.identity) { candidate in
                     guard candidate.weaponInventory.remove(

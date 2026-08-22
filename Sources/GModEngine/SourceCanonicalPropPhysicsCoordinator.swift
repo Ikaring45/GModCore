@@ -268,11 +268,14 @@ public struct SourceCanonicalPropPhysicsMotionSnapshot: Equatable, Sendable {
     public let linearVelocity: SourceVector3
     public let angularVelocity: SourceVector3
     public let damping: SourcePhysicsDamping
+    public let materialIndex: Int
     public let isMotionEnabled: Bool
     public let isGravityEnabled: Bool
     public let isCollisionEnabled: Bool
     public let isSleeping: Bool
     public let simulationTick: UInt64
+    public let isDragEnabled: Bool
+    public let buoyancyRatio: SourcePhysicsBuoyancyRatio
 
     public init(body: SourcePhysicsBodySnapshot) {
         bodyID = body.bodyID
@@ -281,11 +284,14 @@ public struct SourceCanonicalPropPhysicsMotionSnapshot: Equatable, Sendable {
         linearVelocity = body.linearVelocity
         angularVelocity = body.angularVelocity
         damping = body.damping
+        materialIndex = body.materialIndex
         isMotionEnabled = body.isMotionEnabled
         isGravityEnabled = body.isGravityEnabled
         isCollisionEnabled = body.isCollisionEnabled
         isSleeping = body.isSleeping
         simulationTick = body.simulationTick
+        isDragEnabled = body.isDragEnabled
+        buoyancyRatio = body.buoyancyRatio
     }
 
     /// Applies only values authored by the rigid-body environment. Unrelated
@@ -338,6 +344,27 @@ public final class SourceCanonicalPropPhysicsCoordinator {
         /// SetMass guarantees mass at the public boundary. The backend owns
         /// its inertia policy until the resulting body snapshot is committed.
         case backendAuthoredInertia(massKilograms: Float)
+    }
+
+    private struct ExpectedMutableBodyState {
+        var damping: SourcePhysicsDamping
+        var materialIndex: Int
+        var isDragEnabled: Bool
+        var buoyancyRatio: SourcePhysicsBuoyancyRatio
+
+        init(body: SourcePhysicsBodySnapshot) {
+            damping = body.damping
+            materialIndex = body.materialIndex
+            isDragEnabled = body.isDragEnabled
+            buoyancyRatio = body.buoyancyRatio
+        }
+
+        init(creation: SourcePhysicsBodyCreationCommand) {
+            damping = creation.damping
+            materialIndex = creation.materialIndex
+            isDragEnabled = creation.isDragEnabled
+            buoyancyRatio = creation.buoyancyRatio
+        }
     }
 
     private let environment: SourcePhysicsEnvironment
@@ -469,6 +496,7 @@ public final class SourceCanonicalPropPhysicsCoordinator {
             environmentSnapshot: environmentSnapshot,
             desiredBodies: desiredBodies,
             expectedMassStates: expectedMassStates(after: commands),
+            expectedMutableStates: try expectedMutableStates(after: commands),
             expectedConstraintIDs: pendingValidation.constraintIDs,
             deletedBodyIDs: deletions,
             finalCommandSequence: sequences[commandIndex],
@@ -696,6 +724,9 @@ public final class SourceCanonicalPropPhysicsCoordinator {
         environmentSnapshot: SourcePhysicsEnvironmentSnapshot,
         desiredBodies: [SourcePhysicsBodyID: DesiredBody],
         expectedMassStates: [SourcePhysicsBodyID: ExpectedMassState],
+        expectedMutableStates: [
+            SourcePhysicsBodyID: ExpectedMutableBodyState
+        ],
         expectedConstraintIDs: Set<SourcePhysicsConstraintID>,
         deletedBodyIDs: [SourcePhysicsBodyID],
         finalCommandSequence: UInt64,
@@ -768,10 +799,18 @@ public final class SourceCanonicalPropPhysicsCoordinator {
                         .environmentBodyConfigurationMismatch(bodyID)
                 }
             }
+            guard let expectedMutableState = expectedMutableStates[bodyID]
+            else {
+                throw SourceCanonicalPropPhysicsCoordinatorError
+                    .environmentBodyConfigurationMismatch(bodyID)
+            }
             guard
                 body.shape == desired.definition.shape,
                 body.motionType == desired.definition.motionType,
-                body.materialIndex == desired.definition.materialIndex
+                body.damping == expectedMutableState.damping,
+                body.materialIndex == expectedMutableState.materialIndex,
+                body.isDragEnabled == expectedMutableState.isDragEnabled,
+                body.buoyancyRatio == expectedMutableState.buoyancyRatio
             else {
                 throw SourceCanonicalPropPhysicsCoordinatorError
                     .environmentBodyConfigurationMismatch(bodyID)
@@ -802,6 +841,54 @@ public final class SourceCanonicalPropPhysicsCoordinator {
                         massKilograms: massKilograms
                     )
                 }
+            case .createFixedConstraint,
+                 .createLengthConstraint,
+                 .createNoCollideConstraint,
+                 .deleteConstraint,
+                 .simulate,
+                 .query:
+                break
+            }
+        }
+        return states
+    }
+
+    private func expectedMutableStates(
+        after commands: [SourcePhysicsCommand]
+    ) throws -> [SourcePhysicsBodyID: ExpectedMutableBodyState] {
+        var states = committedBodies.mapValues {
+            ExpectedMutableBodyState(body: $0.body)
+        }
+        for command in commands {
+            switch command.payload {
+            case let .createBody(creation):
+                states[creation.bodyID] = ExpectedMutableBodyState(
+                    creation: creation
+                )
+            case let .deleteBody(deletion):
+                states.removeValue(forKey: deletion.bodyID)
+            case let .mutateBody(command):
+                guard var state = states[command.bodyID] else { continue }
+                switch command.mutation {
+                case let .setDamping(linear, angular):
+                    state.damping = try SourcePhysicsDamping(
+                        linear: linear,
+                        angular: angular
+                    )
+                case .setMassKilograms:
+                    state.buoyancyRatio = .automatic
+                case let .setMaterialIndex(materialIndex):
+                    state.materialIndex = materialIndex
+                case let .setDragEnabled(enabled):
+                    state.isDragEnabled = enabled
+                case let .setBuoyancyRatio(ratio):
+                    state.buoyancyRatio = try SourcePhysicsBuoyancyRatio(
+                        explicit: ratio
+                    )
+                default:
+                    break
+                }
+                states[command.bodyID] = state
             case .createFixedConstraint,
                  .createLengthConstraint,
                  .createNoCollideConstraint,

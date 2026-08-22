@@ -382,6 +382,13 @@ public final class SourceCanonicalWeaponPickupController: @unchecked Sendable {
             callbackFailures.append(failure)
         }
 
+        // The exact world EHANDLE becomes inventory-owned. Preserve its
+        // clips/NetworkVars/model/creation identity, but remove it from world
+        // collision and trace candidates before publishing Player ownership.
+        _ = try host.updateCanonicalEntity(currentWeapon.identity) { candidate in
+            candidate.isNotSolid = true
+        }
+
         _ = try host.updateCanonicalEntity(player.identity) { candidate in
             let inserted = candidate.weaponInventory.insert(
                 SourceCanonicalWeaponRecord(

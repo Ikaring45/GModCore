@@ -983,7 +983,9 @@ private final class RecordingPhysicsEnvironment: SourcePhysicsEnvironment {
             isGravityEnabled: body.isGravityEnabled,
             isCollisionEnabled: body.isCollisionEnabled,
             isSleeping: body.isSleeping,
-            simulationTick: simulationTick
+            simulationTick: simulationTick,
+            isDragEnabled: body.isDragEnabled,
+            buoyancyRatio: body.buoyancyRatio
         )
     }
 
@@ -995,6 +997,9 @@ private final class RecordingPhysicsEnvironment: SourcePhysicsEnvironment {
         var linearVelocity = body.linearVelocity
         var angularVelocity = body.angularVelocity
         var damping = body.damping
+        var materialIndex = body.materialIndex
+        var isDragEnabled = body.isDragEnabled
+        var buoyancyRatio = body.buoyancyRatio
         var massProperties = body.massProperties
         var isMotionEnabled = body.isMotionEnabled
         var isGravityEnabled = body.isGravityEnabled
@@ -1058,6 +1063,13 @@ private final class RecordingPhysicsEnvironment: SourcePhysicsEnvironment {
                 massKilograms: massKilograms,
                 principalInertia: body.massProperties.principalInertia * scale
             )
+            buoyancyRatio = .automatic
+        case let .setMaterialIndex(value):
+            materialIndex = value
+        case let .setDragEnabled(enabled):
+            isDragEnabled = enabled
+        case let .setBuoyancyRatio(value):
+            buoyancyRatio = try SourcePhysicsBuoyancyRatio(explicit: value)
         case let .setPosition(position, _):
             transform.origin = position
         case let .setAngles(angles):
@@ -1072,12 +1084,14 @@ private final class RecordingPhysicsEnvironment: SourcePhysicsEnvironment {
             angularVelocity: angularVelocity,
             damping: damping,
             motionType: body.motionType,
-            materialIndex: body.materialIndex,
+            materialIndex: materialIndex,
             isMotionEnabled: isMotionEnabled,
             isGravityEnabled: isGravityEnabled,
             isCollisionEnabled: isCollisionEnabled,
             isSleeping: isSleeping,
-            simulationTick: body.simulationTick
+            simulationTick: body.simulationTick,
+            isDragEnabled: isDragEnabled,
+            buoyancyRatio: buoyancyRatio
         )
     }
 

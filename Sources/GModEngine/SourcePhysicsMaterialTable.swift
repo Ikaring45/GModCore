@@ -81,10 +81,84 @@ public struct SourcePhysicsMaterialInteraction: Equatable, Hashable, Sendable {
 
 public enum SourcePhysicsMaterialTableError: Error, Equatable, Sendable {
     case negativeMaterialIndex(Int)
+    case emptyMaterialName
+    case materialNameContainsNUL(String)
+    case duplicateMaterialName(String)
+    case duplicateMaterialNameIndex(Int)
     case invalidCoefficient(field: String, value: Float)
     case duplicateInteraction(firstMaterialIndex: Int, secondMaterialIndex: Int)
     case unregisteredInteraction(firstMaterialIndex: Int, secondMaterialIndex: Int)
     case missingContactMaterialIndex(bodyID: SourcePhysicsBodyID)
+}
+
+/// One independently resolved VPhysics runtime material name/index pair.
+///
+/// A surface-properties declaration ordinal is provenance, not necessarily a
+/// runtime `IPhysicsSurfaceProps` index. Callers must therefore construct this
+/// entry only from an authenticated runtime mapping; this type never derives
+/// an index from declaration order.
+public struct SourcePhysicsMaterialNameEntry: Equatable, Hashable, Sendable {
+    public let name: String
+    public let materialIndex: Int
+
+    public init(name: String, materialIndex: Int) throws {
+        guard materialIndex >= 0 else {
+            throw SourcePhysicsMaterialTableError.negativeMaterialIndex(
+                materialIndex
+            )
+        }
+        guard !name.isEmpty else {
+            throw SourcePhysicsMaterialTableError.emptyMaterialName
+        }
+        guard !name.contains("\0") else {
+            throw SourcePhysicsMaterialTableError.materialNameContainsNUL(name)
+        }
+        self.name = name
+        self.materialIndex = materialIndex
+    }
+}
+
+/// Exact bidirectional lookup used by GLua `PhysObj:Get/SetMaterial`.
+///
+/// Surface-property names are case-insensitive in Source KeyValues lookups.
+/// The original authenticated spelling is retained for `GetMaterial`, while
+/// lookup keys use a stable lowercase spelling. No default or declaration-
+/// ordinal mapping is synthesized when an entry is missing.
+public struct SourcePhysicsMaterialNameTable: Equatable, Sendable {
+    private let namesByIndex: [Int: String]
+    private let indicesByLowercaseName: [String: Int]
+
+    public init(entries: [SourcePhysicsMaterialNameEntry]) throws {
+        var namesByIndex: [Int: String] = [:]
+        var indicesByLowercaseName: [String: Int] = [:]
+        namesByIndex.reserveCapacity(entries.count)
+        indicesByLowercaseName.reserveCapacity(entries.count)
+        for entry in entries {
+            guard namesByIndex[entry.materialIndex] == nil else {
+                throw SourcePhysicsMaterialTableError
+                    .duplicateMaterialNameIndex(entry.materialIndex)
+            }
+            let key = entry.name.lowercased()
+            guard indicesByLowercaseName[key] == nil else {
+                throw SourcePhysicsMaterialTableError
+                    .duplicateMaterialName(entry.name)
+            }
+            namesByIndex[entry.materialIndex] = entry.name
+            indicesByLowercaseName[key] = entry.materialIndex
+        }
+        self.namesByIndex = namesByIndex
+        self.indicesByLowercaseName = indicesByLowercaseName
+    }
+
+    public var count: Int { namesByIndex.count }
+
+    public func name(for materialIndex: Int) -> String? {
+        namesByIndex[materialIndex]
+    }
+
+    public func materialIndex(named name: String) -> Int? {
+        indicesByLowercaseName[name.lowercased()]
+    }
 }
 
 /// Immutable backend-neutral lookup for exact material-pair behavior.

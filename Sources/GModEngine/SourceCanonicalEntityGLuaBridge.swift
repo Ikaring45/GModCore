@@ -25,6 +25,16 @@ public protocol SourceCanonicalEntityLuaHost: AnyObject {
         playerUserID: Int?
     ) throws -> SourceCanonicalEntitySnapshot
 
+    /// Allocates one registered SWEP class as an unowned world Weapon. The
+    /// caller supplies the exact inherited `WorldModel` already resolved from
+    /// `weapons.Get`; the host must validate that asset before touching a
+    /// SourceEntityList slot. This is deliberately separate from Player:Give,
+    /// which creates an inventory-owned Weapon and has different solidity.
+    func createCanonicalWorldWeapon(
+        className: String,
+        worldModel: SourceEntityModelReference
+    ) throws -> SourceCanonicalEntitySnapshot
+
     func updateCanonicalEntity(
         _ identity: SourceCanonicalEntityIdentity,
         _ mutation: (inout SourceCanonicalEntityState) throws -> Void
@@ -1847,19 +1857,39 @@ public enum SourceCanonicalEntityGLuaBridge {
         try state.setRawTableValue(
             native("ents.Create") { arguments in
                 let className = try requiredString(arguments, index: 0, function: "ents.Create")
-                guard className == SourceCanonicalEntityKind.propPhysics.className else {
-                    return [nullValue]
-                }
                 let host = try requiredHost("ents.Create")
                 let snapshot: SourceCanonicalEntitySnapshot
                 do {
-                    snapshot = try host.createCanonicalEntity(
-                        kind: .propPhysics,
-                        at: nil,
-                        state: nil,
-                        playerUserID: nil
-                    )
+                    if className == SourceCanonicalEntityKind.propPhysics.className {
+                        snapshot = try host.createCanonicalEntity(
+                            kind: .propPhysics,
+                            at: nil,
+                            state: nil,
+                            playerUserID: nil
+                        )
+                    } else {
+                        // The structural check alone is not an Entity factory.
+                        // Resolve the real inherited SWEP table and its exact
+                        // WorldModel before allocating a canonical handle.
+                        guard SourceCanonicalEntityKind
+                            .isStructurallyValidWeaponClassName(className),
+                              let definition = try? runtime
+                                .scriptedWeaponRenderDefinition(
+                                    className: className
+                                ),
+                              let worldModel = definition.worldModel else {
+                            return [nullValue]
+                        }
+                        snapshot = try host.createCanonicalWorldWeapon(
+                            className: className,
+                            worldModel: worldModel
+                        )
+                    }
                 } catch SourceCanonicalEntityError.noFreeNetworkableSlot {
+                    return [nullValue]
+                } catch SourceCanonicalEntityError.modelRejected {
+                    return [nullValue]
+                } catch SourceCanonicalEntityError.modelValidationUnavailable {
                     return [nullValue]
                 }
 

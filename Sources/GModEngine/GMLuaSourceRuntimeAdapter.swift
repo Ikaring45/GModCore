@@ -637,12 +637,14 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
                     angularVelocity: motion.angularVelocity,
                     damping: motion.damping,
                     motionType: definition.motionType,
-                    materialIndex: definition.materialIndex,
+                    materialIndex: motion.materialIndex,
                     isMotionEnabled: motion.isMotionEnabled,
                     isGravityEnabled: motion.isGravityEnabled,
                     isCollisionEnabled: motion.isCollisionEnabled,
                     isSleeping: motion.isSleeping,
-                    simulationTick: motion.simulationTick
+                    simulationTick: motion.simulationTick,
+                    isDragEnabled: motion.isDragEnabled,
+                    buoyancyRatio: motion.buoyancyRatio
                 )
                 if entity.transform != motion.transform ||
                     entity.motion.linearVelocity != motion.linearVelocity ||
@@ -724,13 +726,16 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
 
     /// Installs and retains the realm-local full-EHANDLE PhysObj userdata
     /// cache. Runtime construction alone does not imply a physics host.
-    public func installCanonicalPhysicsObjectLuaBridge() throws {
+    public func installCanonicalPhysicsObjectLuaBridge(
+        materialNames: SourcePhysicsMaterialNameTable? = nil
+    ) throws {
         try withMutationBoundary {
             guard canonicalPhysicsObjectLuaBridge == nil else { return }
             canonicalPhysicsObjectLuaBridge = try
                 SourceCanonicalPhysicsObjectGLuaBridge.install(
                     into: serverRuntime,
-                    host: self
+                    host: self,
+                    materialNames: materialNames
                 )
         }
     }
@@ -763,6 +768,57 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
                 }
             )
             canonicalEntityHandleOrder.append(snapshot.identity.handle.rawValue)
+            return snapshot
+        }
+    }
+
+    /// Creates an unowned world SWEP from the exact registered class and
+    /// validated inherited WorldModel. Unlike Player:Give, this route does not
+    /// enter a Player inventory and therefore remains solid/traceable for
+    /// authoritative +use/contact pickup.
+    @discardableResult
+    public func createCanonicalWorldWeapon(
+        className: String,
+        worldModel: SourceEntityModelReference
+    ) throws -> SourceCanonicalEntitySnapshot {
+        try withMutationBoundary {
+            guard SourceCanonicalEntityKind
+                .isStructurallyValidWeaponClassName(className) else {
+                throw SourceCanonicalEntityError.invalidClassName(
+                    kind: .weapon,
+                    className: className
+                )
+            }
+            switch canonicalEntities.validateModel(worldModel, for: .weapon) {
+            case .valid:
+                break
+            case .invalid:
+                throw SourceCanonicalEntityError.modelRejected(worldModel)
+            case .unavailable:
+                throw SourceCanonicalEntityError
+                    .modelValidationUnavailable(worldModel)
+            }
+
+            try preflightCanonicalMutationJournalLocked(
+                additionalOperations: 1
+            )
+            var state = SourceCanonicalEntityState.defaults(for: .weapon)
+            state.creationTime = kernel.globals.currentTime
+            state.model = worldModel
+            state.isNotSolid = false
+            let snapshot = try canonicalEntities.create(
+                kind: .weapon,
+                className: className,
+                state: state,
+                publishing: { [unowned self] snapshot in
+                    _ = try self.requiredServerRegistryLocked()
+                        .applyAuthoritativeSnapshot(snapshot)
+                    self.canonicalMutationJournal.append(.create(snapshot))
+                }
+            )
+            canonicalEntityHandleOrder.append(
+                snapshot.identity.handle.rawValue
+            )
             return snapshot
         }
     }
@@ -869,6 +925,9 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
             var state = SourceCanonicalEntityState.defaults(for: .weapon)
             state.creator = player
             state.creationTime = kernel.globals.currentTime
+            // Inventory-owned weapons do not participate in world traces.
+            // DropWeapon explicitly reverses this flag on the same EHANDLE.
+            state.isNotSolid = true
             let registry = try requiredServerRegistryLocked()
             let created = try canonicalEntities.create(
                 kind: .weapon,

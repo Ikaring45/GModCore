@@ -248,6 +248,36 @@ public struct SourcePhysicsDamping: Equatable, Hashable, Sendable {
     }
 }
 
+/// Source/VPhysics buoyancy state for one rigid body.
+///
+/// A newly-created VPhysics object derives its buoyancy from the collision
+/// volume and the exact object/fluid material densities. Until that calculation
+/// is available, publishing a guessed numeric ratio would make
+/// `PhysObj:GetBuoyancyRatio` lie. An explicit override is retained exactly and
+/// is reset to ``automatic`` by `SetMass`, matching Garry's Mod's documented
+/// PhysObj contract.
+public struct SourcePhysicsBuoyancyRatio: Equatable, Hashable, Sendable {
+    public static let automatic = SourcePhysicsBuoyancyRatio(
+        validatedExplicitValue: nil
+    )
+
+    public let explicitValue: Float?
+
+    public init(explicit value: Float) throws {
+        guard value.isFinite else {
+            throw SourcePhysicsContractError.nonFinite(field: "buoyancyRatio")
+        }
+        guard value >= 0 else {
+            throw SourcePhysicsContractError.negative(field: "buoyancyRatio")
+        }
+        explicitValue = value
+    }
+
+    private init(validatedExplicitValue: Float?) {
+        explicitValue = validatedExplicitValue
+    }
+}
+
 public enum SourcePhysicsMotionType: Equatable, Hashable, Sendable {
     case staticBody
     case dynamicBody
@@ -269,6 +299,8 @@ public struct SourcePhysicsBodyCreationCommand: Equatable, Sendable {
     public let isGravityEnabled: Bool
     public let isCollisionEnabled: Bool
     public let startsAwake: Bool
+    public let isDragEnabled: Bool
+    public let buoyancyRatio: SourcePhysicsBuoyancyRatio
 
     public init(
         bodyID: SourcePhysicsBodyID,
@@ -282,7 +314,9 @@ public struct SourcePhysicsBodyCreationCommand: Equatable, Sendable {
         materialIndex: Int,
         isGravityEnabled: Bool,
         isCollisionEnabled: Bool,
-        startsAwake: Bool
+        startsAwake: Bool,
+        isDragEnabled: Bool = true,
+        buoyancyRatio: SourcePhysicsBuoyancyRatio = .automatic
     ) throws {
         try sourcePhysicsRequireFinite(transform, field: "transform")
         try sourcePhysicsRequireFinite(linearVelocity, field: "linearVelocity")
@@ -305,6 +339,8 @@ public struct SourcePhysicsBodyCreationCommand: Equatable, Sendable {
         self.isGravityEnabled = isGravityEnabled
         self.isCollisionEnabled = isCollisionEnabled
         self.startsAwake = startsAwake
+        self.isDragEnabled = isDragEnabled
+        self.buoyancyRatio = buoyancyRatio
     }
 }
 
@@ -347,6 +383,9 @@ public enum SourcePhysicsBodyMutation: Equatable, Sendable {
     case applyTorqueCenter(SourceVector3)
     case setDamping(linear: Float, angular: Float)
     case setMassKilograms(Float)
+    case setMaterialIndex(Int)
+    case setDragEnabled(Bool)
+    case setBuoyancyRatio(Float)
     /// `teleport` preserves GLua's optional `PhysObj:SetPos` collision mode.
     case setPosition(SourceVector3, teleport: Bool)
     case setAngles(SourceQAngle)
@@ -440,6 +479,15 @@ public struct SourcePhysicsBodyMutationCommand: Equatable, Sendable {
                 throw SourcePhysicsContractError
                     .massOutsideVPhysicsRange(massKilograms)
             }
+        case let .setMaterialIndex(materialIndex):
+            guard materialIndex >= 0 else {
+                throw SourcePhysicsContractError.negativeMaterialIndex(
+                    field: "bodyMutation.materialIndex",
+                    value: materialIndex
+                )
+            }
+        case let .setBuoyancyRatio(ratio):
+            _ = try SourcePhysicsBuoyancyRatio(explicit: ratio)
         case let .setPosition(position, _):
             try sourcePhysicsRequireFinite(
                 position,
@@ -459,7 +507,8 @@ public struct SourcePhysicsBodyMutationCommand: Equatable, Sendable {
              .sleep,
              .setMotionEnabled,
              .setGravityEnabled,
-             .setCollisionEnabled:
+             .setCollisionEnabled,
+             .setDragEnabled:
             break
         }
         self.bodyID = bodyID
@@ -623,6 +672,8 @@ public struct SourcePhysicsBodySnapshot: Equatable, Sendable {
     public let isCollisionEnabled: Bool
     public let isSleeping: Bool
     public let simulationTick: UInt64
+    public let isDragEnabled: Bool
+    public let buoyancyRatio: SourcePhysicsBuoyancyRatio
 
     public init(
         bodyID: SourcePhysicsBodyID,
@@ -638,7 +689,9 @@ public struct SourcePhysicsBodySnapshot: Equatable, Sendable {
         isGravityEnabled: Bool,
         isCollisionEnabled: Bool,
         isSleeping: Bool,
-        simulationTick: UInt64
+        simulationTick: UInt64,
+        isDragEnabled: Bool = true,
+        buoyancyRatio: SourcePhysicsBuoyancyRatio = .automatic
     ) throws {
         try sourcePhysicsRequireFinite(transform, field: "transform")
         try sourcePhysicsRequireFinite(linearVelocity, field: "linearVelocity")
@@ -663,6 +716,8 @@ public struct SourcePhysicsBodySnapshot: Equatable, Sendable {
         self.isCollisionEnabled = isCollisionEnabled
         self.isSleeping = isSleeping
         self.simulationTick = simulationTick
+        self.isDragEnabled = isDragEnabled
+        self.buoyancyRatio = buoyancyRatio
     }
 }
 
