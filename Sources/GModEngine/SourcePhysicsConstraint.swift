@@ -18,6 +18,116 @@ public struct SourcePhysicsConstraintID: Equatable, Hashable, Sendable {
 
 public enum SourcePhysicsConstraintKind: Equatable, Hashable, Sendable {
     case fixed
+    case length
+}
+
+/// A length-constraint endpoint is either a mutable physics body or the one
+/// immutable worldspawn collision body supplied by the environment. Keeping
+/// this authored distinction avoids manufacturing a dynamic body for Entity(0).
+public enum SourcePhysicsLengthConstraintEndpointKind:
+    Equatable, Hashable, Sendable
+{
+    case body
+    case staticWorld
+}
+
+public struct SourcePhysicsLengthConstraintEndpoint: Equatable, Sendable {
+    public let bodyID: SourcePhysicsBodyID
+    public let kind: SourcePhysicsLengthConstraintEndpointKind
+    public let localAnchor: SourceVector3
+
+    public init(
+        bodyID: SourcePhysicsBodyID,
+        kind: SourcePhysicsLengthConstraintEndpointKind,
+        localAnchor: SourceVector3
+    ) throws {
+        guard localAnchor.sourceConstraintIsFinite else {
+            throw SourcePhysicsContractError.nonFinite(
+                field: "lengthConstraint.localAnchor"
+            )
+        }
+        self.bodyID = bodyID
+        self.kind = kind
+        self.localAnchor = localAnchor
+    }
+}
+
+/// Backend-neutral form of VPhysics `constraint_lengthparams_t`.
+///
+/// Source's flexible rope uses `minimumLength == 0`; spawnflag 2 makes the
+/// constraint rigid by setting minimum and maximum to the same authored
+/// length. A positive break force is preserved in the contract, although the
+/// deterministic backend rejects it until its break event is source-attested.
+public struct SourcePhysicsLengthConstraintCreationCommand:
+    Equatable, Sendable
+{
+    public let constraintID: SourcePhysicsConstraintID
+    public let reference: SourcePhysicsLengthConstraintEndpoint
+    public let attached: SourcePhysicsLengthConstraintEndpoint
+    public let minimumLength: Float
+    public let maximumLength: Float
+    public let forceLimitKilogramInchesPerSecond: Float
+
+    public init(
+        constraintID: SourcePhysicsConstraintID,
+        reference: SourcePhysicsLengthConstraintEndpoint,
+        attached: SourcePhysicsLengthConstraintEndpoint,
+        minimumLength: Float,
+        maximumLength: Float,
+        forceLimitKilogramInchesPerSecond: Float = 0
+    ) throws {
+        guard reference.bodyID != attached.bodyID else {
+            throw SourcePhysicsContractError.constraintReferencesSameBody(
+                reference.bodyID
+            )
+        }
+        guard minimumLength.isFinite, maximumLength.isFinite,
+              forceLimitKilogramInchesPerSecond.isFinite else {
+            throw SourcePhysicsContractError.nonFinite(
+                field: "lengthConstraint"
+            )
+        }
+        guard minimumLength >= 0 else {
+            throw SourcePhysicsContractError.negative(
+                field: "lengthConstraint.minimumLength"
+            )
+        }
+        guard maximumLength >= minimumLength else {
+            throw SourcePhysicsContractError.invalidConstraintLengthRange(
+                minimum: minimumLength,
+                maximum: maximumLength
+            )
+        }
+        guard forceLimitKilogramInchesPerSecond >= 0 else {
+            throw SourcePhysicsContractError.negative(
+                field: "lengthConstraint.forceLimit"
+            )
+        }
+        self.constraintID = constraintID
+        self.reference = reference
+        self.attached = attached
+        self.minimumLength = minimumLength
+        self.maximumLength = maximumLength
+        self.forceLimitKilogramInchesPerSecond =
+            forceLimitKilogramInchesPerSecond
+    }
+}
+
+public struct SourcePhysicsLengthConstraintSnapshot: Equatable, Sendable {
+    public let creation: SourcePhysicsLengthConstraintCreationCommand
+    public let simulationTick: UInt64
+
+    public init(
+        creation: SourcePhysicsLengthConstraintCreationCommand,
+        simulationTick: UInt64
+    ) {
+        self.creation = creation
+        self.simulationTick = simulationTick
+    }
+
+    public var constraintID: SourcePhysicsConstraintID {
+        creation.constraintID
+    }
 }
 
 /// Creates a two-body fixed constraint at the bodies' current relative pose.

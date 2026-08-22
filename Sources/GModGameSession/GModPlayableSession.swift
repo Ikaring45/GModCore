@@ -437,6 +437,8 @@ public final class GModPlayableSession {
     public let clientToolActionBridge: SourceCanonicalToolActionBridge
     public let serverWeldConstraintBridge:
         SourceCanonicalWeldConstraintGLuaBridge
+    public let serverRopeConstraintBridge:
+        SourceCanonicalRopeConstraintGLuaBridge
 
     let serverFileSystem: GMLuaMountedFileSystem
     let clientFileSystem: GMLuaMountedFileSystem
@@ -454,6 +456,8 @@ public final class GModPlayableSession {
     private let weaponPickupController: SourceCanonicalWeaponPickupController
     private let physgunGameplayController:
         SourceCanonicalPhysgunGameplayController
+    private let serverRopeConstraintCommandQueue:
+        SourceCanonicalRopePhysicsCommandQueue
     private var nextCommandNumber: Int32 = 1
     private var closedStorage = false
 
@@ -1105,6 +1109,19 @@ public final class GModPlayableSession {
                     commandQueue: session.netTransport,
                     constraintGraph: toolConstraintGraph
                 )
+            let loadedServerRopeConstraintCommandQueue =
+                SourceCanonicalRopePhysicsCommandQueue(
+                    transport: session.netTransport
+                )
+            let loadedServerRopeConstraintBridge = try
+                SourceCanonicalRopeConstraintGLuaBridge.install(
+                    into: server,
+                    entityHost: sourceAdapter,
+                    physicsHost: sourceAdapter,
+                    commandQueue: loadedServerRopeConstraintCommandQueue,
+                    constraintGraph: toolConstraintGraph,
+                    worldPhysicsBodyID: loadedStaticWorldPhysicsScene.bodyID
+                )
             try SourceCanonicalPhysgunWeaponDefinition.install(
                 into: server,
                 host: sourceAdapter
@@ -1260,6 +1277,9 @@ public final class GModPlayableSession {
             serverToolActionBridge = loadedServerToolActionBridge
             clientToolActionBridge = loadedClientToolActionBridge
             serverWeldConstraintBridge = loadedServerWeldConstraintBridge
+            serverRopeConstraintBridge = loadedServerRopeConstraintBridge
+            serverRopeConstraintCommandQueue =
+                loadedServerRopeConstraintCommandQueue
             propPhysicsCoordinator = loadedPropPhysicsCoordinator
             weaponGameplayController = loadedWeaponGameplayController
             weaponPickupController = loadedWeaponPickupController

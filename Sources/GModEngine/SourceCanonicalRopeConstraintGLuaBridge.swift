@@ -141,6 +141,7 @@ public enum SourceCanonicalRopeConstraintBackendError:
     case lengthConstraintControllerUnavailable
     case rigidLengthConstraintUnavailable
     case flexibleLengthConstraintUnavailable
+    case breakableLengthConstraintUnavailable
     case staticWorldEndpointUnavailable(SourcePhysicsBodyID)
 }
 

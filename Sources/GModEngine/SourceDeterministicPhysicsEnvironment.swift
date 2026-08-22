@@ -253,6 +253,11 @@ public final class SourceDeterministicPhysicsEnvironment:
             constraintID: SourcePhysicsConstraintID
         )
         case nonFiniteConstraintResult(SourcePhysicsConstraintID)
+        case breakableLengthConstraintUnavailable(SourcePhysicsConstraintID)
+        case staticWorldConstraintEndpointUnavailable(
+            constraintID: SourcePhysicsConstraintID,
+            bodyID: SourcePhysicsBodyID
+        )
         case bodyDoesNotSupportMotion(SourcePhysicsBodyID)
         case bodyMotionDisabled(SourcePhysicsBodyID)
         case nonFiniteMutationResult(
@@ -309,6 +314,18 @@ public final class SourceDeterministicPhysicsEnvironment:
     private struct FixedConstraintState: Equatable {
         let creation: SourcePhysicsFixedConstraintCreationCommand
         let relativePose: SourcePhysicsFixedConstraintPose
+        var simulationTick: UInt64
+
+        var constraintID: SourcePhysicsConstraintID {
+            creation.constraintID
+        }
+    }
+
+    private struct LengthConstraintState: Equatable {
+        let creation: SourcePhysicsLengthConstraintCreationCommand
+        /// Stable fallback for a rigid constraint whose anchors become
+        /// coincident before the solver can recover a direction.
+        let initialReferenceToAttachedDirection: SourceVector3
         var simulationTick: UInt64
 
         var constraintID: SourcePhysicsConstraintID {
@@ -478,6 +495,9 @@ public final class SourceDeterministicPhysicsEnvironment:
     private var bodies: [SourcePhysicsBodyID: BodyState] = [:]
     private var fixedConstraints: [
         SourcePhysicsConstraintID: FixedConstraintState
+    ] = [:]
+    private var lengthConstraints: [
+        SourcePhysicsConstraintID: LengthConstraintState
     ] = [:]
     private var retiredConstraintIDs = Set<SourcePhysicsConstraintID>()
     private var simulationTick: UInt64 = 0
@@ -678,6 +698,7 @@ public final class SourceDeterministicPhysicsEnvironment:
 
         var candidateBodies = bodies
         var candidateFixedConstraints = fixedConstraints
+        var candidateLengthConstraints = lengthConstraints
         var candidateRetiredConstraintIDs = retiredConstraintIDs
         var candidateTick = simulationTick
         var candidateHasSimulated = hasSimulated
@@ -724,6 +745,22 @@ public final class SourceDeterministicPhysicsEnvironment:
                         constraintID: constraint.constraintID
                     )
                 }
+                if let constraint = candidateLengthConstraints.values
+                    .filter({ state in
+                        [state.creation.reference, state.creation.attached]
+                            .contains { endpoint in
+                                endpoint.kind == .body &&
+                                    endpoint.bodyID == deletion.bodyID
+                            }
+                    })
+                    .min(by: {
+                        $0.constraintID.rawValue < $1.constraintID.rawValue
+                    }) {
+                    throw Error.bodyHasLiveConstraint(
+                        bodyID: deletion.bodyID,
+                        constraintID: constraint.constraintID
+                    )
+                }
                 guard candidateBodies.removeValue(forKey: deletion.bodyID) != nil else {
                     throw Error.missingBody(deletion.bodyID)
                 }
@@ -736,7 +773,8 @@ public final class SourceDeterministicPhysicsEnvironment:
                 candidateBodies[command.bodyID] = body
 
             case let .createFixedConstraint(creation):
-                guard candidateFixedConstraints[creation.constraintID] == nil else {
+                guard candidateFixedConstraints[creation.constraintID] == nil,
+                      candidateLengthConstraints[creation.constraintID] == nil else {
                     throw Error.duplicateConstraint(creation.constraintID)
                 }
                 guard !candidateRetiredConstraintIDs.contains(
@@ -770,10 +808,58 @@ public final class SourceDeterministicPhysicsEnvironment:
                         simulationTick: candidateTick
                     )
 
+            case let .createLengthConstraint(creation):
+                guard candidateFixedConstraints[creation.constraintID] == nil,
+                      candidateLengthConstraints[creation.constraintID] == nil else {
+                    throw Error.duplicateConstraint(creation.constraintID)
+                }
+                guard !candidateRetiredConstraintIDs.contains(
+                    creation.constraintID
+                ) else {
+                    throw Error.retiredConstraint(creation.constraintID)
+                }
+                guard creation.forceLimitKilogramInchesPerSecond == 0 else {
+                    throw Error.breakableLengthConstraintUnavailable(
+                        creation.constraintID
+                    )
+                }
+                let referenceTransform = try constraintEndpointTransform(
+                    creation.reference,
+                    constraintID: creation.constraintID,
+                    bodies: candidateBodies
+                )
+                let attachedTransform = try constraintEndpointTransform(
+                    creation.attached,
+                    constraintID: creation.constraintID,
+                    bodies: candidateBodies
+                )
+                let referenceAnchor = referenceTransform
+                    .transformPointFromLocal(creation.reference.localAnchor)
+                let attachedAnchor = attachedTransform
+                    .transformPointFromLocal(creation.attached.localAnchor)
+                let anchorDelta = attachedAnchor - referenceAnchor
+                let initialDirection: SourceVector3
+                if anchorDelta.lengthSquared > 0 {
+                    initialDirection = anchorDelta /
+                        anchorDelta.lengthSquared.squareRoot()
+                } else {
+                    initialDirection = SourceVector3(1, 0, 0)
+                }
+                candidateLengthConstraints[creation.constraintID] =
+                    LengthConstraintState(
+                        creation: creation,
+                        initialReferenceToAttachedDirection: initialDirection,
+                        simulationTick: candidateTick
+                    )
+
             case let .deleteConstraint(deletion):
-                guard candidateFixedConstraints.removeValue(
+                let removedFixed = candidateFixedConstraints.removeValue(
                     forKey: deletion.constraintID
-                ) != nil else {
+                )
+                let removedLength = candidateLengthConstraints.removeValue(
+                    forKey: deletion.constraintID
+                )
+                guard removedFixed != nil || removedLength != nil else {
                     throw Error.missingConstraint(deletion.constraintID)
                 }
                 candidateRetiredConstraintIDs.insert(deletion.constraintID)
@@ -788,6 +874,7 @@ public final class SourceDeterministicPhysicsEnvironment:
                 candidateContacts = try simulateOneFixedStep(
                     bodies: &candidateBodies,
                     fixedConstraints: &candidateFixedConstraints,
+                    lengthConstraints: &candidateLengthConstraints,
                     simulationTick: simulate.simulationTick
                 )
                 candidateTick = simulate.simulationTick
@@ -808,6 +895,7 @@ public final class SourceDeterministicPhysicsEnvironment:
         let snapshot = try makeSnapshot(
             bodies: candidateBodies,
             fixedConstraints: candidateFixedConstraints,
+            lengthConstraints: candidateLengthConstraints,
             simulationTick: candidateTick,
             lastProcessedCommandSequence: finalSequence,
             queryResults: queryResults
@@ -815,6 +903,7 @@ public final class SourceDeterministicPhysicsEnvironment:
 
         bodies = candidateBodies
         fixedConstraints = candidateFixedConstraints
+        lengthConstraints = candidateLengthConstraints
         retiredConstraintIDs = candidateRetiredConstraintIDs
         simulationTick = candidateTick
         hasSimulated = candidateHasSimulated
@@ -1009,6 +1098,9 @@ public final class SourceDeterministicPhysicsEnvironment:
         fixedConstraints: inout [
             SourcePhysicsConstraintID: FixedConstraintState
         ],
+        lengthConstraints: inout [
+            SourcePhysicsConstraintID: LengthConstraintState
+        ],
         simulationTick: UInt64
     ) throws -> [ContactSnapshot] {
         let delta = SourcePhysicsContract.fixedTimeStepSeconds
@@ -1104,6 +1196,11 @@ public final class SourceDeterministicPhysicsEnvironment:
                 bodies: &bodies,
                 supportedBodies: &supportedBodies
             )
+            try solveLengthConstraints(
+                &lengthConstraints,
+                bodies: &bodies,
+                supportedBodies: &supportedBodies
+            )
             var contacts = detectContacts(bodies: bodies)
             if iteration == 0, !continuousContacts.isEmpty {
                 // A zero-thickness world triangle can be crossed between two
@@ -1114,7 +1211,7 @@ public final class SourceDeterministicPhysicsEnvironment:
             }
             if iteration == 0 { firstIterationContacts = contacts }
             guard !contacts.isEmpty else {
-                if fixedConstraints.isEmpty { break }
+                if fixedConstraints.isEmpty, lengthConstraints.isEmpty { break }
                 continue
             }
             for contact in contacts {
@@ -1128,6 +1225,9 @@ public final class SourceDeterministicPhysicsEnvironment:
 
         for constraintID in fixedConstraints.keys {
             fixedConstraints[constraintID]?.simulationTick = simulationTick
+        }
+        for constraintID in lengthConstraints.keys {
+            lengthConstraints[constraintID]?.simulationTick = simulationTick
         }
 
         for bodyID in orderedIDs {
@@ -1152,6 +1252,156 @@ public final class SourceDeterministicPhysicsEnvironment:
                 simulationTick: simulationTick
             )
         }
+    }
+
+    /// Enforces VPhysics length limits in stable constraint-ID order. Flexible
+    /// ropes only correct separation above `maximumLength`; rigid ropes also
+    /// correct separation below the equal minimum. The implementation applies
+    /// translation and normal relative-velocity correction by inverse mass.
+    /// Positive break limits are rejected at creation rather than approximated.
+    private func solveLengthConstraints(
+        _ constraints: inout [
+            SourcePhysicsConstraintID: LengthConstraintState
+        ],
+        bodies: inout [SourcePhysicsBodyID: BodyState],
+        supportedBodies: inout Set<SourcePhysicsBodyID>
+    ) throws {
+        for constraintID in constraints.keys.sorted(by: {
+            $0.rawValue < $1.rawValue
+        }) {
+            guard let state = constraints[constraintID] else { continue }
+            let creation = state.creation
+            let referenceTransform = try constraintEndpointTransform(
+                creation.reference,
+                constraintID: constraintID,
+                bodies: bodies
+            )
+            let attachedTransform = try constraintEndpointTransform(
+                creation.attached,
+                constraintID: constraintID,
+                bodies: bodies
+            )
+            let referenceAnchor = referenceTransform.transformPointFromLocal(
+                creation.reference.localAnchor
+            )
+            let attachedAnchor = attachedTransform.transformPointFromLocal(
+                creation.attached.localAnchor
+            )
+            let delta = attachedAnchor - referenceAnchor
+            let distanceSquared = delta.lengthSquared
+            let distance = max(0, distanceSquared).squareRoot()
+            let target: Float
+            if distance > creation.maximumLength {
+                target = creation.maximumLength
+            } else if distance < creation.minimumLength {
+                target = creation.minimumLength
+            } else {
+                continue
+            }
+            let normal = distance > 0
+                ? delta / distance
+                : state.initialReferenceToAttachedDirection
+            let referenceInverseMass = constraintInverseMass(
+                creation.reference,
+                bodies: bodies
+            )
+            let attachedInverseMass = constraintInverseMass(
+                creation.attached,
+                bodies: bodies
+            )
+            let inverseMassSum = referenceInverseMass + attachedInverseMass
+            guard inverseMassSum > 0 else { continue }
+            let referenceShare = referenceInverseMass / inverseMassSum
+            let attachedShare = attachedInverseMass / inverseMassSum
+            let correction = normal * (distance - target)
+            let relativeNormalVelocity = (
+                constraintLinearVelocity(creation.attached, bodies: bodies) -
+                    constraintLinearVelocity(creation.reference, bodies: bodies)
+            ).dot(normal)
+
+            if creation.reference.kind == .body,
+               var reference = bodies[creation.reference.bodyID] {
+                reference.transform.origin += correction * referenceShare
+                reference.linearVelocity += normal *
+                    (relativeNormalVelocity * referenceShare)
+                guard reference.transform.origin.isSourcePhysicsFinite,
+                      reference.linearVelocity.isSourcePhysicsFinite else {
+                    throw Error.nonFiniteConstraintResult(constraintID)
+                }
+                if reference.isDynamic {
+                    reference.settledTicks = 0
+                    wake(&reference)
+                }
+                bodies[creation.reference.bodyID] = reference
+            }
+            if creation.attached.kind == .body,
+               var attached = bodies[creation.attached.bodyID] {
+                attached.transform.origin -= correction * attachedShare
+                attached.linearVelocity -= normal *
+                    (relativeNormalVelocity * attachedShare)
+                guard attached.transform.origin.isSourcePhysicsFinite,
+                      attached.linearVelocity.isSourcePhysicsFinite else {
+                    throw Error.nonFiniteConstraintResult(constraintID)
+                }
+                if attached.isDynamic {
+                    attached.settledTicks = 0
+                    wake(&attached)
+                }
+                bodies[creation.attached.bodyID] = attached
+            }
+            if referenceInverseMass == 0, creation.attached.kind == .body {
+                supportedBodies.insert(creation.attached.bodyID)
+            }
+            if attachedInverseMass == 0, creation.reference.kind == .body {
+                supportedBodies.insert(creation.reference.bodyID)
+            }
+        }
+    }
+
+    private func constraintEndpointTransform(
+        _ endpoint: SourcePhysicsLengthConstraintEndpoint,
+        constraintID: SourcePhysicsConstraintID,
+        bodies: [SourcePhysicsBodyID: BodyState]
+    ) throws -> SourceEntityTransform {
+        switch endpoint.kind {
+        case .body:
+            guard let body = bodies[endpoint.bodyID] else {
+                throw Error.constraintBodyMissing(
+                    constraintID: constraintID,
+                    bodyID: endpoint.bodyID
+                )
+            }
+            return body.transform
+        case .staticWorld:
+            guard let scene = staticCollisionScene,
+                  scene.bodyID == endpoint.bodyID else {
+                throw Error.staticWorldConstraintEndpointUnavailable(
+                    constraintID: constraintID,
+                    bodyID: endpoint.bodyID
+                )
+            }
+            return scene.transform
+        }
+    }
+
+    private func constraintInverseMass(
+        _ endpoint: SourcePhysicsLengthConstraintEndpoint,
+        bodies: [SourcePhysicsBodyID: BodyState]
+    ) -> Float {
+        guard endpoint.kind == .body, let body = bodies[endpoint.bodyID] else {
+            return 0
+        }
+        return inverseMass(body)
+    }
+
+    private func constraintLinearVelocity(
+        _ endpoint: SourcePhysicsLengthConstraintEndpoint,
+        bodies: [SourcePhysicsBodyID: BodyState]
+    ) -> SourceVector3 {
+        guard endpoint.kind == .body, let body = bodies[endpoint.bodyID] else {
+            return .zero
+        }
+        return body.linearVelocity
     }
 
     /// Solves the six fixed degrees of freedom in stable constraint-ID order.
@@ -2868,6 +3118,9 @@ public final class SourceDeterministicPhysicsEnvironment:
         fixedConstraints: [
             SourcePhysicsConstraintID: FixedConstraintState
         ],
+        lengthConstraints: [
+            SourcePhysicsConstraintID: LengthConstraintState
+        ],
         simulationTick: UInt64,
         lastProcessedCommandSequence: UInt64?,
         queryResults: [SourcePhysicsQueryResultSnapshot]
@@ -2904,12 +3157,21 @@ public final class SourceDeterministicPhysicsEnvironment:
                     simulationTick: constraint.simulationTick
                 )
             }
+        let lengthConstraintSnapshots = lengthConstraints.values
+            .sorted { $0.constraintID.rawValue < $1.constraintID.rawValue }
+            .map { constraint in
+                SourcePhysicsLengthConstraintSnapshot(
+                    creation: constraint.creation,
+                    simulationTick: constraint.simulationTick
+                )
+            }
         return try SourcePhysicsEnvironmentSnapshot(
             simulationTick: simulationTick,
             lastProcessedCommandSequence: lastProcessedCommandSequence,
             bodies: snapshots,
             queryResults: queryResults,
-            fixedConstraints: constraintSnapshots
+            fixedConstraints: constraintSnapshots,
+            lengthConstraints: lengthConstraintSnapshots
         )
     }
 

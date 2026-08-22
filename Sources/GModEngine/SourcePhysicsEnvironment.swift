@@ -38,6 +38,7 @@ public enum SourcePhysicsContractError: Error, Equatable, Sendable {
     case duplicateQueryID(UInt64)
     case invalidConstraintID(UInt64)
     case constraintReferencesSameBody(SourcePhysicsBodyID)
+    case invalidConstraintLengthRange(minimum: Float, maximum: Float)
     case duplicateConstraint(SourcePhysicsConstraintID)
     case constraintReferencesUnknownBody(
         constraintID: SourcePhysicsConstraintID,
@@ -553,6 +554,7 @@ public enum SourcePhysicsCommandPayload: Equatable, Sendable {
     case deleteBody(SourcePhysicsBodyDeletionCommand)
     case mutateBody(SourcePhysicsBodyMutationCommand)
     case createFixedConstraint(SourcePhysicsFixedConstraintCreationCommand)
+    case createLengthConstraint(SourcePhysicsLengthConstraintCreationCommand)
     case deleteConstraint(SourcePhysicsConstraintDeletionCommand)
     case simulate(SourcePhysicsSimulateCommand)
     case query(SourcePhysicsQueryCommand)
@@ -734,13 +736,15 @@ public struct SourcePhysicsEnvironmentSnapshot: Equatable, Sendable {
     public let bodies: [SourcePhysicsBodySnapshot]
     public let queryResults: [SourcePhysicsQueryResultSnapshot]
     public let fixedConstraints: [SourcePhysicsFixedConstraintSnapshot]
+    public let lengthConstraints: [SourcePhysicsLengthConstraintSnapshot]
 
     public init(
         simulationTick: UInt64,
         lastProcessedCommandSequence: UInt64?,
         bodies: [SourcePhysicsBodySnapshot],
         queryResults: [SourcePhysicsQueryResultSnapshot],
-        fixedConstraints: [SourcePhysicsFixedConstraintSnapshot] = []
+        fixedConstraints: [SourcePhysicsFixedConstraintSnapshot] = [],
+        lengthConstraints: [SourcePhysicsLengthConstraintSnapshot] = []
     ) throws {
         var bodyIDs = Set<SourcePhysicsBodyID>()
         for body in bodies {
@@ -771,11 +775,28 @@ public struct SourcePhysicsEnvironmentSnapshot: Equatable, Sendable {
                 )
             }
         }
+        for constraint in lengthConstraints {
+            guard constraintIDs.insert(constraint.constraintID).inserted else {
+                throw SourcePhysicsContractError.duplicateConstraint(
+                    constraint.constraintID
+                )
+            }
+            for endpoint in [
+                constraint.creation.reference,
+                constraint.creation.attached,
+            ] where endpoint.kind == .body && !bodyIDs.contains(endpoint.bodyID) {
+                throw SourcePhysicsContractError.constraintReferencesUnknownBody(
+                    constraintID: constraint.constraintID,
+                    bodyID: endpoint.bodyID
+                )
+            }
+        }
         self.simulationTick = simulationTick
         self.lastProcessedCommandSequence = lastProcessedCommandSequence
         self.bodies = bodies
         self.queryResults = queryResults
         self.fixedConstraints = fixedConstraints
+        self.lengthConstraints = lengthConstraints
     }
 
     public var fixedTimeStepSeconds: Float {
