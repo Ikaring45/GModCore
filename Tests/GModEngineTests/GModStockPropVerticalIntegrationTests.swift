@@ -9,7 +9,7 @@ final class GModStockPropVerticalIntegrationTests: XCTestCase {
         "models/maxofs2d/button_06.mdl"
     )
 
-    func testOriginalSpawnIconCreatesReplicatesAndRemovesButtonProp()
+    func testOriginalSpawnIconCreatesReplicatesAndUndoesButtonProp()
         throws
     {
         let mdlData = Data("exact button_06 mdl fixture".utf8)
@@ -234,11 +234,68 @@ final class GModStockPropVerticalIntegrationTests: XCTestCase {
         )
 
         try session.serverRuntime.execute(
-            "Entity(\(serverProp.identity.index)):Remove()",
-            sourceName: "=(stock button_06 remove)"
+            """
+            local undos = undo.GetTable()
+            assert(undos[1] ~= nil)
+            assert(undos[1][1] ~= nil)
+            assert(undos[1][1].Name == "prop_physics")
+            assert(undos[1][1].Entities[1] == Entity(\(serverProp.identity.index)))
+            """,
+            sourceName: "=(stock prop original SERVER undo stack)"
         )
+        try session.clientRuntime.execute(
+            """
+            local undos = undo.GetTable()
+            assert(#undos == 1)
+            assert(undos[1].Key == 1)
+            STOCK_CLIENT_UNDO_HOOKS = 0
+            hook.Add("OnUndo", "StockPropUndo", function(name, customText)
+                assert(name == "prop_physics")
+                assert(customText == nil)
+                STOCK_CLIENT_UNDO_HOOKS = STOCK_CLIENT_UNDO_HOOKS + 1
+            end)
+            RunConsoleCommand("undo")
+            """,
+            sourceName: "=(original stock undo console action)"
+        )
+
+        // The CLIENT command reaches SERVER after this tick's cleanup phase.
+        // Stock undo therefore marks the exact EHANDLE for deferred removal,
+        // sends its original net notices, and lets the following Source tick
+        // perform EntityRemoved/CallOnRemove before invalidating the userdata.
+        let undoAction = try session.runFixedTick()
+        XCTAssertEqual(undoAction.actionFailures, [])
+        XCTAssertEqual(undoAction.server.hookFailures, [])
+        XCTAssertEqual(undoAction.client.hookFailures, [])
+        XCTAssertEqual(
+            session.sourceAdapter.canonicalSnapshot(for: serverProp.identity)?.lifecycle,
+            .pendingRemoval
+        )
+        try session.clientRuntime.execute(
+            """
+            assert(STOCK_CLIENT_UNDO_HOOKS == 1)
+            assert(#undo.GetTable() == 0)
+            local foundNotice = false
+            for _, panel in ipairs(vgui.GetAll()) do
+                if panel:GetClassName() == "NoticePanel" then
+                    foundNotice = true
+                    break
+                end
+            end
+            assert(foundNotice)
+            """,
+            sourceName: "=(stock undo CLIENT notifications)"
+        )
+        XCTAssertTrue(
+            try XCTUnwrap(session.clientRuntime.surfaceCommandState)
+                .pendingSoundRequestReport.requests.contains {
+                    $0.soundPath == "buttons/button15.wav"
+                }
+        )
+
         let removal = try session.runFixedTick()
         XCTAssertEqual(removal.server.hookFailures, [])
+        XCTAssertEqual(removal.client.hookFailures, [])
         try session.serverRuntime.execute(
             """
             assert(STOCK_SERVER_REMOVE_CALLBACKS == 1)
