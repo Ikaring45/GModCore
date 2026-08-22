@@ -8,6 +8,10 @@ final class GModPlayableSessionPakFileIntegrationTests: XCTestCase {
         defer { _ = try? session.close() }
 
         XCTAssertEqual(session.mapPakFileSystem.entries.count, 599)
+        XCTAssertNil(
+            session.surfacePropertiesAttestation,
+            "bundled fixtures do not ship an authored surface manifest"
+        )
 
         let materialName =
             "maps/gm_construct/gm_construct/grass_13_wvt_patch"

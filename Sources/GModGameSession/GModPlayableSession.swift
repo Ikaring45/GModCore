@@ -395,6 +395,11 @@ public final class GModPlayableSession {
     /// One immutable index shared by both Lua realms and reusable by the App
     /// material loader. The BSP pak is never reparsed per realm or renderer.
     public let mapPakFileSystem: SourceBSPPakFileSystem
+    /// Parsed only when the canonical read-only GAME search path contains a
+    /// real surfaceproperties manifest. Declaration ordinals remain source
+    /// provenance and are not treated as VPhysics runtime material indices.
+    public let surfacePropertiesAttestation:
+        SourceSurfacePropertiesAttestation?
     public let clientMaterialResolver: GMLuaVPKMaterialPixelResolver
     public let worldMesh: GModWorldRenderMesh
     public let worldIdentity: GMLuaSourceEntityIdentity
@@ -627,6 +632,14 @@ public final class GModPlayableSession {
         let loadedContentPackGameFileSystem = try loadedContentPackAssetSource.map {
             try GModContentPackGameFileSystem(source: $0)
         }
+        let loadedSourceGameFileSystem = try Self.makeSourceGameFileSystem(
+            mapPakFileSystem: loadedMapPakFileSystem,
+            contentPackFileSystem: loadedContentPackGameFileSystem
+        )
+        let loadedSurfacePropertiesAttestation = try
+            Self.loadSurfacePropertiesAttestationIfPresent(
+                from: loadedSourceGameFileSystem
+            )
         progress(.init(stage: .buildingWorldGeometry))
         let loadedWorldMesh = try GModWorldRenderMesh.build(
             from: loadedBSP,
@@ -972,6 +985,8 @@ public final class GModPlayableSession {
                 loadedAttestedPropPhysicsAssetResolver
             bsp = loadedBSP
             mapPakFileSystem = loadedMapPakFileSystem
+            surfacePropertiesAttestation =
+                loadedSurfacePropertiesAttestation
             clientMaterialResolver = loadedClientMaterialResolver
             worldMesh = loadedWorldMesh
             worldIdentity = sourceWorldIdentity
@@ -1461,6 +1476,62 @@ public final class GModPlayableSession {
             )
         )
         return GMLuaMountedFileSystem(mounts: mounts)
+    }
+
+    /// Canonical, read-only Source GAME search path used for engine-owned
+    /// metadata. It intentionally excludes the mutable runtime DATA mount.
+    static func makeSourceGameFileSystem(
+        mapPakFileSystem: SourceBSPPakFileSystem,
+        contentPackFileSystem: GModContentPackGameFileSystem? = nil,
+        bundledProviderForTesting: (any SourceFileProvider)? = nil
+    ) throws -> SourceSearchPathFileSystem {
+        let bundledProvider: any SourceFileProvider
+        if let bundledProviderForTesting {
+            bundledProvider = bundledProviderForTesting
+        } else {
+            bundledProvider = try SourceHostDirectoryProvider(
+                rootURL: GModGameAssets.clientContentRootURL()
+            )
+        }
+
+        let fileSystem = SourceSearchPathFileSystem()
+        _ = try fileSystem.addSearchPath(
+            provider: mapPakFileSystem.makeSourceFileProvider(),
+            name: "map-pakfile",
+            pathIDs: ["GAME"],
+            kind: .mapPackFile,
+            add: .tail
+        )
+        if let contentPackFileSystem {
+            _ = try fileSystem.addSearchPath(
+                provider: GModContentPackSourceFileProvider(
+                    fileSystem: contentPackFileSystem
+                ),
+                name: "content-pack-game",
+                pathIDs: ["GAME"],
+                add: .tail
+            )
+        }
+        _ = try fileSystem.addSearchPath(
+            provider: bundledProvider,
+            name: "bundled-gmod-base",
+            pathIDs: ["GAME"],
+            add: .tail
+        )
+        return fileSystem
+    }
+
+    /// Absence is an explicit unavailable state. Once a manifest is visible,
+    /// every declared file and material must validate before an immutable
+    /// attestation is returned; no partial result is published.
+    static func loadSurfacePropertiesAttestationIfPresent(
+        from fileSystem: SourceSearchPathFileSystem
+    ) throws -> SourceSurfacePropertiesAttestation? {
+        let manifestPath = SourceSurfacePropertiesLoader.defaultManifestPath
+        guard fileSystem.fileExists(manifestPath, pathID: "GAME") else {
+            return nil
+        }
+        return try SourceSurfacePropertiesLoader.load(from: fileSystem)
     }
 
     private static func drain(

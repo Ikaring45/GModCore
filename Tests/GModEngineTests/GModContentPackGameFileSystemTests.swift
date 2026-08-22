@@ -52,6 +52,46 @@ final class GModContentPackGameFileSystemTests: XCTestCase {
         }
     }
 
+    func testSourceProviderAdapterPreservesTheValidatedReadOnlyGameView()
+        throws
+    {
+        let fixture = try makeContentPackFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let provider = GModContentPackSourceFileProvider(
+            fileSystem: try GModContentPackGameFileSystem(
+                source: GModContentPackAssetSource(
+                    pack: GarrysPADContentPack(url: fixture.archive)
+                )
+            )
+        )
+
+        XCTAssertEqual(
+            try provider.readFile(at: "MATERIALS/PRECEDENCE.TXT"),
+            Data("content".utf8)
+        )
+        XCTAssertEqual(
+            try provider.listDirectory(at: "materials/synthetic"),
+            [
+                SourceFileSystemEntry(
+                    name: "base.vmt",
+                    isDirectory: false
+                ),
+                SourceFileSystemEntry(
+                    name: "from_vpk.vtf",
+                    isDirectory: false
+                ),
+            ]
+        )
+        XCTAssertThrowsError(
+            try provider.readFile(at: "scripts/absent.txt")
+        ) { error in
+            XCTAssertEqual(
+                error as? SourceFileSystemError,
+                .fileNotFound("scripts/absent.txt")
+            )
+        }
+    }
+
     func testMapPakThenContentPackThenBundledPriorityAndCrossMountMaterial()
         throws
     {
@@ -125,7 +165,207 @@ final class GModContentPackGameFileSystemTests: XCTestCase {
         )
     }
 
-    private func makeContentPackFixture() throws
+    func testSurfacePropertiesUseMapThenContentThenBundledGamePriority()
+        throws
+    {
+        let manifest = #"""
+        surfaceproperties_manifest
+        {
+            "file" "scripts/map_surface.txt"
+            "file" "scripts/content_surface.txt"
+            "file" "scripts/bundled_surface.txt"
+        }
+        """#
+        let mapSurface = #"""
+        "default"
+        {
+            "density" "1111"
+            "elasticity" "0.25"
+            "friction" "0.8"
+            "dampening" "0.0"
+        }
+        """#
+        let contentSurface = #"""
+        "content_rubber"
+        {
+            "base" "default"
+            "friction" "0.42"
+        }
+        """#
+        let bundledSurface = #"""
+        "bundled_stone"
+        {
+            "base" "content_rubber"
+            "density" "2700"
+        }
+        """#
+        let fixture = try makeContentPackFixture(gameFiles: [
+            "garrysmod/scripts/surfaceproperties_manifest.txt":
+                Data("not_the_selected_manifest {}".utf8),
+            "garrysmod/scripts/content_surface.txt":
+                Data(contentSurface.utf8),
+        ])
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let content = try GModContentPackGameFileSystem(
+            source: GModContentPackAssetSource(
+                pack: GarrysPADContentPack(url: fixture.archive)
+            )
+        )
+        let mapPak = try SourceBSPPakFileSystem(archiveData: makeStoredZIP([
+            "scripts/surfaceproperties_manifest.txt": Data(manifest.utf8),
+            "scripts/map_surface.txt": Data(mapSurface.utf8),
+        ]))
+        let bundled = try SourceMemoryFileProvider(utf8Files: [
+            "scripts/surfaceproperties_manifest.txt":
+                "also_not_the_selected_manifest {}",
+            "scripts/content_surface.txt": #"""
+            "wrong_lower_priority_material"
+            {
+                "base" "default"
+            }
+            """#,
+            "scripts/bundled_surface.txt": bundledSurface,
+        ])
+
+        let fileSystem = try GModPlayableSession.makeSourceGameFileSystem(
+            mapPakFileSystem: mapPak,
+            contentPackFileSystem: content,
+            bundledProviderForTesting: bundled
+        )
+        XCTAssertEqual(
+            fileSystem.searchPaths(pathID: "GAME").map(\.name),
+            ["map-pakfile", "content-pack-game", "bundled-gmod-base"]
+        )
+        XCTAssertEqual(
+            try fileSystem.resolveFile(
+                "scripts/surfaceproperties_manifest.txt",
+                pathID: "GAME"
+            )?.mountName,
+            "map-pakfile"
+        )
+        XCTAssertEqual(
+            try fileSystem.resolveFile(
+                "scripts/content_surface.txt",
+                pathID: "GAME"
+            )?.mountName,
+            "content-pack-game"
+        )
+        XCTAssertEqual(
+            try fileSystem.resolveFile(
+                "scripts/bundled_surface.txt",
+                pathID: "GAME"
+            )?.mountName,
+            "bundled-gmod-base"
+        )
+
+        let attestation = try XCTUnwrap(
+            GModPlayableSession.loadSurfacePropertiesAttestationIfPresent(
+                from: fileSystem
+            )
+        )
+        XCTAssertEqual(
+            attestation.materials.map(\.name),
+            ["default", "content_rubber", "bundled_stone"]
+        )
+        XCTAssertEqual(
+            attestation.material(named: "content_rubber")?
+                .resolvedPhysics.friction,
+            0.42
+        )
+        XCTAssertEqual(
+            attestation.material(named: "bundled_stone")?
+                .resolvedPhysics.density,
+            2_700
+        )
+    }
+
+    func testAbsentManifestStaysUnavailableAndDeclaredContentFailuresThrow()
+        throws
+    {
+        let emptyPak = try SourceBSPPakFileSystem(archiveData: Data())
+        let bundled = try SourceMemoryFileProvider(files: [:])
+        let noManifestFixture = try makeContentPackFixture()
+        defer {
+            try? FileManager.default.removeItem(
+                at: noManifestFixture.directory
+            )
+        }
+        let noManifestContent = try GModContentPackGameFileSystem(
+            source: GModContentPackAssetSource(
+                pack: GarrysPADContentPack(
+                    url: noManifestFixture.archive
+                )
+            )
+        )
+        let noManifestFiles = try GModPlayableSession.makeSourceGameFileSystem(
+            mapPakFileSystem: emptyPak,
+            contentPackFileSystem: noManifestContent,
+            bundledProviderForTesting: bundled
+        )
+        XCTAssertNil(try GModPlayableSession
+            .loadSurfacePropertiesAttestationIfPresent(
+                from: noManifestFiles
+            ))
+
+        let missingFixture = try makeContentPackFixture(gameFiles: [
+            "garrysmod/scripts/surfaceproperties_manifest.txt": Data(#"""
+            surfaceproperties_manifest
+            {
+                "file" "scripts/declared_but_missing.txt"
+            }
+            """#.utf8),
+        ])
+        defer {
+            try? FileManager.default.removeItem(at: missingFixture.directory)
+        }
+        let missingFiles = try GModPlayableSession.makeSourceGameFileSystem(
+            mapPakFileSystem: emptyPak,
+            contentPackFileSystem: try GModContentPackGameFileSystem(
+                source: GModContentPackAssetSource(
+                    pack: GarrysPADContentPack(url: missingFixture.archive)
+                )
+            ),
+            bundledProviderForTesting: bundled
+        )
+        XCTAssertThrowsError(try GModPlayableSession
+            .loadSurfacePropertiesAttestationIfPresent(from: missingFiles)
+        ) { error in
+            XCTAssertEqual(
+                error as? SourceFileSystemError,
+                .fileNotFound("scripts/declared_but_missing.txt")
+            )
+        }
+
+        let malformedFixture = try makeContentPackFixture(gameFiles: [
+            "garrysmod/scripts/surfaceproperties_manifest.txt": Data([0xFF]),
+        ])
+        defer {
+            try? FileManager.default.removeItem(at: malformedFixture.directory)
+        }
+        let malformedFiles = try GModPlayableSession.makeSourceGameFileSystem(
+            mapPakFileSystem: emptyPak,
+            contentPackFileSystem: try GModContentPackGameFileSystem(
+                source: GModContentPackAssetSource(
+                    pack: GarrysPADContentPack(url: malformedFixture.archive)
+                )
+            ),
+            bundledProviderForTesting: bundled
+        )
+        XCTAssertThrowsError(try GModPlayableSession
+            .loadSurfacePropertiesAttestationIfPresent(from: malformedFiles)
+        ) { error in
+            XCTAssertEqual(
+                error as? SourceSurfacePropertiesError,
+                .invalidUTF8(
+                    path: "scripts/surfaceproperties_manifest.txt"
+                )
+            )
+        }
+    }
+
+    private func makeContentPackFixture(
+        gameFiles: [String: Data] = [:]
+    ) throws
         -> (directory: URL, archive: URL)
     {
         let directory = FileManager.default.temporaryDirectory
@@ -147,7 +387,7 @@ final class GModContentPackGameFileSystemTests: XCTestCase {
             "materials/vpk_priority.txt": Data("platform-vpk".utf8),
         ])
         let archive = directory.appendingPathComponent("GarrysPAD_Content_Test.zip")
-        try makeStoredZIP([
+        var files: [String: Data] = [
             "garrysmod/maps/gm_construct.bsp": Data("construct".utf8),
             "garrysmod/maps/gm_flatgrass.bsp": Data("flatgrass".utf8),
             "garrysmod/html/img/bg.jpg": Data("jpg".utf8),
@@ -161,7 +401,12 @@ final class GModContentPackGameFileSystemTests: XCTestCase {
             ),
             "platform/scripts/platform_only.txt": Data("platform".utf8),
             "platform/platform_misc_dir.vpk": platformVPK,
-        ]).write(to: archive)
+        ]
+        for (path, data) in gameFiles {
+            precondition(files[path] == nil, "duplicate test fixture path")
+            files[path] = data
+        }
+        try makeStoredZIP(files).write(to: archive)
         return (directory, archive)
     }
 }

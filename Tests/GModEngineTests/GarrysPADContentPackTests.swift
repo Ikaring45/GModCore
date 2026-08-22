@@ -232,6 +232,12 @@ final class GarrysPADContentPackTests: XCTestCase {
         ))
         defer { _ = try? session.close() }
         XCTAssertEqual(session.startupReport.map, .construct)
+        let surfaceProperties = try XCTUnwrap(
+            session.surfacePropertiesAttestation,
+            "the configured installed corpus must expose its real GAME manifest"
+        )
+        XCTAssertFalse(surfaceProperties.files.isEmpty)
+        XCTAssertFalse(surfaceProperties.materials.isEmpty)
         let origin = session.playerWalkState.origin
         let tick = try session.runFixedTick(movementInput: .init(forwardMove: 200))
         XCTAssertNotEqual(tick.movement.state.origin, origin)

@@ -451,3 +451,65 @@ public final class GModContentPackGameFileSystem:
 
     private static func fold(_ path: String) -> String { path.lowercased() }
 }
+
+/// Read-only bridge from the validated content-pack GAME projection into the
+/// canonical Source search-path stack. The adapter does not add a writable
+/// DATA overlay and does not alter the content pack's loose/VPK priority.
+public final class GModContentPackSourceFileProvider:
+    SourceFileProvider, @unchecked Sendable
+{
+    public let fileSystem: GModContentPackGameFileSystem
+
+    public init(fileSystem: GModContentPackGameFileSystem) {
+        self.fileSystem = fileSystem
+    }
+
+    public func fileExists(at logicalPath: String) -> Bool {
+        fileSystem.fileExists(at: logicalPath)
+    }
+
+    public func directoryExists(at logicalPath: String) -> Bool {
+        fileSystem.directoryExists(at: logicalPath)
+    }
+
+    public func readFile(at logicalPath: String) throws -> Data {
+        do {
+            return try fileSystem.readFile(at: logicalPath)
+        } catch {
+            throw Self.sourceError(error, path: logicalPath)
+        }
+    }
+
+    public func listDirectory(at logicalPath: String) throws
+        -> [SourceFileSystemEntry]
+    {
+        do {
+            return try fileSystem.listDirectory(at: logicalPath).map {
+                SourceFileSystemEntry(
+                    name: $0.name,
+                    isDirectory: $0.isDirectory
+                )
+            }
+        } catch {
+            throw Self.sourceError(error, path: logicalPath)
+        }
+    }
+
+    public func displayPath(for logicalPath: String) -> String? { nil }
+
+    private static func sourceError(_ error: Error, path: String) -> Error {
+        guard let fileError = error as? GMLuaFileSystemError else {
+            return error
+        }
+        switch fileError {
+        case .fileNotFound:
+            return SourceFileSystemError.fileNotFound(path)
+        case .notDirectory:
+            return SourceFileSystemError.notDirectory(path)
+        case .invalidPath:
+            return SourceFileSystemError.invalidPath(path)
+        case .readOnly, .directoryNotEmpty, .crossMountMove:
+            return error
+        }
+    }
+}
