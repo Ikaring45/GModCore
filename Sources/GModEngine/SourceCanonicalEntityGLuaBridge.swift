@@ -30,6 +30,11 @@ public protocol SourceCanonicalEntityLuaHost: AnyObject {
         _ mutation: (inout SourceCanonicalEntityState) throws -> Void
     ) throws -> SourceCanonicalEntitySnapshot
 
+    func setCanonicalMaterialOverride(
+        _ materialName: String,
+        for identity: SourceCanonicalEntityIdentity
+    ) throws -> SourceCanonicalEntitySnapshot
+
     func giveCanonicalWeapon(
         className: String,
         to player: SourceCanonicalEntityIdentity
@@ -770,6 +775,13 @@ public enum SourceCanonicalEntityGLuaBridge {
             let snapshot = try requiredSnapshot(arguments.first, function: "Entity:GetSkin")
             return [.number(Double(snapshot.skin))]
         }
+        try setMethod("Entity:GetMaterial", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Entity:GetMaterial"
+            )
+            return [.string(LuaString(snapshot.materialOverride?.name ?? ""))]
+        }
         try setMethod("Entity:GetNumBodyGroups", on: entityMetatable) { arguments in
             let snapshot = try requiredSnapshot(
                 arguments.first,
@@ -1448,6 +1460,23 @@ public enum SourceCanonicalEntityGLuaBridge {
             _ = try host.updateCanonicalEntity(snapshot.identity) { candidate in
                 candidate.skin = skin
             }
+            return []
+        }
+        try setMethod("Entity:SetMaterial", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Entity:SetMaterial"
+            )
+            let materialName = try requiredString(
+                arguments,
+                index: 1,
+                function: "Entity:SetMaterial"
+            )
+            _ = try requiredHost("Entity:SetMaterial")
+                .setCanonicalMaterialOverride(
+                    materialName,
+                    for: snapshot.identity
+                )
             return []
         }
         try setMethod("Entity:SetColor4Part", on: entityMetatable) { arguments in

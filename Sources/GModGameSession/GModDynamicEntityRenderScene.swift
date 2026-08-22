@@ -14,6 +14,9 @@ public struct GModDynamicEntityRenderInstanceSnapshot: Sendable, Equatable {
     /// Authored Source RenderFX value. No time-varying effect is fabricated by
     /// this renderer-neutral projection.
     public let renderFX: SourceEntityRenderFX
+    /// Optional VMT override validated through the Source GAME resolver before
+    /// it entered the replicated canonical Entity snapshot.
+    public let materialOverride: SourceEntityMaterialOverride?
 
     public init(
         identity: SourceCanonicalEntityIdentity,
@@ -22,7 +25,8 @@ public struct GModDynamicEntityRenderInstanceSnapshot: Sendable, Equatable {
         resourceID: GModStudioRenderableModelResourceID,
         colorModulation: SourceEntityRenderColor = .white,
         renderMode: SourceEntityRenderMode = .normal,
-        renderFX: SourceEntityRenderFX = .none
+        renderFX: SourceEntityRenderFX = .none,
+        materialOverride: SourceEntityMaterialOverride? = nil
     ) {
         self.identity = identity
         self.sourceEntityRevision = sourceEntityRevision
@@ -31,6 +35,7 @@ public struct GModDynamicEntityRenderInstanceSnapshot: Sendable, Equatable {
         self.colorModulation = colorModulation
         self.renderMode = renderMode
         self.renderFX = renderFX
+        self.materialOverride = materialOverride
     }
 }
 
@@ -275,7 +280,8 @@ public final class GModDynamicEntityRenderSceneProjector: @unchecked Sendable {
                     resourceID: resource.id,
                     colorModulation: entity.renderState.color,
                     renderMode: entity.renderState.mode,
-                    renderFX: entity.renderState.fx
+                    renderFX: entity.renderState.fx,
+                    materialOverride: entity.materialOverride
                 ))
             }
         }
@@ -340,7 +346,8 @@ public final class GModDynamicEntityRenderSceneProjector: @unchecked Sendable {
                 old.resourceID == new.resourceID &&
                 old.colorModulation == new.colorModulation &&
                 old.renderMode == new.renderMode &&
-                old.renderFX == new.renderFX
+                old.renderFX == new.renderFX &&
+                old.materialOverride == new.materialOverride
         }
         guard sameInstances else { return false }
         return zip(prior.issues, issues).allSatisfy { old, new in

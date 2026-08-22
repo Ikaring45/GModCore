@@ -687,6 +687,10 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
     /// retained as authored state even when a renderer does not yet animate
     /// that effect.
     public var renderState: SourceEntityRenderState
+    /// Filesystem-validated Source material override. The only production
+    /// constructor is owned by `GMLuaSourceMaterialResolver`, so arbitrary Lua
+    /// strings cannot enter canonical state without resolving a real GAME VMT.
+    public var materialOverride: SourceEntityMaterialOverride?
     public var solidType: SourceEntitySolidType
     public var moveType: SourceMoveType
     /// Studio skin-family selection. Range validation against the loaded MDL
@@ -756,6 +760,7 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
         isNoDraw: Bool = false,
         isPersistent: Bool = false,
         renderState: SourceEntityRenderState = .init(),
+        materialOverride: SourceEntityMaterialOverride? = nil,
         solidType: SourceEntitySolidType = .none,
         moveType: SourceMoveType = .none,
         skin: Int = 0,
@@ -787,6 +792,7 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
         self.isNoDraw = isNoDraw
         self.isPersistent = isPersistent
         self.renderState = renderState
+        self.materialOverride = materialOverride
         self.solidType = solidType
         self.moveType = moveType
         self.skin = skin
@@ -932,6 +938,7 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
     public let isNoDraw: Bool
     public let isPersistent: Bool
     public let renderState: SourceEntityRenderState
+    public let materialOverride: SourceEntityMaterialOverride?
     public let solidType: SourceEntitySolidType
     public let moveType: SourceMoveType
     public let skin: Int
@@ -970,6 +977,7 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         isNoDraw: Bool = false,
         isPersistent: Bool = false,
         renderState: SourceEntityRenderState = .init(),
+        materialOverride: SourceEntityMaterialOverride? = nil,
         solidType: SourceEntitySolidType,
         moveType: SourceMoveType,
         lifecycle: SourceCanonicalEntityLifecycle,
@@ -1007,6 +1015,7 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         self.isNoDraw = isNoDraw
         self.isPersistent = isPersistent
         self.renderState = renderState
+        self.materialOverride = materialOverride
         self.solidType = solidType
         self.moveType = moveType
         self.skin = skin
@@ -1055,6 +1064,25 @@ public typealias SourceCanonicalBodyGroupResolver = (
     _ subModelIDs: String,
     _ currentBodyValue: Int
 ) throws -> Int
+
+/// Result of resolving one Entity material override through the mounted Source
+/// GAME material search path. The logical VMT path and public GLua name are
+/// retained separately so renderers never reconstruct either by string guess.
+public struct SourceEntityMaterialOverride: Equatable, Hashable, Sendable {
+    public let name: String
+    public let logicalMaterialPath: String
+
+    init(name: String, logicalMaterialPath: String) {
+        precondition(!name.isEmpty)
+        precondition(!logicalMaterialPath.isEmpty)
+        self.name = name
+        self.logicalMaterialPath = logicalMaterialPath
+    }
+}
+
+public typealias SourceCanonicalMaterialOverrideResolver = (
+    _ materialName: String
+) throws -> SourceEntityMaterialOverride?
 
 public enum SourceCanonicalEntityError: Error, Equatable, CustomStringConvertible {
     case entityList(SourceEntityListError)
@@ -1252,6 +1280,7 @@ public final class SourceCanonicalEntity: SourceEntity {
             isNoDraw: state.isNoDraw,
             isPersistent: state.isPersistent,
             renderState: state.renderState,
+            materialOverride: state.materialOverride,
             solidType: state.solidType,
             moveType: state.moveType,
             lifecycle: overrideLifecycle ?? lifecycle,

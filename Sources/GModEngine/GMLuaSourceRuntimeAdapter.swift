@@ -50,6 +50,7 @@ public enum GMLuaSourceRuntimeAdapterError: Error, CustomStringConvertible {
     case canonicalBodyGroupLayoutResolverUnavailable
     case canonicalBodyGroupLayoutUnavailable(SourceEntityModelReference)
     case canonicalBodyGroupModelMissing(SourceCanonicalEntityIdentity)
+    case canonicalMaterialOverrideResolverUnavailable
     case canonicalPhysicsBodyAlreadyRegistered(SourcePhysicsBodyID)
     case canonicalPhysicsBodyMissing(SourcePhysicsBodyID)
     case canonicalPhysicsBodySetMismatch
@@ -93,6 +94,8 @@ public enum GMLuaSourceRuntimeAdapterError: Error, CustomStringConvertible {
             return "canonical Studio body-group layout is unavailable for \(model.path)"
         case let .canonicalBodyGroupModelMissing(identity):
             return "Source entity EHANDLE \(identity.handle.rawValue) has no Studio model for body-group resolution"
+        case .canonicalMaterialOverrideResolverUnavailable:
+            return "canonical Source GAME material override resolver is unavailable"
         case let .canonicalPhysicsBodyAlreadyRegistered(bodyID):
             return "canonical physics body \(bodyID.entityIdentity.handle.rawValue):\(bodyID.solidIndex) is already registered"
         case let .canonicalPhysicsBodyMissing(bodyID):
@@ -185,6 +188,8 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
     private let canonicalBodyGroupResolver: SourceCanonicalBodyGroupResolver?
     private let canonicalBodyGroupLayoutResolver:
         SourceCanonicalBodyGroupLayoutResolver?
+    private let canonicalMaterialOverrideResolver:
+        SourceCanonicalMaterialOverrideResolver?
     private let canonicalPropPhysicsAssetResolver:
         SourceCanonicalPropPhysicsAssetResolver
     private let mutationLock = NSRecursiveLock()
@@ -241,6 +246,8 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
         canonicalBodyGroupResolver: SourceCanonicalBodyGroupResolver? = nil,
         canonicalBodyGroupLayoutResolver:
             SourceCanonicalBodyGroupLayoutResolver? = nil,
+        canonicalMaterialOverrideResolver:
+            SourceCanonicalMaterialOverrideResolver? = nil,
         canonicalPropPhysicsAssetResolver:
             SourceCanonicalPropPhysicsAssetResolver? = nil,
         canonicalNetworkVariableAllocationPolicy:
@@ -253,6 +260,8 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
             canonicalBodyGroupResolver: canonicalBodyGroupResolver,
             canonicalBodyGroupLayoutResolver:
                 canonicalBodyGroupLayoutResolver,
+            canonicalMaterialOverrideResolver:
+                canonicalMaterialOverrideResolver,
             canonicalPropPhysicsAssetResolver:
                 canonicalPropPhysicsAssetResolver,
             canonicalNetworkVariableAllocationPolicy:
@@ -300,6 +309,8 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
         canonicalBodyGroupResolver: SourceCanonicalBodyGroupResolver? = nil,
         canonicalBodyGroupLayoutResolver:
             SourceCanonicalBodyGroupLayoutResolver? = nil,
+        canonicalMaterialOverrideResolver:
+            SourceCanonicalMaterialOverrideResolver? = nil,
         canonicalPropPhysicsAssetResolver:
             SourceCanonicalPropPhysicsAssetResolver? = nil,
         canonicalNetworkVariableAllocationPolicy:
@@ -354,6 +365,8 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
         self.canonicalBodyGroupResolver = canonicalBodyGroupResolver
         self.canonicalBodyGroupLayoutResolver =
             canonicalBodyGroupLayoutResolver
+        self.canonicalMaterialOverrideResolver =
+            canonicalMaterialOverrideResolver
         self.canonicalPropPhysicsAssetResolver =
             canonicalPropPhysicsAssetResolver ?? { _ in .unavailable }
         consoleDispatcher.connectForwardedCommandTransactionHost(self)
@@ -761,6 +774,40 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
             return try canonicalEntities.update(
                 identity,
                 mutation,
+                publishing: { [unowned self] snapshot in
+                    _ = try self.requiredServerRegistryLocked()
+                        .applyAuthoritativeSnapshot(snapshot)
+                    self.canonicalMutationJournal.append(.update(snapshot))
+                }
+            )
+        }
+    }
+
+    /// Validates a public GLua material name against the mounted Source GAME
+    /// filesystem, then commits only the resolver-produced canonical value.
+    /// Reapplying the same normalized VMT is a true no-op.
+    @discardableResult
+    public func setCanonicalMaterialOverride(
+        _ materialName: String,
+        for identity: SourceCanonicalEntityIdentity
+    ) throws -> SourceCanonicalEntitySnapshot {
+        try withMutationBoundary {
+            try requireCanonicalServerProjectionLocked(identity)
+            guard let current = canonicalEntities.snapshot(for: identity) else {
+                throw GMLuaSourceRuntimeAdapterError.unknownEntity(identity)
+            }
+            guard let resolver = canonicalMaterialOverrideResolver else {
+                throw GMLuaSourceRuntimeAdapterError
+                    .canonicalMaterialOverrideResolverUnavailable
+            }
+            let resolved = try resolver(materialName)
+            guard resolved != current.materialOverride else { return current }
+            try preflightCanonicalMutationJournalLocked(additionalOperations: 1)
+            return try canonicalEntities.update(
+                identity,
+                { candidate in
+                    candidate.materialOverride = resolved
+                },
                 publishing: { [unowned self] snapshot in
                     _ = try self.requiredServerRegistryLocked()
                         .applyAuthoritativeSnapshot(snapshot)

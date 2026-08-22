@@ -7,6 +7,8 @@ public enum GMLuaSourceMaterialError: Error, Sendable, Equatable,
     case unsafeLogicalPath(String)
     case encodedMaterialByteCountExceeded(path: String, actual: Int, maximum: Int)
     case materialIsNotUTF8(String)
+    case entityMaterialOverrideMissing(String)
+    case entityMaterialOverrideRequiresVMT(String)
     case invalidPNGHeader(String)
     case textureWidthExceeded(path: String, actual: Int, maximum: Int)
     case textureHeightExceeded(path: String, actual: Int, maximum: Int)
@@ -26,6 +28,10 @@ public enum GMLuaSourceMaterialError: Error, Sendable, Equatable,
             return "Source material \(path) contains \(actual) encoded bytes; maximum is \(maximum)"
         case let .materialIsNotUTF8(path):
             return "Source material \(path) is not UTF-8"
+        case let .entityMaterialOverrideMissing(path):
+            return "Source Entity material override is missing from GAME: \(path)"
+        case let .entityMaterialOverrideRequiresVMT(path):
+            return "Source Entity material override requires a VMT: \(path)"
         case let .invalidPNGHeader(path):
             return "imported material PNG header is invalid: \(path)"
         case let .textureWidthExceeded(path, actual, maximum):
@@ -372,6 +378,44 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
             materialPath: LuaString(materialName),
             encodedParameters: encodedParameters,
             mipPolicy: mipPolicy
+        )
+    }
+
+    /// Resolves the public `Entity:SetMaterial` spelling to one real GAME VMT.
+    /// Empty input clears the override. Missing materials and imported images
+    /// are rejected before canonical state or its replication revision moves.
+    public func resolveEntityMaterialOverride(
+        named materialName: String
+    ) throws -> SourceEntityMaterialOverride? {
+        guard !materialName.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).isEmpty else { return nil }
+        let resolved = try resolve(named: materialName)
+        let logicalPath = resolved.metadata.materialPath.utf8String
+        guard resolved.metadata.status != .materialMissing else {
+            throw GMLuaSourceMaterialError.entityMaterialOverrideMissing(
+                logicalPath
+            )
+        }
+        let lowercasedPath = logicalPath.lowercased()
+        guard lowercasedPath.hasPrefix("materials/"),
+              lowercasedPath.hasSuffix(".vmt") else {
+            throw GMLuaSourceMaterialError.entityMaterialOverrideRequiresVMT(
+                logicalPath
+            )
+        }
+        let nameStart = lowercasedPath.index(
+            lowercasedPath.startIndex,
+            offsetBy: "materials/".count
+        )
+        let nameEnd = lowercasedPath.index(
+            lowercasedPath.endIndex,
+            offsetBy: -".vmt".count
+        )
+        let canonicalName = String(lowercasedPath[nameStart..<nameEnd])
+        return SourceEntityMaterialOverride(
+            name: canonicalName,
+            logicalMaterialPath: lowercasedPath
         )
     }
 
