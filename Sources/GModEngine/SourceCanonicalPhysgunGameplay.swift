@@ -194,6 +194,8 @@ extension GMLuaSourceRuntimeAdapter: SourceCanonicalPhysgunHost {}
 
 public enum SourceCanonicalPhysgunEventKind: String, Equatable, Sendable {
     case pickup
+    case distanceChanged
+    case rotated
     case move
     case freeze
     case freezeIntercepted
@@ -227,6 +229,7 @@ public struct SourceCanonicalPhysgunEvent: Equatable, Sendable {
 }
 
 public enum SourceCanonicalPhysgunFailureStage: String, Equatable, Sendable {
+    case input
     case trace
     case permission
     case pickupHook
@@ -238,6 +241,7 @@ public enum SourceCanonicalPhysgunFailureStage: String, Equatable, Sendable {
     case unfreezeHook
     case motion
     case dropHook
+    case clientDisplay
 }
 
 public struct SourceCanonicalPhysgunFailure: Equatable, Sendable {
@@ -298,9 +302,21 @@ public final class SourceCanonicalPhysgunGameplayController {
         let weapon: SourceCanonicalEntityIdentity
         let entity: SourceCanonicalEntityIdentity
         let bodyID: SourcePhysicsBodyID
-        let grabDistance: Float
+        var grabDistance: Float
         let localGrabPoint: SourceVector3
-        let targetAngles: SourceQAngle
+        var targetAngles: SourceQAngle
+
+        var snapshot: SourceCanonicalPhysgunHeldSnapshot {
+            SourceCanonicalPhysgunHeldSnapshot(
+                player: player,
+                weapon: weapon,
+                entity: entity,
+                bodyID: bodyID,
+                grabDistance: grabDistance,
+                localGrabPoint: localGrabPoint,
+                targetAngles: targetAngles
+            )
+        }
     }
 
     private struct TraceHit {
@@ -364,21 +380,42 @@ public final class SourceCanonicalPhysgunGameplayController {
         heldByPlayer[player]?.entity
     }
 
+    public func heldSnapshot(
+        for player: SourceCanonicalEntityIdentity
+    ) -> SourceCanonicalPhysgunHeldSnapshot? {
+        heldByPlayer[player]?.snapshot
+    }
+
     public func runServerTick(
-        playerIdentity: SourceCanonicalEntityIdentity
+        playerIdentity: SourceCanonicalEntityIdentity,
+        manipulationInput: SourceCanonicalPhysgunManipulationInput = .idle
     ) -> SourceCanonicalPhysgunTickReport {
         guard let host,
               let registry = runtime.entityRegistry,
               let player = host.canonicalSnapshot(for: playerIdentity),
               player.kind == .player,
               player.lifecycle == .active else {
-            heldByPlayer.removeValue(forKey: playerIdentity)
-            return .idle
+            guard let held = heldByPlayer.removeValue(forKey: playerIdentity) else {
+                return .idle
+            }
+            var failures: [SourceCanonicalPhysgunFailure] = []
+            broadcastDisplay(.inactive, held: held, failures: &failures)
+            return SourceCanonicalPhysgunTickReport(
+                events: [event(.staleHoldCleared, held: held)],
+                failures: failures
+            )
         }
         let playerValue = registry.player(at: player.identity.entryIndex)
         guard registry.canonicalIdentity(for: playerValue) == player.identity else {
-            heldByPlayer.removeValue(forKey: playerIdentity)
-            return .idle
+            guard let held = heldByPlayer.removeValue(forKey: playerIdentity) else {
+                return .idle
+            }
+            var failures: [SourceCanonicalPhysgunFailure] = []
+            broadcastDisplay(.inactive, held: held, failures: &failures)
+            return SourceCanonicalPhysgunTickReport(
+                events: [event(.staleHoldCleared, held: held)],
+                failures: failures
+            )
         }
         let buttons = registry.playerInputButtonState(for: playerValue) ?? (
             current: SourceInputButtons(),
@@ -406,12 +443,13 @@ public final class SourceCanonicalPhysgunGameplayController {
             failures.append(contentsOf: report.failures)
         }
 
-        if let held = heldByPlayer[player.identity] {
+        if var held = heldByPlayer[player.identity] {
             guard let activeWeapon,
                   activeWeapon.identity == held.weapon,
                   activeWeapon.className == SourceCanonicalPhysgunWeaponDefinition.className,
                   buttons.current.contains(.attack) else {
                 heldByPlayer.removeValue(forKey: player.identity)
+                broadcastDisplay(.inactive, held: held, failures: &failures)
                 if let entity = host.canonicalSnapshot(for: held.entity),
                    entity.lifecycle == .spawned || entity.lifecycle == .active {
                     dispatchDropHook(
@@ -435,8 +473,12 @@ public final class SourceCanonicalPhysgunGameplayController {
                   let body = host.canonicalPhysicsObject(for: held.bodyID),
                   body.bodyID.entityIdentity == held.entity else {
                 heldByPlayer.removeValue(forKey: player.identity)
+                broadcastDisplay(.inactive, held: held, failures: &failures)
                 events.append(event(.staleHoldCleared, held: held))
-                return SourceCanonicalPhysgunTickReport(events: events)
+                return SourceCanonicalPhysgunTickReport(
+                    events: events,
+                    failures: failures
+                )
             }
             if buttons.current.contains(.attack2),
                !buttons.previous.contains(.attack2) {
@@ -445,8 +487,12 @@ public final class SourceCanonicalPhysgunGameplayController {
                 guard registry.canonicalIdentity(for: entityValue) == held.entity,
                       registry.canonicalIdentity(for: weaponValue) == held.weapon else {
                     heldByPlayer.removeValue(forKey: player.identity)
+                    broadcastDisplay(.inactive, held: held, failures: &failures)
                     events.append(event(.staleHoldCleared, held: held))
-                    return SourceCanonicalPhysgunTickReport(events: events)
+                    return SourceCanonicalPhysgunTickReport(
+                        events: events,
+                        failures: failures
+                    )
                 }
                 do {
                     let gamemodeRan = try dispatchFreezeHook(
@@ -456,6 +502,7 @@ public final class SourceCanonicalPhysgunGameplayController {
                         held: held
                     )
                     heldByPlayer.removeValue(forKey: player.identity)
+                    broadcastDisplay(.inactive, held: held, failures: &failures)
                     events.append(event(
                         gamemodeRan ? .freeze : .freezeIntercepted,
                         held: held
@@ -478,6 +525,59 @@ public final class SourceCanonicalPhysgunGameplayController {
                     failures: failures
                 )
             }
+            if manipulationInput.isFinite {
+                let previousDistance = held.grabDistance
+                let previousAngles = held.targetAngles
+                if manipulationInput.changesDistance {
+                    held.grabDistance = min(
+                        max(
+                            0,
+                            held.grabDistance +
+                                manipulationInput.distanceDeltaSourceUnits
+                        ),
+                        Self.maximumTraceLength
+                    )
+                }
+                if manipulationInput.changesRotation {
+                    let normalizedDelta = SourceQAngle(
+                        pitch: normalizedAngle(
+                            manipulationInput.rotationDelta.pitch
+                        ),
+                        yaw: normalizedAngle(
+                            manipulationInput.rotationDelta.yaw
+                        ),
+                        roll: normalizedAngle(
+                            manipulationInput.rotationDelta.roll
+                        )
+                    )
+                    held.targetAngles = SourceQAngle(
+                        pitch: normalizedAngle(
+                            held.targetAngles.pitch +
+                                normalizedDelta.pitch
+                        ),
+                        yaw: normalizedAngle(
+                            held.targetAngles.yaw +
+                                normalizedDelta.yaw
+                        ),
+                        roll: normalizedAngle(
+                            held.targetAngles.roll +
+                                normalizedDelta.roll
+                        )
+                    )
+                }
+                heldByPlayer[player.identity] = held
+                if held.grabDistance != previousDistance {
+                    events.append(event(.distanceChanged, held: held))
+                }
+                if held.targetAngles != previousAngles {
+                    events.append(event(.rotated, held: held))
+                }
+            } else {
+                failures.append(SourceCanonicalPhysgunFailure(
+                    stage: .input,
+                    message: "weapon_physgun manipulation input is non-finite"
+                ))
+            }
             do {
                 try queueMotion(
                     held: held,
@@ -486,6 +586,7 @@ public final class SourceCanonicalPhysgunGameplayController {
                     host: host
                 )
                 events.append(event(.move, held: held))
+                broadcastDisplay(.active, held: held, failures: &failures)
             } catch {
                 failures.append(SourceCanonicalPhysgunFailure(
                     stage: .motion,
@@ -584,6 +685,7 @@ public final class SourceCanonicalPhysgunGameplayController {
             return SourceCanonicalPhysgunTickReport(failures: failures)
         }
         events.append(event(.pickup, held: held))
+        broadcastDisplay(.active, held: held, failures: &failures)
         let entityValue = registry.entity(at: held.entity.entryIndex)
         if let message = runtime.dispatchContainedHostHook(
             named: "OnPhysgunPickup",
@@ -1216,6 +1318,37 @@ public final class SourceCanonicalPhysgunGameplayController {
             throw LuaError.runtime(
                 "CanPlayerUnfreeze returned \(result.typeName), expected boolean or nil"
             )
+        }
+    }
+
+    private func broadcastDisplay(
+        _ phase: SourceCanonicalPhysgunDisplayEventPhase,
+        held: HeldBody,
+        failures: inout [SourceCanonicalPhysgunFailure]
+    ) {
+        guard let endpoint = runtime.netEndpoint else {
+            failures.append(SourceCanonicalPhysgunFailure(
+                stage: .clientDisplay,
+                message: "weapon_physgun SERVER gameplay endpoint is unavailable"
+            ))
+            return
+        }
+        do {
+            try endpoint.broadcastGameplayEvent(.physgunDisplay(
+                SourceCanonicalPhysgunDisplayEvent(
+                    phase: phase,
+                    player: held.player,
+                    weapon: held.weapon,
+                    entity: held.entity,
+                    bodyID: held.bodyID,
+                    localHitPosition: held.localGrabPoint
+                )
+            ))
+        } catch {
+            failures.append(SourceCanonicalPhysgunFailure(
+                stage: .clientDisplay,
+                message: GMLuaRuntime.describe(error)
+            ))
         }
     }
 
