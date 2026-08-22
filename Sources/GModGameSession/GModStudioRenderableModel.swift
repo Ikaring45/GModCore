@@ -238,11 +238,26 @@ private extension GModStudioRenderableModelCompiler {
         budget: SourceStudioMeshDecodeBudget
     ) throws -> SourceStudioModelMeshSnapshot {
         do {
+            let replacementCount = try SourceStudioModelMeshDecoder
+                .decodeLODMaterialReplacementCount(
+                    asset.renderPayload,
+                    lodIndex: lodIndex
+                )
+            if replacementCount > 0 {
+                throw GModStudioRenderableModelCompileError.unsupportedMesh(
+                    .materialReplacements(
+                        lodIndex: lodIndex,
+                        count: replacementCount
+                    )
+                )
+            }
             return try SourceStudioModelMeshDecoder.decodeLOD(
                 asset.renderPayload,
                 lodIndex: lodIndex,
                 budget: budget
             )
+        } catch let error as GModStudioRenderableModelCompileError {
+            throw error
         } catch let error as SourceStudioModelMeshDecodeError {
             if case let .unsupported(feature) = error {
                 throw GModStudioRenderableModelCompileError.unsupportedMesh(feature)

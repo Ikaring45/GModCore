@@ -143,6 +143,8 @@ struct SourceStudioModelMeshTests {
 
         #expect(table.switchPoints == [0, 12.5, -1])
         #expect(table.renderableLODCount == 2)
+        #expect(try SourceStudioModelMeshDecoder
+            .decodeLODMaterialReplacementCount(payload, lodIndex: 1) == 0)
         #expect(try SourceStudioModelLODSelector.metric(
             projectedUnitSphereSize: 20
         ) == 5)

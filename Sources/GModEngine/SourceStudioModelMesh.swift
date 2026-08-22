@@ -66,6 +66,7 @@ public enum SourceStudioMeshUnsupportedFeature: Sendable, Equatable {
         stripGroup: Int,
         flags: UInt8
     )
+    case materialReplacements(lodIndex: Int, count: Int)
 }
 
 public enum SourceStudioModelMeshDecodeError: Error, Sendable, Equatable,
@@ -685,6 +686,49 @@ public enum SourceStudioModelMeshDecoder {
             switchPoints: points
         )
     }
+
+    /// Returns the number of VTX material replacements authored for one LOD.
+    /// Geometry-only callers may still decode that LOD, while a renderer that
+    /// has not implemented replacement material names can fail closed instead
+    /// of silently drawing the root material.
+    public static func decodeLODMaterialReplacementCount(
+        _ payload: SourceStudioImmutableRenderPayload,
+        lodIndex: Int
+    ) throws -> Int {
+        guard lodIndex >= 0, lodIndex < payload.vtxHeader.lodCount else {
+            throw SourceStudioModelMeshDecodeError.invalidLODIndex(
+                value: lodIndex,
+                count: payload.vtxHeader.lodCount
+            )
+        }
+        let vtx = MeshReader(payload.vtxData)
+        let lists = try vtx.table(
+            base: 0,
+            relativeOffset: vtx.int32(
+                at: 24,
+                field: "FileHeader_t.materialReplacementListOffset"
+            ),
+            count: payload.vtxHeader.lodCount,
+            stride: Layout.vtxMaterialReplacementList,
+            field: "FileHeader_t.materialReplacementLists"
+        )
+        let list = lists + lodIndex * Layout.vtxMaterialReplacementList
+        let count = try vtx.count(
+            at: list,
+            field: "VTX.LOD[\(lodIndex)].materialReplacements"
+        )
+        _ = try vtx.table(
+            base: list,
+            relativeOffset: vtx.int32(
+                at: list + 4,
+                field: "VTX.LOD[\(lodIndex)].materialReplacementOffset"
+            ),
+            count: count,
+            stride: Layout.vtxMaterialReplacement,
+            field: "VTX.LOD[\(lodIndex)].materialReplacementTable"
+        )
+        return count
+    }
 }
 
 private extension SourceStudioModelMeshDecoder {
@@ -696,6 +740,8 @@ private extension SourceStudioModelMeshDecoder {
         static let mdlModel = 148
         static let mdlMesh = 116
         static let vtxBodyPart = 8
+        static let vtxMaterialReplacementList = 8
+        static let vtxMaterialReplacement = 6
         static let vtxModel = 8
         static let vtxModelLOD = 12
         static let vtxMesh = 9
