@@ -378,6 +378,18 @@ public final class SourceDeterministicPhysicsEnvironment:
         let visitedNodeCount: Int
     }
 
+    /// Per-contact-detection accounting for the mutable rigid-body
+    /// broadphase. Counts describe collision-enabled bodies only after the
+    /// explicit total, so disabled bodies remain observable without entering
+    /// the sweep or changing legacy collision behavior.
+    struct DynamicBroadphaseDiagnostics: Equatable {
+        let totalBodyCount: Int
+        let collisionEnabledBodyCount: Int
+        let fullPairCount: Int
+        let sweepCandidatePairCount: Int
+        let narrowphaseCandidatePairCount: Int
+    }
+
     private struct Contact {
         let firstBodyID: SourcePhysicsBodyID
         let secondBodyID: SourcePhysicsBodyID
@@ -435,6 +447,8 @@ public final class SourceDeterministicPhysicsEnvironment:
 
     private(set) var latestStaticBroadphaseDiagnostics:
         StaticBroadphaseDiagnostics
+    private(set) var latestDynamicBroadphaseDiagnostics:
+        DynamicBroadphaseDiagnostics
 
     private var bodies: [SourcePhysicsBodyID: BodyState] = [:]
     private var simulationTick: UInt64 = 0
@@ -458,6 +472,13 @@ public final class SourceDeterministicPhysicsEnvironment:
             totalPartCount: staticPartCount,
             candidatePartCount: 0,
             visitedNodeCount: 0
+        )
+        latestDynamicBroadphaseDiagnostics = DynamicBroadphaseDiagnostics(
+            totalBodyCount: 0,
+            collisionEnabledBodyCount: 0,
+            fullPairCount: 0,
+            sweepCandidatePairCount: 0,
+            narrowphaseCandidatePairCount: 0
         )
         staticBroadphaseStack.reserveCapacity(max(1, staticPartCount * 2))
         staticCandidatePartIndices.reserveCapacity(staticPartCount)
@@ -1004,37 +1025,57 @@ public final class SourceDeterministicPhysicsEnvironment:
         let orderedIDs = bodies.keys.sorted(by: Self.bodyIDPrecedes)
         var shapes: [SourcePhysicsBodyID: WorldShape] = [:]
         shapes.reserveCapacity(orderedIDs.count)
-        for bodyID in orderedIDs {
+        var broadphaseEntries: [SourcePhysicsDynamicBroadphaseEntry] = []
+        broadphaseEntries.reserveCapacity(orderedIDs.count)
+        for (sourceOrder, bodyID) in orderedIDs.enumerated() {
             guard let body = bodies[bodyID], body.isCollisionEnabled else {
                 continue
             }
-            shapes[bodyID] = makeWorldShape(body: body)
+            let shape = makeWorldShape(body: body)
+            shapes[bodyID] = shape
+            broadphaseEntries.append(SourcePhysicsDynamicBroadphaseEntry(
+                sourceOrder: sourceOrder,
+                minimums: shape.bounds.minimums,
+                maximums: shape.bounds.maximums,
+                isMovable: body.isMovable,
+                isDynamic: body.isDynamic
+            ))
         }
 
+        let broadphase = SourcePhysicsDynamicSweepAndPrune.candidates(
+            from: broadphaseEntries
+        )
+        latestDynamicBroadphaseDiagnostics = DynamicBroadphaseDiagnostics(
+            totalBodyCount: orderedIDs.count,
+            collisionEnabledBodyCount: broadphaseEntries.count,
+            fullPairCount: broadphase.fullPairCount,
+            sweepCandidatePairCount: broadphase.sweepCandidatePairCount,
+            narrowphaseCandidatePairCount: broadphase.candidatePairs.count
+        )
+
         var contacts: [Contact] = []
-        for firstIndex in orderedIDs.indices {
-            let firstID = orderedIDs[firstIndex]
+        contacts.reserveCapacity(broadphase.candidatePairs.count)
+        for pair in broadphase.candidatePairs {
+            let firstID = orderedIDs[pair.firstSourceOrder]
+            let secondID = orderedIDs[pair.secondSourceOrder]
             guard let first = bodies[firstID],
                   first.isCollisionEnabled,
-                  let firstShape = shapes[firstID] else { continue }
-            for secondIndex in orderedIDs.index(after: firstIndex) ..< orderedIDs.endIndex {
-                let secondID = orderedIDs[secondIndex]
-                guard let second = bodies[secondID],
-                      second.isCollisionEnabled,
-                      let secondShape = shapes[secondID],
-                      first.isMovable || second.isMovable,
-                      first.isDynamic || second.isDynamic,
-                      firstShape.bounds.intersects(secondShape.bounds),
-                      let contact = contact(
-                          firstID: firstID,
-                          firstMaterialIndex: first.creation.materialIndex,
-                          firstShape: firstShape,
-                          secondID: secondID,
-                          secondMaterialIndex: second.creation.materialIndex,
-                          secondShape: secondShape
-                      ) else { continue }
-                contacts.append(contact)
-            }
+                  let firstShape = shapes[firstID],
+                  let second = bodies[secondID],
+                  second.isCollisionEnabled,
+                  let secondShape = shapes[secondID],
+                  first.isMovable || second.isMovable,
+                  first.isDynamic || second.isDynamic,
+                  firstShape.bounds.intersects(secondShape.bounds),
+                  let contact = contact(
+                      firstID: firstID,
+                      firstMaterialIndex: first.creation.materialIndex,
+                      firstShape: firstShape,
+                      secondID: secondID,
+                      secondMaterialIndex: second.creation.materialIndex,
+                      secondShape: secondShape
+                  ) else { continue }
+            contacts.append(contact)
         }
 
         if let scene = staticCollisionScene,
