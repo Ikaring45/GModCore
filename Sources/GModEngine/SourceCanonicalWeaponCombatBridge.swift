@@ -798,10 +798,10 @@ public enum SourceCanonicalWeaponCombatBridge {
                 function: "Player:GetViewModel",
                 kind: .player
             )
-            _ = try activeWeapon(
-                for: player.identity,
-                function: "Player:GetViewModel"
-            )
+            // Source owns a Player viewmodel entity independently of whether
+            // the Player currently has an active Weapon. Weapon animation
+            // mutators below still require an active canonical Weapon, but
+            // gmod_hands may bonemerge to slot zero during PlayerSpawn first.
             return [try typeSystem.makeObject(
                 metaName: "Entity",
                 payload: SourceCanonicalViewModelValue(player: player.identity)

@@ -196,6 +196,9 @@ final class SourceCanonicalPlayerSpawnHookIntegrationTests: XCTestCase {
         let playerModel = SourceEntityModelReference(
             "models/player/kleiner.mdl"
         )
+        let handsModel = SourceEntityModelReference(
+            "models/weapons/c_arms_citizen.mdl"
+        )
         // This fixture stands in for already-decoded Studio metadata only in
         // the route test. Production sessions resolve the same fields from
         // validated MDL/VVD/VTX bytes or an exact full-identity attestation.
@@ -205,13 +208,26 @@ final class SourceCanonicalPlayerSpawnHookIntegrationTests: XCTestCase {
                 .init(modelSelectionBase: 2, modelCount: 3),
             ]
         )
+        let handsBodyGroupLayout = try SourceStudioBodyGroupLayout(
+            bodyParts: [
+                .init(modelSelectionBase: 1, modelCount: 2),
+                .init(modelSelectionBase: 2, modelCount: 1),
+                .init(modelSelectionBase: 2, modelCount: 1),
+                .init(modelSelectionBase: 2, modelCount: 1),
+                .init(modelSelectionBase: 2, modelCount: 1),
+                .init(modelSelectionBase: 2, modelCount: 1),
+                .init(modelSelectionBase: 2, modelCount: 1),
+            ]
+        )
         let session = try GModPlayableSession(
             configuration: configuration,
             textMeasurer: nil,
             logger: { _, _ in },
             worldWalkCollisionProvider: nil,
             canonicalBodyGroupLayoutResolverForTesting: { model in
-                model == playerModel ? playerBodyGroupLayout : nil
+                if model == playerModel { return playerBodyGroupLayout }
+                if model == handsModel { return handsBodyGroupLayout }
+                return nil
             }
         )
         defer { _ = try? session.close() }
@@ -239,41 +255,11 @@ final class SourceCanonicalPlayerSpawnHookIntegrationTests: XCTestCase {
         guard case let .boolean(completed)? = values.first else {
             return XCTFail("original PlayerSpawn result was malformed")
         }
-        XCTAssertFalse(
+        XCTAssertTrue(
             completed,
-            "original PlayerSpawn unexpectedly completed past the next " +
-                "unsupported engine boundary"
+            "original Sandbox PlayerSpawn must complete through SetupHands: " +
+                (values.dropFirst().first.map(String.init(describing:)) ?? "nil")
         )
-        if !completed,
-           case let .string(message)? = values.dropFirst().first {
-            XCTAssertFalse(
-                message.utf8String.contains("UnSpectate"),
-                "original PlayerSpawn must advance beyond UnSpectate: " +
-                    message.utf8String
-            )
-            XCTAssertFalse(
-                message.utf8String.contains("PlayerColor"),
-                "original PlayerSpawn must advance beyond Player colors: " +
-                    message.utf8String
-            )
-            XCTAssertFalse(
-                message.utf8String.contains("RemoveAllAmmo") ||
-                    message.utf8String.contains("GiveAmmo"),
-                "original PlayerLoadout must advance beyond reserve ammo: " +
-                    message.utf8String
-            )
-            XCTAssertFalse(
-                message.utf8String.contains("GetNumBodyGroups") ||
-                    message.utf8String.contains("SetBodygroup"),
-                "original player model route must advance beyond Studio " +
-                    "body groups: " + message.utf8String
-            )
-            XCTAssertTrue(
-                message.utf8String.contains("GetHands"),
-                "unexpected next original PlayerSpawn blocker: " +
-                    message.utf8String
-            )
-        }
         let authoredServer = try XCTUnwrap(
             serverRegistry.canonicalSnapshot(at: configuration.playerEntityIndex)
         )
@@ -291,6 +277,20 @@ final class SourceCanonicalPlayerSpawnHookIntegrationTests: XCTestCase {
         )
         XCTAssertEqual(authoredServer.model, playerModel)
         XCTAssertEqual(authoredServer.bodyValue, 0)
+        let serverHandsIdentity = try XCTUnwrap(authoredServer.playerHands)
+        let serverHands = try XCTUnwrap(
+            serverRegistry.canonicalSnapshot(
+                at: serverHandsIdentity.entryIndex
+            )
+        )
+        XCTAssertEqual(serverHands.identity, serverHandsIdentity)
+        XCTAssertEqual(serverHands.kind, .playerHands)
+        XCTAssertEqual(serverHands.handsOwner, authoredServer.identity)
+        XCTAssertEqual(serverHands.handsViewModelIndex, 0)
+        XCTAssertEqual(serverHands.model, handsModel)
+        XCTAssertEqual(serverHands.skin, 0)
+        XCTAssertEqual(serverHands.bodyValue, 0)
+        XCTAssertEqual(serverHands.lifecycle, .spawned)
         XCTAssertEqual(
             authoredServer.playerAmmoState?.entries,
             [
@@ -353,6 +353,15 @@ final class SourceCanonicalPlayerSpawnHookIntegrationTests: XCTestCase {
             replicated.weaponInventory,
             serverAfterTick.weaponInventory
         )
+        XCTAssertEqual(replicated.playerHands, serverAfterTick.playerHands)
+        let replicatedHands = try XCTUnwrap(
+            clientRegistry.canonicalSnapshot(
+                at: serverHandsIdentity.entryIndex
+            )
+        )
+        XCTAssertEqual(replicatedHands.identity, serverHandsIdentity)
+        XCTAssertEqual(replicatedHands.model, handsModel)
+        XCTAssertEqual(replicatedHands.handsOwner, replicated.identity)
         try session.clientRuntime.execute(
             """
             local ply = Player(70)
@@ -373,6 +382,12 @@ final class SourceCanonicalPlayerSpawnHookIntegrationTests: XCTestCase {
             assert(ply:GetNumBodyGroups() == 2)
             assert(ply:GetBodygroup(0) == 0)
             assert(ply:GetBodygroup(1) == 0)
+            local hands = ply:GetHands()
+            assert(IsValid(hands))
+            assert(hands:GetClass() == "gmod_hands")
+            assert(hands:GetOwner() == ply)
+            assert(hands:GetModel() == "models/weapons/c_arms_citizen.mdl")
+            assert(hands:GetSkin() == 0)
             assert(ply.SetPlayerColor == nil)
             assert(ply.SetWeaponColor == nil)
             assert(ply.GiveAmmo == nil)

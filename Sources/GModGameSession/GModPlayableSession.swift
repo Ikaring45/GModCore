@@ -1079,6 +1079,10 @@ public final class GModPlayableSession {
                     into: server,
                     host: sourceAdapter
                 )
+            try SourceCanonicalPlayerHandsGLuaBridge.install(
+                into: server,
+                host: sourceAdapter
+            )
             progress(.init(stage: .loadingServerSandbox))
             let serverStartup = try GMLuaStartupOrchestrator(
                 runtime: server,
@@ -1159,6 +1163,7 @@ public final class GModPlayableSession {
             try SourceCanonicalPhysgunWeaponDefinition.install(into: client)
             try SourceCanonicalWeaponCombatBridge
                 .installPlayerFlashlightMethods(into: client)
+            try SourceCanonicalPlayerHandsGLuaBridge.install(into: client)
             progress(.init(stage: .loadingClientSandbox))
             var playerConnectionDeliveries = 0
             let clientStartup = try GMLuaStartupOrchestrator(
@@ -1684,7 +1689,8 @@ public final class GModPlayableSession {
             motion: snapshot.motion,
             model: snapshot.model,
             solidType: snapshot.solidType,
-            moveType: snapshot.moveType
+            moveType: snapshot.moveType,
+            viewOffset: snapshot.viewOffset
         ).playerWalkState
     }
 

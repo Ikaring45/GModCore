@@ -15,6 +15,10 @@ public enum SourceCanonicalEntityKind: String, CaseIterable, Equatable, Hashable
     /// `SourcePhysicsConstraintID`; this entity supplies Source lifetime,
     /// EHANDLE generation, undo, and replication semantics.
     case physicsConstraint = "phys_constraint"
+    /// Stock `gmod_hands` c_model created by `Player:SetupHands`. It owns a
+    /// normal networked EHANDLE; its owner/viewmodel relation and Studio state
+    /// are replicated with that identity.
+    case playerHands = "gmod_hands"
     /// One concrete SWEP owned by the canonical entity list. Its snapshot
     /// `className` is the actual registered SWEP class rather than this
     /// category spelling.
@@ -26,7 +30,7 @@ public enum SourceCanonicalEntityKind: String, CaseIterable, Equatable, Hashable
         switch self {
         case .weapon:
             return Self.isStructurallyValidWeaponClassName(className)
-        case .world, .player, .propPhysics, .physicsConstraint:
+        case .world, .player, .propPhysics, .physicsConstraint, .playerHands:
             return className == self.className
         }
     }
@@ -708,6 +712,14 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
     /// Player reserve ammunition keyed by the engine's canonical ammo IDs.
     /// Nil is reserved for non-Player entities.
     public var playerAmmoState: SourceCanonicalPlayerAmmoState?
+    /// Full EHANDLE returned by native `Player:GetHands`. Nil is the ordinary
+    /// pre-SetupHands state and is valid only on a canonical Player.
+    public var playerHands: SourceCanonicalEntityIdentity?
+    /// Full Player EHANDLE which owns a `gmod_hands` c_model.
+    public var handsOwner: SourceCanonicalEntityIdentity?
+    /// Source viewmodel slot used as this hands entity's bonemerge parent.
+    /// Nil means `DoSetup` has not attached the entity yet.
+    public var handsViewModelIndex: Int32?
     /// Source-relative time at which the engine allocated this entity.
     /// CLIENT receives the SERVER value in the canonical snapshot so
     /// `GetCreationTime` remains comparable with the shared `CurTime` clock.
@@ -754,6 +766,9 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
         playerDisplayName: String? = nil,
         playerColorState: SourceCanonicalPlayerColorState? = nil,
         playerAmmoState: SourceCanonicalPlayerAmmoState? = nil,
+        playerHands: SourceCanonicalEntityIdentity? = nil,
+        handsOwner: SourceCanonicalEntityIdentity? = nil,
+        handsViewModelIndex: Int32? = nil,
         creationTime: Float = 0,
         spawnEffect: Bool = false,
         networkVariables: SourceEntityNetworkVariables = .init(),
@@ -782,6 +797,9 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
         self.playerDisplayName = playerDisplayName
         self.playerColorState = playerColorState
         self.playerAmmoState = playerAmmoState
+        self.playerHands = playerHands
+        self.handsOwner = handsOwner
+        self.handsViewModelIndex = handsViewModelIndex
         self.creationTime = creationTime
         self.spawnEffect = spawnEffect
         self.networkVariables = networkVariables
@@ -866,6 +884,8 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
             )
         case .propPhysics:
             return Self(solidType: .vPhysics, moveType: .vPhysics)
+        case .playerHands:
+            return Self(isNotSolid: true, solidType: .none, moveType: .none)
         case .physicsConstraint:
             return Self(solidType: .none, moveType: .none)
         case .weapon:
@@ -922,6 +942,9 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
     public let playerDisplayName: String?
     public let playerColorState: SourceCanonicalPlayerColorState?
     public let playerAmmoState: SourceCanonicalPlayerAmmoState?
+    public let playerHands: SourceCanonicalEntityIdentity?
+    public let handsOwner: SourceCanonicalEntityIdentity?
+    public let handsViewModelIndex: Int32?
     public let creationTime: Float
     public let spawnEffect: Bool
     public let networkVariables: SourceEntityNetworkVariables
@@ -960,6 +983,9 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         playerDisplayName: String? = nil,
         playerColorState: SourceCanonicalPlayerColorState? = nil,
         playerAmmoState: SourceCanonicalPlayerAmmoState? = nil,
+        playerHands: SourceCanonicalEntityIdentity? = nil,
+        handsOwner: SourceCanonicalEntityIdentity? = nil,
+        handsViewModelIndex: Int32? = nil,
         creationTime: Float = 0,
         spawnEffect: Bool = false,
         networkVariables: SourceEntityNetworkVariables = .init(),
@@ -991,6 +1017,9 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         self.playerDisplayName = playerDisplayName
         self.playerColorState = playerColorState
         self.playerAmmoState = playerAmmoState
+        self.playerHands = playerHands
+        self.handsOwner = handsOwner
+        self.handsViewModelIndex = handsViewModelIndex
         self.creationTime = creationTime
         self.spawnEffect = spawnEffect
         self.networkVariables = networkVariables
@@ -1236,6 +1265,9 @@ public final class SourceCanonicalEntity: SourceEntity {
             playerDisplayName: state.playerDisplayName,
             playerColorState: state.playerColorState,
             playerAmmoState: state.playerAmmoState,
+            playerHands: state.playerHands,
+            handsOwner: state.handsOwner,
+            handsViewModelIndex: state.handsViewModelIndex,
             creationTime: state.creationTime,
             spawnEffect: state.spawnEffect,
             networkVariables: state.networkVariables,
@@ -1864,6 +1896,22 @@ public final class SourceCanonicalEntityStore {
             }
         } else if state.playerAmmoState != nil {
             throw SourceCanonicalEntityError.playerAmmoStateRequiresPlayer
+        }
+        if kind == .player {
+            guard state.handsOwner == nil,
+                  state.handsViewModelIndex == nil else {
+                throw SourceCanonicalEntityError.invalidMotion
+            }
+        } else if kind == .playerHands {
+            guard state.playerHands == nil,
+                  (state.handsOwner == nil) ==
+                    (state.handsViewModelIndex == nil),
+                  state.handsViewModelIndex.map({ $0 >= 0 }) ?? true else {
+                throw SourceCanonicalEntityError.invalidMotion
+            }
+        } else if state.playerHands != nil || state.handsOwner != nil ||
+                    state.handsViewModelIndex != nil {
+            throw SourceCanonicalEntityError.invalidMotion
         }
         if kind == .player {
             var classNames: [String] = []

@@ -1126,29 +1126,26 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
     ) throws -> SourceCanonicalEntitySnapshot {
         try withMutationBoundary {
             try requireCanonicalServerProjectionLocked(identity)
-            guard !subModelIDs.isEmpty else {
-                guard let current = canonicalEntities.snapshot(for: identity) else {
-                    throw GMLuaSourceRuntimeAdapterError.unknownEntity(identity)
-                }
-                return current
+            guard let current = canonicalEntities.snapshot(for: identity) else {
+                throw GMLuaSourceRuntimeAdapterError.unknownEntity(identity)
             }
-            guard let resolver = canonicalBodyGroupResolver else {
+            guard !subModelIDs.isEmpty else { return current }
+            guard let model = current.model else {
                 throw GMLuaSourceRuntimeAdapterError
-                    .canonicalBodyGroupResolverUnavailable
+                    .canonicalBodyGroupModelMissing(identity)
             }
+            let layout = try resolvedCanonicalBodyGroupLayoutLocked(for: model)
+            let updatedBodyValue = try SourceStudioBodyGroupSelection.bodyValue(
+                applyingBodyGroups: subModelIDs,
+                to: current.bodyValue,
+                bodyParts: layout.bodyParts
+            )
+            guard updatedBodyValue != current.bodyValue else { return current }
             try preflightCanonicalMutationJournalLocked(additionalOperations: 1)
             return try canonicalEntities.update(
                 identity,
                 { candidate in
-                    guard let model = candidate.model else {
-                        throw GMLuaSourceRuntimeAdapterError
-                            .canonicalBodyGroupModelMissing(identity)
-                    }
-                    candidate.bodyValue = try resolver(
-                        model,
-                        subModelIDs,
-                        candidate.bodyValue
-                    )
+                    candidate.bodyValue = updatedBodyValue
                 },
                 publishing: { [unowned self] snapshot in
                     _ = try self.requiredServerRegistryLocked()

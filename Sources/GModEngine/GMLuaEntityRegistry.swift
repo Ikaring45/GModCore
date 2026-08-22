@@ -806,7 +806,7 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
         for kind: SourceCanonicalEntityKind
     ) -> GMLuaEntityKind {
         switch kind {
-        case .world, .propPhysics, .physicsConstraint:
+        case .world, .propPhysics, .physicsConstraint, .playerHands:
             return .entity
         case .player:
             return .player

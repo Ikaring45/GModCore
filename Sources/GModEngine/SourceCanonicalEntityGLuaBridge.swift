@@ -751,7 +751,7 @@ public enum SourceCanonicalEntityGLuaBridge {
             switch snapshot.kind {
             case .physicsConstraint:
                 return [.boolean(true)]
-            case .world, .player, .propPhysics, .weapon:
+            case .world, .player, .propPhysics, .playerHands, .weapon:
                 return [.boolean(false)]
             }
         }
@@ -761,7 +761,8 @@ public enum SourceCanonicalEntityGLuaBridge {
                 function: "Entity:IsWidget"
             )
             switch snapshot.kind {
-            case .world, .player, .propPhysics, .physicsConstraint, .weapon:
+            case .world, .player, .propPhysics, .physicsConstraint,
+                 .playerHands, .weapon:
                 return [.boolean(false)]
             }
         }
