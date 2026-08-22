@@ -555,6 +555,9 @@ public enum SourcePhysicsCommandPayload: Equatable, Sendable {
     case mutateBody(SourcePhysicsBodyMutationCommand)
     case createFixedConstraint(SourcePhysicsFixedConstraintCreationCommand)
     case createLengthConstraint(SourcePhysicsLengthConstraintCreationCommand)
+    case createNoCollideConstraint(
+        SourcePhysicsNoCollideConstraintCreationCommand
+    )
     case deleteConstraint(SourcePhysicsConstraintDeletionCommand)
     case simulate(SourcePhysicsSimulateCommand)
     case query(SourcePhysicsQueryCommand)
@@ -737,6 +740,9 @@ public struct SourcePhysicsEnvironmentSnapshot: Equatable, Sendable {
     public let queryResults: [SourcePhysicsQueryResultSnapshot]
     public let fixedConstraints: [SourcePhysicsFixedConstraintSnapshot]
     public let lengthConstraints: [SourcePhysicsLengthConstraintSnapshot]
+    public let noCollideConstraints: [
+        SourcePhysicsNoCollideConstraintSnapshot
+    ]
 
     public init(
         simulationTick: UInt64,
@@ -744,7 +750,10 @@ public struct SourcePhysicsEnvironmentSnapshot: Equatable, Sendable {
         bodies: [SourcePhysicsBodySnapshot],
         queryResults: [SourcePhysicsQueryResultSnapshot],
         fixedConstraints: [SourcePhysicsFixedConstraintSnapshot] = [],
-        lengthConstraints: [SourcePhysicsLengthConstraintSnapshot] = []
+        lengthConstraints: [SourcePhysicsLengthConstraintSnapshot] = [],
+        noCollideConstraints: [
+            SourcePhysicsNoCollideConstraintSnapshot
+        ] = []
     ) throws {
         var bodyIDs = Set<SourcePhysicsBodyID>()
         for body in bodies {
@@ -791,12 +800,29 @@ public struct SourcePhysicsEnvironmentSnapshot: Equatable, Sendable {
                 )
             }
         }
+        for constraint in noCollideConstraints {
+            guard constraintIDs.insert(constraint.constraintID).inserted else {
+                throw SourcePhysicsContractError.duplicateConstraint(
+                    constraint.constraintID
+                )
+            }
+            for bodyID in [
+                constraint.creation.firstBodyID,
+                constraint.creation.secondBodyID,
+            ] where !bodyIDs.contains(bodyID) {
+                throw SourcePhysicsContractError.constraintReferencesUnknownBody(
+                    constraintID: constraint.constraintID,
+                    bodyID: bodyID
+                )
+            }
+        }
         self.simulationTick = simulationTick
         self.lastProcessedCommandSequence = lastProcessedCommandSequence
         self.bodies = bodies
         self.queryResults = queryResults
         self.fixedConstraints = fixedConstraints
         self.lengthConstraints = lengthConstraints
+        self.noCollideConstraints = noCollideConstraints
     }
 
     public var fixedTimeStepSeconds: Float {

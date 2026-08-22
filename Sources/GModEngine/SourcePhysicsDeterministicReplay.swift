@@ -240,6 +240,10 @@ public enum SourcePhysicsReplayEventSnapshot: Equatable, Sendable {
         commandSequence: UInt64,
         command: SourcePhysicsLengthConstraintCreationCommand
     )
+    case noCollideConstraintCreated(
+        commandSequence: UInt64,
+        command: SourcePhysicsNoCollideConstraintCreationCommand
+    )
     case constraintDeleted(
         commandSequence: UInt64,
         constraintID: SourcePhysicsConstraintID
@@ -282,7 +286,7 @@ public struct SourcePhysicsReplayFrame: Equatable, Sendable {
 
 /// Decoded value transcript plus its canonical little-endian binary form.
 public struct SourcePhysicsReplayLog: Equatable, Sendable {
-    public static let formatVersion: UInt16 = 9
+    public static let formatVersion: UInt16 = 10
 
     public let fixedTimeStepSeconds: Float
     public let frames: [SourcePhysicsReplayFrame]
@@ -469,6 +473,10 @@ private struct SourcePhysicsReplayLiveLengthConstraint {
     let creation: SourcePhysicsLengthConstraintCreationCommand
 }
 
+private struct SourcePhysicsReplayLiveNoCollideConstraint {
+    let creation: SourcePhysicsNoCollideConstraintCreationCommand
+}
+
 private struct SourcePhysicsReplayTranscriptValidator {
     let budget: SourcePhysicsReplayBudget
     private var counter = SourcePhysicsReplayBudgetCounter()
@@ -483,6 +491,9 @@ private struct SourcePhysicsReplayTranscriptValidator {
     ] = [:]
     private var liveLengthConstraints: [
         SourcePhysicsConstraintID: SourcePhysicsReplayLiveLengthConstraint
+    ] = [:]
+    private var liveNoCollideConstraints: [
+        SourcePhysicsConstraintID: SourcePhysicsReplayLiveNoCollideConstraint
     ] = [:]
     private var retiredConstraintIDs = Set<SourcePhysicsConstraintID>()
     private var liveHandleByEntry: [Int: UInt32] = [:]
@@ -561,6 +572,7 @@ private struct SourcePhysicsReplayTranscriptValidator {
                 break
             case .createFixedConstraint,
                  .createLengthConstraint,
+                 .createNoCollideConstraint,
                  .deleteConstraint:
                 break
             case let .simulate(simulate):
@@ -590,6 +602,7 @@ private struct SourcePhysicsReplayTranscriptValidator {
                 switch command.payload {
                 case .createFixedConstraint,
                      .createLengthConstraint,
+                     .createNoCollideConstraint,
                      .deleteConstraint,
                      .simulate,
                      .query:
@@ -670,6 +683,20 @@ private struct SourcePhysicsReplayTranscriptValidator {
                         constraintID: constraint.creation.constraintID
                     )
                 }
+                if let constraint = liveNoCollideConstraints.values
+                    .filter({ state in
+                        state.creation.firstBodyID == bodyID ||
+                            state.creation.secondBodyID == bodyID
+                    })
+                    .min(by: {
+                        $0.creation.constraintID.rawValue <
+                            $1.creation.constraintID.rawValue
+                    }) {
+                    throw SourcePhysicsReplayError.bodyDeletedWithLiveConstraint(
+                        bodyID: bodyID,
+                        constraintID: constraint.creation.constraintID
+                    )
+                }
                 guard liveBodies.removeValue(forKey: bodyID) != nil else {
                     throw SourcePhysicsReplayError.bodyNotLive(bodyID)
                 }
@@ -690,7 +717,8 @@ private struct SourcePhysicsReplayTranscriptValidator {
                 )
             case let .createFixedConstraint(creation):
                 guard liveFixedConstraints[creation.constraintID] == nil,
-                      liveLengthConstraints[creation.constraintID] == nil else {
+                      liveLengthConstraints[creation.constraintID] == nil,
+                      liveNoCollideConstraints[creation.constraintID] == nil else {
                     throw SourcePhysicsReplayError.duplicateLiveConstraint(
                         creation.constraintID
                     )
@@ -720,7 +748,8 @@ private struct SourcePhysicsReplayTranscriptValidator {
                 )
             case let .createLengthConstraint(creation):
                 guard liveFixedConstraints[creation.constraintID] == nil,
-                      liveLengthConstraints[creation.constraintID] == nil else {
+                      liveLengthConstraints[creation.constraintID] == nil,
+                      liveNoCollideConstraints[creation.constraintID] == nil else {
                     throw SourcePhysicsReplayError.duplicateLiveConstraint(
                         creation.constraintID
                     )
@@ -745,6 +774,37 @@ private struct SourcePhysicsReplayTranscriptValidator {
                     commandSequence: command.sequence,
                     command: creation
                 )
+            case let .createNoCollideConstraint(creation):
+                guard liveFixedConstraints[creation.constraintID] == nil,
+                      liveLengthConstraints[creation.constraintID] == nil,
+                      liveNoCollideConstraints[creation.constraintID] == nil else {
+                    throw SourcePhysicsReplayError.duplicateLiveConstraint(
+                        creation.constraintID
+                    )
+                }
+                guard !retiredConstraintIDs.contains(creation.constraintID) else {
+                    throw SourcePhysicsReplayError.retiredConstraintReused(
+                        creation.constraintID
+                    )
+                }
+                // Do not canonicalize this pair. The solver treats it as
+                // symmetric, while record/replay retains the authored endpoint
+                // order and each complete EHANDLE + solid index.
+                for bodyID in [creation.firstBodyID, creation.secondBodyID]
+                    where liveBodies[bodyID] == nil {
+                    throw SourcePhysicsReplayError.constraintBodyNotLive(
+                        constraintID: creation.constraintID,
+                        bodyID: bodyID
+                    )
+                }
+                liveNoCollideConstraints[creation.constraintID] =
+                    SourcePhysicsReplayLiveNoCollideConstraint(
+                        creation: creation
+                    )
+                events[commandIndex] = .noCollideConstraintCreated(
+                    commandSequence: command.sequence,
+                    command: creation
+                )
             case let .deleteConstraint(deletion):
                 let removedFixed = liveFixedConstraints.removeValue(
                     forKey: deletion.constraintID
@@ -752,7 +812,11 @@ private struct SourcePhysicsReplayTranscriptValidator {
                 let removedLength = liveLengthConstraints.removeValue(
                     forKey: deletion.constraintID
                 )
-                guard removedFixed != nil || removedLength != nil else {
+                let removedNoCollide = liveNoCollideConstraints.removeValue(
+                    forKey: deletion.constraintID
+                )
+                guard removedFixed != nil || removedLength != nil ||
+                        removedNoCollide != nil else {
                     throw SourcePhysicsReplayError.constraintNotLive(
                         deletion.constraintID
                     )
@@ -834,6 +898,10 @@ private struct SourcePhysicsReplayTranscriptValidator {
         )
         try validateLengthConstraintSnapshots(
             snapshot.lengthConstraints,
+            simulationTick: currentSimulationTick
+        )
+        try validateNoCollideConstraintSnapshots(
+            snapshot.noCollideConstraints,
             simulationTick: currentSimulationTick
         )
         let queryEvents = try validateQueryResults(
@@ -1185,6 +1253,51 @@ private struct SourcePhysicsReplayTranscriptValidator {
         }
     }
 
+    private func validateNoCollideConstraintSnapshots(
+        _ constraints: [SourcePhysicsNoCollideConstraintSnapshot],
+        simulationTick: UInt64
+    ) throws {
+        if constraints.count > 1 {
+            for index in 1 ..< constraints.count {
+                let previous = constraints[index - 1].constraintID
+                let current = constraints[index].constraintID
+                guard previous.rawValue < current.rawValue else {
+                    throw SourcePhysicsReplayError
+                        .environmentConstraintOrderInvalid(
+                            previous: previous,
+                            current: current
+                        )
+                }
+            }
+        }
+        let expected = liveNoCollideConstraints.keys.sorted {
+            $0.rawValue < $1.rawValue
+        }
+        let received = constraints.map(\.constraintID)
+        guard expected == received else {
+            throw SourcePhysicsReplayError.environmentConstraintSetMismatch(
+                expected: expected,
+                received: received
+            )
+        }
+        for constraint in constraints {
+            guard liveNoCollideConstraints[constraint.constraintID]?.creation ==
+                    constraint.creation else {
+                throw SourcePhysicsReplayError
+                    .environmentConstraintDefinitionMismatch(
+                        constraint.constraintID
+                    )
+            }
+            guard constraint.simulationTick == simulationTick else {
+                throw SourcePhysicsReplayError.environmentConstraintTickMismatch(
+                    constraintID: constraint.constraintID,
+                    expected: simulationTick,
+                    received: constraint.simulationTick
+                )
+            }
+        }
+    }
+
     private func validateQueryResults(
         _ results: [SourcePhysicsQueryResultSnapshot],
         expectations: [SourcePhysicsReplayQueryExpectation]
@@ -1481,6 +1594,9 @@ private struct SourcePhysicsReplayEncoder {
         case let .createLengthConstraint(creation):
             try writeUInt8(7)
             try write(creation)
+        case let .createNoCollideConstraint(creation):
+            try writeUInt8(8)
+            try write(creation)
         case let .deleteConstraint(deletion):
             try writeUInt8(6)
             try write(deletion.constraintID)
@@ -1638,6 +1754,13 @@ private struct SourcePhysicsReplayEncoder {
             try write(constraint)
         }
         try writeCount(
+            snapshot.noCollideConstraints.count,
+            field: "snapshot.noCollideConstraints"
+        )
+        for constraint in snapshot.noCollideConstraints {
+            try write(constraint)
+        }
+        try writeCount(
             snapshot.queryResults.count,
             field: "snapshot.queryResults"
         )
@@ -1724,6 +1847,21 @@ private struct SourcePhysicsReplayEncoder {
     }
 
     private mutating func write(
+        _ creation: SourcePhysicsNoCollideConstraintCreationCommand
+    ) throws {
+        try write(creation.constraintID)
+        try write(creation.firstBodyID)
+        try write(creation.secondBodyID)
+    }
+
+    private mutating func write(
+        _ constraint: SourcePhysicsNoCollideConstraintSnapshot
+    ) throws {
+        try write(constraint.creation)
+        try writeUInt64(constraint.simulationTick)
+    }
+
+    private mutating func write(
         _ result: SourcePhysicsQueryResultSnapshot
     ) throws {
         try writeUInt64(result.queryID)
@@ -1784,6 +1922,10 @@ private struct SourcePhysicsReplayEncoder {
             try write(command)
         case let .lengthConstraintCreated(commandSequence, command):
             try writeUInt8(8)
+            try writeUInt64(commandSequence)
+            try write(command)
+        case let .noCollideConstraintCreated(commandSequence, command):
+            try writeUInt8(9)
             try writeUInt64(commandSequence)
             try write(command)
         case let .constraintDeleted(commandSequence, constraintID):
@@ -2049,6 +2191,10 @@ private struct SourcePhysicsReplayDecoder {
             payload = .createLengthConstraint(
                 try readLengthConstraintCreation()
             )
+        case 8:
+            payload = .createNoCollideConstraint(
+                try readNoCollideConstraintCreation()
+            )
         default:
             throw SourcePhysicsReplayError.invalidTag(
                 field: "command",
@@ -2268,6 +2414,17 @@ private struct SourcePhysicsReplayDecoder {
         for _ in 0 ..< lengthConstraintCount {
             lengthConstraints.append(try readLengthConstraintSnapshot())
         }
+        let noCollideConstraintCount = try readCount(
+            field: "snapshot.noCollideConstraints",
+            maximum: budget.maximumBodySnapshots
+        )
+        var noCollideConstraints: [SourcePhysicsNoCollideConstraintSnapshot] = []
+        noCollideConstraints.reserveCapacity(noCollideConstraintCount)
+        for _ in 0 ..< noCollideConstraintCount {
+            noCollideConstraints.append(
+                try readNoCollideConstraintSnapshot()
+            )
+        }
         let queryCount = try readCount(
             field: "snapshot.queryResults",
             maximum: budget.maximumQueryResults
@@ -2284,7 +2441,8 @@ private struct SourcePhysicsReplayDecoder {
             bodies: bodies,
             queryResults: results,
             fixedConstraints: constraints,
-            lengthConstraints: lengthConstraints
+            lengthConstraints: lengthConstraints,
+            noCollideConstraints: noCollideConstraints
         )
     }
 
@@ -2379,6 +2537,25 @@ private struct SourcePhysicsReplayDecoder {
     {
         SourcePhysicsLengthConstraintSnapshot(
             creation: try readLengthConstraintCreation(),
+            simulationTick: try readUInt64()
+        )
+    }
+
+    private mutating func readNoCollideConstraintCreation() throws
+        -> SourcePhysicsNoCollideConstraintCreationCommand
+    {
+        try SourcePhysicsNoCollideConstraintCreationCommand(
+            constraintID: readConstraintID(),
+            firstBodyID: readBodyID(),
+            secondBodyID: readBodyID()
+        )
+    }
+
+    private mutating func readNoCollideConstraintSnapshot() throws
+        -> SourcePhysicsNoCollideConstraintSnapshot
+    {
+        SourcePhysicsNoCollideConstraintSnapshot(
+            creation: try readNoCollideConstraintCreation(),
             simulationTick: try readUInt64()
         )
     }
@@ -2487,6 +2664,11 @@ private struct SourcePhysicsReplayDecoder {
             return .lengthConstraintCreated(
                 commandSequence: try readUInt64(),
                 command: try readLengthConstraintCreation()
+            )
+        case 9:
+            return .noCollideConstraintCreated(
+                commandSequence: try readUInt64(),
+                command: try readNoCollideConstraintCreation()
             )
         default:
             throw SourcePhysicsReplayError.invalidTag(

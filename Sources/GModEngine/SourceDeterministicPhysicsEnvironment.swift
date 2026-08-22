@@ -333,6 +333,32 @@ public final class SourceDeterministicPhysicsEnvironment:
         }
     }
 
+    private struct NoCollideConstraintState: Equatable {
+        let creation: SourcePhysicsNoCollideConstraintCreationCommand
+        var simulationTick: UInt64
+
+        var constraintID: SourcePhysicsConstraintID {
+            creation.constraintID
+        }
+    }
+
+    /// Symmetric dynamic-body collision exclusion key retaining complete body
+    /// identities so an edict-slot reuse cannot inherit a stale relationship.
+    private struct BodyPair: Hashable {
+        let first: SourcePhysicsBodyID
+        let second: SourcePhysicsBodyID
+
+        init(_ lhs: SourcePhysicsBodyID, _ rhs: SourcePhysicsBodyID) {
+            if SourceDeterministicPhysicsEnvironment.bodyIDPrecedes(lhs, rhs) {
+                first = lhs
+                second = rhs
+            } else {
+                first = rhs
+                second = lhs
+            }
+        }
+    }
+
     private struct Bounds {
         var minimums: SourceVector3
         var maximums: SourceVector3
@@ -498,6 +524,9 @@ public final class SourceDeterministicPhysicsEnvironment:
     ] = [:]
     private var lengthConstraints: [
         SourcePhysicsConstraintID: LengthConstraintState
+    ] = [:]
+    private var noCollideConstraints: [
+        SourcePhysicsConstraintID: NoCollideConstraintState
     ] = [:]
     private var retiredConstraintIDs = Set<SourcePhysicsConstraintID>()
     private var simulationTick: UInt64 = 0
@@ -699,6 +728,7 @@ public final class SourceDeterministicPhysicsEnvironment:
         var candidateBodies = bodies
         var candidateFixedConstraints = fixedConstraints
         var candidateLengthConstraints = lengthConstraints
+        var candidateNoCollideConstraints = noCollideConstraints
         var candidateRetiredConstraintIDs = retiredConstraintIDs
         var candidateTick = simulationTick
         var candidateHasSimulated = hasSimulated
@@ -761,6 +791,19 @@ public final class SourceDeterministicPhysicsEnvironment:
                         constraintID: constraint.constraintID
                     )
                 }
+                if let constraint = candidateNoCollideConstraints.values
+                    .filter({
+                        $0.creation.firstBodyID == deletion.bodyID ||
+                            $0.creation.secondBodyID == deletion.bodyID
+                    })
+                    .min(by: {
+                        $0.constraintID.rawValue < $1.constraintID.rawValue
+                    }) {
+                    throw Error.bodyHasLiveConstraint(
+                        bodyID: deletion.bodyID,
+                        constraintID: constraint.constraintID
+                    )
+                }
                 guard candidateBodies.removeValue(forKey: deletion.bodyID) != nil else {
                     throw Error.missingBody(deletion.bodyID)
                 }
@@ -774,7 +817,8 @@ public final class SourceDeterministicPhysicsEnvironment:
 
             case let .createFixedConstraint(creation):
                 guard candidateFixedConstraints[creation.constraintID] == nil,
-                      candidateLengthConstraints[creation.constraintID] == nil else {
+                      candidateLengthConstraints[creation.constraintID] == nil,
+                      candidateNoCollideConstraints[creation.constraintID] == nil else {
                     throw Error.duplicateConstraint(creation.constraintID)
                 }
                 guard !candidateRetiredConstraintIDs.contains(
@@ -810,7 +854,8 @@ public final class SourceDeterministicPhysicsEnvironment:
 
             case let .createLengthConstraint(creation):
                 guard candidateFixedConstraints[creation.constraintID] == nil,
-                      candidateLengthConstraints[creation.constraintID] == nil else {
+                      candidateLengthConstraints[creation.constraintID] == nil,
+                      candidateNoCollideConstraints[creation.constraintID] == nil else {
                     throw Error.duplicateConstraint(creation.constraintID)
                 }
                 guard !candidateRetiredConstraintIDs.contains(
@@ -852,6 +897,30 @@ public final class SourceDeterministicPhysicsEnvironment:
                         simulationTick: candidateTick
                     )
 
+            case let .createNoCollideConstraint(creation):
+                guard candidateFixedConstraints[creation.constraintID] == nil,
+                      candidateLengthConstraints[creation.constraintID] == nil,
+                      candidateNoCollideConstraints[creation.constraintID] == nil else {
+                    throw Error.duplicateConstraint(creation.constraintID)
+                }
+                guard !candidateRetiredConstraintIDs.contains(
+                    creation.constraintID
+                ) else {
+                    throw Error.retiredConstraint(creation.constraintID)
+                }
+                for bodyID in [creation.firstBodyID, creation.secondBodyID]
+                    where candidateBodies[bodyID] == nil {
+                    throw Error.constraintBodyMissing(
+                        constraintID: creation.constraintID,
+                        bodyID: bodyID
+                    )
+                }
+                candidateNoCollideConstraints[creation.constraintID] =
+                    NoCollideConstraintState(
+                        creation: creation,
+                        simulationTick: candidateTick
+                    )
+
             case let .deleteConstraint(deletion):
                 let removedFixed = candidateFixedConstraints.removeValue(
                     forKey: deletion.constraintID
@@ -859,7 +928,11 @@ public final class SourceDeterministicPhysicsEnvironment:
                 let removedLength = candidateLengthConstraints.removeValue(
                     forKey: deletion.constraintID
                 )
-                guard removedFixed != nil || removedLength != nil else {
+                let removedNoCollide = candidateNoCollideConstraints.removeValue(
+                    forKey: deletion.constraintID
+                )
+                guard removedFixed != nil || removedLength != nil ||
+                    removedNoCollide != nil else {
                     throw Error.missingConstraint(deletion.constraintID)
                 }
                 candidateRetiredConstraintIDs.insert(deletion.constraintID)
@@ -875,6 +948,7 @@ public final class SourceDeterministicPhysicsEnvironment:
                     bodies: &candidateBodies,
                     fixedConstraints: &candidateFixedConstraints,
                     lengthConstraints: &candidateLengthConstraints,
+                    noCollideConstraints: &candidateNoCollideConstraints,
                     simulationTick: simulate.simulationTick
                 )
                 candidateTick = simulate.simulationTick
@@ -896,6 +970,7 @@ public final class SourceDeterministicPhysicsEnvironment:
             bodies: candidateBodies,
             fixedConstraints: candidateFixedConstraints,
             lengthConstraints: candidateLengthConstraints,
+            noCollideConstraints: candidateNoCollideConstraints,
             simulationTick: candidateTick,
             lastProcessedCommandSequence: finalSequence,
             queryResults: queryResults
@@ -904,6 +979,7 @@ public final class SourceDeterministicPhysicsEnvironment:
         bodies = candidateBodies
         fixedConstraints = candidateFixedConstraints
         lengthConstraints = candidateLengthConstraints
+        noCollideConstraints = candidateNoCollideConstraints
         retiredConstraintIDs = candidateRetiredConstraintIDs
         simulationTick = candidateTick
         hasSimulated = candidateHasSimulated
@@ -1101,6 +1177,9 @@ public final class SourceDeterministicPhysicsEnvironment:
         lengthConstraints: inout [
             SourcePhysicsConstraintID: LengthConstraintState
         ],
+        noCollideConstraints: inout [
+            SourcePhysicsConstraintID: NoCollideConstraintState
+        ],
         simulationTick: UInt64
     ) throws -> [ContactSnapshot] {
         let delta = SourcePhysicsContract.fixedTimeStepSeconds
@@ -1190,6 +1269,12 @@ public final class SourceDeterministicPhysicsEnvironment:
 
         var supportedBodies = Set<SourcePhysicsBodyID>()
         var firstIterationContacts: [Contact] = []
+        let excludedPairs = Set(noCollideConstraints.values.map {
+            BodyPair(
+                $0.creation.firstBodyID,
+                $0.creation.secondBodyID
+            )
+        })
         for iteration in 0 ..< configuration.contactSolverIterations {
             try solveFixedConstraints(
                 &fixedConstraints,
@@ -1201,7 +1286,10 @@ public final class SourceDeterministicPhysicsEnvironment:
                 bodies: &bodies,
                 supportedBodies: &supportedBodies
             )
-            var contacts = detectContacts(bodies: bodies)
+            var contacts = detectContacts(
+                bodies: bodies,
+                excludedPairs: excludedPairs
+            )
             if iteration == 0, !continuousContacts.isEmpty {
                 // A zero-thickness world triangle can be crossed between two
                 // 0.015-second poses. Resolve the conservative convex-brush
@@ -1228,6 +1316,9 @@ public final class SourceDeterministicPhysicsEnvironment:
         }
         for constraintID in lengthConstraints.keys {
             lengthConstraints[constraintID]?.simulationTick = simulationTick
+        }
+        for constraintID in noCollideConstraints.keys {
+            noCollideConstraints[constraintID]?.simulationTick = simulationTick
         }
 
         for bodyID in orderedIDs {
@@ -1609,7 +1700,8 @@ public final class SourceDeterministicPhysicsEnvironment:
     }
 
     private func detectContacts(
-        bodies: [SourcePhysicsBodyID: BodyState]
+        bodies: [SourcePhysicsBodyID: BodyState],
+        excludedPairs: Set<BodyPair> = []
     ) -> [Contact] {
         let orderedIDs = bodies.keys.sorted(by: Self.bodyIDPrecedes)
         var shapes: [SourcePhysicsBodyID: WorldShape] = [:]
@@ -1634,17 +1726,22 @@ public final class SourceDeterministicPhysicsEnvironment:
         let broadphase = SourcePhysicsDynamicSweepAndPrune.candidates(
             from: broadphaseEntries
         )
+        let narrowphasePairs = broadphase.candidatePairs.filter { pair in
+            let firstID = orderedIDs[pair.firstSourceOrder]
+            let secondID = orderedIDs[pair.secondSourceOrder]
+            return !excludedPairs.contains(BodyPair(firstID, secondID))
+        }
         latestDynamicBroadphaseDiagnostics = DynamicBroadphaseDiagnostics(
             totalBodyCount: orderedIDs.count,
             collisionEnabledBodyCount: broadphaseEntries.count,
             fullPairCount: broadphase.fullPairCount,
             sweepCandidatePairCount: broadphase.sweepCandidatePairCount,
-            narrowphaseCandidatePairCount: broadphase.candidatePairs.count
+            narrowphaseCandidatePairCount: narrowphasePairs.count
         )
 
         var contacts: [Contact] = []
-        contacts.reserveCapacity(broadphase.candidatePairs.count)
-        for pair in broadphase.candidatePairs {
+        contacts.reserveCapacity(narrowphasePairs.count)
+        for pair in narrowphasePairs {
             let firstID = orderedIDs[pair.firstSourceOrder]
             let secondID = orderedIDs[pair.secondSourceOrder]
             guard let first = bodies[firstID],
@@ -3121,6 +3218,9 @@ public final class SourceDeterministicPhysicsEnvironment:
         lengthConstraints: [
             SourcePhysicsConstraintID: LengthConstraintState
         ],
+        noCollideConstraints: [
+            SourcePhysicsConstraintID: NoCollideConstraintState
+        ],
         simulationTick: UInt64,
         lastProcessedCommandSequence: UInt64?,
         queryResults: [SourcePhysicsQueryResultSnapshot]
@@ -3165,13 +3265,22 @@ public final class SourceDeterministicPhysicsEnvironment:
                     simulationTick: constraint.simulationTick
                 )
             }
+        let noCollideConstraintSnapshots = noCollideConstraints.values
+            .sorted { $0.constraintID.rawValue < $1.constraintID.rawValue }
+            .map { constraint in
+                SourcePhysicsNoCollideConstraintSnapshot(
+                    creation: constraint.creation,
+                    simulationTick: constraint.simulationTick
+                )
+            }
         return try SourcePhysicsEnvironmentSnapshot(
             simulationTick: simulationTick,
             lastProcessedCommandSequence: lastProcessedCommandSequence,
             bodies: snapshots,
             queryResults: queryResults,
             fixedConstraints: constraintSnapshots,
-            lengthConstraints: lengthConstraintSnapshots
+            lengthConstraints: lengthConstraintSnapshots,
+            noCollideConstraints: noCollideConstraintSnapshots
         )
     }
 

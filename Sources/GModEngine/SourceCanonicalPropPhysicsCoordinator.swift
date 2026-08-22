@@ -27,12 +27,15 @@ public enum SourceCanonicalQueuedPhysicsBodyCommand: Equatable, Sendable {
 public enum SourceCanonicalQueuedPhysicsConstraintCommand: Equatable, Sendable {
     case createFixed(SourcePhysicsFixedConstraintCreationCommand)
     case createLength(SourcePhysicsLengthConstraintCreationCommand)
+    case createNoCollide(SourcePhysicsNoCollideConstraintCreationCommand)
     case delete(SourcePhysicsConstraintDeletionCommand)
 
     var payload: SourcePhysicsCommandPayload {
         switch self {
         case let .createFixed(command): .createFixedConstraint(command)
         case let .createLength(command): .createLengthConstraint(command)
+        case let .createNoCollide(command):
+            .createNoCollideConstraint(command)
         case let .delete(command): .deleteConstraint(command)
         }
     }
@@ -302,6 +305,9 @@ public struct SourceCanonicalPropPhysicsStepSnapshot: Equatable, Sendable {
     public let bodies: [SourceCanonicalPropPhysicsMotionSnapshot]
     public let fixedConstraints: [SourcePhysicsFixedConstraintSnapshot]
     public let lengthConstraints: [SourcePhysicsLengthConstraintSnapshot]
+    public let noCollideConstraints: [
+        SourcePhysicsNoCollideConstraintSnapshot
+    ]
 
     public var fixedTimeStepSeconds: Float {
         SourcePhysicsContract.fixedTimeStepSeconds
@@ -342,6 +348,9 @@ public final class SourceCanonicalPropPhysicsCoordinator {
     ] = [:]
     private var committedLengthConstraints: [
         SourcePhysicsConstraintID: SourcePhysicsLengthConstraintSnapshot
+    ] = [:]
+    private var committedNoCollideConstraints: [
+        SourcePhysicsConstraintID: SourcePhysicsNoCollideConstraintSnapshot
     ] = [:]
     private var committedSimulationTickStorage: UInt64?
 
@@ -485,7 +494,8 @@ public final class SourceCanonicalPropPhysicsCoordinator {
             operations: operations,
             bodies: motionSnapshots,
             fixedConstraints: environmentSnapshot.fixedConstraints,
-            lengthConstraints: environmentSnapshot.lengthConstraints
+            lengthConstraints: environmentSnapshot.lengthConstraints,
+            noCollideConstraints: environmentSnapshot.noCollideConstraints
         )
 
         mutationQueue?.commitPendingCanonicalPhysicsBodyCommands(
@@ -499,6 +509,11 @@ public final class SourceCanonicalPropPhysicsCoordinator {
         )
         committedLengthConstraints = Dictionary(
             uniqueKeysWithValues: environmentSnapshot.lengthConstraints.map {
+                ($0.constraintID, $0)
+            }
+        )
+        committedNoCollideConstraints = Dictionary(
+            uniqueKeysWithValues: environmentSnapshot.noCollideConstraints.map {
                 ($0.constraintID, $0)
             }
         )
@@ -588,6 +603,7 @@ public final class SourceCanonicalPropPhysicsCoordinator {
         var liveBodyIDs = Set(committedBodies.keys)
         var liveConstraintIDs = Set(committedFixedConstraints.keys)
         liveConstraintIDs.formUnion(committedLengthConstraints.keys)
+        liveConstraintIDs.formUnion(committedNoCollideConstraints.keys)
         var createdBodyIDs: [SourcePhysicsBodyID] = []
         for command in commands {
             switch command.payload {
@@ -635,6 +651,20 @@ public final class SourceCanonicalPropPhysicsCoordinator {
                         .pendingConstraintBodyUnavailable(
                             constraintID: creation.constraintID,
                             bodyID: endpoint.bodyID
+                        )
+                }
+            case let .createNoCollideConstraint(creation):
+                guard liveConstraintIDs.insert(creation.constraintID).inserted else {
+                    throw SourceCanonicalPropPhysicsCoordinatorError
+                        .pendingConstraintAlreadyExists(creation.constraintID)
+                }
+                for bodyID in [creation.firstBodyID, creation.secondBodyID]
+                    where !liveBodyIDs.contains(bodyID)
+                {
+                    throw SourceCanonicalPropPhysicsCoordinatorError
+                        .pendingConstraintBodyUnavailable(
+                            constraintID: creation.constraintID,
+                            bodyID: bodyID
                         )
                 }
             case let .deleteConstraint(deletion):
@@ -693,7 +723,8 @@ public final class SourceCanonicalPropPhysicsCoordinator {
         )
         let returnedConstraintIDs = Set(
             environmentSnapshot.fixedConstraints.map(\.constraintID) +
-                environmentSnapshot.lengthConstraints.map(\.constraintID)
+                environmentSnapshot.lengthConstraints.map(\.constraintID) +
+                environmentSnapshot.noCollideConstraints.map(\.constraintID)
         )
         guard returnedConstraintIDs == expectedConstraintIDs else {
             throw SourceCanonicalPropPhysicsCoordinatorError
@@ -773,6 +804,7 @@ public final class SourceCanonicalPropPhysicsCoordinator {
                 }
             case .createFixedConstraint,
                  .createLengthConstraint,
+                 .createNoCollideConstraint,
                  .deleteConstraint,
                  .simulate,
                  .query:

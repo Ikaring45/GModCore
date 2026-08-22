@@ -299,6 +299,234 @@ struct SourceCanonicalPropPhysicsCoordinatorTests {
         #expect(coordinator.committedSimulationTick == 2)
     }
 
+    @Test("pending NoCollide commits full-body snapshot then deletes in the same FIFO")
+    func pendingNoCollideCommitsSnapshotAndDeletes() throws {
+        let environment = RecordingPhysicsEnvironment()
+        let sequences = RecordingPhysicsSequenceSource(first: 900)
+        let coordinator = SourceCanonicalPropPhysicsCoordinator(
+            environment: environment,
+            commandSequenceSource: sequences
+        )
+        let definition = try makeBodyDefinition()
+        let first = makeProp(
+            entryIndex: 120,
+            serialNumber: 9,
+            lifecycle: .active
+        )
+        let second = makeProp(
+            entryIndex: 121,
+            serialNumber: 14,
+            lifecycle: .active
+        )
+        let inputs = [
+            try SourceCanonicalPropPhysicsInput(
+                entity: first,
+                bodyDefinition: definition
+            ),
+            try SourceCanonicalPropPhysicsInput(
+                entity: second,
+                bodyDefinition: definition
+            ),
+        ]
+        _ = try coordinator.step(inputs: inputs, simulationTick: 1)
+
+        let firstBodyID = try SourcePhysicsBodyID(
+            entityIdentity: first.identity,
+            solidIndex: 0
+        )
+        let secondBodyID = try SourcePhysicsBodyID(
+            entityIdentity: second.identity,
+            solidIndex: 0
+        )
+        let constraintID = try SourcePhysicsConstraintID(rawValue: 31)
+        let creation = try SourcePhysicsNoCollideConstraintCreationCommand(
+            constraintID: constraintID,
+            firstBodyID: firstBodyID,
+            secondBodyID: secondBodyID
+        )
+        let queuedCreation = try #require(
+            sequences.enqueueCanonicalPhysicsConstraintCommands([
+                .createNoCollide(creation),
+            ]).first
+        )
+
+        let created = try coordinator.step(
+            inputs: inputs,
+            simulationTick: 2
+        )
+
+        #expect(created.commandSequences == [queuedCreation.sequence, 904])
+        #expect(created.noCollideConstraints == [
+            SourcePhysicsNoCollideConstraintSnapshot(
+                creation: creation,
+                simulationTick: 2
+            ),
+        ])
+        #expect(created.noCollideConstraints[0].creation.firstBodyID == firstBodyID)
+        #expect(created.noCollideConstraints[0].creation.secondBodyID == secondBodyID)
+        #expect(firstBodyID.entityIdentity.serialNumber == 9)
+        #expect(secondBodyID.entityIdentity.serialNumber == 14)
+        #expect(sequences.pendingCommands.isEmpty)
+        #expect(sequences.committedPendingCommands == [[queuedCreation]])
+
+        let queuedDeletion = try #require(
+            sequences.enqueueCanonicalPhysicsConstraintCommands([
+                .delete(SourcePhysicsConstraintDeletionCommand(
+                    constraintID: constraintID
+                )),
+            ]).first
+        )
+        let deleted = try coordinator.step(
+            inputs: inputs,
+            simulationTick: 3
+        )
+
+        #expect(deleted.commandSequences == [queuedDeletion.sequence, 906])
+        #expect(deleted.noCollideConstraints.isEmpty)
+        #expect(environment.noCollideConstraints.isEmpty)
+        #expect(sequences.pendingCommands.isEmpty)
+        #expect(
+            sequences.committedPendingCommands == [
+                [queuedCreation],
+                [queuedDeletion],
+            ]
+        )
+    }
+
+    @Test("NoCollide environment failure retains pending FIFO and snapshot until retry")
+    func pendingNoCollideFailureIsTransactionalAndRetryable() throws {
+        let environment = RecordingPhysicsEnvironment()
+        let sequences = RecordingPhysicsSequenceSource(first: 1_100)
+        let coordinator = SourceCanonicalPropPhysicsCoordinator(
+            environment: environment,
+            commandSequenceSource: sequences
+        )
+        let definition = try makeBodyDefinition()
+        let first = makeProp(
+            entryIndex: 130,
+            serialNumber: 2,
+            lifecycle: .active
+        )
+        let second = makeProp(
+            entryIndex: 131,
+            serialNumber: 3,
+            lifecycle: .active
+        )
+        let inputs = [
+            try SourceCanonicalPropPhysicsInput(
+                entity: first,
+                bodyDefinition: definition
+            ),
+            try SourceCanonicalPropPhysicsInput(
+                entity: second,
+                bodyDefinition: definition
+            ),
+        ]
+        let initial = try coordinator.step(inputs: inputs, simulationTick: 1)
+        let creation = try SourcePhysicsNoCollideConstraintCreationCommand(
+            constraintID: SourcePhysicsConstraintID(rawValue: 41),
+            firstBodyID: SourcePhysicsBodyID(
+                entityIdentity: first.identity,
+                solidIndex: 0
+            ),
+            secondBodyID: SourcePhysicsBodyID(
+                entityIdentity: second.identity,
+                solidIndex: 0
+            )
+        )
+        let queued = try sequences.enqueueCanonicalPhysicsConstraintCommands([
+            .createNoCollide(creation),
+        ])
+
+        environment.failNextExecution = true
+        #expect(throws: RecordingPhysicsEnvironment.Failure.injected) {
+            _ = try coordinator.step(inputs: inputs, simulationTick: 2)
+        }
+        #expect(coordinator.committedSimulationTick == 1)
+        #expect(coordinator.latestStepSnapshot == initial)
+        #expect(environment.noCollideConstraints.isEmpty)
+        #expect(sequences.pendingCommands == queued)
+        #expect(sequences.committedPendingCommands.isEmpty)
+
+        let retried = try coordinator.step(inputs: inputs, simulationTick: 2)
+        #expect(retried.noCollideConstraints.map(\.creation) == [creation])
+        #expect(sequences.pendingCommands.isEmpty)
+        #expect(sequences.committedPendingCommands == [queued])
+    }
+
+    @Test("NoCollide rejects an unknown EHANDLE generation and supports exact rollback")
+    func pendingNoCollideRejectsUnknownFullBodyAndRollsBack() throws {
+        let environment = RecordingPhysicsEnvironment()
+        let sequences = RecordingPhysicsSequenceSource(first: 1_300)
+        let coordinator = SourceCanonicalPropPhysicsCoordinator(
+            environment: environment,
+            commandSequenceSource: sequences
+        )
+        let definition = try makeBodyDefinition()
+        let first = makeProp(
+            entryIndex: 140,
+            serialNumber: 5,
+            lifecycle: .active
+        )
+        let second = makeProp(
+            entryIndex: 141,
+            serialNumber: 6,
+            lifecycle: .active
+        )
+        let inputs = [
+            try SourceCanonicalPropPhysicsInput(
+                entity: first,
+                bodyDefinition: definition
+            ),
+            try SourceCanonicalPropPhysicsInput(
+                entity: second,
+                bodyDefinition: definition
+            ),
+        ]
+        _ = try coordinator.step(inputs: inputs, simulationTick: 1)
+
+        let liveFirstBodyID = try SourcePhysicsBodyID(
+            entityIdentity: first.identity,
+            solidIndex: 0
+        )
+        let staleSecondBodyID = try SourcePhysicsBodyID(
+            entityIdentity: SourceCanonicalEntityIdentity(
+                handle: SourceBaseHandle(
+                    entryIndex: second.identity.entryIndex,
+                    serialNumber: second.identity.serialNumber + 1
+                )
+            ),
+            solidIndex: 0
+        )
+        let constraintID = try SourcePhysicsConstraintID(rawValue: 51)
+        let creation = try SourcePhysicsNoCollideConstraintCreationCommand(
+            constraintID: constraintID,
+            firstBodyID: liveFirstBodyID,
+            secondBodyID: staleSecondBodyID
+        )
+        let queued = try sequences.enqueueCanonicalPhysicsConstraintCommands([
+            .createNoCollide(creation),
+        ])
+        let executedBatchCount = environment.successfulBatches.count
+
+        #expect(
+            throws: SourceCanonicalPropPhysicsCoordinatorError
+                .pendingConstraintBodyUnavailable(
+                    constraintID: constraintID,
+                    bodyID: staleSecondBodyID
+                )
+        ) {
+            _ = try coordinator.step(inputs: inputs, simulationTick: 2)
+        }
+        #expect(environment.successfulBatches.count == executedBatchCount)
+        #expect(coordinator.committedSimulationTick == 1)
+        #expect(sequences.pendingCommands == queued)
+
+        sequences.rollbackCanonicalPhysicsConstraintCommands(queued)
+        #expect(sequences.pendingCommands.isEmpty)
+        #expect(sequences.rollbackCalls == [queued])
+    }
+
     @Test("stock remover transient deletes the rigid body without deleting Entity")
     func stockRemoverTransientDisablesBodyUntilDeferredRemoval() throws {
         let environment = RecordingPhysicsEnvironment()
@@ -524,10 +752,15 @@ struct SourceCanonicalPropPhysicsCoordinatorTests {
 }
 
 private final class RecordingPhysicsSequenceSource:
-    SourceCanonicalPropPhysicsCommandSequenceSource
+    SourceCanonicalPropPhysicsCommandSequenceSource,
+    SourceCanonicalPropPhysicsMutationCommandQueue,
+    SourceCanonicalPhysicsConstraintCommandQueue
 {
     private var next: UInt64
     private(set) var reservations: [[UInt64]] = []
+    private(set) var pendingCommands: [SourcePhysicsCommand] = []
+    private(set) var committedPendingCommands: [[SourcePhysicsCommand]] = []
+    private(set) var rollbackCalls: [[SourcePhysicsCommand]] = []
 
     init(first: UInt64) {
         next = first
@@ -538,6 +771,53 @@ private final class RecordingPhysicsSequenceSource:
         next += UInt64(count)
         reservations.append(result)
         return result
+    }
+
+    func enqueueCanonicalPhysicsBodyCommands(
+        _ commands: [SourceCanonicalQueuedPhysicsBodyCommand]
+    ) throws -> [SourcePhysicsCommand] {
+        try enqueue(payloads: commands.map(\.payload))
+    }
+
+    func enqueueCanonicalPhysicsConstraintCommands(
+        _ commands: [SourceCanonicalQueuedPhysicsConstraintCommand]
+    ) throws -> [SourcePhysicsCommand] {
+        try enqueue(payloads: commands.map(\.payload))
+    }
+
+    func preparePendingCanonicalPhysicsBodyCommands()
+        -> [SourcePhysicsCommand]
+    {
+        pendingCommands
+    }
+
+    func commitPendingCanonicalPhysicsBodyCommands(
+        _ commands: [SourcePhysicsCommand]
+    ) {
+        guard !commands.isEmpty else { return }
+        precondition(Array(pendingCommands.prefix(commands.count)) == commands)
+        pendingCommands.removeFirst(commands.count)
+        committedPendingCommands.append(commands)
+    }
+
+    func rollbackCanonicalPhysicsConstraintCommands(
+        _ commands: [SourcePhysicsCommand]
+    ) {
+        guard !commands.isEmpty else { return }
+        precondition(Array(pendingCommands.suffix(commands.count)) == commands)
+        pendingCommands.removeLast(commands.count)
+        rollbackCalls.append(commands)
+    }
+
+    private func enqueue(
+        payloads: [SourcePhysicsCommandPayload]
+    ) throws -> [SourcePhysicsCommand] {
+        let sequences = try reservePhysicsCommandSequences(count: payloads.count)
+        let commands = zip(sequences, payloads).map {
+            SourcePhysicsCommand(sequence: $0.0, payload: $0.1)
+        }
+        pendingCommands.append(contentsOf: commands)
+        return commands
     }
 }
 
@@ -550,6 +830,9 @@ private final class RecordingPhysicsEnvironment: SourcePhysicsEnvironment {
 
     private(set) var successfulBatches: [SourcePhysicsCommandBatch] = []
     private(set) var bodies: [SourcePhysicsBodyID: SourcePhysicsBodySnapshot] = [:]
+    private(set) var noCollideConstraints: [
+        SourcePhysicsConstraintID: SourcePhysicsNoCollideConstraintSnapshot
+    ] = [:]
     var failNextExecution = false
     private var simulationTick: UInt64 = 0
 
@@ -562,6 +845,7 @@ private final class RecordingPhysicsEnvironment: SourcePhysicsEnvironment {
         }
 
         var candidateBodies = bodies
+        var candidateNoCollideConstraints = noCollideConstraints
         var candidateTick = simulationTick
         for command in batch.commands {
             switch command.payload {
@@ -590,9 +874,28 @@ private final class RecordingPhysicsEnvironment: SourcePhysicsEnvironment {
                     by: mutation.mutation
                 )
             case .createFixedConstraint,
-                 .createLengthConstraint,
-                 .deleteConstraint:
+                 .createLengthConstraint:
                 break
+            case let .createNoCollideConstraint(creation):
+                guard candidateNoCollideConstraints[creation.constraintID] == nil else {
+                    throw Failure.injected
+                }
+                for bodyID in [creation.firstBodyID, creation.secondBodyID] {
+                    guard candidateBodies[bodyID] != nil else {
+                        throw Failure.missingBody(bodyID)
+                    }
+                }
+                candidateNoCollideConstraints[creation.constraintID] =
+                    SourcePhysicsNoCollideConstraintSnapshot(
+                        creation: creation,
+                        simulationTick: candidateTick
+                    )
+            case let .deleteConstraint(deletion):
+                guard candidateNoCollideConstraints.removeValue(
+                    forKey: deletion.constraintID
+                ) != nil else {
+                    throw Failure.injected
+                }
             case let .simulate(simulate):
                 candidateTick = simulate.simulationTick
                 for (bodyID, body) in candidateBodies {
@@ -608,6 +911,13 @@ private final class RecordingPhysicsEnvironment: SourcePhysicsEnvironment {
                         simulationTick: candidateTick
                     )
                 }
+                for (constraintID, constraint) in candidateNoCollideConstraints {
+                    candidateNoCollideConstraints[constraintID] =
+                        SourcePhysicsNoCollideConstraintSnapshot(
+                            creation: constraint.creation,
+                            simulationTick: candidateTick
+                        )
+                }
             case .query:
                 break
             }
@@ -617,9 +927,13 @@ private final class RecordingPhysicsEnvironment: SourcePhysicsEnvironment {
             simulationTick: candidateTick,
             lastProcessedCommandSequence: batch.commands.last?.sequence,
             bodies: candidateBodies.values.sorted(by: bodyPrecedes),
-            queryResults: []
+            queryResults: [],
+            noCollideConstraints: candidateNoCollideConstraints.values.sorted {
+                $0.constraintID.rawValue < $1.constraintID.rawValue
+            }
         )
         bodies = candidateBodies
+        noCollideConstraints = candidateNoCollideConstraints
         simulationTick = candidateTick
         successfulBatches.append(batch)
         return snapshot

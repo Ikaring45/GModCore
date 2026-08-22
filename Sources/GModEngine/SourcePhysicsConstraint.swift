@@ -19,6 +19,55 @@ public struct SourcePhysicsConstraintID: Equatable, Hashable, Sendable {
 public enum SourcePhysicsConstraintKind: Equatable, Hashable, Sendable {
     case fixed
     case length
+    case noCollide
+}
+
+/// Backend-neutral VPhysics collision-pair suppression used by
+/// `constraint.NoCollide`. The endpoints retain complete body identities, so
+/// a stale tool constraint cannot suppress collision on a later entity which
+/// reused either edict slot.
+public struct SourcePhysicsNoCollideConstraintCreationCommand:
+    Equatable,
+    Sendable
+{
+    public let constraintID: SourcePhysicsConstraintID
+    public let firstBodyID: SourcePhysicsBodyID
+    public let secondBodyID: SourcePhysicsBodyID
+
+    public init(
+        constraintID: SourcePhysicsConstraintID,
+        firstBodyID: SourcePhysicsBodyID,
+        secondBodyID: SourcePhysicsBodyID
+    ) throws {
+        guard firstBodyID != secondBodyID else {
+            throw SourcePhysicsContractError.constraintReferencesSameBody(
+                firstBodyID
+            )
+        }
+        self.constraintID = constraintID
+        self.firstBodyID = firstBodyID
+        self.secondBodyID = secondBodyID
+    }
+}
+
+/// Immutable no-collide state published by the physics environment. The
+/// authored endpoint order is retained for replay while pair matching in the
+/// solver remains symmetric.
+public struct SourcePhysicsNoCollideConstraintSnapshot: Equatable, Sendable {
+    public let creation: SourcePhysicsNoCollideConstraintCreationCommand
+    public let simulationTick: UInt64
+
+    public init(
+        creation: SourcePhysicsNoCollideConstraintCreationCommand,
+        simulationTick: UInt64
+    ) {
+        self.creation = creation
+        self.simulationTick = simulationTick
+    }
+
+    public var constraintID: SourcePhysicsConstraintID {
+        creation.constraintID
+    }
 }
 
 /// A length-constraint endpoint is either a mutable physics body or the one
