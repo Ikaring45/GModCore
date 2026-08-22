@@ -10,9 +10,47 @@ public enum GMLuaMenuAction: Sendable, Equatable {
     case startMap(String)
     case resumeGame
     case setAudioEnabled(Bool)
+    case setMenuBackgroundsEnabled(Bool)
+    case setPreferredFramesPerSecond(Int)
+    case setInvertTouchLookY(Bool)
+    case setTouchLookSensitivity(Double)
     case executeConsoleLine(String)
+    case closeUtility
     case disconnect
     case quit
+}
+
+/// Host utility selected by the original HTML Home menu (or by the stock
+/// `gui.ShowConsole` command). Home itself remains the shipped DHTML surface;
+/// these cases only identify the Derma window layered above it.
+public enum GMLuaMenuUtility: String, Sendable, Equatable {
+    case settings
+    case problems
+    case console
+}
+
+/// Immutable values read by MENU Lua from the app stores that actually own
+/// audio, content presentation, touch input, and display cadence.
+public struct GMLuaMenuSettingsSnapshot: Sendable, Equatable {
+    public var audioEnabled: Bool
+    public var menuBackgroundsEnabled: Bool
+    public var preferredFramesPerSecond: Int
+    public var invertTouchLookY: Bool
+    public var touchLookSensitivity: Double
+
+    public init(
+        audioEnabled: Bool = true,
+        menuBackgroundsEnabled: Bool = true,
+        preferredFramesPerSecond: Int = 60,
+        invertTouchLookY: Bool = false,
+        touchLookSensitivity: Double = 0.34
+    ) {
+        self.audioEnabled = audioEnabled
+        self.menuBackgroundsEnabled = menuBackgroundsEnabled
+        self.preferredFramesPerSecond = preferredFramesPerSecond
+        self.invertTouchLookY = invertTouchLookY
+        self.touchLookSensitivity = touchLookSensitivity
+    }
 }
 
 public enum GMLuaMenuSessionError: Error, Sendable, Equatable,
@@ -73,6 +111,7 @@ private final class GMLuaMenuHostState: @unchecked Sendable {
     private var actions: [GMLuaMenuAction] = []
     private var problemText = "No current problems."
     private var consoleText = "Console ready."
+    private var settings = GMLuaMenuSettingsSnapshot()
 
     func append(_ action: GMLuaMenuAction) throws {
         lock.lock()
@@ -176,16 +215,28 @@ private final class GMLuaMenuHostState: @unchecked Sendable {
         defer { lock.unlock() }
         return consoleText
     }
+
+    func replaceSettings(_ replacement: GMLuaMenuSettingsSnapshot) {
+        lock.lock()
+        settings = replacement
+        lock.unlock()
+    }
+
+    func currentSettings() -> GMLuaMenuSettingsSnapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return settings
+    }
 }
 
 /// One trusted Garry's Mod MENU realm backed by the same native VGUI, Derma,
 /// pointer, text-input, and renderer-neutral Surface implementation as the
 /// gameplay Spawnmenu.
 ///
-/// This replaces Swift lookalike windows with original shipped DFrame,
-/// DButton, DLabel, and DTextEntry controls. The application remains
-/// responsible for executing typed ``GMLuaMenuAction`` values; MENU Lua never
-/// receives direct UIKit, filesystem, or process access.
+/// The application remains responsible for executing typed
+/// ``GMLuaMenuAction`` values; MENU Lua never receives direct UIKit,
+/// filesystem, or process access. The original Home DHTML is hosted by the app
+/// and this realm owns only the Derma Settings, Problems, and Console windows.
 public final class GMLuaMenuSession: @unchecked Sendable {
     private static let bootstrapPaths = [
         "lua/includes/init.lua",
@@ -261,7 +312,10 @@ public final class GMLuaMenuSession: @unchecked Sendable {
         for path in Self.bootstrapPaths {
             try runtime.loadFile(path)
         }
-        try runtime.execute(Self.menuSource, sourceName: "@garryspad/menu.lua")
+        try runtime.execute(
+            Self.menuSource,
+            sourceName: "@garryspad/menu_utilities.lua"
+        )
 
         guard let registry = runtime.vguiRegistry else {
             throw GMLuaMenuSessionError.missingRuntimeSurface("VGUI registry")
@@ -288,6 +342,37 @@ public final class GMLuaMenuSession: @unchecked Sendable {
         try runtime.execute(
             "if GARRYSPAD_REFRESH_CONSOLE then GARRYSPAD_REFRESH_CONSOLE() end",
             sourceName: "=(Garry's PAD Console refresh)"
+        )
+    }
+
+    public func updateSettings(_ settings: GMLuaMenuSettingsSnapshot) throws {
+        try requireActive()
+        hostState.replaceSettings(settings)
+        try runtime.execute(
+            "if GARRYSPAD_REFRESH_SETTINGS then GARRYSPAD_REFRESH_SETTINGS() end",
+            sourceName: "=(Garry's PAD Settings refresh)"
+        )
+    }
+
+    public func present(_ utility: GMLuaMenuUtility) throws {
+        try requireActive()
+        let source: String
+        switch utility {
+        case .settings:
+            source = "GARRYSPAD_OPEN_UTILITY('settings')"
+        case .problems:
+            source = "GARRYSPAD_OPEN_UTILITY('problems')"
+        case .console:
+            source = "GARRYSPAD_OPEN_UTILITY('console')"
+        }
+        try runtime.execute(source, sourceName: "=(Garry's PAD utility open)")
+    }
+
+    public func dismissUtility() throws {
+        try requireActive()
+        try runtime.execute(
+            "GARRYSPAD_OPEN_UTILITY(nil)",
+            sourceName: "=(Garry's PAD utility close)"
         )
     }
 
@@ -437,14 +522,66 @@ public final class GMLuaMenuSession: @unchecked Sendable {
             case "resume":
                 try hostState.append(.resumeGame)
             case "audio":
-                guard arguments.indices.contains(1),
-                      case let .boolean(enabled) = arguments[1] else {
-                    throw LuaError.runtime(
-                        "bad argument #2 to '__garryspad_menu_action' " +
-                            "(boolean expected)"
+                let enabled = try Self.requiredBoolean(
+                    arguments,
+                    index: 1,
+                    function: "__garryspad_menu_action"
+                )
+                try hostState.append(.setAudioEnabled(enabled))
+                var settings = hostState.currentSettings()
+                settings.audioEnabled = enabled
+                hostState.replaceSettings(settings)
+            case "backgrounds":
+                let enabled = try Self.requiredBoolean(
+                    arguments,
+                    index: 1,
+                    function: "__garryspad_menu_action"
+                )
+                try hostState.append(.setMenuBackgroundsEnabled(enabled))
+                var settings = hostState.currentSettings()
+                settings.menuBackgroundsEnabled = enabled
+                hostState.replaceSettings(settings)
+            case "frame_rate":
+                let rawValue = try Self.requiredNumber(
+                    arguments,
+                    index: 1,
+                    function: "__garryspad_menu_action"
+                )
+                guard rawValue == 60 || rawValue == 120 else {
+                    throw GMLuaMenuSessionError.invalidAction(
+                        "unsupported frame rate \(rawValue)"
                     )
                 }
-                try hostState.append(.setAudioEnabled(enabled))
+                let frameRate = Int(rawValue)
+                try hostState.append(.setPreferredFramesPerSecond(frameRate))
+                var settings = hostState.currentSettings()
+                settings.preferredFramesPerSecond = frameRate
+                hostState.replaceSettings(settings)
+            case "invert_touch_y":
+                let enabled = try Self.requiredBoolean(
+                    arguments,
+                    index: 1,
+                    function: "__garryspad_menu_action"
+                )
+                try hostState.append(.setInvertTouchLookY(enabled))
+                var settings = hostState.currentSettings()
+                settings.invertTouchLookY = enabled
+                hostState.replaceSettings(settings)
+            case "touch_sensitivity":
+                let value = try Self.requiredNumber(
+                    arguments,
+                    index: 1,
+                    function: "__garryspad_menu_action"
+                )
+                guard value.isFinite, value >= 0.05, value <= 1.50 else {
+                    throw GMLuaMenuSessionError.invalidAction(
+                        "touch sensitivity outside 0.05...1.50"
+                    )
+                }
+                try hostState.append(.setTouchLookSensitivity(value))
+                var settings = hostState.currentSettings()
+                settings.touchLookSensitivity = value
+                hostState.replaceSettings(settings)
             case "console":
                 let line = try Self.requiredString(
                     arguments,
@@ -459,6 +596,8 @@ public final class GMLuaMenuSession: @unchecked Sendable {
                     )
                 }
                 try hostState.append(.executeConsoleLine(line))
+            case "close_utility":
+                try hostState.append(.closeUtility)
             case "disconnect":
                 try hostState.append(.disconnect)
             case "quit":
@@ -473,6 +612,30 @@ public final class GMLuaMenuSession: @unchecked Sendable {
         }
         state.register("__garryspad_menu_console_text") { _ in
             [.string(LuaString(hostState.currentConsoleText()))]
+        }
+        state.register("__garryspad_menu_setting") { arguments in
+            let key = try Self.requiredString(
+                arguments,
+                index: 0,
+                function: "__garryspad_menu_setting"
+            )
+            let settings = hostState.currentSettings()
+            switch key {
+            case "audio":
+                return [.boolean(settings.audioEnabled)]
+            case "backgrounds":
+                return [.boolean(settings.menuBackgroundsEnabled)]
+            case "frame_rate":
+                return [.number(Double(settings.preferredFramesPerSecond))]
+            case "invert_touch_y":
+                return [.boolean(settings.invertTouchLookY)]
+            case "touch_sensitivity":
+                return [.number(settings.touchLookSensitivity)]
+            default:
+                throw GMLuaMenuSessionError.invalidAction(
+                    "unknown settings key \(key)"
+                )
+            }
         }
     }
 
@@ -494,6 +657,42 @@ public final class GMLuaMenuSession: @unchecked Sendable {
         return value.utf8String
     }
 
+    private static func requiredBoolean(
+        _ arguments: [LuaValue],
+        index: Int,
+        function: String
+    ) throws -> Bool {
+        guard arguments.indices.contains(index),
+              case let .boolean(value) = arguments[index] else {
+            let actual = arguments.indices.contains(index)
+                ? arguments[index].typeName
+                : "no value"
+            throw LuaError.runtime(
+                "bad argument #\(index + 1) to '\(function)' " +
+                    "(boolean expected, got \(actual))"
+            )
+        }
+        return value
+    }
+
+    private static func requiredNumber(
+        _ arguments: [LuaValue],
+        index: Int,
+        function: String
+    ) throws -> Double {
+        guard arguments.indices.contains(index),
+              case let .number(value) = arguments[index] else {
+            let actual = arguments.indices.contains(index)
+                ? arguments[index].typeName
+                : "no value"
+            throw LuaError.runtime(
+                "bad argument #\(index + 1) to '\(function)' " +
+                    "(number expected, got \(actual))"
+            )
+        }
+        return value
+    }
+
     private static let menuSource = #"""
         local function menuButton(parent, text, x, y, width, callback)
             local button = assert(vgui.Create("DButton", parent))
@@ -504,50 +703,94 @@ public final class GMLuaMenuSession: @unchecked Sendable {
             return button
         end
 
-        local home = assert(vgui.Create("DFrame"))
-        GARRYSPAD_HOME = home
-        home:SetTitle("Garry's PAD")
-        home:SetSize(math.min(ScrW() - 48, 760), math.min(ScrH() - 48, 640))
-        home:Center()
-        home:SetSizable(true)
-        home:SetDeleteOnClose(false)
-        home:MakePopup()
-
-        local title = assert(vgui.Create("DLabel", home))
-        title:SetText("Sandbox")
-        title:SetFont("DermaLarge")
-        title:SetPos(28, 52)
-        title:SetSize(360, 48)
-
-        local status = assert(vgui.Create("DLabel", home))
-        status:SetText("Original Lua / Derma menu realm")
-        status:SetPos(30, 96)
-        status:SetSize(420, 24)
-
         local options = assert(vgui.Create("DFrame"))
         GARRYSPAD_OPTIONS = options
-        options:SetTitle("Options")
-        options:SetSize(460, 300)
+        options:SetTitle("Settings")
+        options:SetSize(620, 440)
         options:Center()
         options:SetSizable(true)
         options:SetDeleteOnClose(false)
         options:SetVisible(false)
-        local audioEnabled = true
-        local audioStatus = assert(vgui.Create("DLabel", options))
-        audioStatus:SetPos(24, 54)
-        audioStatus:SetSize(390, 28)
-        local function refreshAudio()
-            audioStatus:SetText(audioEnabled and "Audio: Enabled" or "Audio: Muted")
+
+        local settingsDescription = assert(vgui.Create("DLabel", options))
+        settingsDescription:SetText("These controls update the active Garry's PAD stores.")
+        settingsDescription:SetPos(24, 48)
+        settingsDescription:SetSize(560, 28)
+
+        local audioButton
+        local backgroundsButton
+        local frameRateButton
+        local invertTouchButton
+        local sensitivityDown
+        local sensitivityUp
+        local function refreshSettings()
+            local audio = __garryspad_menu_setting("audio")
+            local backgrounds = __garryspad_menu_setting("backgrounds")
+            local frameRate = __garryspad_menu_setting("frame_rate")
+            local invertTouch = __garryspad_menu_setting("invert_touch_y")
+            local sensitivity = __garryspad_menu_setting("touch_sensitivity")
+            audioButton:SetText(audio and "Menu audio: On" or "Menu audio: Muted")
+            backgroundsButton:SetText(
+                backgrounds and "Menu backgrounds: On" or "Menu backgrounds: Off"
+            )
+            frameRateButton:SetText("Display cadence: " .. frameRate .. " FPS")
+            invertTouchButton:SetText(
+                invertTouch and "Invert touch look Y: On" or "Invert touch look Y: Off"
+            )
+            local sensitivityText = string.format("Touch look: %.2f", sensitivity)
+            sensitivityDown:SetText(sensitivityText .. "  -")
+            sensitivityUp:SetText(sensitivityText .. "  +")
         end
-        refreshAudio()
-        menuButton(options, "Toggle Audio", 24, 96, 190, function()
-            audioEnabled = not audioEnabled
-            refreshAudio()
-            __garryspad_menu_action("audio", audioEnabled)
+
+        audioButton = menuButton(options, "", 24, 88, 272, function()
+            __garryspad_menu_action(
+                "audio", not __garryspad_menu_setting("audio")
+            )
+            refreshSettings()
         end)
-        menuButton(options, "Back", 246, 220, 190, function()
-            options:SetVisible(false)
+        backgroundsButton = menuButton(options, "", 320, 88, 272, function()
+            __garryspad_menu_action(
+                "backgrounds", not __garryspad_menu_setting("backgrounds")
+            )
+            refreshSettings()
         end)
+        frameRateButton = menuButton(options, "", 24, 142, 272, function()
+            local current = __garryspad_menu_setting("frame_rate")
+            __garryspad_menu_action("frame_rate", current == 60 and 120 or 60)
+            refreshSettings()
+        end)
+        invertTouchButton = menuButton(options, "", 320, 142, 272, function()
+            __garryspad_menu_action(
+                "invert_touch_y", not __garryspad_menu_setting("invert_touch_y")
+            )
+            refreshSettings()
+        end)
+        sensitivityDown = menuButton(options, "", 24, 196, 272, function()
+            local current = __garryspad_menu_setting("touch_sensitivity")
+            local replacement = math.max(0.05, current - 0.05)
+            __garryspad_menu_action("touch_sensitivity", replacement)
+            refreshSettings()
+        end)
+        sensitivityUp = menuButton(options, "", 320, 196, 272, function()
+            local current = __garryspad_menu_setting("touch_sensitivity")
+            local replacement = math.min(1.50, current + 0.05)
+            __garryspad_menu_action("touch_sensitivity", replacement)
+            refreshSettings()
+        end)
+        local optionsBack = menuButton(options, "Back", 420, 366, 172, function()
+            options:Close()
+        end)
+        GARRYSPAD_REFRESH_SETTINGS = refreshSettings
+        refreshSettings()
+        local optionsFrameLayout = options.PerformLayout
+        options.PerformLayout = function(self, w, h)
+            optionsFrameLayout(self, w, h)
+            settingsDescription:SetWide(math.max(160, w - 48))
+            optionsBack:SetPos(math.max(24, w - 200), math.max(260, h - 74))
+        end
+        options.OnClose = function()
+            __garryspad_menu_action("close_utility")
+        end
 
         local problems = assert(vgui.Create("DFrame"))
         GARRYSPAD_PROBLEMS = problems
@@ -570,7 +813,7 @@ public final class GMLuaMenuSession: @unchecked Sendable {
         GARRYSPAD_REFRESH_PROBLEMS = refreshProblems
         refreshProblems()
         local problemBack = menuButton(problems, "Back", 430, 358, 150, function()
-            problems:SetVisible(false)
+            problems:Close()
         end)
         local problemFrameLayout = problems.PerformLayout
         problems.PerformLayout = function(self, w, h)
@@ -585,6 +828,9 @@ public final class GMLuaMenuSession: @unchecked Sendable {
             problemBack:SetPos(math.max(20, w - 170), math.max(48, h - 58))
         end
         problems:InvalidateLayout()
+        problems.OnClose = function()
+            __garryspad_menu_action("close_utility")
+        end
 
         local console = assert(vgui.Create("DFrame"))
         GARRYSPAD_CONSOLE = console
@@ -618,7 +864,7 @@ public final class GMLuaMenuSession: @unchecked Sendable {
         consoleEntry.OnEnter = submitConsole
         local consoleRun = menuButton(console, "Run", 20, 148, 150, submitConsole)
         local consoleBack = menuButton(console, "Back", 180, 148, 150, function()
-            console:SetVisible(false)
+            console:Close()
         end)
         local consoleFrameLayout = console.PerformLayout
         console.PerformLayout = function(self, w, h)
@@ -637,34 +883,34 @@ public final class GMLuaMenuSession: @unchecked Sendable {
             consoleBack:SetPos(180, math.max(166, h - 58))
         end
         console:InvalidateLayout()
+        console.OnClose = function()
+            __garryspad_menu_action("close_utility")
+        end
 
-        menuButton(home, "gm_construct", 28, 142, 230, function()
-            __garryspad_menu_action("start_map", "gm_construct")
-        end)
-        menuButton(home, "gm_flatgrass", 28, 194, 230, function()
-            __garryspad_menu_action("start_map", "gm_flatgrass")
-        end)
-        menuButton(home, "Resume Game", 28, 258, 230, function()
-            __garryspad_menu_action("resume")
-        end)
-        menuButton(home, "Options", 286, 142, 210, function()
-            options:SetVisible(true)
-            options:MakePopup()
-        end)
-        menuButton(home, "Problems", 286, 194, 210, function()
-            problems:SetVisible(true)
-            problems:MakePopup()
-        end)
-        menuButton(home, "Console", 286, 246, 210, function()
-            console:SetVisible(true)
-            console:MakePopup()
-            consoleEntry:RequestFocus()
-        end)
-        menuButton(home, "Disconnect", 28, 334, 230, function()
-            __garryspad_menu_action("disconnect")
-        end)
-        menuButton(home, "Quit", 286, 334, 210, function()
-            __garryspad_menu_action("quit")
-        end)
+        function GARRYSPAD_OPEN_UTILITY(name)
+            options:SetVisible(false)
+            problems:SetVisible(false)
+            console:SetVisible(false)
+
+            if name == "settings" then
+                refreshSettings()
+                options:Center()
+                options:SetVisible(true)
+                options:MakePopup()
+            elseif name == "problems" then
+                refreshProblems()
+                problems:Center()
+                problems:SetVisible(true)
+                problems:MakePopup()
+            elseif name == "console" then
+                refreshConsole()
+                console:Center()
+                console:SetVisible(true)
+                console:MakePopup()
+                consoleEntry:RequestFocus()
+            elseif name ~= nil then
+                error("unknown Garry's PAD utility " .. tostring(name), 2)
+            end
+        end
     """#
 }

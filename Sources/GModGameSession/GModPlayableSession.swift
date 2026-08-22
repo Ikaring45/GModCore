@@ -554,6 +554,16 @@ public final class GModPlayableSession {
         )
     }
 
+    /// Sends a user-entered Source command line through the active CLIENT
+    /// console bridge. Local CLIENT ConVars/commands remain CLIENT-owned and
+    /// SERVER-owned commands use the existing shared-session FIFO; this does
+    /// not execute the text as SERVER Lua source.
+    @discardableResult
+    public func executeClientConsoleCommandLine(_ source: String) throws -> Int {
+        try ensureOpen()
+        return try clientRuntime.invokeClientConsoleCommandLine(source)
+    }
+
     /// Drops the currently selected canonical Weapon through the same
     /// `Player:DropWeapon` implementation exposed to original SERVER Lua.
     /// The full EHANDLE is resolved immediately before dispatch, so a reused
@@ -1564,7 +1574,9 @@ public final class GModPlayableSession {
     /// Paints the live CLIENT VGUI tree into renderer-neutral surface
     /// commands using the same registry, surface state, and viewport exposed
     /// to the bundled Sandbox Lua runtime.
-    public func renderClientVGUIFrame() throws -> GMLuaSurfaceFrameSnapshot {
+    public func renderClientVGUIFrame(
+        scope: GMLuaVGUIRenderScope = .all
+    ) throws -> GMLuaSurfaceFrameSnapshot {
         try ensureOpen()
         let registry = try clientVGUIRegistry()
         guard let surface = clientRuntime.surfaceCommandState else {
@@ -1582,8 +1594,17 @@ public final class GModPlayableSession {
         return try registry.renderFrame(
             surface: surface,
             viewportWidth: viewport.width,
-            viewportHeight: viewport.height
+            viewportHeight: viewport.height,
+            scope: scope
         )
+    }
+
+    /// Reports the live engine OverlayPanel subtree used by stock CLIENT
+    /// notification/hint Lua. This reads existing Panel visibility/ancestry;
+    /// it does not infer HUD ownership from a class name or screen position.
+    public func hasVisibleClientOverlayPanels() throws -> Bool {
+        try ensureOpen()
+        return try clientVGUIRegistry().hasVisibleOverlayPanels
     }
 
     /// Moves every retained CLIENT `surface.PlaySound` event into one bounded

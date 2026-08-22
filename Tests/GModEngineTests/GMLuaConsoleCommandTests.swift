@@ -180,6 +180,62 @@ final class GMLuaConsoleCommandTests: XCTestCase {
         XCTAssertEqual(catalog.currentValue(for: "gmod_language"), "ja")
     }
 
+    func testInteractiveClientConsoleLineUsesLiveRunConsoleCommandWithoutLuaSource()
+        throws
+    {
+        let runtime = GMLuaRuntime(
+            realm: .client,
+            logger: { _ in },
+            bootstrapMode: .strict
+        )
+        defer { _ = runtime.close() }
+        let dispatcher = try XCTUnwrap(runtime.consoleCommandDispatcher)
+        let invocations = InvocationRecorder()
+        dispatcher.connectHost { invocation in
+            invocations.append(invocation)
+            return invocation.command == "engine_status" ? .handled : .unhandled
+        }
+        try runtime.execute(
+            "CreateConVar('gpad_interactive_value', 'old')",
+            sourceName: "=(interactive console setup)"
+        )
+
+        let count = try runtime.invokeClientConsoleCommandLine(
+            "gpad_interactive_value \"new value\"; " +
+                "engine_status 'quoted argument' plain"
+        )
+        XCTAssertEqual(count, 2)
+        try runtime.execute(
+            "assert(GetConVar('gpad_interactive_value'):GetString() == 'new value')",
+            sourceName: "=(interactive console ConVar checkpoint)"
+        )
+        XCTAssertEqual(invocations.values, [
+            GMLuaConsoleCommandInvocation(
+                realm: .client,
+                command: "engine_status",
+                arguments: ["quoted argument", "plain"]
+            )
+        ])
+
+        XCTAssertThrowsError(
+            try runtime.invokeClientConsoleCommandLine(
+                "engine_status should_not_run; broken \"quote"
+            )
+        ) { error in
+            XCTAssertTrue(GMLuaRuntime.describe(error).contains(
+                "unterminated quoted console argument"
+            ))
+        }
+        XCTAssertThrowsError(
+            try runtime.invokeClientConsoleCommandLine(
+                "engine_status should_not_run\0"
+            )
+        ) { error in
+            XCTAssertTrue(GMLuaRuntime.describe(error).contains("NUL bytes"))
+        }
+        XCTAssertEqual(invocations.values.count, 1)
+    }
+
     func testServerLuaCommandsDispatchThroughConcommandRunWithNullCaller() throws {
         let runtime = GMLuaRuntime(
             realm: .server,

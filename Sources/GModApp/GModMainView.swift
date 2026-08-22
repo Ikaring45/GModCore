@@ -142,6 +142,7 @@ public struct GModMainView: View {
     @State private var resultLabel = "READY"
     @State private var showConsole = false
     @State private var presentation = GModGamePresentationState()
+    @State private var activeHomeUtility: GMLuaMenuUtility?
     @State private var showingQuitUnavailable = false
     @State private var isChoosingContentPack = false
     @State private var menuVolumeBeforeMute: Double
@@ -921,29 +922,67 @@ public struct GModMainView: View {
                 ),
                 showsForgetAction: true
             )
-        case let .ready(pack, _, _):
+        case let .ready(pack, backgroundJPEG, logoPNG):
             if presentation.showsHomeMenu {
-                GModDermaMenuSurface(
-                    model: dermaMenu,
-                    preferredFramesPerSecond:
-                        inputVideoSettings.preferredFramesPerSecond,
-                    onActions: { actions in
-                        handleDermaMenuActions(actions, pack: pack)
+                ZStack {
+                    GModHomeMenuView(
+                        pack: pack,
+                        assetSource: content.assetSource,
+                        backgroundJPEG: backgroundJPEG,
+                        logoPNG: logoPNG,
+                        onSelectMap: { map in
+                            handlePresentationEvent(
+                                .validatedMapSelected(map),
+                                contentPackURL: pack.archiveURL
+                            )
+                        },
+                        isInGame: game.hasActiveSession,
+                        preferredLanguageCode:
+                            localizationSelection.snapshot.code,
+                        menuBackgroundsEnabled:
+                            contentSettings.menuBackgroundsEnabled,
+                        problemCount: homeProblemCount,
+                        problemSeverity: homeProblemSeverity,
+                        onMenuAction: { action in
+                            handleHomeMenuAction(action, pack: pack)
+                        },
+                        onDiagnostic: { record in
+                            diagnostics.record(record)
+                        },
+                        audioController: game.audioController
+                    )
+                    .allowsHitTesting(activeHomeUtility == nil)
+                    .accessibilityHidden(activeHomeUtility != nil)
+
+                    if activeHomeUtility != nil {
+                        GModDermaMenuSurface(
+                            model: dermaMenu,
+                            preferredFramesPerSecond:
+                                inputVideoSettings.preferredFramesPerSecond,
+                            onActions: { actions in
+                                handleDermaMenuActions(actions, pack: pack)
+                            }
+                        )
+                        .transition(.opacity)
                     }
-                )
+                }
                 .ignoresSafeArea()
                 .transition(.opacity)
                 .onAppear {
-                    activateDermaMenu()
+                    if activeHomeUtility != nil {
+                        reactivateVisibleDermaUtility()
+                    } else {
+                        dermaMenu.deactivate()
+                    }
                 }
                 .onChange(of: content.activeMountGeneration) { _ in
-                    activateDermaMenu()
+                    reactivateVisibleDermaUtility()
                 }
                 .onChange(of: localizationSelection.snapshot) { _ in
-                    activateDermaMenu()
+                    reactivateVisibleDermaUtility()
                 }
                 .onChange(of: game.permissionSessionTransportIdentity) { _ in
-                    activateDermaMenu()
+                    reactivateVisibleDermaUtility()
                 }
                 .onChange(of: currentProblemSnapshot) { _ in
                     dermaMenu.replaceProblems(dermaProblemLines)
@@ -951,9 +990,25 @@ public struct GModMainView: View {
                 .onChange(of: console.lines) { _ in
                     dermaMenu.replaceConsoleLines(dermaConsoleLines)
                 }
+                .onChange(of: dermaMenuSettings) { settings in
+                    dermaMenu.replaceSettings(settings)
+                }
+                .onChange(of: activeHomeUtility) { utility in
+                    if let utility {
+                        activateDermaMenu()
+                        dermaMenu.present(utility)
+                    } else {
+                        dermaMenu.dismissUtility()
+                        dermaMenu.deactivate()
+                    }
+                }
             } else {
                 Color.clear
-                    .onAppear { dermaMenu.deactivate() }
+                    .onAppear {
+                        activeHomeUtility = nil
+                        dermaMenu.dismissUtility()
+                        dermaMenu.deactivate()
+                    }
             }
         }
     }
@@ -1070,12 +1125,30 @@ public struct GModMainView: View {
         return pack.archiveURL
     }
 
+    private var homeProblemCount: Int {
+        currentProblemSnapshot.problems.count
+    }
+
+    private var homeProblemSeverity: Int {
+        currentProblemSnapshot.problems
+            .map { $0.severity.rawValue }
+            .max() ?? GModAppProblemSeverity.information.rawValue
+    }
+
+    private var dermaMenuSettings: GMLuaMenuSettingsSnapshot {
+        GMLuaMenuSettingsSnapshot(
+            audioEnabled: menuAudio.settings.menuVolume > 0,
+            menuBackgroundsEnabled: contentSettings.menuBackgroundsEnabled,
+            preferredFramesPerSecond:
+                inputVideoSettings.preferredFramesPerSecond,
+            invertTouchLookY: inputVideoSettings.invertTouchLookY,
+            touchLookSensitivity: inputVideoSettings.touchLookSensitivity
+        )
+    }
+
     private var dermaProblemLines: [String] {
         let snapshot = currentProblemSnapshot
-        if snapshot.problems.isEmpty {
-            return ["No current problems."]
-        }
-        return snapshot.problems.map { problem in
+        var lines = snapshot.problems.map { problem in
             let severity: String
             switch problem.severity {
             case .information:
@@ -1094,6 +1167,17 @@ public struct GModMainView: View {
             let source = problem.source.map { " (\($0))" } ?? ""
             return "[\(severity)] \(title): \(detail)\(source)"
         }
+        if lines.isEmpty {
+            lines.append("No current problems.")
+        }
+        if !snapshot.permissions.isEmpty {
+            lines.append("Permissions:")
+            lines.append(contentsOf: snapshot.permissions.map { permission in
+                "[\(permission.lifetime.rawValue.uppercased())] " +
+                    "\(permission.serverIdentifier): \(permission.permission)"
+            })
+        }
+        return lines
     }
 
     private var dermaConsoleLines: [String] {
@@ -1106,8 +1190,36 @@ public struct GModMainView: View {
             phrases: localizationSelection.snapshot.phrases,
             problemLines: dermaProblemLines,
             consoleLines: dermaConsoleLines,
+            settings: dermaMenuSettings,
             permissionSessionTransport: game.permissionSessionTransport
         )
+    }
+
+    private func reactivateVisibleDermaUtility() {
+        guard let utility = activeHomeUtility else { return }
+        activateDermaMenu()
+        dermaMenu.present(utility)
+    }
+
+    private func handleHomeMenuAction(
+        _ action: GModHomeMenuAction,
+        pack: GarrysPADContentPack
+    ) {
+        switch action {
+        case .openOptions:
+            activeHomeUtility = .settings
+        case .openProblems:
+            activeHomeUtility = .problems
+        case .openConsole:
+            activeHomeUtility = .console
+        case .startMap, .setLanguage, .hideGameUI, .disconnect, .quit:
+            activeHomeUtility = nil
+            dermaMenu.dismissUtility()
+            handlePresentationEvent(
+                .homeMenuAction(action),
+                contentPackURL: pack.archiveURL
+            )
+        }
     }
 
     private func handleDermaMenuActions(
@@ -1137,9 +1249,25 @@ public struct GModMainView: View {
                     menuAudio.setMenuVolume(0)
                 }
 
+            case let .setMenuBackgroundsEnabled(enabled):
+                contentSettings.setMenuBackgroundsEnabled(enabled)
+
+            case let .setPreferredFramesPerSecond(frameRate):
+                inputVideoSettings.setPreferredFramesPerSecond(frameRate)
+
+            case let .setInvertTouchLookY(enabled):
+                inputVideoSettings.setInvertTouchLookY(enabled)
+
+            case let .setTouchLookSensitivity(value):
+                inputVideoSettings.setTouchLookSensitivity(value)
+
             case let .executeConsoleLine(line):
                 console.input = line
                 submitConsole()
+
+            case .closeUtility:
+                activeHomeUtility = nil
+                dermaMenu.dismissUtility()
 
             case .disconnect:
                 handlePresentationEvent(.homeMenuAction(.disconnect))
@@ -1150,6 +1278,7 @@ public struct GModMainView: View {
         }
         dermaMenu.replaceProblems(dermaProblemLines)
         dermaMenu.replaceConsoleLines(dermaConsoleLines)
+        dermaMenu.replaceSettings(dermaMenuSettings)
     }
 
     private func handlePresentationEvent(
@@ -1456,7 +1585,7 @@ public struct GModMainView: View {
 
     private var consoleInputBar: some View {
         HStack(spacing: 7) {
-            TextField("Lua / lua_run command", text: $console.input)
+            TextField("Console command / lua_run <code>", text: $console.input)
                 .textFieldStyle(.plain)
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundColor(.black)
@@ -1633,7 +1762,12 @@ public struct GModMainView: View {
             return
         }
         guard let submission = console.takeSubmission() else { return }
-        if case let .source(source) = submission {
+        switch submission {
+        case .clear:
+            break
+        case let .commandLine(line):
+            game.executeActiveConsoleCommandLine(line)
+        case let .luaSource(source):
             game.executeActiveServer(source)
         }
     }

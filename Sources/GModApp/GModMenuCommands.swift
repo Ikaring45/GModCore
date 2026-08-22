@@ -6,6 +6,7 @@ enum GModHomeMenuAction: Equatable, Sendable {
     case hideGameUI
     case openOptions
     case openProblems
+    case openConsole
     case disconnect
     case quit
 }
@@ -46,11 +47,17 @@ enum GModHomeMenuCommandParser {
             }
         }
 
-        let compact = source
-            .filter { !$0.isWhitespace }
-            .lowercased()
-        if compact.contains("gui.hidegameui()") {
+        if let arguments = callArguments(
+            function: "gui.HideGameUI",
+            in: source
+        ), arguments.isEmpty {
             return .hideGameUI
+        }
+        if let arguments = callArguments(
+            function: "gui.ShowConsole",
+            in: source
+        ), arguments.isEmpty {
+            return .openConsole
         }
         if callArguments(function: "OpenProblemsPanel", in: source) != nil {
             return .openProblems

@@ -5,7 +5,7 @@ import GModGameAssets
 import GModLua
 
 final class GMLuaVGUIRegistryTests: XCTestCase {
-    func testStockDFrameBottomRightTouchResizeIsImmediateClampedAndReleasesCapture() throws {
+    func testStockDFrameTouchDragAndBottomRightResizeAreImmediateAndReleaseCapture() throws {
         let fileSystem = try GMLuaHostDirectoryFileSystem(
             rootURL: GModGameAssets.clientContentRootURL(),
             writable: false
@@ -175,6 +175,20 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
         try runtime.execute(
             "assert(FRAME:GetWide() == 200 and FRAME:GetTall() == 160)",
             sourceName: "@GMLuaStockDFrameNonSizableCheckpoint.lua"
+        )
+
+        // Stock title-bar movement, like sizing, is performed by DFrame:Think.
+        // A UIKit move must therefore update position in this dispatch cycle.
+        _ = try dispatch(150, 112, .began, 6.3)
+        _ = try dispatch(210, 160, .moved, 6.4)
+        try runtime.execute(
+            "local x, y = FRAME:GetPos(); assert(x == 160 and y == 148)",
+            sourceName: "@GMLuaStockDFrameImmediateDragCheckpoint.lua"
+        )
+        _ = try dispatch(210, 160, .ended, 6.5)
+        try runtime.execute(
+            "assert(FRAME.Dragging == nil)",
+            sourceName: "@GMLuaStockDFrameDragReleaseCheckpoint.lua"
         )
 
         // Neither cancellation nor the no-op path may steal the next button tap.
@@ -3503,5 +3517,80 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
             """,
             sourceName: "@GMLuaPanelParentChangeCallbackRegression.lua"
         )
+    }
+
+    func testOverlayPanelOwnsNoticeHUDAndOverlayCaptureExcludesWorldRoots() throws {
+        let runtime = GMLuaRuntime(
+            realm: .client,
+            logger: { _ in },
+            bootstrapMode: .strict,
+            initialViewport: GMLuaViewportSize(width: 320, height: 180)
+        )
+        defer { _ = runtime.close() }
+        let registry = try XCTUnwrap(runtime.vguiRegistry)
+        let surface = try XCTUnwrap(runtime.surfaceCommandState)
+
+        try runtime.execute(
+            """
+            local overlay = assert(GetOverlayPanel())
+            assert(overlay == GetOverlayPanel())
+            assert(overlay:GetWide() == 320 and overlay:GetTall() == 180)
+
+            WORLD_ROOT = assert(vgui.Create("Panel"))
+            WORLD_ROOT:SetPos(0, 0)
+            WORLD_ROOT:SetSize(40, 40)
+            function WORLD_ROOT:Paint()
+                surface.SetDrawColor(255, 0, 0)
+                surface.DrawRect(0, 0, 40, 40)
+            end
+
+            NOTICE = assert(vgui.Create("Panel", overlay))
+            NOTICE:SetPos(16, 16)
+            NOTICE:SetSize(160, 32)
+            assert(NOTICE:GetParent() == overlay)
+            assert(NOTICE:HasParent(overlay))
+            assert(not NOTICE:HasParent(vgui.GetWorldPanel()))
+            function NOTICE:Paint()
+                surface.SetFont("Default")
+                surface.SetTextColor(255, 255, 255)
+                surface.SetTextPos(0, 0)
+                surface.DrawText("通知ヒント")
+            end
+            """,
+            sourceName: "@GMLuaOverlayPanelCaptureRegression.lua"
+        )
+
+        XCTAssertTrue(registry.hasVisibleOverlayPanels)
+        let overlayFrame = try registry.renderFrame(
+            surface: surface,
+            viewportWidth: 320,
+            viewportHeight: 180,
+            scope: .overlay
+        )
+        XCTAssertEqual(overlayFrame.commands.count, 1)
+        guard case let .text(text, _, _, _, _) = overlayFrame.commands[0] else {
+            return XCTFail("overlay capture did not retain the notice text")
+        }
+        XCTAssertEqual(text, LuaString("通知ヒント"))
+
+        let fullFrame = try registry.renderFrame(
+            surface: surface,
+            viewportWidth: 320,
+            viewportHeight: 180
+        )
+        XCTAssertEqual(fullFrame.commands.count, 2)
+
+        try runtime.execute(
+            "NOTICE:SetVisible(false)",
+            sourceName: "@GMLuaOverlayPanelHiddenRegression.lua"
+        )
+        XCTAssertFalse(registry.hasVisibleOverlayPanels)
+        let hiddenFrame = try registry.renderFrame(
+            surface: surface,
+            viewportWidth: 320,
+            viewportHeight: 180,
+            scope: .overlay
+        )
+        XCTAssertEqual(hiddenFrame.commands, [])
     }
 }

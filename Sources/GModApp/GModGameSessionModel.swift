@@ -697,6 +697,35 @@ final class GModGameSessionModel: ObservableObject {
         }
     }
 
+    func executeActiveConsoleCommandLine(_ rawLine: String) {
+        let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !line.isEmpty else { return }
+        let requestedGeneration = sessionGeneration
+        guard let requestedLaneGeneration = laneGeneration else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                guard requestedGeneration == sessionGeneration, isReady else {
+                    return
+                }
+                let count = try await lane.executeClientConsoleCommandLine(
+                    line,
+                    expectedGeneration: requestedLaneGeneration
+                )
+                guard requestedGeneration == sessionGeneration, isReady else {
+                    return
+                }
+                appendLog("[CONSOLE][OK] dispatched \(count) command(s)")
+            } catch {
+                if requestedGeneration == sessionGeneration {
+                    appendLog(
+                        "[CONSOLE][ERROR] \(GMLuaRuntime.describe(error))"
+                    )
+                }
+            }
+        }
+    }
+
     func setMovementAxes(forward: Float, side: Float) {
         guard acceptsWorldInput else {
             rejectLateWorldInput()
@@ -1318,9 +1347,14 @@ final class GModGameSessionModel: ObservableObject {
                 applicationGeneration: activeToken.generation.application,
                 laneGeneration: activeToken.generation.lane
             )
+            let hasVisibleOverlayPanels = try await lane
+                .hasVisibleClientOverlayPanels(
+                    expectedGeneration: activeToken.generation.lane
+                )
             scheduleClientSurfaceRefresh(
                 applicationGeneration: activeToken.generation.application,
-                laneGeneration: activeToken.generation.lane
+                laneGeneration: activeToken.generation.lane,
+                hasVisibleOverlayPanels: hasVisibleOverlayPanels
             )
         } catch {
             if isReady, !isInputSuspended,
@@ -1359,7 +1393,7 @@ final class GModGameSessionModel: ObservableObject {
             }
         }.value
 
-        guard isReady,
+        guard isReady, !isInputSuspended, !inputSuspensionInFlight,
               token.matches(
                 application: sessionGeneration,
                 lane: laneGeneration,
@@ -1641,11 +1675,14 @@ final class GModGameSessionModel: ObservableObject {
 
     private func scheduleClientSurfaceRefresh(
         applicationGeneration: UInt64,
-        laneGeneration: UInt64
+        laneGeneration: UInt64,
+        hasVisibleOverlayPanels: Bool = false
     ) {
-        guard GModGameClientSurfaceCapturePolicy.shouldCapture(
+        guard isReady, !isInputSuspended, !inputSuspensionInFlight,
+              GModGameClientSurfaceCapturePolicy.shouldCapture(
             activeMenu: activeClientMenu,
-            transitioningMenu: transitioningClientMenu
+            transitioningMenu: transitioningClientMenu,
+            hasVisibleOverlayPanels: hasVisibleOverlayPanels
         ) else {
             surfaceRefreshQueue.removeAll()
             if surfaceScene != nil || surfaceDiagnostics != nil {
@@ -1660,8 +1697,12 @@ final class GModGameSessionModel: ObservableObject {
             application: applicationGeneration,
             lane: laneGeneration
         )
+        let scope: GMLuaVGUIRenderScope = activeClientMenu == nil
+            ? .overlay
+            : .all
         surfaceRefreshQueue.submit(GModGameSurfaceRefreshRequest(
-            generation: generation
+            generation: generation,
+            scope: scope
         ))
         guard surfaceRefreshTask == nil else { return }
         surfaceRefreshTask = Task(priority: .userInitiated) { [weak self] in
@@ -1679,17 +1720,33 @@ final class GModGameSessionModel: ObservableObject {
         surfaceRefreshTask = nil
     }
 
-    /// Captures one renderer-facing frame for the current foreground Q/C
-    /// owner. Pointer callbacks mutate Lua synchronously and enqueue this work
-    /// in the same host input cycle; the latest-only refresh queue keeps scene
-    /// construction from blocking subsequent pointer delivery.
+    /// Captures one renderer-facing frame for either the current foreground
+    /// Q/C owner or the engine OverlayPanel HUD subtree. Pointer callbacks
+    /// mutate Lua synchronously and enqueue this work in the same host input
+    /// cycle; the latest-only queue keeps scene construction from blocking
+    /// subsequent pointer delivery.
     private func refreshClientSurface(
         request: GModGameSurfaceRefreshRequest
     ) async {
-        guard GModGameClientSurfaceCapturePolicy.shouldCapture(
+        let hasVisibleOverlayPanels: Bool
+        if request.scope == .overlay {
+            do {
+                hasVisibleOverlayPanels = try await lane
+                    .hasVisibleClientOverlayPanels(
+                        expectedGeneration: request.generation.lane
+                    )
+            } catch {
+                return
+            }
+        } else {
+            hasVisibleOverlayPanels = false
+        }
+        guard isReady, !isInputSuspended, !inputSuspensionInFlight,
+              GModGameClientSurfaceCapturePolicy.shouldCapture(
             activeMenu: activeClientMenu,
-            transitioningMenu: transitioningClientMenu
-        ) else {
+            transitioningMenu: transitioningClientMenu,
+            hasVisibleOverlayPanels: hasVisibleOverlayPanels
+        ), (activeClientMenu == nil) == (request.scope == .overlay) else {
             if surfaceScene != nil || surfaceDiagnostics != nil {
                 invalidateSurfaceRequests()
                 surfaceScene = nil
@@ -1704,6 +1761,7 @@ final class GModGameSessionModel: ObservableObject {
         )
         do {
             let snapshot = try await lane.renderClientVGUIFrame(
+                scope: request.scope,
                 expectedGeneration: request.generation.lane
             )
             await buildAndPublishSurfaceScene(snapshot, token: surfaceToken)

@@ -8,8 +8,8 @@ final class SourceCanonicalWeaponInventoryGLuaBridgeTests: XCTestCase {
             configuration: .init(
                 map: .construct,
                 languagePhrases: [
-                    "Hint_Annoy1": "Canonical hint one",
-                    "Hint_Annoy2": "Canonical hint two",
+                    "Hint_Annoy1": "正規ヒント一",
+                    "Hint_Annoy2": "正規ヒント二",
                 ]
             ),
             textMeasurer: nil,
@@ -148,6 +148,7 @@ final class SourceCanonicalWeaponInventoryGLuaBridgeTests: XCTestCase {
             local noticeIndex = 0
             for _, panel in ipairs(vgui.GetAll()) do
                 if panel:GetClassName() == "NoticePanel" then
+                    assert(panel:GetParent() == GetOverlayPanel())
                     panel:SetPos(16, 16 + noticeIndex * 64)
                     noticeIndex = noticeIndex + 1
                 end
@@ -159,9 +160,11 @@ final class SourceCanonicalWeaponInventoryGLuaBridgeTests: XCTestCase {
         let registry = try XCTUnwrap(session.clientRuntime.vguiRegistry)
         XCTAssertTrue(registry.renderTree(
             viewportWidth: 1_024,
-            viewportHeight: 768
+            viewportHeight: 768,
+            scope: .overlay
         ).contains(where: { $0.requestedClassName == "NoticePanel" }))
-        let notificationFrame = try session.renderClientVGUIFrame()
+        XCTAssertTrue(registry.hasVisibleOverlayPanels)
+        let notificationFrame = try session.renderClientVGUIFrame(scope: .overlay)
         let notificationTexts = notificationFrame.commands.compactMap {
             command -> String? in
             guard case let .text(value, _, _, _, _) = command else {
@@ -169,7 +172,7 @@ final class SourceCanonicalWeaponInventoryGLuaBridgeTests: XCTestCase {
             }
             return value.utf8String
         }
-        XCTAssertTrue(notificationTexts.contains("Canonical hint one"))
-        XCTAssertTrue(notificationTexts.contains("Canonical hint two"))
+        XCTAssertTrue(notificationTexts.contains("正規ヒント一"))
+        XCTAssertTrue(notificationTexts.contains("正規ヒント二"))
     }
 }

@@ -5,10 +5,160 @@ import GModGameAssets
 import GModMetal
 import SwiftUI
 
-/// App-owned presentation adapter for the trusted MENU Lua realm. It owns no
-/// menu layout: the shipped Derma panels are the sole source of pixels and
-/// pointer behavior. The small host boundary below only turns immutable
-/// Surface snapshots into Metal scenes and returns typed MENU requests.
+private struct GModDermaMenuPointerOutput: Sendable {
+    let wantsTextInput: Bool
+    let actions: [GMLuaMenuAction]
+}
+
+/// Serializes the mutable MENU Lua state off UIKit's MainActor. Surface
+/// snapshot construction and stock panel callbacks can walk the full VGUI
+/// tree, so running them inline from a touch callback made UIKit wait before it
+/// could deliver the next sample.
+private actor GModDermaMenuSessionLane {
+    private var session: GMLuaMenuSession?
+    private var generation: UInt64 = 0
+    private var lastAdvanceTimestamp: TimeInterval?
+
+    deinit {
+        _ = session?.close()
+    }
+
+    func replace(with replacement: GMLuaMenuSession, generation: UInt64) {
+        guard generation >= self.generation else {
+            _ = replacement.close()
+            return
+        }
+        _ = session?.close()
+        session = replacement
+        self.generation = generation
+        lastAdvanceTimestamp = nil
+    }
+
+    func removeSession(generation: UInt64) {
+        guard generation >= self.generation else { return }
+        _ = session?.close()
+        session = nil
+        self.generation = generation
+        lastAdvanceTimestamp = nil
+    }
+
+    func synchronize(
+        problems: [String],
+        consoleLines: [String],
+        settings: GMLuaMenuSettingsSnapshot,
+        expectedGeneration: UInt64
+    ) throws {
+        let session = try requiredSession(expectedGeneration: expectedGeneration)
+        try session.updateProblems(problems)
+        try session.updateConsoleLines(consoleLines)
+        try session.updateSettings(settings)
+    }
+
+    func updateProblems(_ lines: [String], expectedGeneration: UInt64) throws {
+        try requiredSession(expectedGeneration: expectedGeneration)
+            .updateProblems(lines)
+    }
+
+    func updateConsoleLines(
+        _ lines: [String],
+        expectedGeneration: UInt64
+    ) throws {
+        try requiredSession(expectedGeneration: expectedGeneration)
+            .updateConsoleLines(lines)
+    }
+
+    func updateSettings(
+        _ settings: GMLuaMenuSettingsSnapshot,
+        expectedGeneration: UInt64
+    ) throws {
+        try requiredSession(expectedGeneration: expectedGeneration)
+            .updateSettings(settings)
+    }
+
+    func present(
+        _ utility: GMLuaMenuUtility,
+        expectedGeneration: UInt64
+    ) throws {
+        try requiredSession(expectedGeneration: expectedGeneration)
+            .present(utility)
+    }
+
+    func dismissUtility(expectedGeneration: UInt64) throws {
+        try requiredSession(expectedGeneration: expectedGeneration)
+            .dismissUtility()
+        lastAdvanceTimestamp = nil
+    }
+
+    func renderFrame(
+        viewport: GMLuaViewportSize,
+        expectedGeneration: UInt64
+    ) throws -> GMLuaSurfaceFrameSnapshot {
+        try requiredSession(expectedGeneration: expectedGeneration).renderFrame(
+            viewportWidth: viewport.width,
+            viewportHeight: viewport.height
+        )
+    }
+
+    func submitPointer(
+        _ sample: GModTouchSample,
+        viewport: GMLuaViewportSize,
+        expectedGeneration: UInt64
+    ) throws -> GModDermaMenuPointerOutput {
+        let session = try requiredSession(expectedGeneration: expectedGeneration)
+        _ = try session.dispatchPointerEvent(
+            x: sample.x,
+            y: sample.y,
+            phase: sample.phase,
+            timestamp: sample.timestamp,
+            viewportWidth: viewport.width,
+            viewportHeight: viewport.height
+        )
+        let wantsTextInput = try session.insertText("") != nil
+        if sample.timestamp.isFinite {
+            if let prior = lastAdvanceTimestamp {
+                let delta = min(0.25, max(0, sample.timestamp - prior))
+                if delta > 0 { _ = try session.advance(by: delta) }
+            }
+            lastAdvanceTimestamp = sample.timestamp
+        }
+        return GModDermaMenuPointerOutput(
+            wantsTextInput: wantsTextInput,
+            actions: session.drainActions()
+        )
+    }
+
+    func insertText(
+        _ text: String,
+        expectedGeneration: UInt64
+    ) throws -> [GMLuaMenuAction] {
+        let session = try requiredSession(expectedGeneration: expectedGeneration)
+        if text == "\n" || text == "\r" {
+            _ = try session.submitFocusedTextEntry()
+        } else {
+            _ = try session.insertText(text)
+        }
+        return session.drainActions()
+    }
+
+    func deleteTextBackward(expectedGeneration: UInt64) throws {
+        _ = try requiredSession(expectedGeneration: expectedGeneration)
+            .deleteTextBackward()
+    }
+
+    private func requiredSession(
+        expectedGeneration: UInt64
+    ) throws -> GMLuaMenuSession {
+        guard expectedGeneration == generation, let session else {
+            throw GMLuaMenuSessionError.notStarted
+        }
+        return session
+    }
+}
+
+/// App-owned presentation adapter for the trusted MENU Lua utility realm. The
+/// original Home remains DHTML; Settings, Problems, and Console pixels and
+/// pointer behavior come from shipped Derma controls over the common Surface
+/// bridge. The host only supplies immutable state and handles typed requests.
 @MainActor
 final class GModDermaMenuModel: ObservableObject {
     @Published private(set) var surfaceScene: GModMetalSurfaceScene?
@@ -17,7 +167,11 @@ final class GModDermaMenuModel: ObservableObject {
 
     private let runtimeFactory: GModAppRuntimeFactory
     private let permissionStore: GModPermissionStore
-    private var session: GMLuaMenuSession?
+    private let sessionLane = GModDermaMenuSessionLane()
+    private var installationTask: Task<Void, Never>?
+    private var mutationTask: Task<Void, Never>?
+    private var hasSession = false
+    private var sessionGeneration: UInt64 = 0
     private var mountGeneration: UInt64?
     private var languageConfiguration: GMLuaLanguageConfiguration?
     private var permissionSessionTransportIdentity: ObjectIdentifier?
@@ -25,9 +179,10 @@ final class GModDermaMenuModel: ObservableObject {
     private var pendingFrame = false
     private var buildInFlight = false
     private var frameRevision: UInt64 = 0
-    private var lastAdvanceTimestamp: TimeInterval?
     private var problemLines: [String] = []
     private var consoleLines: [String] = []
+    private var settings = GMLuaMenuSettingsSnapshot()
+    private var presentedUtility: GMLuaMenuUtility?
 
     init(
         runtimeFactory: GModAppRuntimeFactory,
@@ -37,15 +192,12 @@ final class GModDermaMenuModel: ObservableObject {
         self.permissionStore = permissionStore
     }
 
-    deinit {
-        session?.close()
-    }
-
     func activate(
         mountGeneration: UInt64,
         phrases: [String: String],
         problemLines: [String],
         consoleLines: [String],
+        settings: GMLuaMenuSettingsSnapshot,
         permissionSessionTransport: GMLuaPermissionSessionTransport?
     ) {
         let configuration = GMLuaLanguageConfiguration(phrases: phrases)
@@ -56,17 +208,20 @@ final class GModDermaMenuModel: ObservableObject {
             || languageConfiguration != configuration
             || permissionSessionTransportIdentity != permissionIdentity
         if requiresNewSession {
-            session?.close()
-            session = nil
+            sessionGeneration &+= 1
+            hasSession = false
+            installationTask = nil
+            mutationTask = nil
             surfaceScene = nil
             failure = nil
             wantsTextInput = false
             pendingFrame = false
             buildInFlight = false
             frameRevision &+= 1
-            lastAdvanceTimestamp = nil
             self.problemLines = []
             self.consoleLines = []
+            self.settings = GMLuaMenuSettingsSnapshot()
+            presentedUtility = nil
             self.mountGeneration = mountGeneration
             languageConfiguration = configuration
             permissionSessionTransportIdentity = permissionIdentity
@@ -85,20 +240,58 @@ final class GModDermaMenuModel: ObservableObject {
                     logger: { _ in }
                 )
                 _ = try replacement.start()
-                session = replacement
+                let lane = sessionLane
+                let generation = sessionGeneration
+                let task = Task {
+                    await lane.replace(
+                        with: replacement,
+                        generation: generation
+                    )
+                }
+                installationTask = task
+                hasSession = true
             } catch {
+                let lane = sessionLane
+                let generation = sessionGeneration
+                installationTask = Task {
+                    await lane.removeSession(generation: generation)
+                }
                 failure = GMLuaRuntime.describe(error)
                 return
             }
         }
-        replaceProblems(problemLines, requestFrame: false)
-        replaceConsoleLines(consoleLines, requestFrame: false)
-        requestFrame()
+        guard hasSession else { return }
+        let boundedProblems = Self.boundedProblemLines(problemLines)
+        let boundedConsole = Self.boundedConsoleLines(consoleLines)
+        self.problemLines = boundedProblems
+        self.consoleLines = boundedConsole
+        self.settings = settings
+        let generation = sessionGeneration
+        let installation = installationTask
+        let previousMutation = mutationTask
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await previousMutation?.value
+            await installation?.value
+            do {
+                try await sessionLane.synchronize(
+                    problems: boundedProblems,
+                    consoleLines: boundedConsole,
+                    settings: settings,
+                    expectedGeneration: generation
+                )
+                guard generation == sessionGeneration else { return }
+                requestFrame()
+            } catch {
+                guard generation == sessionGeneration else { return }
+                fail(error)
+            }
+        }
+        mutationTask = task
     }
 
     func deactivate() {
         wantsTextInput = false
-        lastAdvanceTimestamp = nil
     }
 
     func updateViewport(width: Double, height: Double) {
@@ -117,93 +310,222 @@ final class GModDermaMenuModel: ObservableObject {
         let bounded = Self.boundedProblemLines(lines)
         guard bounded != problemLines else { return }
         problemLines = bounded
-        guard let session else { return }
-        do {
-            try session.updateProblems(bounded)
-            if requestFrame { self.requestFrame() }
-        } catch {
-            fail(error)
+        guard hasSession else { return }
+        let generation = sessionGeneration
+        let installation = installationTask
+        let previousMutation = mutationTask
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await previousMutation?.value
+            await installation?.value
+            do {
+                try await sessionLane.updateProblems(
+                    bounded,
+                    expectedGeneration: generation
+                )
+                guard generation == sessionGeneration else { return }
+                if requestFrame { self.requestFrame() }
+            } catch {
+                guard generation == sessionGeneration else { return }
+                fail(error)
+            }
         }
+        mutationTask = task
     }
 
     func replaceConsoleLines(_ lines: [String], requestFrame: Bool = true) {
         let bounded = Self.boundedConsoleLines(lines)
         guard bounded != consoleLines else { return }
         consoleLines = bounded
-        guard let session else { return }
-        do {
-            try session.updateConsoleLines(bounded)
-            if requestFrame { self.requestFrame() }
-        } catch {
-            fail(error)
-        }
-    }
-
-    func submitPointer(_ sample: GModTouchSample) -> [GMLuaMenuAction] {
-        guard let session else { return [] }
-        updateViewport(width: sample.viewWidth, height: sample.viewHeight)
-        do {
-            _ = try session.dispatchPointerEvent(
-                x: sample.x,
-                y: sample.y,
-                phase: sample.phase,
-                timestamp: sample.timestamp,
-                viewportWidth: viewport.width,
-                viewportHeight: viewport.height
-            )
-            // The Engine returns a focused identifier from `insertText` even
-            // when its payload is empty. This keeps keyboard ownership with
-            // actual DTextEntry focus rather than treating every panel click
-            // as a native text-field request.
-            wantsTextInput = try session.insertText("") != nil
-            advanceIfNeeded(timestamp: sample.timestamp)
-            requestFrame()
-            return session.drainActions()
-        } catch {
-            fail(error)
-            return []
-        }
-    }
-
-    func insertText(_ text: String) {
-        guard !text.isEmpty, let session else { return }
-        do {
-            if text == "\n" || text == "\r" {
-                _ = try session.submitFocusedTextEntry()
-            } else {
-                _ = try session.insertText(text)
+        guard hasSession else { return }
+        let generation = sessionGeneration
+        let installation = installationTask
+        let previousMutation = mutationTask
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await previousMutation?.value
+            await installation?.value
+            do {
+                try await sessionLane.updateConsoleLines(
+                    bounded,
+                    expectedGeneration: generation
+                )
+                guard generation == sessionGeneration else { return }
+                if requestFrame { self.requestFrame() }
+            } catch {
+                guard generation == sessionGeneration else { return }
+                fail(error)
             }
-            requestFrame()
-        } catch {
-            fail(error)
         }
+        mutationTask = task
+    }
+
+    func replaceSettings(
+        _ replacement: GMLuaMenuSettingsSnapshot,
+        requestFrame: Bool = true
+    ) {
+        guard replacement != settings else { return }
+        settings = replacement
+        guard hasSession else { return }
+        let generation = sessionGeneration
+        let installation = installationTask
+        let previousMutation = mutationTask
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await previousMutation?.value
+            await installation?.value
+            do {
+                try await sessionLane.updateSettings(
+                    replacement,
+                    expectedGeneration: generation
+                )
+                guard generation == sessionGeneration else { return }
+                if requestFrame { self.requestFrame() }
+            } catch {
+                guard generation == sessionGeneration else { return }
+                fail(error)
+            }
+        }
+        mutationTask = task
+    }
+
+    func present(_ utility: GMLuaMenuUtility) {
+        guard hasSession, utility != presentedUtility else { return }
+        presentedUtility = utility
+        let generation = sessionGeneration
+        let installation = installationTask
+        let previousMutation = mutationTask
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await previousMutation?.value
+            await installation?.value
+            do {
+                try await sessionLane.present(
+                    utility,
+                    expectedGeneration: generation
+                )
+                guard generation == sessionGeneration else { return }
+                requestFrame()
+            } catch {
+                guard generation == sessionGeneration else { return }
+                fail(error)
+            }
+        }
+        mutationTask = task
+    }
+
+    func dismissUtility() {
+        presentedUtility = nil
+        wantsTextInput = false
+        guard hasSession else { return }
+        let generation = sessionGeneration
+        let installation = installationTask
+        let previousMutation = mutationTask
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await previousMutation?.value
+            await installation?.value
+            do {
+                try await sessionLane.dismissUtility(
+                    expectedGeneration: generation
+                )
+                guard generation == sessionGeneration else { return }
+                requestFrame()
+            } catch {
+                guard generation == sessionGeneration else { return }
+                fail(error)
+            }
+        }
+        mutationTask = task
+    }
+
+    func submitPointer(
+        _ sample: GModTouchSample,
+        onActions: @escaping ([GMLuaMenuAction]) -> Void
+    ) {
+        guard hasSession else { return }
+        if sample.viewWidth.isFinite, sample.viewHeight.isFinite,
+           sample.viewWidth >= 1, sample.viewHeight >= 1 {
+            viewport = GMLuaViewportSize(
+                width: max(1, Int(sample.viewWidth.rounded())),
+                height: max(1, Int(sample.viewHeight.rounded()))
+            )
+        }
+        let activeViewport = viewport
+        let generation = sessionGeneration
+        let installation = installationTask
+        let previousMutation = mutationTask
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await previousMutation?.value
+            await installation?.value
+            do {
+                let output = try await sessionLane.submitPointer(
+                    sample,
+                    viewport: activeViewport,
+                    expectedGeneration: generation
+                )
+                guard generation == sessionGeneration else { return }
+                wantsTextInput = output.wantsTextInput
+                if !output.actions.isEmpty { onActions(output.actions) }
+                requestFrame()
+            } catch {
+                guard generation == sessionGeneration else { return }
+                fail(error)
+            }
+        }
+        mutationTask = task
+    }
+
+    func insertText(
+        _ text: String,
+        onActions: @escaping ([GMLuaMenuAction]) -> Void
+    ) {
+        guard !text.isEmpty, hasSession else { return }
+        let generation = sessionGeneration
+        let installation = installationTask
+        let previousMutation = mutationTask
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await previousMutation?.value
+            await installation?.value
+            do {
+                let actions = try await sessionLane.insertText(
+                    text,
+                    expectedGeneration: generation
+                )
+                guard generation == sessionGeneration else { return }
+                if !actions.isEmpty { onActions(actions) }
+                requestFrame()
+            } catch {
+                guard generation == sessionGeneration else { return }
+                fail(error)
+            }
+        }
+        mutationTask = task
     }
 
     func deleteTextBackward() {
-        guard let session else { return }
-        do {
-            _ = try session.deleteTextBackward()
-            requestFrame()
-        } catch {
-            fail(error)
+        guard hasSession else { return }
+        let generation = sessionGeneration
+        let installation = installationTask
+        let previousMutation = mutationTask
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await previousMutation?.value
+            await installation?.value
+            do {
+                try await sessionLane.deleteTextBackward(
+                    expectedGeneration: generation
+                )
+                guard generation == sessionGeneration else { return }
+                requestFrame()
+            } catch {
+                guard generation == sessionGeneration else { return }
+                fail(error)
+            }
         }
-    }
-
-    func drainActions() -> [GMLuaMenuAction] {
-        session?.drainActions() ?? []
-    }
-
-    private func advanceIfNeeded(timestamp: TimeInterval) {
-        guard let session, timestamp.isFinite else { return }
-        defer { lastAdvanceTimestamp = timestamp }
-        guard let prior = lastAdvanceTimestamp else { return }
-        let delta = min(0.25, max(0, timestamp - prior))
-        guard delta > 0 else { return }
-        do {
-            _ = try session.advance(by: delta)
-        } catch {
-            fail(error)
-        }
+        mutationTask = task
     }
 
     private func requestFrame() {
@@ -213,25 +535,32 @@ final class GModDermaMenuModel: ObservableObject {
     }
 
     private func buildNextFrameIfNeeded() {
-        guard pendingFrame, !buildInFlight, let session else { return }
+        guard pendingFrame, !buildInFlight, hasSession else { return }
         pendingFrame = false
-        let snapshot: GMLuaSurfaceFrameSnapshot
-        do {
-            snapshot = try session.renderFrame(
-                viewportWidth: viewport.width,
-                viewportHeight: viewport.height
-            )
-        } catch {
-            fail(error)
-            return
-        }
-
         buildInFlight = true
         frameRevision &+= 1
         let revision = frameRevision
+        let generation = sessionGeneration
+        let activeViewport = viewport
+        let installation = installationTask
         let textureResolver = runtimeFactory.surfaceTextureResolver
         let textRasterizer = runtimeFactory.surfaceTextRasterizer
         Task { [weak self] in
+            guard let self else { return }
+            await installation?.value
+            let snapshot: GMLuaSurfaceFrameSnapshot
+            do {
+                snapshot = try await sessionLane.renderFrame(
+                    viewport: activeViewport,
+                    expectedGeneration: generation
+                )
+            } catch {
+                guard generation == sessionGeneration,
+                      frameRevision == revision else { return }
+                buildInFlight = false
+                fail(error)
+                return
+            }
             let result = await Task.detached(priority: .userInitiated) {
                 Result {
                     try GModMetalSurfaceScene(
@@ -241,7 +570,8 @@ final class GModDermaMenuModel: ObservableObject {
                     )
                 }
             }.value
-            guard let self, self.frameRevision == revision else { return }
+            guard generation == sessionGeneration,
+                  frameRevision == revision else { return }
             self.buildInFlight = false
             switch result {
             case let .success(scene):
@@ -312,9 +642,10 @@ struct GModDermaMenuSurface: View {
                 .background(Color.black)
 
                 GModTouchInputBridge { sample in
-                    let actions = model.submitPointer(sample)
-                    if !actions.isEmpty {
-                        onActions(actions)
+                    model.submitPointer(sample) { actions in
+                        if !actions.isEmpty {
+                            onActions(actions)
+                        }
                     }
                 }
                 .contentShape(Rectangle())
@@ -322,7 +653,13 @@ struct GModDermaMenuSurface: View {
 
                 GModDermaMenuTextInputBridge(
                     wantsFocus: model.wantsTextInput,
-                    onText: model.insertText,
+                    onText: { text in
+                        model.insertText(text) { actions in
+                            if !actions.isEmpty {
+                                onActions(actions)
+                            }
+                        }
+                    },
                     onDeleteBackward: model.deleteTextBackward
                 )
                 .frame(width: 1, height: 1)
