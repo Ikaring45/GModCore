@@ -348,7 +348,6 @@ jobs:
           echo "Unsigned generic-device .app: $app_path"
 
       - name: Compile embedded Metal library and smoke runtime pipelines
-        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           bash Tools/iPadValidation/verify-embedded-metal.sh "$GITHUB_WORKSPACE"
