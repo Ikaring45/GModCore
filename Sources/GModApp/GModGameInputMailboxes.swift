@@ -116,6 +116,59 @@ struct GModGameSurfaceRefreshPendingQueue: Sendable, Equatable {
     }
 }
 
+/// Limits gameplay HUD captures without changing the foreground Q/C menu
+/// cadence. OverlayPanel rendering executes original Lua on the same serial
+/// lane as movement; admitting it at the 120 Hz Metal cadence can otherwise
+/// turn one stock Hint into a permanent fixed-tick backlog. Expiry/position
+/// still advance from CLIENT Think every host frame, while the small visual
+/// overlay is sampled at a bounded presentation rate.
+struct GModGameOverlaySurfaceFramePacer: Sendable, Equatable {
+    static let defaultMinimumInterval: TimeInterval = 1.0 / 30.0
+
+    let minimumInterval: TimeInterval
+    private(set) var lastAdmissionTime: TimeInterval?
+
+    init(
+        minimumInterval: TimeInterval = Self.defaultMinimumInterval
+    ) {
+        precondition(
+            minimumInterval.isFinite && minimumInterval >= 0,
+            "overlay Surface minimum interval must be finite and nonnegative"
+        )
+        self.minimumInterval = minimumInterval
+    }
+
+    mutating func shouldAdmit(
+        scope: GMLuaVGUIRenderScope,
+        at now: TimeInterval,
+        captureInFlight: Bool
+    ) -> Bool {
+        guard scope == .overlay else {
+            // The foreground Q/C owner uses the latest-only pending queue and
+            // must react to every pointer mutation even while a build runs.
+            reset()
+            return true
+        }
+        guard now.isFinite, now >= 0, !captureInFlight else { return false }
+        guard let lastAdmissionTime else {
+            self.lastAdmissionTime = now
+            return true
+        }
+        // A replaced host clock must not suppress the first frame forever.
+        guard now >= lastAdmissionTime else {
+            self.lastAdmissionTime = now
+            return true
+        }
+        guard now - lastAdmissionTime >= minimumInterval else { return false }
+        self.lastAdmissionTime = now
+        return true
+    }
+
+    mutating func reset() {
+        lastAdmissionTime = nil
+    }
+}
+
 enum GModGameWorldActionButton: Sendable, Equatable {
     case attack
     case attack2

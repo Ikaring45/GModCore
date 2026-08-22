@@ -399,6 +399,7 @@ final class GModGameSessionModel: ObservableObject {
     private var surfaceRequestRevision: UInt64 = 0
     private var surfaceRefreshQueue = GModGameSurfaceRefreshPendingQueue()
     private var surfaceRefreshTask: Task<Void, Never>?
+    private var overlaySurfaceFramePacer = GModGameOverlaySurfaceFramePacer()
     private var lastDynamicEntitySourceRevision: UInt64?
     private var pendingDynamicEntitySceneBuild:
         GModDynamicEntitySceneBuildRequest?
@@ -1507,6 +1508,7 @@ final class GModGameSessionModel: ObservableObject {
     private func invalidateSurfaceRequests() {
         surfaceRequestRevision &+= 1
         surfaceRefreshQueue.removeAll()
+        overlaySurfaceFramePacer.reset()
     }
 
     /// Fetches the CLIENT prop projection only after the shared host FIFO has
@@ -1745,6 +1747,7 @@ final class GModGameSessionModel: ObservableObject {
             hasVisibleOverlayPanels: hasVisibleOverlayPanels
         ) else {
             surfaceRefreshQueue.removeAll()
+            overlaySurfaceFramePacer.reset()
             if surfaceScene != nil || surfaceDiagnostics != nil {
                 surfaceRequestRevision &+= 1
                 surfaceScene = nil
@@ -1760,12 +1763,20 @@ final class GModGameSessionModel: ObservableObject {
         let scope: GMLuaVGUIRenderScope = activeClientMenu == nil
             ? .overlay
             : .all
+        guard overlaySurfaceFramePacer.shouldAdmit(
+            scope: scope,
+            at: ProcessInfo.processInfo.systemUptime,
+            captureInFlight: surfaceRefreshTask != nil
+        ) else { return }
         surfaceRefreshQueue.submit(GModGameSurfaceRefreshRequest(
             generation: generation,
             scope: scope
         ))
         guard surfaceRefreshTask == nil else { return }
-        surfaceRefreshTask = Task(priority: .userInitiated) { [weak self] in
+        let priority: TaskPriority = scope == .overlay
+            ? .utility
+            : .userInitiated
+        surfaceRefreshTask = Task(priority: priority) { [weak self] in
             guard let self else { return }
             await self.drainClientSurfaceRefreshes()
         }
