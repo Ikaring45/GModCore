@@ -1,10 +1,66 @@
 import Foundation
 import XCTest
-@testable import GModApp
 import GModEngine
+import GModGameAssets
 import GModLua
+@testable import GModApp
 
 final class GModBundledFontsTests: XCTestCase {
+    func testRuntimeFactoryReadsTheSessionMapPakForMetalMaterials() throws {
+        let factory = GModAppRuntimeFactory()
+
+        let bsp = try SourceBSP(
+            data: GModGameAssets.data(for: .flatgrass, kind: .bsp)
+        )
+        let pak = try SourceBSPPakFileSystem(bsp: bsp)
+        let mountToken = factory.mountMapPak(pak)
+        defer { factory.unmountMapPak(mountToken) }
+
+        let path = "materials/maps/gm_flatgrass/concrete/" +
+            "concretefloor028c_0_96_-12032.vmt"
+        let data = try XCTUnwrap(
+            factory.mountedContentData(
+                for: path.uppercased(),
+                maximumByteCount: 64 * 1_024
+            )
+        )
+        let text = try XCTUnwrap(String(data: data, encoding: .utf8))
+        XCTAssertTrue(text.contains("maps/gm_flatgrass/c0_96_-12032"))
+    }
+
+    func testMapPakUnmountRequiresTheCurrentOwnerToken() throws {
+        let firstFactory = GModAppRuntimeFactory()
+        let secondFactory = GModAppRuntimeFactory()
+        let constructPak = try SourceBSPPakFileSystem(
+            bsp: SourceBSP(
+                data: GModGameAssets.data(for: .construct, kind: .bsp)
+            )
+        )
+        let flatgrassPak = try SourceBSPPakFileSystem(
+            bsp: SourceBSP(
+                data: GModGameAssets.data(for: .flatgrass, kind: .bsp)
+            )
+        )
+
+        let staleToken = firstFactory.mountMapPak(constructPak)
+        let currentToken = secondFactory.mountMapPak(flatgrassPak)
+        defer { secondFactory.unmountMapPak(currentToken) }
+
+        XCTAssertNotEqual(staleToken, currentToken)
+        XCTAssertFalse(firstFactory.unmountMapPak(staleToken))
+        let flatgrassOnlyPath = "materials/maps/gm_flatgrass/concrete/" +
+            "concretefloor028c_0_96_-12032.vmt"
+        XCTAssertNotNil(
+            try secondFactory.mountedContentData(
+                for: flatgrassOnlyPath,
+                maximumByteCount: 64 * 1_024
+            ),
+            "a stale model must not clear the newer process-shared map mount"
+        )
+        XCTAssertTrue(secondFactory.unmountMapPak(currentToken))
+        XCTAssertFalse(secondFactory.unmountMapPak(currentToken))
+    }
+
     func testRuntimeFactoriesShareProcessSurfaceCachesAndResolveBundledPNG()
         throws
     {

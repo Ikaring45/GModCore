@@ -27,6 +27,11 @@ public final class GModMetalSurfaceSourceMaterialResolver:
     GModMetalSurfaceTextureResolving,
     @unchecked Sendable
 {
+    private struct CacheKey: Hashable {
+        let contentEpoch: UInt64
+        let logicalKey: String
+    }
+
     private enum CachedResult {
         case missing
         case bitmap(GModMetalSurfaceBitmap)
@@ -36,31 +41,42 @@ public final class GModMetalSurfaceSourceMaterialResolver:
 
     private let maximumCachedEntryCount: Int
     private let maximumCachedByteCount: Int
+    private let contentEpochProvider:
+        GMLuaSourceMaterialResolver.ContentEpochProvider
     private let lock = NSLock()
-    private var cache: [String: CachedResult] = [:]
-    private var cacheOrder: [String] = []
+    private var cache: [CacheKey: CachedResult] = [:]
+    private var cacheOrder: [CacheKey] = []
     private var cachedByteCountStorage = 0
 
     public convenience init(
         maximumCachedEntryCount: Int = 512,
         maximumCachedByteCount: Int = 32 * 1_024 * 1_024,
+        contentEpochProvider: @escaping
+            GMLuaSourceMaterialResolver.ContentEpochProvider = { 0 },
         loader: @escaping GMLuaSourceMaterialResolver.Loader
     ) {
         self.init(
-            sourceMaterialResolver: GMLuaSourceMaterialResolver(loader: loader),
+            sourceMaterialResolver: GMLuaSourceMaterialResolver(
+                contentEpochProvider: contentEpochProvider,
+                loader: loader
+            ),
             maximumCachedEntryCount: maximumCachedEntryCount,
-            maximumCachedByteCount: maximumCachedByteCount
+            maximumCachedByteCount: maximumCachedByteCount,
+            contentEpochProvider: contentEpochProvider
         )
     }
 
     public init(
         sourceMaterialResolver: GMLuaSourceMaterialResolver,
         maximumCachedEntryCount: Int = 512,
-        maximumCachedByteCount: Int = 32 * 1_024 * 1_024
+        maximumCachedByteCount: Int = 32 * 1_024 * 1_024,
+        contentEpochProvider: @escaping
+            GMLuaSourceMaterialResolver.ContentEpochProvider = { 0 }
     ) {
         self.sourceMaterialResolver = sourceMaterialResolver
         self.maximumCachedEntryCount = max(1, maximumCachedEntryCount)
         self.maximumCachedByteCount = max(1, maximumCachedByteCount)
+        self.contentEpochProvider = contentEpochProvider
     }
 
     public var cachedEntryCount: Int {
@@ -134,7 +150,11 @@ public final class GModMetalSurfaceSourceMaterialResolver:
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         guard !logicalKey.isEmpty else { return nil }
-        let key = (retainingAuthoredMipChain ? "world:" : "surface:") + logicalKey
+        let key = CacheKey(
+            contentEpoch: contentEpochProvider(),
+            logicalKey: (retainingAuthoredMipChain ? "world:" : "surface:") +
+                logicalKey
+        )
         if let cached = cachedValue(for: key) {
             switch cached {
             case .missing: return nil
@@ -311,7 +331,7 @@ public final class GModMetalSurfaceSourceMaterialResolver:
         )
     }
 
-    private func cachedValue(for key: String) -> CachedResult? {
+    private func cachedValue(for key: CacheKey) -> CachedResult? {
         lock.lock()
         defer { lock.unlock() }
         guard let value = cache[key] else { return nil }
@@ -320,7 +340,7 @@ public final class GModMetalSurfaceSourceMaterialResolver:
         return value
     }
 
-    private func store(_ value: CachedResult, for key: String) {
+    private func store(_ value: CachedResult, for key: CacheKey) {
         let byteCount: Int
         switch value {
         case .missing: byteCount = 0

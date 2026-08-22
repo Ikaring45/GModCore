@@ -315,6 +315,7 @@ final class GModGameSessionModel: ObservableObject {
         "hover/wheel/keyboard pending"
 
     private let lane: GModPlayableSessionLane
+    private nonisolated let runtimeFactory: GModAppRuntimeFactory
     private let logSink: (String) -> Void
     private let diagnosticsStore: GModAppDiagnosticsStore
     private let inputVideoSettings: GModInputVideoSettingsStore
@@ -336,6 +337,7 @@ final class GModGameSessionModel: ObservableObject {
     private var isHostPopupPresented = false
     private var sessionGeneration: UInt64 = 0
     private var laneGeneration: UInt64?
+    private var mapPakMountToken: GModMapPakMountToken?
     private var pointerEpoch: UInt64?
     private var inputEpoch: UInt64?
     private var surfaceRequestRevision: UInt64 = 0
@@ -407,6 +409,7 @@ final class GModGameSessionModel: ObservableObject {
         diagnosticsStore: GModAppDiagnosticsStore = .shared,
         logSink: @escaping (String) -> Void = { _ in }
     ) {
+        self.runtimeFactory = runtimeFactory
         lane = runtimeFactory.makePlayableSessionLane()
         self.diagnosticsStore = diagnosticsStore
         self.inputVideoSettings = inputVideoSettings
@@ -449,9 +452,18 @@ final class GModGameSessionModel: ObservableObject {
 
     deinit {
         let lane = lane
+        if let mapPakMountToken {
+            _ = runtimeFactory.unmountMapPak(mapPakMountToken)
+        }
         Task {
             _ = try? await lane.close()
         }
+    }
+
+    private func unmountOwnedMapPak() {
+        guard let token = mapPakMountToken else { return }
+        mapPakMountToken = nil
+        _ = runtimeFactory.unmountMapPak(token)
     }
 
     func start(
@@ -494,6 +506,7 @@ final class GModGameSessionModel: ObservableObject {
         isHostPopupPresented = false
         sessionGeneration &+= 1
         let requestedGeneration = sessionGeneration
+        unmountOwnedMapPak()
         laneGeneration = nil
         pointerEpoch = nil
         inputEpoch = nil
@@ -530,12 +543,18 @@ final class GModGameSessionModel: ObservableObject {
                         }
                     }
                 )
+                let mapPakFileSystem = try await lane.mapPakFileSystem(
+                    expectedGeneration: snapshot.generation
+                )
                 guard requestedGeneration == sessionGeneration else {
                     _ = try? await lane.close(
                         expectedGeneration: snapshot.generation
                     )
                     return
                 }
+                mapPakMountToken = runtimeFactory.mountMapPak(
+                    mapPakFileSystem
+                )
                 recordLoadingProgress(
                     .init(stage: .preparingMaterials),
                     requestedGeneration: requestedGeneration
@@ -584,6 +603,7 @@ final class GModGameSessionModel: ObservableObject {
                 }
             } catch {
                 guard requestedGeneration == sessionGeneration else { return }
+                unmountOwnedMapPak()
                 let description = GMLuaRuntime.describe(error)
                 var failedLoadingState = loadingState
                 failedLoadingState.fail(description)
@@ -815,6 +835,7 @@ final class GModGameSessionModel: ObservableObject {
         invalidateSurfaceRequests()
         invalidateDynamicEntityScene()
         invalidateFirstPersonViewModelScene()
+        unmountOwnedMapPak()
         frameMailbox.disable()
         pointerMailbox.setEnabled(false)
         firstWorldFrameGate.reset()
@@ -887,6 +908,7 @@ final class GModGameSessionModel: ObservableObject {
         invalidateSurfaceRequests()
         invalidateDynamicEntityScene()
         invalidateFirstPersonViewModelScene()
+        unmountOwnedMapPak()
         frameMailbox.disable()
         pointerMailbox.setEnabled(false)
         firstWorldFrameGate.reset()

@@ -5,20 +5,66 @@ import GModGameSession
 import GModLua
 import GModMetal
 
+struct GModMapPakMountToken: Sendable, Equatable {
+    fileprivate let generation: UInt64
+}
+
 private final class GModMountedContentSource: @unchecked Sendable {
+    private struct MapPakMount {
+        let token: GModMapPakMountToken
+        let fileSystem: SourceBSPPakFileSystem
+    }
+
     private let lock = NSLock()
     private var source: GModContentPackAssetSource?
+    private var mapPakMount: MapPakMount?
+    private var contentEpochStorage: UInt64 = 0
 
     func mount(_ replacement: GModContentPackAssetSource) {
         lock.lock()
         source = replacement
+        advanceContentEpochLocked()
         lock.unlock()
     }
 
     func unmount() {
         lock.lock()
-        source = nil
+        if source != nil {
+            source = nil
+            advanceContentEpochLocked()
+        }
         lock.unlock()
+    }
+
+    func mountMapPak(
+        _ replacement: SourceBSPPakFileSystem
+    ) -> GModMapPakMountToken {
+        lock.lock()
+        let token = GModMapPakMountToken(
+            generation: advanceContentEpochLocked()
+        )
+        mapPakMount = MapPakMount(token: token, fileSystem: replacement)
+        lock.unlock()
+        return token
+    }
+
+    @discardableResult
+    func unmountMapPak(owner token: GModMapPakMountToken) -> Bool {
+        lock.lock()
+        guard mapPakMount?.token == token else {
+            lock.unlock()
+            return false
+        }
+        mapPakMount = nil
+        advanceContentEpochLocked()
+        lock.unlock()
+        return true
+    }
+
+    func contentEpoch() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return contentEpochStorage
     }
 
     func data(
@@ -27,7 +73,15 @@ private final class GModMountedContentSource: @unchecked Sendable {
     ) throws -> Data? {
         lock.lock()
         let current = source
+        let currentMapPak = mapPakMount?.fileSystem
         lock.unlock()
+        if let mapData = try currentMapPak?.data(
+            for: logicalPath,
+            maximumByteCount: maximumByteCount,
+            maximumCompressedByteCount: maximumByteCount
+        ) {
+            return mapData
+        }
         return try current?.data(
             for: logicalPath,
             maximumByteCount: maximumByteCount
@@ -39,6 +93,16 @@ private final class GModMountedContentSource: @unchecked Sendable {
         let url = source?.pack.archiveURL
         lock.unlock()
         return url
+    }
+
+    @discardableResult
+    private func advanceContentEpochLocked() -> UInt64 {
+        precondition(
+            contentEpochStorage < UInt64.max,
+            "process content mount epoch exhausted"
+        )
+        contentEpochStorage += 1
+        return contentEpochStorage
     }
 }
 
@@ -59,23 +123,30 @@ public final class GModAppRuntimeFactory: @unchecked Sendable {
     // concrete resolvers are thread-safe and deliberately shared at process
     // scope so recreating a SwiftUI model does not discard immutable results.
     private static let processSurfaceTextureResolver =
-        GModMetalSurfaceSourceMaterialResolver { logicalPath in
-            if let mounted = try processMountedContentSource.data(for: logicalPath) {
-                return mounted
-            }
-            do {
-                return try GModGameAssets.clientContentData(
+        GModMetalSurfaceSourceMaterialResolver(
+            contentEpochProvider: {
+                processMountedContentSource.contentEpoch()
+            },
+            loader: { logicalPath in
+                if let mounted = try processMountedContentSource.data(
                     for: logicalPath
-                )
-            } catch let error as GModGameAssetError {
-                switch error {
-                case .missingResource:
-                    return nil
-                case .invalidManifest, .invalidContentPath:
-                    throw error
+                ) {
+                    return mounted
+                }
+                do {
+                    return try GModGameAssets.clientContentData(
+                        for: logicalPath
+                    )
+                } catch let error as GModGameAssetError {
+                    switch error {
+                    case .missingResource:
+                        return nil
+                    case .invalidManifest, .invalidContentPath:
+                        throw error
+                    }
                 }
             }
-        }
+        )
 
     /// Resolves a bounded generic asset through the exact active content-pack
     /// mount used by Metal: loose ZIP files first, then nested VPKs, then the
@@ -196,6 +267,31 @@ public final class GModAppRuntimeFactory: @unchecked Sendable {
     func unmountContentPack() {
         Self.processMountedContentSource.unmount()
         clearContentCaches()
+    }
+
+    /// Installs the active BSP's immutable map-local GAME layer ahead of loose
+    /// game content, matching Source's `LUMP_PAKFILE` search priority. The
+    /// session owns parsing and validation; the App reuses that exact index.
+    @discardableResult
+    func mountMapPak(
+        _ mapPakFileSystem: SourceBSPPakFileSystem
+    ) -> GModMapPakMountToken {
+        let token = Self.processMountedContentSource.mountMapPak(
+            mapPakFileSystem
+        )
+        clearContentCaches()
+        return token
+    }
+
+    @discardableResult
+    func unmountMapPak(_ token: GModMapPakMountToken) -> Bool {
+        let unmounted = Self.processMountedContentSource.unmountMapPak(
+            owner: token
+        )
+        if unmounted {
+            clearContentCaches()
+        }
+        return unmounted
     }
 
     func clearContentCaches() {
