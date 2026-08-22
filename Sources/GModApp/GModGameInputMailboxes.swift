@@ -58,7 +58,7 @@ enum GModGameWorldInputPolicy {
         if jumpPressed { buttons.insert(.jump) }
         buttons.formUnion(
             heldActionButtons.intersection([
-                .attack, .attack2, .use, .reload, .duck,
+                .attack, .attack2, .use, .reload, .duck, .speed,
             ])
         )
         return GModPlayableMovementInput(
@@ -112,6 +112,7 @@ enum GModGameWorldActionButton: Sendable, Equatable {
     case use
     case reload
     case duck
+    case speed
 
     var sourceButton: SourceInputButtons {
         switch self {
@@ -120,6 +121,7 @@ enum GModGameWorldActionButton: Sendable, Equatable {
         case .use: return .use
         case .reload: return .reload
         case .duck: return .duck
+        case .speed: return .speed
         }
     }
 }

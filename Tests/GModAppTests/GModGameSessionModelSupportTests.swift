@@ -314,7 +314,9 @@ final class GModGameSessionModelSupportTests: XCTestCase {
             forwardAxis: positive.forward,
             sideAxis: positive.side,
             jumpPressed: positive.jump,
-            heldActionButtons: [.attack, .attack2, .use, .reload, .duck]
+            heldActionButtons: [
+                .attack, .attack2, .use, .reload, .duck, .speed,
+            ]
         )
         XCTAssertTrue(accepts)
         XCTAssertEqual(admitted.forwardMove, 250)
@@ -327,6 +329,7 @@ final class GModGameSessionModelSupportTests: XCTestCase {
         XCTAssertTrue(admitted.buttons.contains(.use))
         XCTAssertTrue(admitted.buttons.contains(.reload))
         XCTAssertTrue(admitted.buttons.contains(.duck))
+        XCTAssertTrue(admitted.buttons.contains(.speed))
 
         let popupAccepts = GModGameWorldInputPolicy.accepts(
             isReady: true,

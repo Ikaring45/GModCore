@@ -206,6 +206,10 @@ public struct GModMainView: View {
         localizationSelection.snapshot.appText(.duckButton)
     }
 
+    private var localizedSpeedButton: String {
+        localizationSelection.snapshot.appText(.speedButton)
+    }
+
     private var localizedPreviousWeaponButton: String {
         localizationSelection.snapshot.appText(.previousWeaponButton)
     }
@@ -451,6 +455,17 @@ public struct GModMainView: View {
                                                 ) { pressed in
                                                     game.setWorldActionButton(
                                                         .duck,
+                                                        pressed: pressed
+                                                    )
+                                                }
+                                                GModTouchActionButton(
+                                                    label: localizedSpeedButton,
+                                                    diameter: layout.heldActionDiameter,
+                                                    accessibilityIdentifier:
+                                                        "garryspad.control.speed"
+                                                ) { pressed in
+                                                    game.setWorldActionButton(
+                                                        .speed,
                                                         pressed: pressed
                                                     )
                                                 }
