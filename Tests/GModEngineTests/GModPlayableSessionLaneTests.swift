@@ -268,7 +268,16 @@ final class GModPlayableSessionLaneTests: XCTestCase {
             expectedInputEpoch: snapshot.inputEpoch
         )
         XCTAssertEqual(actionFrame.fixedTicks.count, 1)
-        XCTAssertEqual(actionFrame.actionFailures, [])
+        XCTAssertEqual(actionFrame.actionFailures.count, 1)
+        let failure = try XCTUnwrap(actionFrame.actionFailures.first)
+        XCTAssertEqual(failure.command, "gm_spawn")
+        XCTAssertEqual(
+            failure.arguments,
+            ["models/props_c17/oildrum001.mdl", "0", ""]
+        )
+        XCTAssertTrue(
+            failure.message.contains("IsValidModel validation is unavailable")
+        )
         let actionEntities = try await lane.clientCanonicalEntitySnapshots(
             expectedGeneration: snapshot.generation
         )
