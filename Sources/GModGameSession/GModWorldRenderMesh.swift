@@ -291,6 +291,137 @@ public struct GModWorldSkybox: Sendable, Equatable {
     }
 }
 
+/// Identifies the compiled Source world-light lump that matches the selected
+/// BSP face/lightmap pair. `SourceBSP.lightmap(forFaceAt:)` prefers HDR only
+/// when both HDR faces and HDR lighting are present; the world renderer uses
+/// the same rule so dynamic/unlightmapped lighting cannot mix LDR and HDR data.
+public enum GModWorldEnvironmentLightingSource: Sendable, Equatable {
+    case standardDynamicRange
+    case highDynamicRange
+
+    fileprivate var lumpIndex: Int {
+        switch self {
+        case .standardDynamicRange: return 15
+        case .highDynamicRange: return 54
+        }
+    }
+}
+
+/// The two compiled global lights emitted by Source's `light_environment`.
+/// Values are read from `dworldlight_t` rather than reconstructed from entity
+/// keyvalues: intensity is already linear and the skylight normal already
+/// contains VRAD's final pitch/yaw interpretation.
+public struct GModWorldEnvironmentLighting: Sendable, Equatable {
+    /// `dworldlight_t.normal` for `emit_skylight`: direction travelled by the
+    /// incoming light. A renderer negates this for a surface-to-light vector.
+    public let sourceDirectionFromLight: SourceVector3
+    public let directLinearRGB: SourceVector3
+    public let ambientLinearRGB: SourceVector3
+    public let source: GModWorldEnvironmentLightingSource
+
+    public init(
+        sourceDirectionFromLight: SourceVector3,
+        directLinearRGB: SourceVector3,
+        ambientLinearRGB: SourceVector3,
+        source: GModWorldEnvironmentLightingSource
+    ) {
+        self.sourceDirectionFromLight = sourceDirectionFromLight
+        self.directLinearRGB = directLinearRGB
+        self.ambientLinearRGB = ambientLinearRGB
+        self.source = source
+    }
+}
+
+/// One image layer of Source's directional `env_sun` glow overlay. Values are
+/// retained exactly at the renderer-neutral boundary; the Metal adapter is
+/// responsible for resolving the authored VMT/VTF and applying the client
+/// glow-overlay projection contract.
+public struct GModWorldSunSpriteLayer: Sendable, Equatable {
+    public let materialName: String
+    /// Source color modulation in display-RGB space after `C_Sun`'s core-hue
+    /// normalization (or the explicit overlay color conversion).
+    public let displayRGB: SourceVector3
+    /// The authored `size`/`overlaysize`, before `CGlowOverlay`'s view-dot
+    /// dependent size multiplier.
+    public let size: Float
+
+    public init(
+        materialName: String,
+        displayRGB: SourceVector3,
+        size: Float
+    ) {
+        self.materialName = materialName
+        self.displayRGB = displayRGB
+        self.size = size
+    }
+}
+
+/// Static BSP entity-lump state needed to reproduce Source's directional sun.
+/// Target-driven `env_sun` entities are intentionally not represented until
+/// canonical entity target resolution can supply their activated direction.
+public struct GModWorldSunSprite: Sendable, Equatable {
+    /// `CSun::m_vDirection`: normalized direction from the camera to the sun.
+    public let sourceDirectionToSun: SourceVector3
+    public let hdrColorScale: Float
+    public let core: GModWorldSunSpriteLayer
+    public let overlay: GModWorldSunSpriteLayer
+
+    public init(
+        sourceDirectionToSun: SourceVector3,
+        hdrColorScale: Float,
+        core: GModWorldSunSpriteLayer,
+        overlay: GModWorldSunSpriteLayer
+    ) {
+        self.sourceDirectionToSun = sourceDirectionToSun
+        self.hdrColorScale = hdrColorScale
+        self.core = core
+        self.overlay = overlay
+    }
+}
+
+/// Exact compilation boundary for the BSP `env_sun` entity. An unsupported or
+/// malformed entity never receives a guessed direction, color, size, or VMT.
+public enum GModWorldSunSpriteStatus: Sendable, Equatable {
+    case unavailableNoEntity
+    case available(entityCount: Int)
+    case unavailableUnsupportedTargetDirection(entityIndex: Int)
+    case unavailableMissingOrInvalidKey(entityIndex: Int, key: String)
+}
+
+/// Explicit availability boundary for compiled `light_environment` data.
+/// Unsupported or ambiguous inputs remain diagnosable instead of silently
+/// receiving a made-up sun direction or color.
+public enum GModWorldEnvironmentLightingStatus: Sendable, Equatable {
+    case available(
+        source: GModWorldEnvironmentLightingSource,
+        worldLightRecordCount: Int
+    )
+    case unavailableNoCompiledWorldLights(
+        source: GModWorldEnvironmentLightingSource
+    )
+    case unavailableCompressedLump(
+        source: GModWorldEnvironmentLightingSource,
+        declaredUncompressedByteCount: UInt32
+    )
+    case unavailableUnsupportedLumpVersion(
+        source: GModWorldEnvironmentLightingSource,
+        actual: Int32
+    )
+    case unavailableInvalidRecordByteCount(
+        source: GModWorldEnvironmentLightingSource,
+        actual: Int,
+        recordByteCount: Int
+    )
+    case unavailableAmbiguousGlobalLights(
+        source: GModWorldEnvironmentLightingSource,
+        skylightCount: Int,
+        skyAmbientCount: Int
+    )
+    case unavailableInvalidGlobalLightValue(
+        source: GModWorldEnvironmentLightingSource
+    )
+}
+
 public struct GModWorldLightmapAtlas: Sendable, Equatable {
     public let width: Int
     public let height: Int
@@ -344,6 +475,8 @@ public struct GModWorldRenderMeshDiagnostics: Sendable, Equatable {
     public let lightmappedFaceCount: Int
     public let unlightmappedFaceCount: Int
     public let lightmapAtlasStatus: GModWorldLightmapAtlasStatus
+    public let environmentLightingStatus: GModWorldEnvironmentLightingStatus
+    public let sunSpriteStatus: GModWorldSunSpriteStatus
     public let ignoredAdditionalLightStyleFaceCount: Int
     public let ignoredBumpLightFaceCount: Int
     public let emittedDisplacementVertexCount: Int
@@ -368,6 +501,9 @@ public struct GModWorldRenderMeshDiagnostics: Sendable, Equatable {
         lightmappedFaceCount: Int = 0,
         unlightmappedFaceCount: Int = 0,
         lightmapAtlasStatus: GModWorldLightmapAtlasStatus = .unavailableNoLightmaps,
+        environmentLightingStatus: GModWorldEnvironmentLightingStatus =
+            .unavailableNoCompiledWorldLights(source: .standardDynamicRange),
+        sunSpriteStatus: GModWorldSunSpriteStatus = .unavailableNoEntity,
         ignoredAdditionalLightStyleFaceCount: Int = 0,
         ignoredBumpLightFaceCount: Int = 0,
         emittedDisplacementVertexCount: Int = 0,
@@ -392,6 +528,8 @@ public struct GModWorldRenderMeshDiagnostics: Sendable, Equatable {
         self.lightmappedFaceCount = lightmappedFaceCount
         self.unlightmappedFaceCount = unlightmappedFaceCount
         self.lightmapAtlasStatus = lightmapAtlasStatus
+        self.environmentLightingStatus = environmentLightingStatus
+        self.sunSpriteStatus = sunSpriteStatus
         self.ignoredAdditionalLightStyleFaceCount =
             ignoredAdditionalLightStyleFaceCount
         self.ignoredBumpLightFaceCount = ignoredBumpLightFaceCount
@@ -435,6 +573,8 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
     public let sky3D: GModWorldSky3D?
     public let skyVisibility: GModWorldSkyVisibility?
     public let lightmapAtlas: GModWorldLightmapAtlas?
+    public let environmentLighting: GModWorldEnvironmentLighting?
+    public let sunSprites: [GModWorldSunSprite]
     public let diagnostics: GModWorldRenderMeshDiagnostics
 
     public init(
@@ -447,6 +587,8 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
         sky3D: GModWorldSky3D? = nil,
         skyVisibility: GModWorldSkyVisibility? = nil,
         lightmapAtlas: GModWorldLightmapAtlas? = nil,
+        environmentLighting: GModWorldEnvironmentLighting? = nil,
+        sunSprites: [GModWorldSunSprite] = [],
         diagnostics: GModWorldRenderMeshDiagnostics
     ) {
         self.vertices = vertices
@@ -458,6 +600,8 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
         self.sky3D = sky3D
         self.skyVisibility = skyVisibility
         self.lightmapAtlas = lightmapAtlas
+        self.environmentLighting = environmentLighting
+        self.sunSprites = sunSprites
         self.diagnostics = diagnostics
     }
 
@@ -492,6 +636,8 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
             .flatMap(Self.normalizedSkyName)
         let sky3DContext = try Self.sky3DContext(in: bsp)
         let skyVisibility = Self.skyVisibility(in: bsp)
+        let environmentLightingResult = Self.environmentLighting(in: bsp)
+        let sunSpriteResult = try Self.sunSprites(in: bsp)
         let allocationEstimate = try Self.allocationEstimate(
             from: bsp,
             firstFace: firstFace,
@@ -980,6 +1126,8 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
             sky3D: sky3D,
             skyVisibility: skyVisibility,
             lightmapAtlas: lightmapAtlas,
+            environmentLighting: environmentLightingResult.lighting,
+            sunSprites: sunSpriteResult.sprites,
             diagnostics: GModWorldRenderMeshDiagnostics(
                 sourceFaceCount: faceCount,
                 emittedFaceCount: emittedFaces,
@@ -995,6 +1143,8 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
                 lightmappedFaceCount: lightmappedFaces,
                 unlightmappedFaceCount: unlightmappedFaces,
                 lightmapAtlasStatus: lightmapResult.status,
+                environmentLightingStatus: environmentLightingResult.status,
+                sunSpriteStatus: sunSpriteResult.status,
                 ignoredAdditionalLightStyleFaceCount:
                     ignoredAdditionalLightStyleFaces,
                 ignoredBumpLightFaceCount: ignoredBumpLightFaces,
@@ -1007,6 +1157,387 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
                 waterBelowSurfaceFaceCount: waterBelowSurfaceFaces
             )
         )
+    }
+
+    struct SunSpriteCompilationResult: Sendable, Equatable {
+        let sprites: [GModWorldSunSprite]
+        let status: GModWorldSunSpriteStatus
+    }
+
+    /// Compiles only angle-driven `env_sun` entities. Source normally resolves
+    /// target-driven directions during `CSun::Activate`; doing that from the
+    /// static BSP text would bypass entity ownership and is therefore kept as
+    /// an explicit unsupported boundary.
+    private static func sunSprites(
+        in bsp: SourceBSP
+    ) throws -> SunSpriteCompilationResult {
+        sunSprites(from: try bsp.entities.parsedEntities())
+    }
+
+    static func sunSprites(
+        from entities: [SourceBSPParsedEntity]
+    ) -> SunSpriteCompilationResult {
+        let sunEntities = entities.filter {
+            $0.value(forKey: "classname")?
+                .caseInsensitiveCompare("env_sun") == .orderedSame
+        }
+        guard !sunEntities.isEmpty else {
+            return SunSpriteCompilationResult(
+                sprites: [],
+                status: .unavailableNoEntity
+            )
+        }
+
+        var sprites: [GModWorldSunSprite] = []
+        sprites.reserveCapacity(sunEntities.count)
+        for (entityIndex, entity) in sunEntities.enumerated() {
+            guard let rawUseAngles = entity.value(forKey: "use_angles"),
+                  Int(rawUseAngles.trimmingCharacters(in: .whitespacesAndNewlines)) == 1 else {
+                return SunSpriteCompilationResult(
+                    sprites: [],
+                    status: .unavailableUnsupportedTargetDirection(
+                        entityIndex: entityIndex
+                    )
+                )
+            }
+            guard let anglesText = entity.value(forKey: "angles"),
+                  let angles = sourceVector(from: anglesText) else {
+                return invalidSun(entityIndex: entityIndex, key: "angles")
+            }
+            guard let pitchText = entity.value(forKey: "pitch"),
+                  let pitch = finiteFloat(pitchText) else {
+                return invalidSun(entityIndex: entityIndex, key: "pitch")
+            }
+            let angle: Float
+            if let angleText = entity.value(forKey: "angle") {
+                guard let parsed = finiteFloat(angleText), parsed != -1, parsed != -2 else {
+                    return invalidSun(entityIndex: entityIndex, key: "angle")
+                }
+                angle = parsed
+            } else {
+                // CSun initializes m_flYaw to zero. SetupLightNormalFromProps
+                // then selects the explicitly authored `angles` yaw.
+                angle = 0
+            }
+            guard let direction = angleDrivenSunDirection(
+                angles: angles,
+                angle: angle,
+                pitch: pitch
+            ) else {
+                return invalidSun(entityIndex: entityIndex, key: "angles/pitch")
+            }
+
+            guard let sizeText = entity.value(forKey: "size"),
+                  let sizeInteger = Int(
+                      sizeText.trimmingCharacters(in: .whitespacesAndNewlines)
+                  ), (1...1_023).contains(sizeInteger) else {
+                return invalidSun(entityIndex: entityIndex, key: "size")
+            }
+            let size = Float(sizeInteger)
+            guard let overlaySizeText = entity.value(forKey: "overlaysize"),
+                  let overlaySizeInteger = Int(
+                      overlaySizeText.trimmingCharacters(in: .whitespacesAndNewlines)
+                  ), overlaySizeInteger == -1 ||
+                    (1...1_023).contains(overlaySizeInteger) else {
+                return invalidSun(entityIndex: entityIndex, key: "overlaysize")
+            }
+            let overlaySize = overlaySizeInteger == -1
+                ? size
+                : Float(overlaySizeInteger)
+
+            guard let renderColorText = entity.value(forKey: "rendercolor"),
+                  let renderColor = sourceColor(from: renderColorText),
+                  max(renderColor.x, max(renderColor.y, renderColor.z)) > 0 else {
+                return invalidSun(entityIndex: entityIndex, key: "rendercolor")
+            }
+            let maximumColor = max(
+                renderColor.x,
+                max(renderColor.y, renderColor.z)
+            )
+            let coreColor = renderColor / maximumColor
+            guard let overlayColorText = entity.value(forKey: "overlaycolor"),
+                  let rawOverlayColor = sourceColor(from: overlayColorText) else {
+                return invalidSun(entityIndex: entityIndex, key: "overlaycolor")
+            }
+            let overlayColor = rawOverlayColor.lengthSquared > 0
+                ? rawOverlayColor / 255
+                : coreColor
+
+            guard let coreMaterialText = entity.value(forKey: "material"),
+                  let coreMaterial = normalizedMaterialName(coreMaterialText) else {
+                return invalidSun(entityIndex: entityIndex, key: "material")
+            }
+            guard let overlayMaterialText = entity.value(forKey: "overlaymaterial"),
+                  let overlayMaterial = normalizedMaterialName(overlayMaterialText) else {
+                return invalidSun(entityIndex: entityIndex, key: "overlaymaterial")
+            }
+            guard let hdrScaleText = entity.value(forKey: "HDRColorScale"),
+                  let hdrScale = finiteFloat(hdrScaleText),
+                  hdrScale >= 0, hdrScale <= 100 else {
+                return invalidSun(entityIndex: entityIndex, key: "HDRColorScale")
+            }
+
+            sprites.append(GModWorldSunSprite(
+                sourceDirectionToSun: direction,
+                hdrColorScale: hdrScale,
+                core: GModWorldSunSpriteLayer(
+                    materialName: coreMaterial,
+                    displayRGB: coreColor,
+                    size: size
+                ),
+                overlay: GModWorldSunSpriteLayer(
+                    materialName: overlayMaterial,
+                    displayRGB: overlayColor,
+                    size: overlaySize
+                )
+            ))
+        }
+        return SunSpriteCompilationResult(
+            sprites: sprites,
+            status: .available(entityCount: sunEntities.count)
+        )
+    }
+
+    private static func invalidSun(
+        entityIndex: Int,
+        key: String
+    ) -> SunSpriteCompilationResult {
+        SunSpriteCompilationResult(
+            sprites: [],
+            status: .unavailableMissingOrInvalidKey(
+                entityIndex: entityIndex,
+                key: key
+            )
+        )
+    }
+
+    /// Source SDK `SetupLightNormalFromProps`, followed by the negation in
+    /// `CSun::Activate`. Zero angle/pitch selects the corresponding component
+    /// from the entity's explicit `angles` key.
+    private static func angleDrivenSunDirection(
+        angles: SourceVector3,
+        angle: Float,
+        pitch: Float
+    ) -> SourceVector3? {
+        let yawDegrees = angle == 0 ? angles.y : angle
+        let pitchDegrees = pitch == 0 ? angles.x : pitch
+        let yawRadians = yawDegrees * .pi / 180
+        let pitchRadians = pitchDegrees * .pi / 180
+        let cosinePitch = cos(pitchRadians)
+        let setupNormal = SourceVector3(
+            cos(yawRadians) * cosinePitch,
+            sin(yawRadians) * cosinePitch,
+            sin(pitchRadians)
+        )
+        guard isFinite(setupNormal),
+              setupNormal.lengthSquared > Float.ulpOfOne else { return nil }
+        return -setupNormal / setupNormal.length
+    }
+
+    private static func finiteFloat(_ text: String) -> Float? {
+        guard let value = Float(
+            text.trimmingCharacters(in: .whitespacesAndNewlines)
+        ), value.isFinite else { return nil }
+        return value
+    }
+
+    private static func sourceColor(from text: String) -> SourceVector3? {
+        let components = text.split(whereSeparator: { $0.isWhitespace })
+        guard components.count == 3 || components.count == 4 else { return nil }
+        var channels: [Int] = []
+        channels.reserveCapacity(components.count)
+        for component in components {
+            guard let channel = Int(component), (0...255).contains(channel) else {
+                return nil
+            }
+            channels.append(channel)
+        }
+        return SourceVector3(
+            Float(channels[0]),
+            Float(channels[1]),
+            Float(channels[2])
+        )
+    }
+
+    private static func normalizedMaterialName(_ text: String) -> String? {
+        var normalized = text
+            .replacingOccurrences(of: "\\", with: "/")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if normalized.hasPrefix("materials/") {
+            normalized.removeFirst("materials/".count)
+        }
+        if normalized.hasSuffix(".vmt") {
+            normalized.removeLast(".vmt".count)
+        }
+        let components = normalized.split(
+            separator: "/",
+            omittingEmptySubsequences: false
+        )
+        guard !normalized.isEmpty,
+              !normalized.hasPrefix("/"),
+              !normalized.contains(":"),
+              components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
+            return nil
+        }
+        return normalized
+    }
+
+    private struct EnvironmentLightingResult {
+        let lighting: GModWorldEnvironmentLighting?
+        let status: GModWorldEnvironmentLightingStatus
+    }
+
+    private struct CompiledWorldLight {
+        let intensity: SourceVector3
+        let normal: SourceVector3
+        let type: Int32
+    }
+
+    /// `dworldlight_t` from Source SDK 2013 `src/public/bspfile.h` is 88
+    /// little-endian bytes. The renderer consumes only the fields whose binary
+    /// contract is required here; the remaining attenuation/entity fields stay
+    /// untouched in the raw BSP lump.
+    private static let compiledWorldLightRecordByteCount = 88
+    private static let compiledSkylightType: Int32 = 3
+    private static let compiledSkyAmbientType: Int32 = 5
+
+    private static func environmentLighting(
+        in bsp: SourceBSP
+    ) -> EnvironmentLightingResult {
+        let source: GModWorldEnvironmentLightingSource =
+            !bsp.facesHDR.isEmpty && !bsp.lightingHDR.isEmpty
+                ? .highDynamicRange
+                : .standardDynamicRange
+        let lump = bsp.lumps[source.lumpIndex]
+        let descriptor = lump.descriptor
+        guard !descriptor.isCompressed else {
+            return EnvironmentLightingResult(
+                lighting: nil,
+                status: .unavailableCompressedLump(
+                    source: source,
+                    declaredUncompressedByteCount: descriptor.uncompressedSize
+                )
+            )
+        }
+        guard descriptor.version == 0 else {
+            return EnvironmentLightingResult(
+                lighting: nil,
+                status: .unavailableUnsupportedLumpVersion(
+                    source: source,
+                    actual: descriptor.version
+                )
+            )
+        }
+        let data = lump.data
+        guard !data.isEmpty else {
+            return EnvironmentLightingResult(
+                lighting: nil,
+                status: .unavailableNoCompiledWorldLights(source: source)
+            )
+        }
+        guard data.count.isMultiple(of: compiledWorldLightRecordByteCount) else {
+            return EnvironmentLightingResult(
+                lighting: nil,
+                status: .unavailableInvalidRecordByteCount(
+                    source: source,
+                    actual: data.count,
+                    recordByteCount: compiledWorldLightRecordByteCount
+                )
+            )
+        }
+
+        let records: [CompiledWorldLight] = data.withUnsafeBytes { bytes in
+            var result: [CompiledWorldLight] = []
+            result.reserveCapacity(data.count / compiledWorldLightRecordByteCount)
+            for offset in stride(
+                from: 0,
+                to: data.count,
+                by: compiledWorldLightRecordByteCount
+            ) {
+                result.append(CompiledWorldLight(
+                    intensity: SourceVector3(
+                        littleEndianFloat(bytes, at: offset + 12),
+                        littleEndianFloat(bytes, at: offset + 16),
+                        littleEndianFloat(bytes, at: offset + 20)
+                    ),
+                    normal: SourceVector3(
+                        littleEndianFloat(bytes, at: offset + 24),
+                        littleEndianFloat(bytes, at: offset + 28),
+                        littleEndianFloat(bytes, at: offset + 32)
+                    ),
+                    type: littleEndianInt32(bytes, at: offset + 40)
+                ))
+            }
+            return result
+        }
+        let skylights = records.filter { $0.type == compiledSkylightType }
+        let skyAmbientLights = records.filter {
+            $0.type == compiledSkyAmbientType
+        }
+        guard skylights.count == 1, skyAmbientLights.count == 1 else {
+            return EnvironmentLightingResult(
+                lighting: nil,
+                status: .unavailableAmbiguousGlobalLights(
+                    source: source,
+                    skylightCount: skylights.count,
+                    skyAmbientCount: skyAmbientLights.count
+                )
+            )
+        }
+        let skylight = skylights[0]
+        let skyAmbient = skyAmbientLights[0]
+        guard isFinite(skylight.intensity),
+              isFinite(skylight.normal),
+              isFinite(skyAmbient.intensity),
+              skylight.normal.lengthSquared > Float.ulpOfOne,
+              nonnegative(skylight.intensity),
+              nonnegative(skyAmbient.intensity) else {
+            return EnvironmentLightingResult(
+                lighting: nil,
+                status: .unavailableInvalidGlobalLightValue(source: source)
+            )
+        }
+        return EnvironmentLightingResult(
+            lighting: GModWorldEnvironmentLighting(
+                sourceDirectionFromLight: skylight.normal,
+                directLinearRGB: skylight.intensity,
+                ambientLinearRGB: skyAmbient.intensity,
+                source: source
+            ),
+            status: .available(
+                source: source,
+                worldLightRecordCount: records.count
+            )
+        )
+    }
+
+    private static func littleEndianInt32(
+        _ bytes: UnsafeRawBufferPointer,
+        at offset: Int
+    ) -> Int32 {
+        Int32(bitPattern: littleEndianUInt32(bytes, at: offset))
+    }
+
+    private static func littleEndianFloat(
+        _ bytes: UnsafeRawBufferPointer,
+        at offset: Int
+    ) -> Float {
+        Float(bitPattern: littleEndianUInt32(bytes, at: offset))
+    }
+
+    private static func littleEndianUInt32(
+        _ bytes: UnsafeRawBufferPointer,
+        at offset: Int
+    ) -> UInt32 {
+        UInt32(bytes[offset]) |
+            UInt32(bytes[offset + 1]) << 8 |
+            UInt32(bytes[offset + 2]) << 16 |
+            UInt32(bytes[offset + 3]) << 24
+    }
+
+    private static func nonnegative(_ value: SourceVector3) -> Bool {
+        value.x >= 0 && value.y >= 0 && value.z >= 0
     }
 
     static func allocationEstimate(

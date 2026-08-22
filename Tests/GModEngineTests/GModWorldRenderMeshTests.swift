@@ -4,6 +4,115 @@ import XCTest
 @testable import GModGameSession
 
 final class GModWorldRenderMeshTests: XCTestCase {
+    func testBundledMapsCompileAuthoredAngleDrivenSunSprites() throws {
+        let expectations: [(
+            map: GModBundledMap,
+            direction: SourceVector3,
+            coreColor: SourceVector3,
+            overlayColor: SourceVector3
+        )] = [
+            (
+                .construct,
+                SourceVector3(-0.3778211, 0.5200261, 0.76604444),
+                SourceVector3(1, 240.0 / 241.0, 199.0 / 241.0),
+                SourceVector3(244.0 / 255.0, 242.0 / 255.0, 236.0 / 255.0)
+            ),
+            (
+                .flatgrass,
+                SourceVector3(0.4145188, 0.27959645, 0.8660254),
+                SourceVector3(1, 1, 1),
+                SourceVector3(1, 1, 1)
+            ),
+        ]
+
+        for expectation in expectations {
+            let bsp = try SourceBSP(
+                data: GModGameAssets.data(for: expectation.map, kind: .bsp)
+            )
+            let mesh = try GModWorldRenderMesh.build(from: bsp)
+            XCTAssertEqual(
+                mesh.diagnostics.sunSpriteStatus,
+                .available(entityCount: 1)
+            )
+            let sun = try XCTUnwrap(mesh.sunSprites.first)
+            XCTAssertEqual(mesh.sunSprites.count, 1)
+            assertVector(sun.sourceDirectionToSun, equals: expectation.direction)
+            XCTAssertEqual(sun.hdrColorScale, 1)
+            XCTAssertEqual(sun.core.materialName, "sprites/light_glow02_add_noz")
+            XCTAssertEqual(sun.overlay.materialName, "sprites/light_glow02_add_noz")
+            XCTAssertEqual(sun.core.size, 16)
+            XCTAssertEqual(sun.overlay.size, 16)
+            assertVector(sun.core.displayRGB, equals: expectation.coreColor)
+            assertVector(sun.overlay.displayRGB, equals: expectation.overlayColor)
+        }
+    }
+
+    func testSunSpriteCompilerDrawsNothingWithoutEntityOrActivatedDirection() throws {
+        let noSun = GModWorldRenderMesh.sunSprites(from: try SourceBSPEntityText(
+            rawBytes: Data("{\n\"classname\" \"worldspawn\"\n}\n\0".utf8)
+        ).parsedEntities())
+        XCTAssertEqual(noSun.sprites, [])
+        XCTAssertEqual(noSun.status, .unavailableNoEntity)
+
+        let targetDriven = GModWorldRenderMesh.sunSprites(from: try SourceBSPEntityText(
+            rawBytes: Data(
+                "{\n\"classname\" \"env_sun\"\n\"use_angles\" \"0\"\n}\n\0".utf8
+            )
+        ).parsedEntities())
+        XCTAssertEqual(targetDriven.sprites, [])
+        XCTAssertEqual(
+            targetDriven.status,
+            .unavailableUnsupportedTargetDirection(entityIndex: 0)
+        )
+    }
+
+    func testBundledMapsUseCompiledHDRLightEnvironmentWorldLights() throws {
+        let expectations: [(
+            map: GModBundledMap,
+            recordCount: Int,
+            directionFromLight: SourceVector3,
+            direct: SourceVector3,
+            ambient: SourceVector3
+        )] = [
+            (
+                .construct,
+                138,
+                SourceVector3(0.3287, -0.4524, -0.8290),
+                SourceVector3(1.5658, 1.4542, 1.2444),
+                SourceVector3(0.3083, 0.4545, 0.5474)
+            ),
+            (
+                .flatgrass,
+                3,
+                SourceVector3(-0.2347, -0.4415, -0.8660),
+                SourceVector3(0.9222, 0.8898, 0.8346),
+                SourceVector3(0.3079, 0.3797, 0.4083)
+            ),
+        ]
+
+        for expectation in expectations {
+            let bsp = try SourceBSP(
+                data: GModGameAssets.data(for: expectation.map, kind: .bsp)
+            )
+            let mesh = try GModWorldRenderMesh.build(from: bsp)
+            let lighting = try XCTUnwrap(mesh.environmentLighting)
+            XCTAssertEqual(lighting.source, .highDynamicRange)
+            XCTAssertEqual(
+                mesh.diagnostics.environmentLightingStatus,
+                .available(
+                    source: .highDynamicRange,
+                    worldLightRecordCount: expectation.recordCount
+                )
+            )
+            assertVector(
+                lighting.sourceDirectionFromLight,
+                equals: expectation.directionFromLight
+            )
+            assertVector(lighting.directLinearRGB, equals: expectation.direct)
+            assertVector(lighting.ambientLinearRGB, equals: expectation.ambient)
+        }
+    }
+
     func testBundledMapsRetainDominantOrdinaryWorldRanges() throws {
         let expectations: [
             (map: GModBundledMap, worldIndices: Int, sky3DIndices: Int)
@@ -492,6 +601,18 @@ final class GModWorldRenderMeshTests: XCTestCase {
     private func appendInt32(_ value: Int32, to data: inout Data) {
         var littleEndian = value.littleEndian
         withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
+    }
+
+    private func assertVector(
+        _ actual: SourceVector3,
+        equals expected: SourceVector3,
+        accuracy: Float = 0.001,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertEqual(actual.x, expected.x, accuracy: accuracy, file: file, line: line)
+        XCTAssertEqual(actual.y, expected.y, accuracy: accuracy, file: file, line: line)
+        XCTAssertEqual(actual.z, expected.z, accuracy: accuracy, file: file, line: line)
     }
 
     private func assertConstructFaceZeroSourceSemantics(
