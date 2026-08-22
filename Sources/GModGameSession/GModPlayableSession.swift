@@ -293,6 +293,7 @@ public struct GModPlayableFixedTickReport: Equatable, Sendable {
     public let movement: GModPlayableMovementResult
     public let inputButtons: GModPlayableInputButtonReport
     public let weaponGameplay: SourceCanonicalWeaponGameplayTickReport
+    public let physgunGameplay: SourceCanonicalPhysgunTickReport
     public let server: GMLuaSourceRuntimeRunReport
     public let propPhysics: SourceCanonicalPropPhysicsStepSnapshot
     public let client: GMLuaSourceRuntimeRunReport
@@ -445,6 +446,8 @@ public final class GModPlayableSession {
         GModFirstPersonViewModelSceneProjector?
     private let propPhysicsCoordinator: SourceCanonicalPropPhysicsCoordinator
     private let weaponGameplayController: SourceCanonicalWeaponGameplayController
+    private let physgunGameplayController:
+        SourceCanonicalPhysgunGameplayController
     private var nextCommandNumber: Int32 = 1
     private var closedStorage = false
 
@@ -1015,8 +1018,17 @@ public final class GModPlayableSession {
                     runtime: server,
                     host: sourceAdapter
                 )
+            let loadedPhysgunGameplayController =
+                SourceCanonicalPhysgunGameplayController(
+                    runtime: server,
+                    host: sourceAdapter
+                )
 
             try server.loadFile("lua/includes/init.lua")
+            try SourceCanonicalPhysgunWeaponDefinition.install(
+                into: server,
+                host: sourceAdapter
+            )
             // The original extension intentionally defines these two methods
             // in Lua. Rebind only that pair after include initialization so
             // PlayerSpawn authors canonical SERVER state rather than a
@@ -1097,6 +1109,7 @@ public final class GModPlayableSession {
             progress(.init(stage: .startingClientLua))
 
             try client.loadFile("lua/includes/init.lua")
+            try SourceCanonicalPhysgunWeaponDefinition.install(into: client)
             try SourceCanonicalWeaponCombatBridge
                 .installPlayerFlashlightMethods(into: client)
             progress(.init(stage: .loadingClientSandbox))
@@ -1157,6 +1170,7 @@ public final class GModPlayableSession {
             clientToolActionBridge = loadedClientToolActionBridge
             propPhysicsCoordinator = loadedPropPhysicsCoordinator
             weaponGameplayController = loadedWeaponGameplayController
+            physgunGameplayController = loadedPhysgunGameplayController
             worldWalkSolver = SourceWorldWalkSolver(
                 collisionProvider: loadedWorldWalkCollisionProvider,
                 configuration: SourceWorldWalkConfiguration(
@@ -1346,6 +1360,9 @@ public final class GModPlayableSession {
         let weaponGameplay = weaponGameplayController.runServerTick(
             playerIdentity: playerIdentity
         )
+        let physgunGameplay = physgunGameplayController.runServerTick(
+            playerIdentity: playerIdentity
+        )
         let serverReport = try sourceAdapter.runServerFixedTick()
         let physicsInputs = try sourceAdapter.prepareCanonicalPropPhysicsStep()
         let propPhysics = try propPhysicsCoordinator.step(
@@ -1363,6 +1380,7 @@ public final class GModPlayableSession {
             movement: movement,
             inputButtons: inputButtons,
             weaponGameplay: weaponGameplay,
+            physgunGameplay: physgunGameplay,
             server: serverReport,
             propPhysics: propPhysics,
             client: clientReport,

@@ -485,6 +485,13 @@ public enum SourceCanonicalEntityGLuaBridge {
             )
             return [.number(Double(snapshot.collisionGroup))]
         }
+        try setMethod("Entity:GetPersistent", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Entity:GetPersistent"
+            )
+            return [.boolean(snapshot.isPersistent)]
+        }
         try setMethod("Entity:IsConstraint", on: entityMetatable) { arguments in
             let snapshot = try requiredSnapshot(
                 arguments.first,
@@ -1016,6 +1023,23 @@ public enum SourceCanonicalEntityGLuaBridge {
             let host = try requiredHost("Entity:SetCollisionGroup")
             _ = try host.updateCanonicalEntity(snapshot.identity) { candidate in
                 candidate.collisionGroup = Int32(value)
+            }
+            return []
+        }
+        try setMethod("Entity:SetPersistent", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Entity:SetPersistent"
+            )
+            guard arguments.indices.contains(1),
+                  case let .boolean(value) = arguments[1] else {
+                throw LuaError.runtime(
+                    "bad argument #1 to 'Entity:SetPersistent' (boolean expected)"
+                )
+            }
+            let host = try requiredHost("Entity:SetPersistent")
+            _ = try host.updateCanonicalEntity(snapshot.identity) { candidate in
+                candidate.isPersistent = value
             }
             return []
         }

@@ -665,6 +665,10 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
     /// renderer. Keeping it canonical prevents a SERVER removal transition
     /// from becoming a realm-local visual side table.
     public var isNoDraw: Bool
+    /// Sandbox persistence is an authoritative Entity property. It is kept
+    /// on the canonical full EHANDLE so `GM:PhysgunPickup` and duplicator Lua
+    /// never fall back to a realm-local flag or inherit a reused slot's value.
+    public var isPersistent: Bool
     /// Source color32 modulation, render mode, and RenderFX. RenderFX is
     /// retained as authored state even when a renderer does not yet animate
     /// that effect.
@@ -722,6 +726,7 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
         collisionGroup: Int32 = 0,
         isNotSolid: Bool = false,
         isNoDraw: Bool = false,
+        isPersistent: Bool = false,
         renderState: SourceEntityRenderState = .init(),
         solidType: SourceEntitySolidType = .none,
         moveType: SourceMoveType = .none,
@@ -747,6 +752,7 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
         self.collisionGroup = collisionGroup
         self.isNotSolid = isNotSolid
         self.isNoDraw = isNoDraw
+        self.isPersistent = isPersistent
         self.renderState = renderState
         self.solidType = solidType
         self.moveType = moveType
@@ -879,6 +885,7 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
     public let collisionGroup: Int32
     public let isNotSolid: Bool
     public let isNoDraw: Bool
+    public let isPersistent: Bool
     public let renderState: SourceEntityRenderState
     public let solidType: SourceEntitySolidType
     public let moveType: SourceMoveType
@@ -911,6 +918,7 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         collisionGroup: Int32 = 0,
         isNotSolid: Bool = false,
         isNoDraw: Bool = false,
+        isPersistent: Bool = false,
         renderState: SourceEntityRenderState = .init(),
         solidType: SourceEntitySolidType,
         moveType: SourceMoveType,
@@ -942,6 +950,7 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         self.collisionGroup = collisionGroup
         self.isNotSolid = isNotSolid
         self.isNoDraw = isNoDraw
+        self.isPersistent = isPersistent
         self.renderState = renderState
         self.solidType = solidType
         self.moveType = moveType
@@ -1163,6 +1172,7 @@ public final class SourceCanonicalEntity: SourceEntity {
             collisionGroup: state.collisionGroup,
             isNotSolid: state.isNotSolid,
             isNoDraw: state.isNoDraw,
+            isPersistent: state.isPersistent,
             renderState: state.renderState,
             solidType: state.solidType,
             moveType: state.moveType,
