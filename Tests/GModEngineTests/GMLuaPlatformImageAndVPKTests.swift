@@ -392,6 +392,51 @@ final class GMLuaPlatformImageAndVPKTests: XCTestCase {
         ])
     }
 
+    func testSourceMaterialResolverRetainsTerrainShaderTextureContracts() throws {
+        let files: [String: Data] = [
+            "materials/synthetic/terrain.vmt": Data(
+                #""WorldVertexTransition" { "$basetexture" "synthetic/base" "$basetexture2" "synthetic/rock" "$basetexturetransform2" "center .5 .5 scale 1.2 1.3 rotate 30 translate .1 .2" "$blendmodulatetexture" "synthetic/blend" "$detail" "synthetic/clouds" "$detailscale" "0.125" "$detailblendfactor" "0.5" "$detailblendmode" "7" "$detailtexturetransform" "center .5 .5 scale 2 3 rotate 0 translate 0 0" }"#.utf8
+            ),
+            "materials/synthetic/base.vtf": makeRGBA8888VTF(
+                width: 1,
+                height: 1,
+                pixels: [10, 20, 30, 255]
+            ),
+        ]
+        let resolver = GMLuaSourceMaterialResolver { path in
+            files[path.lowercased()]
+        }
+
+        let material = try resolver.resolve(named: "synthetic/terrain")
+        XCTAssertEqual(material.detailParameters, .init(
+            textureName: "materials/synthetic/clouds.vtf",
+            scale: 0.125,
+            blendFactor: 0.5,
+            blendMode: 7,
+            textureTransform: .textureTransform(
+                center: .init(x: 0.5, y: 0.5),
+                scale: .init(x: 2, y: 3),
+                rotationDegrees: 0,
+                translation: .init(x: 0, y: 0)
+            )
+        ))
+        XCTAssertEqual(material.worldVertexTransitionParameters, .init(
+            baseTexture2Name: "materials/synthetic/rock.vtf",
+            baseTextureTransform2: .textureTransform(
+                center: .init(x: 0.5, y: 0.5),
+                scale: .init(x: 1.2, y: 1.3),
+                rotationDegrees: 30,
+                translation: .init(x: 0.1, y: 0.2)
+            ),
+            blendModulateTextureName: "materials/synthetic/blend.vtf"
+        ))
+        XCTAssertEqual(
+            material.decodedByteCount,
+            4,
+            "secondary terrain bindings stay lazy until a renderer consumes them"
+        )
+    }
+
     func testSourceMaterialResolverRetainsAuthoredVTFMipChainAndFlags() throws {
         let base = Array(repeating: UInt8(10), count: 4 * 4 * 4)
         let mip1 = Array(repeating: UInt8(20), count: 2 * 2 * 4)

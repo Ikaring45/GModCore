@@ -67,6 +67,51 @@ public struct GMLuaSourceEntityColorProxy: Sendable, Equatable {
     }
 }
 
+/// Authored `$detail` shader inputs retained without resolving or decoding the
+/// secondary VTF during an ordinary material lookup. World render adapters can
+/// request the texture through `resolveTexture` only when the selected shader
+/// path actually consumes it.
+public struct GMLuaSourceDetailMaterialParameters: Sendable, Equatable {
+    public let textureName: String
+    public let scale: Float?
+    public let blendFactor: Float?
+    public let blendMode: Int?
+    public let textureTransform: SourceVMTMatrix?
+
+    public init(
+        textureName: String,
+        scale: Float?,
+        blendFactor: Float?,
+        blendMode: Int?,
+        textureTransform: SourceVMTMatrix?
+    ) {
+        self.textureName = textureName
+        self.scale = scale
+        self.blendFactor = blendFactor
+        self.blendMode = blendMode
+        self.textureTransform = textureTransform
+    }
+}
+
+/// Exact texture bindings used by Source's `WorldVertexTransition` material.
+/// The BSP displacement alpha channel is kept separately on render vertices;
+/// this contract deliberately does not guess shader blend math.
+public struct GMLuaSourceWorldVertexTransitionParameters: Sendable, Equatable {
+    public let baseTexture2Name: String
+    public let baseTextureTransform2: SourceVMTMatrix?
+    public let blendModulateTextureName: String?
+
+    public init(
+        baseTexture2Name: String,
+        baseTextureTransform2: SourceVMTMatrix?,
+        blendModulateTextureName: String?
+    ) {
+        self.baseTexture2Name = baseTexture2Name
+        self.baseTextureTransform2 = baseTextureTransform2
+        self.blendModulateTextureName = blendModulateTextureName
+    }
+}
+
 /// Complete static result shared by GLua resource handles and renderer adapters.
 /// `rgbaBytes == nil` is intentional for real VMTs whose base texture is an
 /// engine render target or is absent from the mounted search paths.
@@ -82,6 +127,9 @@ public struct GMLuaResolvedSourceMaterial: Sendable, Equatable {
     /// Exact supported entity-colour proxy declarations from the resolved VMT.
     /// They remain ordered because duplicate Source proxy blocks are legal.
     public let entityColorProxies: [GMLuaSourceEntityColorProxy]
+    public let detailParameters: GMLuaSourceDetailMaterialParameters?
+    public let worldVertexTransitionParameters:
+        GMLuaSourceWorldVertexTransitionParameters?
 
     public init(
         metadata: GMLuaMaterialMetadata,
@@ -89,13 +137,19 @@ public struct GMLuaResolvedSourceMaterial: Sendable, Equatable {
         sourceTextureFormat: SourceVTFImageFormat? = nil,
         sourceTextureFlags: SourceVTFTextureFlags? = nil,
         mipImages: [SourceVTFDecodedImage] = [],
-        entityColorProxies: [GMLuaSourceEntityColorProxy] = []
+        entityColorProxies: [GMLuaSourceEntityColorProxy] = [],
+        detailParameters: GMLuaSourceDetailMaterialParameters? = nil,
+        worldVertexTransitionParameters:
+            GMLuaSourceWorldVertexTransitionParameters? = nil
     ) {
         self.metadata = metadata
         self.rgbaBytes = rgbaBytes
         self.sourceTextureFormat = sourceTextureFormat
         self.sourceTextureFlags = sourceTextureFlags
         self.entityColorProxies = entityColorProxies
+        self.detailParameters = detailParameters
+        self.worldVertexTransitionParameters =
+            worldVertexTransitionParameters
         if mipImages.isEmpty,
            let dimensions = metadata.dimensions,
            let rgbaBytes {
@@ -438,6 +492,9 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
         }
         let shader = LuaString(document.shader)
         let entityColorProxies = Self.entityColorProxies(in: document)
+        let detailParameters = try Self.detailParameters(in: document)
+        let worldVertexTransitionParameters = try Self
+            .worldVertexTransitionParameters(in: document)
         guard let baseTextureValue = try document.string(named: "$basetexture"),
               !baseTextureValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return GMLuaResolvedSourceMaterial(
@@ -450,7 +507,10 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
                     status: .materialWithoutBaseTexture
                 ),
                 rgbaBytes: nil,
-                entityColorProxies: entityColorProxies
+                entityColorProxies: entityColorProxies,
+                detailParameters: detailParameters,
+                worldVertexTransitionParameters:
+                    worldVertexTransitionParameters
             )
         }
         guard let baseTexturePath = try Self.normalizedVTFPath(baseTextureValue) else {
@@ -467,7 +527,10 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
                     status: .baseTextureMissing
                 ),
                 rgbaBytes: nil,
-                entityColorProxies: entityColorProxies
+                entityColorProxies: entityColorProxies,
+                detailParameters: detailParameters,
+                worldVertexTransitionParameters:
+                    worldVertexTransitionParameters
             )
         }
 
@@ -494,7 +557,89 @@ public final class GMLuaSourceMaterialResolver: GMLuaMaterialMetadataResolver,
             sourceTextureFormat: vtf.imageFormat,
             sourceTextureFlags: vtf.flags,
             mipImages: mipImages,
-            entityColorProxies: entityColorProxies
+            entityColorProxies: entityColorProxies,
+            detailParameters: detailParameters,
+            worldVertexTransitionParameters: worldVertexTransitionParameters
+        )
+    }
+
+    private static func detailParameters(
+        in document: SourceVMTDocument
+    ) throws -> GMLuaSourceDetailMaterialParameters? {
+        guard let rawTexture = try document.string(named: "$detail"),
+              !rawTexture.trimmingCharacters(
+                in: .whitespacesAndNewlines
+              ).isEmpty else { return nil }
+        guard let textureName = try normalizedVTFPath(rawTexture) else {
+            throw GMLuaSourceMaterialError.unsafeLogicalPath(rawTexture)
+        }
+
+        func float(_ name: String) throws -> Float? {
+            guard let number = try document.number(named: name) else {
+                return nil
+            }
+            let value = Float(number)
+            guard value.isFinite else {
+                throw SourceVMTError.invalidNumber(name, String(number))
+            }
+            return value
+        }
+
+        let blendMode: Int?
+        if let number = try document.number(named: "$detailblendmode") {
+            guard let value = Int(exactly: number) else {
+                throw SourceVMTError.invalidNumber(
+                    "$detailblendmode",
+                    String(number)
+                )
+            }
+            blendMode = value
+        } else {
+            blendMode = nil
+        }
+
+        return GMLuaSourceDetailMaterialParameters(
+            textureName: textureName,
+            scale: try float("$detailscale"),
+            blendFactor: try float("$detailblendfactor"),
+            blendMode: blendMode,
+            textureTransform: try document.matrix(
+                named: "$detailtexturetransform"
+            )
+        )
+    }
+
+    private static func worldVertexTransitionParameters(
+        in document: SourceVMTDocument
+    ) throws -> GMLuaSourceWorldVertexTransitionParameters? {
+        guard document.shader.caseInsensitiveCompare(
+            "WorldVertexTransition"
+        ) == .orderedSame,
+        let rawBaseTexture2 = try document.string(named: "$basetexture2"),
+        !rawBaseTexture2.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).isEmpty else { return nil }
+        guard let baseTexture2Name = try normalizedVTFPath(rawBaseTexture2) else {
+            throw GMLuaSourceMaterialError.unsafeLogicalPath(rawBaseTexture2)
+        }
+
+        let blendModulateTextureName: String?
+        if let rawBlend = try document.string(named: "$blendmodulatetexture"),
+           !rawBlend.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            guard let normalized = try normalizedVTFPath(rawBlend) else {
+                throw GMLuaSourceMaterialError.unsafeLogicalPath(rawBlend)
+            }
+            blendModulateTextureName = normalized
+        } else {
+            blendModulateTextureName = nil
+        }
+
+        return GMLuaSourceWorldVertexTransitionParameters(
+            baseTexture2Name: baseTexture2Name,
+            baseTextureTransform2: try document.matrix(
+                named: "$basetexturetransform2"
+            ),
+            blendModulateTextureName: blendModulateTextureName
         )
     }
 
