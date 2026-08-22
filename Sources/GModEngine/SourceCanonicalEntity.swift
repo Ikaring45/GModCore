@@ -84,6 +84,11 @@ public struct SourceEntityMotionState: Equatable, Sendable {
     /// snapshot so the next fixed tick does not depend on a host-side mirror.
     public var ladderNormal: SourceVector3
     public var isAlive: Bool
+    /// Player-only engine values behind the stock speed/jump GLua ABI. Nil on
+    /// world, prop, and Weapon entities so snapshots cannot silently treat a
+    /// non-Player as movement-configurable.
+    public var playerMovementSettings:
+        SourceCanonicalPlayerMovementSettings?
 
     public init(
         linearVelocity: SourceVector3 = .zero,
@@ -98,7 +103,9 @@ public struct SourceEntityMotionState: Equatable, Sendable {
         waterLevel: SourcePlayerWaterLevel = .notInWater,
         isDucked: Bool = false,
         ladderNormal: SourceVector3 = .zero,
-        isAlive: Bool = true
+        isAlive: Bool = true,
+        playerMovementSettings:
+            SourceCanonicalPlayerMovementSettings? = nil
     ) {
         self.linearVelocity = linearVelocity
         self.angularVelocity = angularVelocity
@@ -113,6 +120,7 @@ public struct SourceEntityMotionState: Equatable, Sendable {
         self.isDucked = isDucked
         self.ladderNormal = ladderNormal
         self.isAlive = isAlive
+        self.playerMovementSettings = playerMovementSettings
     }
 
     fileprivate var isFinite: Bool {
@@ -124,7 +132,8 @@ public struct SourceEntityMotionState: Equatable, Sendable {
             Self.isFinite(ladderNormal) &&
             entityGravity.isFinite &&
             surfaceFriction.isFinite && surfaceFriction >= 0 &&
-            waterJumpTime.isFinite && waterJumpTime >= 0
+            waterJumpTime.isFinite && waterJumpTime >= 0 &&
+            (playerMovementSettings?.isFiniteAndNonNegative ?? true)
     }
 
     private static func isFinite(_ vector: SourceVector3) -> Bool {
@@ -644,6 +653,10 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
     /// renderer. Keeping it canonical prevents a SERVER removal transition
     /// from becoming a realm-local visual side table.
     public var isNoDraw: Bool
+    /// Source color32 modulation, render mode, and RenderFX. RenderFX is
+    /// retained as authored state even when a renderer does not yet animate
+    /// that effect.
+    public var renderState: SourceEntityRenderState
     public var solidType: SourceEntitySolidType
     public var moveType: SourceMoveType
     /// Studio skin-family selection. Range validation against the loaded MDL
@@ -697,6 +710,7 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
         collisionGroup: Int32 = 0,
         isNotSolid: Bool = false,
         isNoDraw: Bool = false,
+        renderState: SourceEntityRenderState = .init(),
         solidType: SourceEntitySolidType = .none,
         moveType: SourceMoveType = .none,
         skin: Int = 0,
@@ -721,6 +735,7 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
         self.collisionGroup = collisionGroup
         self.isNotSolid = isNotSolid
         self.isNoDraw = isNoDraw
+        self.renderState = renderState
         self.solidType = solidType
         self.moveType = moveType
         self.skin = skin
@@ -798,6 +813,9 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
             // Source SDK's standing VEC_VIEW is 64 units above the player
             // origin. Ducking can later authoritatively change this value.
             return Self(
+                motion: SourceEntityMotionState(
+                    playerMovementSettings: .legacyWorldWalkDefaults
+                ),
                 solidType: .boundingBox,
                 moveType: .walk,
                 viewOffset: SourceVector3(0, 0, 64),
@@ -848,6 +866,7 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
     public let collisionGroup: Int32
     public let isNotSolid: Bool
     public let isNoDraw: Bool
+    public let renderState: SourceEntityRenderState
     public let solidType: SourceEntitySolidType
     public let moveType: SourceMoveType
     public let skin: Int
@@ -879,6 +898,7 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         collisionGroup: Int32 = 0,
         isNotSolid: Bool = false,
         isNoDraw: Bool = false,
+        renderState: SourceEntityRenderState = .init(),
         solidType: SourceEntitySolidType,
         moveType: SourceMoveType,
         lifecycle: SourceCanonicalEntityLifecycle,
@@ -909,6 +929,7 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         self.collisionGroup = collisionGroup
         self.isNotSolid = isNotSolid
         self.isNoDraw = isNoDraw
+        self.renderState = renderState
         self.solidType = solidType
         self.moveType = moveType
         self.skin = skin
@@ -1120,6 +1141,7 @@ public final class SourceCanonicalEntity: SourceEntity {
             collisionGroup: state.collisionGroup,
             isNotSolid: state.isNotSolid,
             isNoDraw: state.isNoDraw,
+            renderState: state.renderState,
             solidType: state.solidType,
             moveType: state.moveType,
             lifecycle: overrideLifecycle ?? lifecycle,
@@ -1600,6 +1622,13 @@ public final class SourceCanonicalEntityStore {
             )
         }
         guard state.motion.isFinite else {
+            throw SourceCanonicalEntityError.invalidMotion
+        }
+        if kind == .player {
+            guard state.motion.playerMovementSettings != nil else {
+                throw SourceCanonicalEntityError.invalidMotion
+            }
+        } else if state.motion.playerMovementSettings != nil {
             throw SourceCanonicalEntityError.invalidMotion
         }
         guard state.skin >= 0, state.skin <= Int(Int32.max) else {

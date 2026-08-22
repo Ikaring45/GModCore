@@ -136,6 +136,26 @@ public enum SourceCanonicalEntityGLuaBridge {
         let registryBox = SourceCanonicalEntityLuaWeakObject(registry)
         let typeSystemBox = SourceCanonicalEntityLuaWeakObject(typeSystem)
 
+        // Public GLua spellings for Source SDK `RenderMode_t`. Installing the
+        // complete native enum keeps the bundled colour stool's alpha branch
+        // and later renderer consumers on one numeric contract.
+        let renderModeConstants: [(String, SourceEntityRenderMode)] = [
+            ("RENDERMODE_NORMAL", .normal),
+            ("RENDERMODE_TRANSCOLOR", .transColor),
+            ("RENDERMODE_TRANSTEXTURE", .transTexture),
+            ("RENDERMODE_GLOW", .glow),
+            ("RENDERMODE_TRANSALPHA", .transAlpha),
+            ("RENDERMODE_TRANSADD", .transAdd),
+            ("RENDERMODE_ENVIRONMENTAL", .environmental),
+            ("RENDERMODE_TRANSADDFRAMEBLEND", .transAddFrameBlend),
+            ("RENDERMODE_TRANSALPHAADD", .transAlphaAdd),
+            ("RENDERMODE_WORLDGLOW", .worldGlow),
+            ("RENDERMODE_NONE", .none),
+        ]
+        for (name, mode) in renderModeConstants {
+            state.setGlobal(name, value: .number(Double(mode.rawValue)))
+        }
+
         func native(
             _ name: String,
             _ body: @escaping LuaNativeFunction
@@ -445,6 +465,37 @@ public enum SourceCanonicalEntityGLuaBridge {
             let snapshot = try requiredSnapshot(arguments.first, function: "Entity:GetSkin")
             return [.number(Double(snapshot.skin))]
         }
+        // `lua/includes/extensions/entity.lua` implements the public
+        // Entity:GetColor/SetColor methods over these native four-part APIs.
+        // Returning four numbers lets the bundled Color constructor and Color
+        // metatable remain the only Lua color representation.
+        try setMethod("Entity:GetColor4Part", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Entity:GetColor4Part"
+            )
+            let color = snapshot.renderState.color
+            return [
+                .number(Double(color.red)),
+                .number(Double(color.green)),
+                .number(Double(color.blue)),
+                .number(Double(color.alpha)),
+            ]
+        }
+        try setMethod("Entity:GetRenderMode", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Entity:GetRenderMode"
+            )
+            return [.number(Double(snapshot.renderState.mode.rawValue))]
+        }
+        try setMethod("Entity:GetRenderFX", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Entity:GetRenderFX"
+            )
+            return [.number(Double(snapshot.renderState.fx.rawValue))]
+        }
         try setMethod("Weapon:GetHoldType", on: weaponMetatable) { arguments in
             let snapshot = try requiredSnapshot(
                 arguments.first,
@@ -746,6 +797,92 @@ public enum SourceCanonicalEntityGLuaBridge {
             let host = try requiredHost("Entity:SetSkin")
             _ = try host.updateCanonicalEntity(snapshot.identity) { candidate in
                 candidate.skin = skin
+            }
+            return []
+        }
+        try setMethod("Entity:SetColor4Part", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Entity:SetColor4Part"
+            )
+            let components = try (1...4).map { index -> UInt8 in
+                let value = try requiredInteger(
+                    arguments,
+                    index: index,
+                    function: "Entity:SetColor4Part"
+                )
+                guard let component = UInt8(exactly: value) else {
+                    throw LuaError.runtime(
+                        "bad argument #\(index) to 'Entity:SetColor4Part' " +
+                            "(color byte expected)"
+                    )
+                }
+                return component
+            }
+            let host = try requiredHost("Entity:SetColor4Part")
+            _ = try host.updateCanonicalEntity(snapshot.identity) { candidate in
+                candidate.renderState.color = SourceEntityRenderColor(
+                    red: components[0],
+                    green: components[1],
+                    blue: components[2],
+                    alpha: components[3]
+                )
+            }
+            return []
+        }
+        try setMethod("Entity:SetRenderMode", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Entity:SetRenderMode"
+            )
+            let rawValue = try requiredInteger(
+                arguments,
+                index: 1,
+                function: "Entity:SetRenderMode"
+            )
+            guard let rawByte = UInt8(exactly: rawValue),
+                  let mode = SourceEntityRenderMode(rawValue: rawByte) else {
+                throw LuaError.runtime(
+                    "bad argument #1 to 'Entity:SetRenderMode' " +
+                        "(Source RenderMode_t expected)"
+                )
+            }
+            let host = try requiredHost("Entity:SetRenderMode")
+            _ = try host.updateCanonicalEntity(snapshot.identity) { candidate in
+                candidate.renderState.mode = mode
+            }
+            return []
+        }
+        try setMethod("Entity:SetKeyValue", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Entity:SetKeyValue"
+            )
+            let key = try requiredString(
+                arguments,
+                index: 1,
+                function: "Entity:SetKeyValue"
+            )
+            guard key.caseInsensitiveCompare("renderfx") == .orderedSame else {
+                throw LuaError.runtime(
+                    "Entity:SetKeyValue canonical key '\(key)' is unsupported"
+                )
+            }
+            let rawValue = try requiredInteger(
+                arguments,
+                index: 2,
+                function: "Entity:SetKeyValue"
+            )
+            guard let rawByte = UInt8(exactly: rawValue),
+                  let fx = SourceEntityRenderFX(rawValue: rawByte) else {
+                throw LuaError.runtime(
+                    "bad argument #2 to 'Entity:SetKeyValue' " +
+                        "(Source RenderFx_t expected for renderfx)"
+                )
+            }
+            let host = try requiredHost("Entity:SetKeyValue")
+            _ = try host.updateCanonicalEntity(snapshot.identity) { candidate in
+                candidate.renderState.fx = fx
             }
             return []
         }

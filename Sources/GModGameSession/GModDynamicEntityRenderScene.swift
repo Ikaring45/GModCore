@@ -6,6 +6,32 @@ public struct GModDynamicEntityRenderInstanceSnapshot: Sendable, Equatable {
     public let sourceEntityRevision: UInt64
     public let transform: SourceEntityTransform
     public let resourceID: GModStudioRenderableModelResourceID
+    /// Renderer-facing Source color32 modulation. Metal consumes this in a
+    /// later slice; retaining it here prevents render projection from erasing
+    /// the replicated Entity appearance.
+    public let colorModulation: SourceEntityRenderColor
+    public let renderMode: SourceEntityRenderMode
+    /// Authored Source RenderFX value. No time-varying effect is fabricated by
+    /// this renderer-neutral projection.
+    public let renderFX: SourceEntityRenderFX
+
+    public init(
+        identity: SourceCanonicalEntityIdentity,
+        sourceEntityRevision: UInt64,
+        transform: SourceEntityTransform,
+        resourceID: GModStudioRenderableModelResourceID,
+        colorModulation: SourceEntityRenderColor = .white,
+        renderMode: SourceEntityRenderMode = .normal,
+        renderFX: SourceEntityRenderFX = .none
+    ) {
+        self.identity = identity
+        self.sourceEntityRevision = sourceEntityRevision
+        self.transform = transform
+        self.resourceID = resourceID
+        self.colorModulation = colorModulation
+        self.renderMode = renderMode
+        self.renderFX = renderFX
+    }
 }
 
 public struct GModDynamicEntityRenderIssue: Sendable, Equatable {
@@ -246,7 +272,10 @@ public final class GModDynamicEntityRenderSceneProjector: @unchecked Sendable {
                     identity: entity.identity,
                     sourceEntityRevision: entity.revision,
                     transform: entity.transform,
-                    resourceID: resource.id
+                    resourceID: resource.id,
+                    colorModulation: entity.renderState.color,
+                    renderMode: entity.renderState.mode,
+                    renderFX: entity.renderState.fx
                 ))
             }
         }
@@ -308,7 +337,10 @@ public final class GModDynamicEntityRenderSceneProjector: @unchecked Sendable {
             old, new in
             old.identity == new.identity &&
                 old.transform == new.transform &&
-                old.resourceID == new.resourceID
+                old.resourceID == new.resourceID &&
+                old.colorModulation == new.colorModulation &&
+                old.renderMode == new.renderMode &&
+                old.renderFX == new.renderFX
         }
         guard sameInstances else { return false }
         return zip(prior.issues, issues).allSatisfy { old, new in
