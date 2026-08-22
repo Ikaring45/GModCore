@@ -1818,10 +1818,12 @@ final class GModGameSessionModel: ObservableObject {
         mesh: GModWorldRenderMesh,
         playerOrigin: SourceVector3,
         viewAngles: SourceQAngle,
-        textureResolver: GModMetalSurfaceSourceMaterialResolver
+        textureResolver: GModMetalSurfaceSourceMaterialResolver,
+        maximumRetainedBitmapByteCount: Int =
+            GModMetalWorldBitmapRetentionBudget.defaultMaximumByteCount
     ) throws -> GModMetalWorldScene {
         var retentionBudget = GModMetalWorldBitmapRetentionBudget(
-            maximumByteCount: 128 * 1_024 * 1_024
+            maximumByteCount: maximumRetainedBitmapByteCount
         )
         func resolveWorldMaterial(
             named name: String
@@ -1845,6 +1847,37 @@ final class GModGameSessionModel: ObservableObject {
                 return .decodeFailed(GMLuaRuntime.describe(error))
             }
         }
+        func resolveWorldWaterMaterial(
+            named name: String
+        ) -> (
+            material: GModMetalWorldWaterMaterial?,
+            resolution: GModMetalWorldMaterialResolution
+        ) {
+            let resolved: GModMetalWorldWaterMaterial?
+            do {
+                resolved = try textureResolver.resolveWaterMaterial(named: name)
+            } catch {
+                // Preserve the established Water fallback behavior. The
+                // renderer diagnoses the absent material independently.
+                return (nil, .notApplicable)
+            }
+            guard let resolved else { return (nil, .notApplicable) }
+            guard let normalBitmap = resolved.normalBitmap else {
+                return (resolved, .notApplicable)
+            }
+            let requiredByteCount = normalBitmap.totalByteCount
+            guard retentionBudget.retain(normalBitmap) else {
+                return (
+                    resolved.withoutNormalBitmap(),
+                    .retentionCapacityExceeded(
+                        requiredByteCount: requiredByteCount,
+                        retainedByteCount: retentionBudget.retainedByteCount,
+                        maximumByteCount: retentionBudget.maximumByteCount
+                    )
+                )
+            }
+            return (resolved, .notApplicable)
+        }
         let meshIdentifier =
             "session-\(sessionGeneration):\(map.rawValue):" +
             "\(mesh.vertices.count):\(mesh.indices.count)"
@@ -1855,14 +1888,13 @@ final class GModGameSessionModel: ObservableObject {
                     minimumZ: $0.minimumZ
                 )
             }
-            let waterMaterial = waterSurface.flatMap { _ in
-                range.materialName.flatMap {
-                    try? textureResolver.resolveWaterMaterial(named: $0)
-                }
+            let waterResolution = waterSurface.flatMap { _ in
+                range.materialName.map(resolveWorldWaterMaterial(named:))
             }
+            let waterMaterial = waterResolution?.material
             let materialResolution: GModMetalWorldMaterialResolution
-            if waterSurface != nil || range.materialName == nil {
-                materialResolution = .notApplicable
+            if waterSurface != nil {
+                materialResolution = waterResolution?.resolution ?? .notApplicable
             } else if let name = range.materialName {
                 materialResolution = resolveWorldMaterial(named: name)
             } else {

@@ -1723,6 +1723,7 @@ public struct GModMetalView:
                         cachedWorldTextures.removeAll(keepingCapacity: true)
                         cachedWorldLightmap = nil
                     }
+                    pruneCachedWorldTextures(for: scene)
 
                     let priorLightmapIssue = worldLightmapIssue
                     if let atlas = scene.lightmapAtlas {
@@ -4471,11 +4472,26 @@ public struct GModMetalView:
             return texture
         }
 
+        private func pruneCachedWorldTextures(
+            for scene: GModMetalWorldScene
+        ) {
+            let staleKeys = GModMetalWorldTextureCacheContract.staleKeys(
+                cachedKeys: Set(cachedWorldTextures.keys),
+                for: scene
+            )
+            for key in staleKeys {
+                cachedWorldTextures.removeValue(forKey: key)
+            }
+        }
+
         private static func worldTextureKey(
             for bitmap: GModMetalSurfaceBitmap,
             isSRGB: Bool
         ) -> String {
-            (isSRGB ? "srgb:" : "linear:") + bitmap.cacheIdentifier
+            GModMetalWorldTextureCacheContract.key(
+                for: bitmap,
+                isSRGB: isSRGB
+            )
         }
 
         private func samplerStateForWorldTexture(

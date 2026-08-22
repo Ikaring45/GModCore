@@ -281,7 +281,9 @@ public struct GModMetalWorldSamplerConfiguration: Sendable, Equatable, Hashable 
             ? .clampToEdge
             : .repeat
         maximumAnisotropy = flags.contains(.anisotropic) &&
-            mipFilter != .notMipmapped ? 8 : 1
+            mipFilter != .notMipmapped
+                ? GModMetalSamplerContract.maximumAnisotropy
+                : 1
     }
 }
 
@@ -289,6 +291,8 @@ public struct GModMetalWorldSamplerConfiguration: Sendable, Equatable, Hashable 
 /// can reference the same decoded bitmap in multiple Source render layers; the
 /// bytes are charged once by cache identity while every range keeps the value.
 public struct GModMetalWorldBitmapRetentionBudget: Sendable, Equatable {
+    public static let defaultMaximumByteCount = 128 * 1_024 * 1_024
+
     public let maximumByteCount: Int
     public private(set) var retainedByteCount = 0
     private var retainedIdentifiers = Set<String>()
@@ -397,6 +401,25 @@ public struct GModMetalWorldWaterMaterial: Sendable, Equatable {
         self.textureScrollAngleDegrees = textureScrollAngleDegrees
         self.unsupportedBumpTextureFormat = unsupportedBumpTextureFormat
     }
+
+    /// Preserves every authored Water VMT value while allowing the shared
+    /// scene-retention boundary to fall back to the solid-water pipeline.
+    public func withoutNormalBitmap() -> Self {
+        guard normalBitmap != nil else { return self }
+        return Self(
+            resourceIdentifier: resourceIdentifier,
+            isAboveWater: isAboveWater,
+            fogColor: fogColor,
+            fogStart: fogStart,
+            fogEnd: fogEnd,
+            reflectionAmount: reflectionAmount,
+            refractionAmount: refractionAmount,
+            normalBitmap: nil,
+            textureScrollRate: textureScrollRate,
+            textureScrollAngleDegrees: textureScrollAngleDegrees,
+            unsupportedBumpTextureFormat: unsupportedBumpTextureFormat
+        )
+    }
 }
 
 enum GModMetalWaterRenderContract {
@@ -406,6 +429,46 @@ enum GModMetalWaterRenderContract {
         cameraZ: Float
     ) -> Bool {
         (cameraZ >= surface.surfaceZ) == material.isAboveWater
+    }
+}
+
+/// Cache ownership follows the immutable scene's complete texture references,
+/// not the current PVS/sky/water visibility. Camera-only scene replacements
+/// therefore keep valid bindings without retaining assets removed by a real
+/// replacement scene.
+enum GModMetalWorldTextureCacheContract {
+    static func key(
+        for bitmap: GModMetalSurfaceBitmap,
+        isSRGB: Bool
+    ) -> String {
+        (isSRGB ? "srgb:" : "linear:") + bitmap.cacheIdentifier
+    }
+
+    static func retainedKeys(for scene: GModMetalWorldScene) -> Set<String> {
+        var keys = Set<String>()
+        for range in scene.materialRanges {
+            if let bitmap = range.bitmap {
+                keys.insert(key(for: bitmap, isSRGB: true))
+            }
+            if let normalBitmap = range.waterMaterial?.normalBitmap {
+                keys.insert(key(for: normalBitmap, isSRGB: false))
+            }
+        }
+        for sun in scene.sunSprites {
+            for layer in [sun.core, sun.overlay] {
+                if let bitmap = layer.bitmap {
+                    keys.insert(key(for: bitmap, isSRGB: true))
+                }
+            }
+        }
+        return keys
+    }
+
+    static func staleKeys(
+        cachedKeys: Set<String>,
+        for scene: GModMetalWorldScene
+    ) -> Set<String> {
+        cachedKeys.subtracting(retainedKeys(for: scene))
     }
 }
 
