@@ -951,6 +951,38 @@ public final class GModPlayableSession {
             let sourcePlayer = try sourceAdapter.activateCanonicalEntity(
                 createdSourcePlayer.identity
             )
+            // Original CLIENT RunConsoleCommand("use", class) reaches this
+            // SERVER-owned Source command only through SharedSession's FIFO.
+            // Reconnect after the canonical Player exists so the handler can
+            // retain an immutable full EHANDLE while preserving the earlier
+            // mp_friendlyfire host route used during SERVER startup.
+            server.consoleCommandDispatcher?.connectHost {
+                [weak sourceAdapter] invocation in
+                if invocation.command.caseInsensitiveCompare("mp_friendlyfire")
+                    == .orderedSame {
+                    if let value = invocation.arguments.first {
+                        _ = serverConVars.setCurrentValue(
+                            value,
+                            for: "mp_friendlyfire"
+                        )
+                    }
+                    return .handled
+                }
+                guard invocation.command.caseInsensitiveCompare(
+                    SourceCanonicalWeaponUseConsoleCommand.commandName
+                ) == .orderedSame else {
+                    return .unhandled
+                }
+                guard let sourceAdapter else {
+                    throw SourceCanonicalWeaponUseConsoleHostError
+                        .runtimeAdapterReleased
+                }
+                return try SourceCanonicalWeaponUseConsoleCommand.handle(
+                    invocation,
+                    adapter: sourceAdapter,
+                    playerIdentity: sourcePlayer.identity
+                ).hostDisposition
+            }
             progress(.init(stage: .startingClientLua))
 
             try client.loadFile("lua/includes/init.lua")
