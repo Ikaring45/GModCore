@@ -28,6 +28,16 @@ final class GMLuaSourceRuntimeAdapterCanonicalEntityTests: XCTestCase {
         try installNoopHooks(in: server)
         try installNoopHooks(in: client)
         try adapter.attach(client: client)
+        try client.execute(
+            """
+            assert(type(util.IsValidModel) == "function")
+            assert(type(util.IsValidProp) == "function")
+            assert(util.IsValidModel("models/props_c17/oildrum001.mdl"))
+            assert(util.IsValidProp("models/props_c17/oildrum001.mdl"))
+            assert(util.IsValidProp("models/props_c17/not_present.mdl") == false)
+            """,
+            sourceName: "=(CLIENT canonical model validation)"
+        )
 
         let world = try adapter.createCanonicalEntity(kind: .world)
         let player = try adapter.createCanonicalEntity(

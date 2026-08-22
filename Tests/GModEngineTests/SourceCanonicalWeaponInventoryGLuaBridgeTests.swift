@@ -71,7 +71,7 @@ final class SourceCanonicalWeaponInventoryGLuaBridgeTests: XCTestCase {
 
         try session.serverRuntime.execute(
             """
-            local ply = LocalPlayer()
+            local ply = Player(\(session.configuration.playerUserID))
             assert(ply:HasWeapon("gmod_tool"))
             assert(ply:GetWeapon("gmod_tool"):GetClass() == "gmod_tool")
             assert(ply:GetWeapon("gmod_tool"):IsWeapon())
@@ -101,7 +101,7 @@ final class SourceCanonicalWeaponInventoryGLuaBridgeTests: XCTestCase {
         // SERVER mutation therefore reaches CLIENT only through the ordinary
         // entity FIFO, alongside the full EHANDLE identity.
         try session.serverRuntime.execute(
-            "LocalPlayer():GetActiveWeapon():SetHoldType('revolver')",
+            "Player(\(session.configuration.playerUserID)):GetActiveWeapon():SetHoldType('revolver')",
             sourceName: "=(SERVER canonical gmod_tool hold type)"
         )
         let holdTypeTick = try session.runFixedTick()

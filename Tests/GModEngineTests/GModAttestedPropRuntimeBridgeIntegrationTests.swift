@@ -103,10 +103,25 @@ final class GModAttestedPropRuntimeBridgeIntegrationTests: XCTestCase {
             try adapter.installCanonicalEntityLuaBridge()
             try adapter.installCanonicalPhysicsObjectLuaBridge()
 
+            let validationScript: String
+            if offset == 0 {
+                validationScript =
+                    "assert(util.IsValidProp(" +
+                    "\"models/props/attested_runtime.mdl\") == false)"
+            } else {
+                validationScript = """
+                local ok, message = pcall(
+                    util.IsValidProp,
+                    "models/props/attested_runtime.mdl"
+                )
+                assert(ok == false)
+                assert(string.find(message, "IsValidProp validation is unavailable", 1, true))
+                """
+            }
             let values = try server.executeReturningValues(
                 """
                 assert(util.IsValidModel("models/props/attested_runtime.mdl"))
-                assert(util.IsValidProp("models/props/attested_runtime.mdl") == false)
+                \(validationScript)
                 local prop = assert(ents.Create("prop_physics"))
                 prop:SetModel("models/props/attested_runtime.mdl")
                 return prop

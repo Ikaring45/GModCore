@@ -211,10 +211,7 @@ public final class GMLuaMenuSession: @unchecked Sendable {
         guard let registry = runtime.vguiRegistry else {
             throw GMLuaMenuSessionError.missingRuntimeSurface("VGUI registry")
         }
-        let rootCount = registry
-            .renderTree(viewportWidth: 1_024, viewportHeight: 768)
-            .filter { $0.parentIdentifier == nil }
-            .count
+        let rootCount = registry.rootPanelCount
         return GMLuaMenuBootstrapReport(
             loadedPaths: Self.bootstrapPaths,
             rootPanelCount: rootCount
@@ -224,6 +221,10 @@ public final class GMLuaMenuSession: @unchecked Sendable {
     public func updateProblems(_ lines: [String]) throws {
         try requireActive()
         try hostState.replaceProblems(lines)
+        try runtime.execute(
+            "if GARRYSPAD_REFRESH_PROBLEMS then GARRYSPAD_REFRESH_PROBLEMS() end",
+            sourceName: "=(Garry's PAD Problems refresh)"
+        )
     }
 
     public func drainActions() -> [GMLuaMenuAction] {
@@ -458,6 +459,9 @@ public final class GMLuaMenuSession: @unchecked Sendable {
             refreshAudio()
             __garryspad_menu_action("audio", audioEnabled)
         end)
+        menuButton(options, "Back", 246, 220, 190, function()
+            options:SetVisible(false)
+        end)
 
         local problems = assert(vgui.Create("DFrame"))
         GARRYSPAD_PROBLEMS = problems
@@ -472,10 +476,16 @@ public final class GMLuaMenuSession: @unchecked Sendable {
         problemText:SetSize(570, 340)
         problemText:SetWrap(true)
         problemText:SetAutoStretchVertical(false)
-        problemText.Think = function(self)
+        local function refreshProblems()
             local text = __garryspad_menu_problem_text()
-            if self:GetText() ~= text then self:SetText(text) end
+            if problemText:GetText() ~= text then problemText:SetText(text) end
         end
+        GARRYSPAD_REFRESH_PROBLEMS = refreshProblems
+        problemText.Think = refreshProblems
+        refreshProblems()
+        menuButton(problems, "Back", 430, 358, 150, function()
+            problems:SetVisible(false)
+        end)
 
         local console = assert(vgui.Create("DFrame"))
         GARRYSPAD_CONSOLE = console

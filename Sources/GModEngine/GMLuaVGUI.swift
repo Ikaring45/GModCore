@@ -434,6 +434,7 @@ private func panelComesBefore(
 /// userdata and preserves the scripted-panel inheritance contract, but does
 /// not claim that a platform view or a Metal drawable already exists.
 public final class GMLuaVGUIRegistry: @unchecked Sendable {
+    fileprivate static let worldPanelIdentifier = 0
     private static let engineClassNames: Set<String> = [
         "AchievementIcon", "AvatarImage", "CheckButton", "EditablePanel",
         "Frame", "HTML", "Label", "ModelImage", "Panel", "RadioButton",
@@ -443,6 +444,8 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     private let state: LuaState
     private let typeSystem: GMLuaTypeSystem
     private let panelMetatable: LuaTable
+    private let worldPanelValue: LuaValue
+    private let worldPanelDescriptor: GMLuaPanelValue
     fileprivate let screenMetrics: GMLuaScreenMetrics?
     private let surfaceCommandState: GMLuaSurfaceCommandState?
     private let languageRegistry: GMLuaLanguageRegistry?
@@ -451,6 +454,23 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     private var panels: [Int: LuaValue] = [:]
     private var nextPanelIdentifier = 1
     private var semanticIndex: LuaValue = .nilValue
+
+    /// Number of live script-created panels attached directly to WorldPanel.
+    /// Unlike renderTree this includes hidden utility windows, matching
+    /// vgui.GetAll/root ownership rather than the current draw list.
+    public var rootPanelCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return panels.values.reduce(into: 0) { count, value in
+            guard let panel = panelDescriptor(from: value),
+                  panel.parentIdentifier == nil,
+                  !panel.isParentedToHUD,
+                  GMLuaTypeSystem.typedObject(from: value)?.isValid == true else {
+                return
+            }
+            count += 1
+        }
+    }
     private var completedLayoutPasses: UInt64 = 0
     private var renderBridgeAttached = false
     private var textBridgeAttached = false
@@ -473,13 +493,45 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         screenMetrics: GMLuaScreenMetrics?,
         surfaceCommandState: GMLuaSurfaceCommandState?,
         languageRegistry: GMLuaLanguageRegistry?
-    ) {
+    ) throws {
+        let worldPanelDescriptor = GMLuaPanelValue(
+            identifier: Self.worldPanelIdentifier,
+            engineClassName: "Panel",
+            requestedClassName: "Panel",
+            name: "WorldPanel",
+            parentIdentifier: nil
+        )
+        if let viewport = screenMetrics?.viewport {
+            worldPanelDescriptor.width = Double(viewport.width)
+            worldPanelDescriptor.height = Double(viewport.height)
+        }
+        let worldPanelValue = try typeSystem.makeObject(
+            metaName: "Panel",
+            payload: worldPanelDescriptor
+        )
         self.state = state
         self.typeSystem = typeSystem
         self.panelMetatable = panelMetatable
+        self.worldPanelValue = worldPanelValue
+        self.worldPanelDescriptor = worldPanelDescriptor
         self.screenMetrics = screenMetrics
         self.surfaceCommandState = surfaceCommandState
         self.languageRegistry = languageRegistry
+        try state.setRawTableValue(
+            .number(0),
+            for: .string("x"),
+            in: worldPanelDescriptor.instanceTable
+        )
+        try state.setRawTableValue(
+            .number(0),
+            for: .string("y"),
+            in: worldPanelDescriptor.instanceTable
+        )
+        try state.setRawTableValue(
+            .string("Panel"),
+            for: .string("ClassName"),
+            in: worldPanelDescriptor.instanceTable
+        )
     }
 
     /// Native Label keeps the supplied token as its logical value and only
@@ -515,30 +567,31 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         highlightColor: GMLuaPanelColorSnapshot,
         cursorColor: GMLuaPanelColorSnapshot
     ) throws {
-        guard !isFocused(identifier: panel.identifier) else {
-            // The logical TextEntry has a real caret offset, but it still has
-            // no selection range or platform glyph advances from which to
-            // derive a truthful cursor rectangle. Keep that rendering gap
-            // explicit instead of drawing a guessed caret/highlight.
-            _ = highlightColor
-            _ = cursorColor
-            throw LuaError.runtime(
-                "Panel:DrawTextEntryText cannot paint a focused TextEntry " +
-                    "without caret and selection state"
-            )
-        }
         guard let surfaceCommandState else {
             throw LuaError.runtime(
                 "Panel:DrawTextEntryText requires the shared surface command boundary"
             )
         }
+        let caretPrefix: LuaString?
+        if isFocused(identifier: panel.identifier) {
+            let boundaries = utf8CharacterBoundaries(in: panel.text.bytes)
+            let caret = min(max(0, panel.caretPosition), boundaries.count - 1)
+            caretPrefix = LuaString(bytes: Array(panel.text.bytes[..<boundaries[caret]]))
+        } else {
+            caretPrefix = nil
+        }
+        // No selection-producing input path exists yet, so the exact current
+        // selection is empty and highlightColor has no primitive to emit.
+        _ = highlightColor
         try surfaceCommandState.appendTextEntryText(
             value: panel.text,
             fontName: panel.fontName,
             color: textColor,
             insetX: panel.textInsetX,
             insetY: panel.textInsetY,
-            panelHeight: panel.height
+            panelHeight: panel.height,
+            caretPrefix: caretPrefix,
+            cursorColor: cursorColor
         )
     }
 
@@ -1037,8 +1090,9 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     }
 
     /// Resolves the native dock graph without executing Lua. Top-level panels
-    /// dock against VGUI's implicit world panel, represented here by the live
-    /// viewport rather than by a fabricated Lua parent.
+    /// dock against VGUI's world panel. The native graph uses the live
+    /// viewport as that root while Lua observes the persistent WorldPanel
+    /// userdata projected by ``worldPanel()``.
     private func resolveNativeDocking(viewportWidth: Int, viewportHeight: Int) {
         guard viewportWidth > 0, viewportHeight > 0 else { return }
         lock.lock()
@@ -2100,6 +2154,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         return controls.values.map(LuaValue.table)
             + panelValues
             + instanceTables
+            + [worldPanelValue, .table(worldPanelDescriptor.instanceTable)]
             + [.table(panelMetatable), semanticIndex]
     }
 
@@ -2155,7 +2210,9 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
                   GMLuaTypeSystem.typedObject(from: parent)?.isValid == true else {
                 throw LuaError.runtime("bad argument #2 to 'Create' (Panel expected)")
             }
-            parentIdentifier = descriptor.identifier
+            parentIdentifier = descriptor.identifier == Self.worldPanelIdentifier
+                ? nil
+                : descriptor.identifier
         } else {
             parentIdentifier = nil
         }
@@ -2303,6 +2360,9 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
 
     fileprivate func panel(identifier: Int?) -> LuaValue? {
         guard let identifier else { return nil }
+        if identifier == Self.worldPanelIdentifier {
+            return worldPanel()
+        }
         lock.lock()
         let value = panels[identifier]
         lock.unlock()
@@ -2316,6 +2376,9 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     /// ancestor during the documented one-frame removal interval.
     fileprivate func retainedPanel(identifier: Int?) -> LuaValue? {
         guard let identifier else { return nil }
+        if identifier == Self.worldPanelIdentifier {
+            return worldPanel()
+        }
         lock.lock()
         let value = panels[identifier]
         lock.unlock()
@@ -2324,6 +2387,32 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
               GMLuaTypeSystem.typedObject(from: value)?.isValid == true ||
                 descriptor.isMarkedForDeletion else { return nil }
         return value
+    }
+
+    /// Source VGUI exposes one persistent WorldPanel userdata as the Lua
+    /// parent of every top-level panel. Native layout still stores top-level
+    /// parent identifiers as nil so the viewport remains the docking root;
+    /// this projection restores the stock Lua identity and live dimensions.
+    fileprivate func worldPanel() -> LuaValue {
+        synchronizeWorldPanelSize()
+        return worldPanelValue
+    }
+
+    fileprivate func synchronizeWorldPanelSizeIfNeeded(
+        _ panel: GMLuaPanelValue
+    ) {
+        guard panel.identifier == Self.worldPanelIdentifier else { return }
+        synchronizeWorldPanelSize()
+    }
+
+    private func synchronizeWorldPanelSize() {
+        guard let viewport = screenMetrics?.viewport else { return }
+        lock.lock()
+        worldPanelDescriptor.x = 0
+        worldPanelDescriptor.y = 0
+        worldPanelDescriptor.width = Double(viewport.width)
+        worldPanelDescriptor.height = Double(viewport.height)
+        lock.unlock()
     }
 
     fileprivate func hoveredPanel() -> LuaValue? {
@@ -2350,6 +2439,9 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     }
 
     fileprivate func setParent(identifier: Int, parentIdentifier: Int?) throws {
+        let parentIdentifier = parentIdentifier == Self.worldPanelIdentifier
+            ? nil
+            : parentIdentifier
         lock.lock()
         guard let value = panels[identifier],
               let descriptor = panelDescriptor(from: value),
@@ -2358,7 +2450,10 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
             throw LuaError.runtime("invalid Panel")
         }
         let previousParentIdentifier = descriptor.parentIdentifier
-        guard previousParentIdentifier != parentIdentifier else {
+        // ParentToHUD also uses a nil native parent. SetParent(nil) and
+        // SetParent(WorldPanel) must nevertheless leave that special HUD root
+        // and restore the ordinary WorldPanel relationship.
+        guard previousParentIdentifier != parentIdentifier || descriptor.isParentedToHUD else {
             lock.unlock()
             return
         }
@@ -2439,10 +2534,14 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     fileprivate func children(of identifier: Int) -> [LuaValue] {
         lock.lock()
         defer { lock.unlock() }
+        let nativeParentIdentifier = identifier == Self.worldPanelIdentifier
+            ? nil
+            : identifier
         return panels.keys.sorted().compactMap { childIdentifier in
             guard let value = panels[childIdentifier],
                   let child = panelDescriptor(from: value),
-                  child.parentIdentifier == identifier,
+                  child.parentIdentifier == nativeParentIdentifier,
+                  identifier != Self.worldPanelIdentifier || !child.isParentedToHUD,
                   GMLuaTypeSystem.typedObject(from: value)?.isValid == true else { return nil }
             return value
         }
@@ -2507,13 +2606,21 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     fileprivate func hasParent(identifier: Int, ancestorIdentifier: Int) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        var current = panels[identifier].flatMap { panelDescriptor(from: $0) }?.parentIdentifier
+        if identifier == Self.worldPanelIdentifier { return false }
+        guard let start = panels[identifier].flatMap({ panelDescriptor(from: $0) }) else {
+            return false
+        }
+        var reachesHUDRoot = start.isParentedToHUD
+        var current = start.parentIdentifier
         var visited: Set<Int> = []
         while let candidate = current, visited.insert(candidate).inserted {
             if candidate == ancestorIdentifier { return true }
-            current = panels[candidate].flatMap { panelDescriptor(from: $0) }?.parentIdentifier
+            guard let descriptor = panels[candidate]
+                .flatMap({ panelDescriptor(from: $0) }) else { break }
+            reachesHUDRoot = reachesHUDRoot || descriptor.isParentedToHUD
+            current = descriptor.parentIdentifier
         }
-        return false
+        return ancestorIdentifier == Self.worldPanelIdentifier && !reachesHUDRoot
     }
 
     /// Returns the panel's upper-left corner in screen coordinates by walking
@@ -2521,6 +2628,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     /// LocalToScreen and ScreenToLocal share the same validity and cycle
     /// checks instead of relying on the most recent render snapshot.
     fileprivate func screenOrigin(identifier: Int) throws -> (x: Double, y: Double) {
+        if identifier == Self.worldPanelIdentifier { return (0, 0) }
         lock.lock()
         defer { lock.unlock() }
 
@@ -2601,6 +2709,16 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     }
 
     fileprivate func invalidateLayout(identifier: Int, layoutNow: Bool) throws {
+        if identifier == Self.worldPanelIdentifier {
+            // WorldPanel is an engine-owned viewport root rather than an item
+            // in the script-created panel map. Stock Panel:GetSkin invalidates
+            // it while inheriting the default skin; accept that operation
+            // without trying to dispatch a Lua PerformLayout on the viewport.
+            lock.lock()
+            worldPanelDescriptor.isLayoutInvalidated = true
+            lock.unlock()
+            return
+        }
         let shouldPerformImmediately: Bool
         lock.lock()
         guard let value = panels[identifier],
@@ -2922,7 +3040,7 @@ public enum GMLuaVGUI {
         guard let panelMetatable = typeSystem.metatable(named: "Panel") else {
             throw LuaError.runtime("GLua Panel metatable was not installed")
         }
-        let registry = GMLuaVGUIRegistry(
+        let registry = try GMLuaVGUIRegistry(
             state: state,
             typeSystem: typeSystem,
             panelMetatable: panelMetatable,
@@ -3061,12 +3179,36 @@ public enum GMLuaVGUI {
         ) { _ in
             [registry.keyboardFocusPanel() ?? .nilValue]
         }
+        let getWorldPanel = nativeFunction(
+            name: "vgui.GetWorldPanel",
+            registry: registry
+        ) { _ in
+            [registry.worldPanel()]
+        }
+        let focusedHasParent = nativeFunction(
+            name: "vgui.FocusedHasParent",
+            registry: registry
+        ) { arguments in
+            guard let candidate = arguments.first,
+                  let ancestor = panelDescriptor(from: candidate),
+                  GMLuaTypeSystem.typedObject(from: candidate)?.isValid == true,
+                  let focusedValue = registry.keyboardFocusPanel(),
+                  let focused = panelDescriptor(from: focusedValue) else {
+                return [.boolean(false)]
+            }
+            return [.boolean(registry.hasParent(
+                identifier: focused.identifier,
+                ancestorIdentifier: ancestor.identifier
+            ))]
+        }
 
         for (name, value) in [
             ("Register", register), ("GetControlTable", getControlTable),
             ("Exists", exists), ("Create", create), ("GetAll", getAll),
             ("GetHoveredPanel", getHoveredPanel),
-            ("GetKeyboardFocus", getKeyboardFocus)
+            ("GetKeyboardFocus", getKeyboardFocus),
+            ("GetWorldPanel", getWorldPanel),
+            ("FocusedHasParent", focusedHasParent)
         ] {
             try set(value, name, vgui, state)
         }
@@ -3174,6 +3316,14 @@ public enum GMLuaVGUI {
             }),
             ("GetParent", { arguments in
                 let panel = try requiredPanel(arguments, "GetParent")
+                if panel.identifier == GMLuaVGUIRegistry.worldPanelIdentifier {
+                    return [.nilValue]
+                }
+                if panel.parentIdentifier == nil {
+                    return [panel.isParentedToHUD
+                        ? .nilValue
+                        : registry.worldPanel()]
+                }
                 return [registry.retainedPanel(identifier: panel.parentIdentifier) ?? .nilValue]
             }),
             ("SetParent", { arguments in
@@ -3292,6 +3442,7 @@ public enum GMLuaVGUI {
             }),
             ("GetSize", { arguments in
                 let panel = try requiredPanel(arguments, "GetSize")
+                registry.synchronizeWorldPanelSizeIfNeeded(panel)
                 return [.number(panel.width), .number(panel.height)]
             }),
             ("ChildrenSize", { arguments in
@@ -3328,13 +3479,18 @@ public enum GMLuaVGUI {
                 return []
             }),
             ("GetWide", { arguments in
-                [.number(try requiredPanel(arguments, "GetWide").width)]
+                let panel = try requiredPanel(arguments, "GetWide")
+                registry.synchronizeWorldPanelSizeIfNeeded(panel)
+                return [.number(panel.width)]
             }),
             ("GetTall", { arguments in
-                [.number(try requiredPanel(arguments, "GetTall").height)]
+                let panel = try requiredPanel(arguments, "GetTall")
+                registry.synchronizeWorldPanelSizeIfNeeded(panel)
+                return [.number(panel.height)]
             }),
             ("GetBounds", { arguments in
                 let panel = try requiredPanel(arguments, "GetBounds")
+                registry.synchronizeWorldPanelSizeIfNeeded(panel)
                 return [
                     .number(panel.x), .number(panel.y),
                     .number(panel.width), .number(panel.height)
@@ -3857,6 +4013,20 @@ public enum GMLuaVGUI {
             ("HasFocus", { arguments in
                 let panel = try requiredPanel(arguments, "HasFocus")
                 return [.boolean(registry.isFocused(identifier: panel.identifier))]
+            }),
+            ("HasHierarchicalFocus", { arguments in
+                let panel = try requiredPanel(arguments, "HasHierarchicalFocus")
+                if registry.isFocused(identifier: panel.identifier) {
+                    return [.boolean(true)]
+                }
+                guard let focusedValue = registry.keyboardFocusPanel(),
+                      let focused = panelDescriptor(from: focusedValue) else {
+                    return [.boolean(false)]
+                }
+                return [.boolean(registry.hasParent(
+                    identifier: focused.identifier,
+                    ancestorIdentifier: panel.identifier
+                ))]
             }),
             ("MakePopup", { arguments in
                 let panel = try requiredPanel(arguments, "MakePopup")

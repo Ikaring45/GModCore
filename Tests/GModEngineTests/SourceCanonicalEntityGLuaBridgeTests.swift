@@ -122,7 +122,7 @@ final class SourceCanonicalEntityGLuaBridgeTests: XCTestCase {
         )
     }
 
-    func testUnavailableModelValidationReturnsFalseAndSpawnRollsBackExactHandle() throws {
+    func testUnavailableModelValidationIsExplicitAndSpawnRollsBackExactHandle() throws {
         let runtime = makeRuntime()
         let adapter = try GMLuaSourceRuntimeAdapter(
             serverRuntime: runtime,
@@ -137,7 +137,17 @@ final class SourceCanonicalEntityGLuaBridgeTests: XCTestCase {
 
         let first = try runtime.executeReturningValues(
             """
-            assert(util.IsValidModel("models/props_c17/oildrum001.mdl") == false)
+            local validationOK, validationMessage = pcall(
+                util.IsValidModel,
+                "models/props_c17/oildrum001.mdl"
+            )
+            assert(validationOK == false)
+            assert(string.find(
+                validationMessage,
+                "IsValidModel validation is unavailable",
+                1,
+                true
+            ))
             local prop = ents.Create("prop_physics")
             local index = prop:EntIndex()
             prop:SetModel("models/props_c17/oildrum001.mdl")

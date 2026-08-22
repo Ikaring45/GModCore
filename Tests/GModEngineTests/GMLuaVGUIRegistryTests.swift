@@ -2461,6 +2461,73 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
         XCTAssertFalse(tree.contains(where: { $0.alpha == 0 }))
     }
 
+    func testTopLevelGetParentProjectsLiveWorldPanelForStockCenterHelpers()
+        throws
+    {
+        let runtime = GMLuaRuntime(
+            realm: .menu,
+            logger: { _ in },
+            initialViewport: GMLuaViewportSize(width: 640, height: 480)
+        )
+        defer { _ = runtime.close() }
+
+        try runtime.execute(
+            """
+            local meta = assert(FindMetaTable("Panel"))
+            function meta:GetX()
+                local x = self:GetPos()
+                return x
+            end
+            function meta:GetY()
+                local _, y = self:GetPos()
+                return y
+            end
+            function meta:SetX(x) self:SetPos(x, self:GetY()) end
+            function meta:SetY(y) self:SetPos(self:GetX(), y) end
+            function meta:CenterVertical(fraction)
+                self:SetY(
+                    self:GetParent():GetTall() * (fraction or 0.5)
+                    - self:GetTall() * 0.5
+                )
+            end
+
+            local world = assert(vgui.GetWorldPanel())
+            assert(world:IsValid())
+            assert(world:GetParent() == nil)
+            assert(world:GetWide() == 640 and world:GetTall() == 480)
+
+            ROOT = assert(vgui.Create("Panel"))
+            ROOT:SetSize(100, 40)
+            assert(ROOT:GetParent() == world)
+            assert(ROOT:HasParent(world))
+            assert(world:ChildCount() == 1)
+            local HUD_ROOT = assert(vgui.Create("Panel"))
+            local HUD_CHILD = assert(vgui.Create("Panel", HUD_ROOT))
+            HUD_ROOT:ParentToHUD()
+            assert(HUD_ROOT:GetParent() == nil)
+            assert(not HUD_ROOT:HasParent(world))
+            assert(not HUD_CHILD:HasParent(world))
+            HUD_ROOT:SetParent(world)
+            assert(HUD_ROOT:GetParent() == world)
+            assert(HUD_ROOT:HasParent(world))
+            assert(HUD_CHILD:HasParent(world))
+            ROOT:CenterVertical()
+            assert(ROOT:GetY() == 220)
+            """,
+            sourceName: "@GMLuaWorldPanelCenterRegression.lua"
+        )
+
+        XCTAssertTrue(runtime.updateViewport(width: 800, height: 600))
+        try runtime.execute(
+            """
+            assert(vgui.GetWorldPanel():GetTall() == 600)
+            ROOT:CenterVertical()
+            assert(ROOT:GetY() == 280)
+            """,
+            sourceName: "@GMLuaWorldPanelResizeRegression.lua"
+        )
+    }
+
     func testRenderFrameDocksRootBeforeLuaLayoutAndReappliesAfterLayout() throws {
         let state = LuaState(output: { _ in })
         let typeSystem = try GMLuaTypeSystem.install(
@@ -3106,7 +3173,7 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
         )
         let surface = try GMLuaSurface.install(
             into: state,
-            maximumDrawCommandCount: 1
+            maximumDrawCommandCount: 2
         )
         let registry = try GMLuaVGUI.install(
             into: state,
@@ -3184,13 +3251,23 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
             "TEXT_ENTRY:SetEnabled(true); TEXT_ENTRY:RequestFocus()",
             sourceName: "@GMLuaFocusedTextEntryMissingCaretState.lua"
         )
-        XCTAssertThrowsError(try registry.renderFrame(
+        let focusedFrame = try registry.renderFrame(
             surface: surface,
             viewportWidth: 200,
             viewportHeight: 100
-        )) { error in
-            XCTAssertTrue(String(describing: error).contains("caret and selection state"))
+        )
+        XCTAssertEqual(focusedFrame.captureDiagnostics.attemptedCommandCount, 2)
+        XCTAssertEqual(focusedFrame.captureDiagnostics.droppedCommandCount, 0)
+        XCTAssertEqual(focusedFrame.commands.count, 2)
+        guard case let .rectangle(caretFrame, caretColor, _) = focusedFrame.commands[1] else {
+            return XCTFail("focused TextEntry did not emit a caret rectangle")
         }
+        XCTAssertEqual(caretFrame.width, 1)
+        XCTAssertGreaterThan(caretFrame.height, 0)
+        XCTAssertEqual(
+            caretColor,
+            GMLuaSurfaceColor(red: 111, green: 122, blue: 133, alpha: 51)
+        )
     }
 
     func testExpensiveShadowStoresLabelStateAndEmitsShadowBeforeMainText() throws {
@@ -3420,8 +3497,9 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
 
             PARENT_CHANGE_LOG = {}
             child:SetParent(nil)
-            assert(table.concat(PARENT_CHANGE_LOG, "|") == "new:removed:nil")
-            assert(child:GetParent() == nil)
+            assert(table.concat(PARENT_CHANGE_LOG, "|") ==
+                "new:removed:WorldPanel")
+            assert(child:GetParent() == vgui.GetWorldPanel())
             """,
             sourceName: "@GMLuaPanelParentChangeCallbackRegression.lua"
         )

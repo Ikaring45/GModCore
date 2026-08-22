@@ -1103,7 +1103,11 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
             guard let registry = client.entityRegistry else {
                 throw GMLuaSourceRuntimeAdapterError.missingRuntimeSurface(.client, "Entity registry")
             }
-            try SourceCanonicalEntityGLuaBridge.install(into: client)
+            // CLIENT receives the same read-only, exact-byte model validation
+            // host used by SERVER. The bridge itself withholds every mutation
+            // API outside SERVER, while stock ghostentity.lua can safely call
+            // util.IsValidModel/IsValidProp in its native realm.
+            try SourceCanonicalEntityGLuaBridge.install(into: client, host: self)
             try SourceCanonicalEntityNetworkVariableGLuaBridge.install(
                 into: client
             )

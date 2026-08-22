@@ -40,6 +40,7 @@ final class GMLuaMenuSessionTests: XCTestCase {
         XCTAssertTrue(texts(in: frame).contains("Toggle Audio"))
         try tap(x: 401, y: 351, in: session)
         XCTAssertEqual(session.drainActions(), [.setAudioEnabled(false)])
+        try tap(x: 600, y: 475, in: session)
 
         try session.updateProblems([
             "Lua: no current timer failures",
@@ -51,6 +52,7 @@ final class GMLuaMenuSessionTests: XCTestCase {
         XCTAssertTrue(renderedText.contains(where: {
             $0.contains("physical iPad validation pending")
         }))
+        try tap(x: 700, y: 553, in: session)
 
         // Raising Console after the other frames exercises real Derma popup
         // ordering instead of bypassing VGUI with a direct native call.

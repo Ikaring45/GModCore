@@ -568,6 +568,78 @@ public enum SourceCanonicalEntityGLuaBridge {
             return [value]
         }
 
+        // Model validation is a read surface in both SERVER and CLIENT. Stock
+        // Sandbox uses it from client ghost/entity helpers, so install it
+        // before the SERVER-only mutation boundary below.
+        let util: LuaTable
+        if case let .table(existing) = state.getGlobal("util") {
+            util = existing
+        } else {
+            util = LuaTable()
+        }
+        try state.setRawTableValue(
+            native("util.IsValidModel") { arguments in
+                let path = try requiredString(
+                    arguments,
+                    index: 0,
+                    function: "util.IsValidModel"
+                )
+                guard let host = hostBox.value else {
+                    throw LuaError.runtime(
+                        "util.IsValidModel validation host is unavailable for \(path)"
+                    )
+                }
+                let validation = host.validateCanonicalModel(
+                    SourceEntityModelReference(path),
+                    for: .propPhysics
+                )
+                switch validation {
+                case .valid:
+                    return [.boolean(true)]
+                case .invalid:
+                    return [.boolean(false)]
+                case .unavailable:
+                    throw LuaError.runtime(
+                        "util.IsValidModel validation is unavailable for \(path)"
+                    )
+                }
+            },
+            for: .string("IsValidModel"),
+            in: util
+        )
+        try state.setRawTableValue(
+            native("util.IsValidProp") { arguments in
+                let path = try requiredString(
+                    arguments,
+                    index: 0,
+                    function: "util.IsValidProp"
+                )
+                guard let host = hostBox.value else {
+                    throw LuaError.runtime(
+                        "util.IsValidProp validation host is unavailable for \(path)"
+                    )
+                }
+                let validation = host.validateCanonicalPropPhysicsModel(
+                    SourceEntityModelReference(path)
+                )
+                switch validation {
+                case .valid:
+                    return [.boolean(true)]
+                case .invalid:
+                    return [.boolean(false)]
+                case .unavailable:
+                    // `false` means the engine actually rejected this model as
+                    // a prop. An absent attestation is a different state.
+                    throw LuaError.runtime(
+                        "util.IsValidProp validation is unavailable for \(path)"
+                    )
+                }
+            },
+            for: .string("IsValidProp"),
+            in: util
+        )
+        state.setGlobal("util", value: .table(util))
+
         // CLIENT owns immutable replicated snapshots only. Returning here
         // keeps every mutation surface and ents.Create SERVER-exclusive.
         guard runtime.realm == .server else { return }
@@ -819,45 +891,5 @@ public enum SourceCanonicalEntityGLuaBridge {
         )
         state.setGlobal("ents", value: .table(ents))
 
-        let util: LuaTable
-        if case let .table(existing) = state.getGlobal("util") {
-            util = existing
-        } else {
-            util = LuaTable()
-        }
-        try state.setRawTableValue(
-            native("util.IsValidModel") { arguments in
-                let path = try requiredString(
-                    arguments,
-                    index: 0,
-                    function: "util.IsValidModel"
-                )
-                guard let host = hostBox.value else { return [.boolean(false)] }
-                let validation = host.validateCanonicalModel(
-                    SourceEntityModelReference(path),
-                    for: .propPhysics
-                )
-                return [.boolean(validation == .valid)]
-            },
-            for: .string("IsValidModel"),
-            in: util
-        )
-        try state.setRawTableValue(
-            native("util.IsValidProp") { arguments in
-                let path = try requiredString(
-                    arguments,
-                    index: 0,
-                    function: "util.IsValidProp"
-                )
-                guard let host = hostBox.value else { return [.boolean(false)] }
-                let validation = host.validateCanonicalPropPhysicsModel(
-                    SourceEntityModelReference(path)
-                )
-                return [.boolean(validation == .valid)]
-            },
-            for: .string("IsValidProp"),
-            in: util
-        )
-        state.setGlobal("util", value: .table(util))
     }
 }
