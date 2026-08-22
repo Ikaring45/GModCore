@@ -21,6 +21,44 @@ public struct GModDynamicEntityMetalSceneBuilderPolicy: Sendable, Equatable {
     )
 }
 
+/// One entity-to-pose assignment from the session animation cache. Different
+/// entities sharing a bind-pose appearance may select different exact frames;
+/// entities selecting the same complete animated resource still share one
+/// immutable Metal allocation.
+public struct GModDynamicEntityAnimatedMetalAssignment:
+    Sendable,
+    Equatable
+{
+    public let identity: SourceCanonicalEntityIdentity
+    public let resource: GModStudioAnimatedRenderableModelResource
+
+    public init(
+        identity: SourceCanonicalEntityIdentity,
+        resource: GModStudioAnimatedRenderableModelResource
+    ) {
+        self.identity = identity
+        self.resource = resource
+    }
+}
+
+/// Independently revisioned animation publication. Source entity projection
+/// revisions need not advance when only an authored sequence/frame changes.
+public struct GModDynamicEntityAnimatedMetalPublication:
+    Sendable,
+    Equatable
+{
+    public let revision: UInt64
+    public let assignments: [GModDynamicEntityAnimatedMetalAssignment]
+
+    public init(
+        revision: UInt64,
+        assignments: [GModDynamicEntityAnimatedMetalAssignment]
+    ) {
+        self.revision = revision
+        self.assignments = assignments
+    }
+}
+
 public enum GModDynamicEntityMetalSceneBuilderError:
     Error,
     Sendable,
@@ -35,6 +73,14 @@ public enum GModDynamicEntityMetalSceneBuilderError:
         received: GModMetalDynamicEntitySceneGeneration
     )
     case revisionNotIncreasing(previous: UInt64, received: UInt64)
+    case invalidAnimationRevision(UInt64)
+    case animationRevisionWentBackwards(previous: UInt64, received: UInt64)
+    case duplicateAnimatedEntity(SourceCanonicalEntityIdentity)
+    case animatedEntityUnavailable(SourceCanonicalEntityIdentity)
+    case animatedBindPoseUnavailable(GModStudioRenderableModelResourceID)
+    case conflictingBindPoseResource(GModStudioRenderableModelResourceID)
+    case conflictingAnimatedResource(GModMetalDynamicEntityResourceID)
+    case publicationRevisionExhausted
     case updateInvalidated
 
     public var description: String {
@@ -50,6 +96,22 @@ public enum GModDynamicEntityMetalSceneBuilderError:
                 Self.describe(previous)
         case let .revisionNotIncreasing(previous, received):
             return "dynamic prop revision \(received) does not follow \(previous)"
+        case let .invalidAnimationRevision(value):
+            return "invalid dynamic prop animation revision \(value)"
+        case let .animationRevisionWentBackwards(previous, received):
+            return "dynamic prop animation revision \(received) precedes \(previous)"
+        case let .duplicateAnimatedEntity(identity):
+            return "duplicate animated dynamic entity EHANDLE \(identity.handle.rawValue)"
+        case let .animatedEntityUnavailable(identity):
+            return "animated dynamic entity EHANDLE \(identity.handle.rawValue) is absent"
+        case let .animatedBindPoseUnavailable(id):
+            return "animated dynamic bind pose \(id.normalizedModelPath) is absent"
+        case let .conflictingBindPoseResource(id):
+            return "dynamic bind pose \(id.normalizedModelPath) has conflicting payloads"
+        case let .conflictingAnimatedResource(id):
+            return "animated dynamic resource \(id.normalizedModelPath) has conflicting payloads"
+        case .publicationRevisionExhausted:
+            return "dynamic Metal publication revision is exhausted"
         case .updateInvalidated:
             return "dynamic prop scene build was invalidated"
         }
@@ -75,6 +137,36 @@ public final class GModDynamicEntityMetalSceneBuilder: @unchecked Sendable {
     private struct State {
         let scene: GModMetalDynamicEntityScene
         let retainedBitmapByteCount: Int
+        let sourceRevision: UInt64
+        let animationRevision: UInt64?
+        let bindPoseResources: [
+            GModStudioRenderableModelResourceID: GModStudioRenderableModelResource
+        ]
+        let resolvedBindPoseInputs: [
+            GModStudioRenderableModelResourceID:
+                GModMetalDynamicEntityResourceInput
+        ]
+        let animatedResources: [
+            GModMetalDynamicEntityResourceID:
+                GModStudioAnimatedRenderableModelResource
+        ]
+    }
+
+    private struct ResourcePlan {
+        let bindPose: GModStudioRenderableModelResource
+        let animated: GModStudioAnimatedRenderableModelResource?
+    }
+
+    private struct PlannedScene {
+        let resources: [GModMetalDynamicEntityResourceID: ResourcePlan]
+        let instances: [GModMetalDynamicEntityInstanceInput]
+        let bindPoseResources: [
+            GModStudioRenderableModelResourceID: GModStudioRenderableModelResource
+        ]
+        let animatedResources: [
+            GModMetalDynamicEntityResourceID:
+                GModStudioAnimatedRenderableModelResource
+        ]
     }
 
     private let lock = NSLock()
@@ -128,7 +220,9 @@ public final class GModDynamicEntityMetalSceneBuilder: @unchecked Sendable {
     public func build(
         from snapshot: GModDynamicEntityRenderSceneSnapshot,
         applicationGeneration: UInt64,
-        laneGeneration: UInt64
+        laneGeneration: UInt64,
+        animatedPublication:
+            GModDynamicEntityAnimatedMetalPublication? = nil
     ) throws -> GModMetalDynamicEntityScene? {
         guard applicationGeneration > 0 else {
             throw GModDynamicEntityMetalSceneBuilderError.invalidGeneration(
@@ -141,6 +235,11 @@ public final class GModDynamicEntityMetalSceneBuilder: @unchecked Sendable {
                 field: "lane",
                 value: laneGeneration
             )
+        }
+        if let animatedPublication,
+           animatedPublication.revision == 0 {
+            throw GModDynamicEntityMetalSceneBuilderError
+                .invalidAnimationRevision(animatedPublication.revision)
         }
 
         lock.lock()
@@ -164,67 +263,116 @@ public final class GModDynamicEntityMetalSceneBuilder: @unchecked Sendable {
             )
         }
 
-        let resourceIDs = snapshot.resources.map(Self.resourceID).sorted()
-        let instanceInputs = snapshot.instances.map(Self.instanceInput)
+        let planned = try Self.plan(
+            snapshot: snapshot,
+            animatedPublication: animatedPublication
+        )
+        let resourceIDs = planned.resources.keys.sorted()
+        let animationRevision = animatedPublication?.revision
         let candidate: State
         if let previous,
-           previous.scene.generation == generation,
-           previous.scene.resources.map(\.id) == resourceIDs {
-            if snapshot.revision == previous.scene.revision {
-                guard Self.hasSameVisualInstances(
-                    previous.scene.instances,
-                    instanceInputs
-                ) else {
+           previous.scene.generation == generation {
+            guard snapshot.revision >= previous.sourceRevision else {
+                throw GModDynamicEntityMetalSceneBuilderError
+                    .revisionNotIncreasing(
+                        previous: previous.sourceRevision,
+                        received: snapshot.revision
+                    )
+            }
+            let priorAnimationRevision = previous.animationRevision ?? 0
+            let receivedAnimationRevision = animationRevision ?? 0
+            guard receivedAnimationRevision >= priorAnimationRevision else {
+                throw GModDynamicEntityMetalSceneBuilderError
+                    .animationRevisionWentBackwards(
+                        previous: priorAnimationRevision,
+                        received: receivedAnimationRevision
+                    )
+            }
+            for (id, bindPose) in planned.bindPoseResources {
+                if let prior = previous.bindPoseResources[id],
+                   prior != bindPose {
+                    throw GModDynamicEntityMetalSceneBuilderError
+                        .conflictingBindPoseResource(id)
+                }
+            }
+            for (id, animated) in planned.animatedResources {
+                if let prior = previous.animatedResources[id],
+                   prior != animated {
+                    throw GModDynamicEntityMetalSceneBuilderError
+                        .conflictingAnimatedResource(id)
+                }
+            }
+            let sameResources = previous.scene.resources.map(\.id) ==
+                resourceIDs
+            let sameInstances = Self.hasSameVisualInstances(
+                previous.scene.instances,
+                planned.instances
+            )
+            if sameResources && sameInstances {
+                candidate = State(
+                    scene: previous.scene,
+                    retainedBitmapByteCount:
+                        previous.retainedBitmapByteCount,
+                    sourceRevision: snapshot.revision,
+                    animationRevision: animationRevision,
+                    bindPoseResources: planned.bindPoseResources,
+                    resolvedBindPoseInputs:
+                        previous.resolvedBindPoseInputs,
+                    animatedResources: planned.animatedResources
+                )
+            } else {
+                guard snapshot.revision > previous.sourceRevision ||
+                        receivedAnimationRevision > priorAnimationRevision else {
+                    if !sameResources {
+                        throw GModDynamicEntityMetalSceneBuilderError
+                            .animationRevisionWentBackwards(
+                                previous: priorAnimationRevision,
+                                received: receivedAnimationRevision
+                            )
+                    }
                     throw GModDynamicEntityMetalSceneBuilderError
                         .revisionNotIncreasing(
-                            previous: previous.scene.revision,
+                            previous: previous.sourceRevision,
                             received: snapshot.revision
                         )
                 }
-                return previous.scene
-            }
-            guard snapshot.revision > previous.scene.revision else {
-                throw GModDynamicEntityMetalSceneBuilderError
-                    .revisionNotIncreasing(
-                        previous: previous.scene.revision,
-                        received: snapshot.revision
-                    )
-            }
-            candidate = State(
-                scene: try previous.scene.updatingInstances(
-                    revision: snapshot.revision,
-                    instances: instanceInputs
-                ),
-                retainedBitmapByteCount: previous.retainedBitmapByteCount
-            )
-        } else {
-            if let previous, previous.scene.generation == generation,
-               snapshot.revision <= previous.scene.revision {
-                throw GModDynamicEntityMetalSceneBuilderError
-                    .revisionNotIncreasing(
-                        previous: previous.scene.revision,
-                        received: snapshot.revision
-                    )
-            }
-            var retentionBudget = GModMetalWorldBitmapRetentionBudget(
-                maximumByteCount: policy.maximumRetainedBitmapByteCount
-            )
-            let resources = snapshot.resources.map {
-                Self.resourceInput(
-                    $0,
-                    retentionBudget: &retentionBudget,
-                    resolveMaterial: resolveMaterial
+                let publicationRevision = try Self.nextPublicationRevision(
+                    after: previous.scene.revision
                 )
+                if sameResources {
+                    candidate = State(
+                        scene: try previous.scene.updatingInstances(
+                            revision: publicationRevision,
+                            instances: planned.instances
+                        ),
+                        retainedBitmapByteCount:
+                            previous.retainedBitmapByteCount,
+                        sourceRevision: snapshot.revision,
+                        animationRevision: animationRevision,
+                        bindPoseResources: planned.bindPoseResources,
+                        resolvedBindPoseInputs:
+                            previous.resolvedBindPoseInputs,
+                        animatedResources: planned.animatedResources
+                    )
+                } else {
+                    candidate = try makeState(
+                        generation: generation,
+                        publicationRevision: publicationRevision,
+                        sourceRevision: snapshot.revision,
+                        animationRevision: animationRevision,
+                        planned: planned,
+                        reusableState: previous
+                    )
+                }
             }
-            candidate = State(
-                scene: try GModMetalDynamicEntityScene(
-                    generation: generation,
-                    revision: snapshot.revision,
-                    resources: resources,
-                    instances: instanceInputs,
-                    policy: policy.metalScene
-                ),
-                retainedBitmapByteCount: retentionBudget.retainedByteCount
+        } else {
+            candidate = try makeState(
+                generation: generation,
+                publicationRevision: snapshot.revision,
+                sourceRevision: snapshot.revision,
+                animationRevision: animationRevision,
+                planned: planned,
+                reusableState: nil
             )
         }
 
@@ -247,6 +395,189 @@ public final class GModDynamicEntityMetalSceneBuilder: @unchecked Sendable {
 }
 
 private extension GModDynamicEntityMetalSceneBuilder {
+    func makeState(
+        generation: GModMetalDynamicEntitySceneGeneration,
+        publicationRevision: UInt64,
+        sourceRevision: UInt64,
+        animationRevision: UInt64?,
+        planned: PlannedScene,
+        reusableState: State?
+    ) throws -> State {
+        let resolvedBindPoseInputs: [
+            GModStudioRenderableModelResourceID:
+                GModMetalDynamicEntityResourceInput
+        ]
+        let retainedBitmapByteCount: Int
+        if let reusableState,
+           reusableState.bindPoseResources == planned.bindPoseResources {
+            resolvedBindPoseInputs = reusableState.resolvedBindPoseInputs
+            retainedBitmapByteCount =
+                reusableState.retainedBitmapByteCount
+        } else {
+            var retentionBudget = GModMetalWorldBitmapRetentionBudget(
+                maximumByteCount: policy.maximumRetainedBitmapByteCount
+            )
+            var resolved: [
+                GModStudioRenderableModelResourceID:
+                    GModMetalDynamicEntityResourceInput
+            ] = [:]
+            for id in planned.bindPoseResources.keys.sorted() {
+                guard let bindPose = planned.bindPoseResources[id] else {
+                    continue
+                }
+                resolved[id] = Self.resourceInput(
+                    bindPose,
+                    retentionBudget: &retentionBudget,
+                    resolveMaterial: resolveMaterial
+                )
+            }
+            resolvedBindPoseInputs = resolved
+            retainedBitmapByteCount = retentionBudget.retainedByteCount
+        }
+
+        var resources: [GModMetalDynamicEntityResourceInput] = []
+        resources.reserveCapacity(planned.resources.count)
+        for (_, plan) in planned.resources.sorted(by: { $0.key < $1.key }) {
+            guard let resolvedBindPose =
+                    resolvedBindPoseInputs[plan.bindPose.id] else {
+                throw GModDynamicEntityMetalSceneBuilderError
+                    .animatedBindPoseUnavailable(plan.bindPose.id)
+            }
+            if let animated = plan.animated {
+                resources.append(
+                    try GModStudioAnimatedMetalResourceAdapter.resourceInput(
+                        animated: animated,
+                        bindPose: plan.bindPose,
+                        resolvedBindPose: resolvedBindPose
+                    )
+                )
+            } else {
+                resources.append(resolvedBindPose)
+            }
+        }
+        return State(
+            scene: try GModMetalDynamicEntityScene(
+                generation: generation,
+                revision: publicationRevision,
+                resources: resources,
+                instances: planned.instances,
+                policy: policy.metalScene
+            ),
+            retainedBitmapByteCount: retainedBitmapByteCount,
+            sourceRevision: sourceRevision,
+            animationRevision: animationRevision,
+            bindPoseResources: planned.bindPoseResources,
+            resolvedBindPoseInputs: resolvedBindPoseInputs,
+            animatedResources: planned.animatedResources
+        )
+    }
+
+    static func plan(
+        snapshot: GModDynamicEntityRenderSceneSnapshot,
+        animatedPublication: GModDynamicEntityAnimatedMetalPublication?
+    ) throws -> PlannedScene {
+        var bindPoseByID: [
+            GModStudioRenderableModelResourceID: GModStudioRenderableModelResource
+        ] = [:]
+        for resource in snapshot.resources {
+            if let prior = bindPoseByID.updateValue(
+                resource,
+                forKey: resource.id
+            ), prior != resource {
+                throw GModDynamicEntityMetalSceneBuilderError
+                    .conflictingBindPoseResource(resource.id)
+            }
+        }
+        let instanceIdentities = Set(snapshot.instances.map(\.identity))
+        var assignmentByIdentity: [
+            SourceCanonicalEntityIdentity:
+                GModStudioAnimatedRenderableModelResource
+        ] = [:]
+        for assignment in animatedPublication?.assignments ?? [] {
+            guard instanceIdentities.contains(assignment.identity) else {
+                throw GModDynamicEntityMetalSceneBuilderError
+                    .animatedEntityUnavailable(assignment.identity)
+            }
+            guard assignmentByIdentity.updateValue(
+                assignment.resource,
+                forKey: assignment.identity
+            ) == nil else {
+                throw GModDynamicEntityMetalSceneBuilderError
+                    .duplicateAnimatedEntity(assignment.identity)
+            }
+        }
+
+        var plans: [GModMetalDynamicEntityResourceID: ResourcePlan] = [:]
+        var referencedBindPoseIDs = Set<GModStudioRenderableModelResourceID>()
+        var animatedResources: [
+            GModMetalDynamicEntityResourceID:
+                GModStudioAnimatedRenderableModelResource
+        ] = [:]
+        var instances: [GModMetalDynamicEntityInstanceInput] = []
+        instances.reserveCapacity(snapshot.instances.count)
+        for source in snapshot.instances {
+            guard let bindPose = bindPoseByID[source.resourceID] else {
+                throw GModDynamicEntityMetalSceneBuilderError
+                    .animatedBindPoseUnavailable(source.resourceID)
+            }
+            referencedBindPoseIDs.insert(bindPose.id)
+            let animated = assignmentByIdentity[source.identity]
+            if let animated {
+                try GModStudioAnimatedMetalResourceAdapter.validate(
+                    animated: animated,
+                    bindPose: bindPose
+                )
+            }
+            let id = animated.map(
+                GModStudioAnimatedMetalResourceAdapter.resourceID
+            ) ?? resourceID(bindPose)
+            if let prior = plans[id],
+               prior.bindPose != bindPose || prior.animated != animated {
+                throw GModDynamicEntityMetalSceneBuilderError
+                    .conflictingAnimatedResource(id)
+            }
+            plans[id] = ResourcePlan(
+                bindPose: bindPose,
+                animated: animated
+            )
+            if let animated {
+                if let prior = animatedResources.updateValue(
+                    animated,
+                    forKey: id
+                ), prior != animated {
+                    throw GModDynamicEntityMetalSceneBuilderError
+                        .conflictingAnimatedResource(id)
+                }
+            }
+            instances.append(instanceInput(source, resourceID: id))
+        }
+        // Preserve the established static path for an explicitly published but
+        // currently unreferenced resource. A bind pose used exclusively by
+        // animated instances is omitted because those instances already point
+        // at their exact immutable pose resources.
+        for (id, bindPose) in bindPoseByID where
+            !referencedBindPoseIDs.contains(id) {
+            plans[resourceID(bindPose)] = ResourcePlan(
+                bindPose: bindPose,
+                animated: nil
+            )
+        }
+        return PlannedScene(
+            resources: plans,
+            instances: instances,
+            bindPoseResources: bindPoseByID,
+            animatedResources: animatedResources
+        )
+    }
+
+    static func nextPublicationRevision(after previous: UInt64) throws -> UInt64 {
+        guard previous != UInt64.max else {
+            throw GModDynamicEntityMetalSceneBuilderError
+                .publicationRevisionExhausted
+        }
+        return previous + 1
+    }
+
     static func generation(
         snapshot: GModDynamicEntityRenderSceneSnapshot,
         application: UInt64,
@@ -293,6 +624,7 @@ private extension GModDynamicEntityMetalSceneBuilder {
         GModMetalDynamicEntityResourceID(
             normalizedModelPath: source.id.normalizedModelPath,
             checksum: source.id.checksum,
+            lodIndex: source.id.lodIndex,
             bodyValue: source.id.bodyValue,
             skinFamilyIndex: source.id.skinFamilyIndex
         )
@@ -396,15 +728,17 @@ private extension GModDynamicEntityMetalSceneBuilder {
     }
 
     static func instanceInput(
-        _ source: GModDynamicEntityRenderInstanceSnapshot
+        _ source: GModDynamicEntityRenderInstanceSnapshot,
+        resourceID: GModMetalDynamicEntityResourceID? = nil
     ) -> GModMetalDynamicEntityInstanceInput {
         GModMetalDynamicEntityInstanceInput(
             identity: source.identity,
             sourceEntityRevision: source.sourceEntityRevision,
             transform: source.transform,
-            resourceID: GModMetalDynamicEntityResourceID(
+            resourceID: resourceID ?? GModMetalDynamicEntityResourceID(
                 normalizedModelPath: source.resourceID.normalizedModelPath,
                 checksum: source.resourceID.checksum,
+                lodIndex: source.resourceID.lodIndex,
                 bodyValue: source.resourceID.bodyValue,
                 skinFamilyIndex: source.resourceID.skinFamilyIndex
             ),

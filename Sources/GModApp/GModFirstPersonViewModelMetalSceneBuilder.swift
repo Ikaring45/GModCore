@@ -24,6 +24,25 @@ public struct GModFirstPersonViewModelMetalSceneBuilderPolicy:
     )
 }
 
+/// Independently revisioned first-person animation publication. A nil resource
+/// explicitly returns the current projection to its authored bind pose; an
+/// absent publication means no animation channel has been connected.
+public struct GModFirstPersonViewModelAnimatedMetalPublication:
+    Sendable,
+    Equatable
+{
+    public let revision: UInt64
+    public let resource: GModStudioAnimatedRenderableModelResource?
+
+    public init(
+        revision: UInt64,
+        resource: GModStudioAnimatedRenderableModelResource?
+    ) {
+        self.revision = revision
+        self.resource = resource
+    }
+}
+
 public enum GModFirstPersonViewModelMetalSceneBuilderError:
     Error,
     Sendable,
@@ -38,7 +57,13 @@ public enum GModFirstPersonViewModelMetalSceneBuilderError:
         received: GModMetalDynamicEntitySceneGeneration
     )
     case revisionNotIncreasing(previous: UInt64, received: UInt64)
+    case invalidAnimationRevision(UInt64)
+    case animationRevisionWentBackwards(previous: UInt64, received: UInt64)
     case resourceIdentityMismatch(expected: String, received: String)
+    case animatedProjectionUnavailable
+    case conflictingBindPoseResource(GModStudioRenderableModelResourceID)
+    case conflictingAnimatedResource(GModMetalDynamicEntityResourceID)
+    case publicationRevisionExhausted
     case updateInvalidated
 
     public var description: String {
@@ -53,8 +78,20 @@ public enum GModFirstPersonViewModelMetalSceneBuilderError:
             return "viewmodel generation \(received) precedes \(previous)"
         case let .revisionNotIncreasing(previous, received):
             return "viewmodel revision \(received) does not follow \(previous)"
+        case let .invalidAnimationRevision(value):
+            return "invalid viewmodel animation revision \(value)"
+        case let .animationRevisionWentBackwards(previous, received):
+            return "viewmodel animation revision \(received) precedes \(previous)"
         case let .resourceIdentityMismatch(expected, received):
             return "viewmodel Studio resource '\(received)' does not match '\(expected)'"
+        case .animatedProjectionUnavailable:
+            return "animated viewmodel resource has no current bind-pose projection"
+        case let .conflictingBindPoseResource(id):
+            return "viewmodel bind pose \(id.normalizedModelPath) has conflicting payloads"
+        case let .conflictingAnimatedResource(id):
+            return "viewmodel animated resource \(id.normalizedModelPath) has conflicting payloads"
+        case .publicationRevisionExhausted:
+            return "viewmodel Metal publication revision is exhausted"
         case .updateInvalidated:
             return "viewmodel scene build was invalidated"
         }
@@ -77,6 +114,11 @@ public final class GModFirstPersonViewModelMetalSceneBuilder:
     private struct State {
         let scene: GModMetalFirstPersonViewModelScene
         let retainedBitmapByteCount: Int
+        let sourceRevision: UInt64
+        let animationRevision: UInt64?
+        let bindPoseResource: GModStudioRenderableModelResource
+        let resolvedBindPoseInput: GModMetalDynamicEntityResourceInput
+        let animatedResource: GModStudioAnimatedRenderableModelResource?
     }
 
     private let lock = NSLock()
@@ -139,7 +181,9 @@ public final class GModFirstPersonViewModelMetalSceneBuilder:
     public func build(
         from snapshot: GModFirstPersonViewModelSceneSnapshot,
         applicationGeneration: UInt64,
-        laneGeneration: UInt64
+        laneGeneration: UInt64,
+        animatedPublication:
+            GModFirstPersonViewModelAnimatedMetalPublication? = nil
     ) throws -> GModMetalFirstPersonViewModelScene? {
         guard applicationGeneration > 0 else {
             throw GModFirstPersonViewModelMetalSceneBuilderError
@@ -151,6 +195,11 @@ public final class GModFirstPersonViewModelMetalSceneBuilder:
         guard laneGeneration > 0 else {
             throw GModFirstPersonViewModelMetalSceneBuilderError
                 .invalidGeneration(field: "lane", value: laneGeneration)
+        }
+        if let animatedPublication,
+           animatedPublication.revision == 0 {
+            throw GModFirstPersonViewModelMetalSceneBuilderError
+                .invalidAnimationRevision(animatedPublication.revision)
         }
 
         lock.lock()
@@ -178,25 +227,11 @@ public final class GModFirstPersonViewModelMetalSceneBuilder:
                     received: generation
                 )
         }
-        if let previous,
-           generation == previous.scene.generation,
-           snapshot.revision <= previous.scene.revision {
-            if snapshot.revision == previous.scene.revision,
-               let projection = snapshot.projection,
-               Self.matches(
-                   scene: previous.scene,
-                   projection: projection
-               ) {
-                return previous.scene
-            }
-            throw GModFirstPersonViewModelMetalSceneBuilderError
-                .revisionNotIncreasing(
-                    previous: previous.scene.revision,
-                    received: snapshot.revision
-                )
-        }
-
         guard let projection = snapshot.projection else {
+            if animatedPublication?.resource != nil {
+                throw GModFirstPersonViewModelMetalSceneBuilderError
+                    .animatedProjectionUnavailable
+            }
             return try publish(candidate: nil, capturedEpoch: capturedEpoch)
         }
         let expectedViewModelPath = projection.viewModel.path
@@ -210,34 +245,107 @@ public final class GModFirstPersonViewModelMetalSceneBuilder:
                     received: projection.resource.id.normalizedModelPath
                 )
         }
+        let animatedResource = animatedPublication?.resource
+        if let animatedResource {
+            try GModStudioAnimatedMetalResourceAdapter.validate(
+                animated: animatedResource,
+                bindPose: projection.resource
+            )
+        }
+        let effectiveResourceID = animatedResource.map(
+            GModStudioAnimatedMetalResourceAdapter.resourceID
+        ) ?? Self.resourceID(projection.resource)
+        let animationRevision = animatedPublication?.revision
 
-        var retentionBudget = GModMetalWorldBitmapRetentionBudget(
-            maximumByteCount: policy.maximumRetainedBitmapByteCount
-        )
-        let resource = Self.resourceInput(
-            projection.resource,
-            retentionBudget: &retentionBudget,
-            resolveMaterial: resolveMaterial,
-            resolveEntityColorProxies: resolveEntityColorProxies
-        )
-        let candidate = State(
-            scene: try GModMetalFirstPersonViewModelScene(
+        let candidate: State
+        if let previous,
+           generation == previous.scene.generation {
+            guard snapshot.revision >= previous.sourceRevision else {
+                throw GModFirstPersonViewModelMetalSceneBuilderError
+                    .revisionNotIncreasing(
+                        previous: previous.sourceRevision,
+                        received: snapshot.revision
+                    )
+            }
+            let priorAnimationRevision = previous.animationRevision ?? 0
+            let receivedAnimationRevision = animationRevision ?? 0
+            guard receivedAnimationRevision >= priorAnimationRevision else {
+                throw GModFirstPersonViewModelMetalSceneBuilderError
+                    .animationRevisionWentBackwards(
+                        previous: priorAnimationRevision,
+                        received: receivedAnimationRevision
+                    )
+            }
+            if previous.bindPoseResource.id == projection.resource.id,
+               previous.bindPoseResource != projection.resource {
+                throw GModFirstPersonViewModelMetalSceneBuilderError
+                    .conflictingBindPoseResource(projection.resource.id)
+            }
+            if let animatedResource,
+               let priorAnimated = previous.animatedResource,
+               GModStudioAnimatedMetalResourceAdapter.resourceID(
+                   priorAnimated
+               ) == effectiveResourceID,
+               priorAnimated != animatedResource {
+                throw GModFirstPersonViewModelMetalSceneBuilderError
+                    .conflictingAnimatedResource(effectiveResourceID)
+            }
+
+            if Self.matches(
+                scene: previous.scene,
+                projection: projection,
+                resourceID: effectiveResourceID
+            ) {
+                candidate = State(
+                    scene: previous.scene,
+                    retainedBitmapByteCount:
+                        previous.retainedBitmapByteCount,
+                    sourceRevision: snapshot.revision,
+                    animationRevision: animationRevision,
+                    bindPoseResource: projection.resource,
+                    resolvedBindPoseInput:
+                        previous.resolvedBindPoseInput,
+                    animatedResource: animatedResource
+                )
+            } else {
+                guard snapshot.revision > previous.sourceRevision ||
+                        receivedAnimationRevision > priorAnimationRevision else {
+                    if effectiveResourceID != previous.scene.resource.id {
+                        throw GModFirstPersonViewModelMetalSceneBuilderError
+                            .animationRevisionWentBackwards(
+                                previous: priorAnimationRevision,
+                                received: receivedAnimationRevision
+                            )
+                    }
+                    throw GModFirstPersonViewModelMetalSceneBuilderError
+                        .revisionNotIncreasing(
+                            previous: previous.sourceRevision,
+                            received: snapshot.revision
+                        )
+                }
+                candidate = try makeState(
+                    generation: generation,
+                    publicationRevision: try Self.nextPublicationRevision(
+                        after: previous.scene.revision
+                    ),
+                    sourceRevision: snapshot.revision,
+                    animationRevision: animationRevision,
+                    projection: projection,
+                    animatedResource: animatedResource,
+                    reusableState: previous
+                )
+            }
+        } else {
+            candidate = try makeState(
                 generation: generation,
-                revision: snapshot.revision,
-                playerIdentity: projection.playerIdentity,
-                weaponIdentity: projection.weaponIdentity,
-                weaponClassName: projection.weaponClassName,
-                sourceWeaponRevision: projection.sourceWeaponRevision,
-                normalizedViewModelPath:
-                    projection.resource.id.normalizedModelPath,
-                sourceFieldOfViewDegrees:
-                    projection.viewModelFieldOfViewDegrees,
-                weaponColor: projection.weaponColor,
-                resource: resource,
-                policy: policy.metalScene
-            ),
-            retainedBitmapByteCount: retentionBudget.retainedByteCount
-        )
+                publicationRevision: snapshot.revision,
+                sourceRevision: snapshot.revision,
+                animationRevision: animationRevision,
+                projection: projection,
+                animatedResource: animatedResource,
+                reusableState: nil
+            )
+        }
         return try publish(
             candidate: candidate,
             capturedEpoch: capturedEpoch
@@ -253,6 +361,70 @@ public final class GModFirstPersonViewModelMetalSceneBuilder:
 }
 
 private extension GModFirstPersonViewModelMetalSceneBuilder {
+    func makeState(
+        generation: GModMetalDynamicEntitySceneGeneration,
+        publicationRevision: UInt64,
+        sourceRevision: UInt64,
+        animationRevision: UInt64?,
+        projection: GModFirstPersonViewModelProjection,
+        animatedResource: GModStudioAnimatedRenderableModelResource?,
+        reusableState: State?
+    ) throws -> State {
+        let resolvedBindPoseInput: GModMetalDynamicEntityResourceInput
+        let retainedBitmapByteCount: Int
+        if let reusableState,
+           reusableState.scene.generation == generation,
+           reusableState.bindPoseResource == projection.resource {
+            resolvedBindPoseInput = reusableState.resolvedBindPoseInput
+            retainedBitmapByteCount = reusableState.retainedBitmapByteCount
+        } else {
+            var retentionBudget = GModMetalWorldBitmapRetentionBudget(
+                maximumByteCount: policy.maximumRetainedBitmapByteCount
+            )
+            resolvedBindPoseInput = Self.resourceInput(
+                projection.resource,
+                retentionBudget: &retentionBudget,
+                resolveMaterial: resolveMaterial,
+                resolveEntityColorProxies: resolveEntityColorProxies
+            )
+            retainedBitmapByteCount = retentionBudget.retainedByteCount
+        }
+        let resourceInput: GModMetalDynamicEntityResourceInput
+        if let animatedResource {
+            resourceInput = try GModStudioAnimatedMetalResourceAdapter
+                .resourceInput(
+                    animated: animatedResource,
+                    bindPose: projection.resource,
+                    resolvedBindPose: resolvedBindPoseInput
+                )
+        } else {
+            resourceInput = resolvedBindPoseInput
+        }
+        return State(
+            scene: try GModMetalFirstPersonViewModelScene(
+                generation: generation,
+                revision: publicationRevision,
+                playerIdentity: projection.playerIdentity,
+                weaponIdentity: projection.weaponIdentity,
+                weaponClassName: projection.weaponClassName,
+                sourceWeaponRevision: projection.sourceWeaponRevision,
+                normalizedViewModelPath:
+                    projection.resource.id.normalizedModelPath,
+                sourceFieldOfViewDegrees:
+                    projection.viewModelFieldOfViewDegrees,
+                weaponColor: projection.weaponColor,
+                resource: resourceInput,
+                policy: policy.metalScene
+            ),
+            retainedBitmapByteCount: retainedBitmapByteCount,
+            sourceRevision: sourceRevision,
+            animationRevision: animationRevision,
+            bindPoseResource: projection.resource,
+            resolvedBindPoseInput: resolvedBindPoseInput,
+            animatedResource: animatedResource
+        )
+    }
+
     private func publish(
         candidate: State?,
         capturedEpoch: UInt64
@@ -279,20 +451,41 @@ private extension GModFirstPersonViewModelMetalSceneBuilder {
         return lhs.sourceConnection < rhs.sourceConnection
     }
 
+    static func nextPublicationRevision(after previous: UInt64) throws -> UInt64 {
+        guard previous != UInt64.max else {
+            throw GModFirstPersonViewModelMetalSceneBuilderError
+                .publicationRevisionExhausted
+        }
+        return previous + 1
+    }
+
+    static func resourceID(
+        _ source: GModStudioRenderableModelResource
+    ) -> GModMetalDynamicEntityResourceID {
+        GModMetalDynamicEntityResourceID(
+            normalizedModelPath: source.id.normalizedModelPath,
+            checksum: source.id.checksum,
+            lodIndex: source.id.lodIndex,
+            bodyValue: source.id.bodyValue,
+            skinFamilyIndex: source.id.skinFamilyIndex
+        )
+    }
+
     static func matches(
         scene: GModMetalFirstPersonViewModelScene,
-        projection: GModFirstPersonViewModelProjection
+        projection: GModFirstPersonViewModelProjection,
+        resourceID: GModMetalDynamicEntityResourceID
     ) -> Bool {
         scene.playerIdentity == projection.playerIdentity &&
             scene.weaponIdentity == projection.weaponIdentity &&
             scene.weaponClassName == projection.weaponClassName &&
+            scene.sourceWeaponRevision == projection.sourceWeaponRevision &&
             scene.normalizedViewModelPath ==
                 projection.resource.id.normalizedModelPath &&
             scene.sourceFieldOfViewDegrees ==
                 projection.viewModelFieldOfViewDegrees &&
             scene.weaponColor == projection.weaponColor &&
-            scene.resource.id.normalizedModelPath ==
-                projection.resource.id.normalizedModelPath
+            scene.resource.id == resourceID
     }
 
     static func resourceInput(
@@ -301,12 +494,7 @@ private extension GModFirstPersonViewModelMetalSceneBuilder {
         resolveMaterial: MaterialResolver,
         resolveEntityColorProxies: EntityColorProxyResolver
     ) -> GModMetalDynamicEntityResourceInput {
-        let id = GModMetalDynamicEntityResourceID(
-            normalizedModelPath: source.id.normalizedModelPath,
-            checksum: source.id.checksum,
-            bodyValue: source.id.bodyValue,
-            skinFamilyIndex: source.id.skinFamilyIndex
-        )
+        let id = resourceID(source)
         let vertices = source.model.vertices.map {
             GModMetalDynamicEntitySourceVertex(
                 position: $0.position,
