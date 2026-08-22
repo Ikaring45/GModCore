@@ -20,7 +20,11 @@
 
 ## Validation status
 
-- The bundled `gm_construct` displacement regression test passes.
-- Focused VGUI, Hint, input-latency, and Apple test-target checks are recorded
-  on the release commit. Physical-iPad observations reported against 0.1.56
-  were the source of this hotfix; they are not represented as automated tests.
+- Five focused Windows tests pass: bundled `gm_construct`, the real stock Q
+  transition, two stock Hint frame/expiry paths, and the canonical Toolgun
+  inventory route used by the Hint code.
+- The Windows build compiles the complete available package test target. The
+  CoreText orientation and app overlay-pacer tests remain Apple-only and are
+  validated by the release commit's iPadOS CI.
+- Physical-iPad observations reported against 0.1.56 were the source of this
+  hotfix; they are not represented as automated tests.
