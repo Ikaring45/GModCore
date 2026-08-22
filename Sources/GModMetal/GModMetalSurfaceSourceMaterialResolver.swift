@@ -265,6 +265,7 @@ public final class GModMetalSurfaceSourceMaterialResolver:
                 rawFogColor[1] / 255,
                 rawFogColor[2] / 255
             ),
+            fogEnabled: material.fogEnabled,
             fogStart: material.fogStart,
             fogEnd: material.fogEnd,
             reflectionAmount: material.reflectionAmount,

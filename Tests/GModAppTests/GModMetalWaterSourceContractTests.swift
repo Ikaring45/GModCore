@@ -101,6 +101,7 @@ final class GModMetalWaterSourceContractTests: XCTestCase {
 
         XCTAssertFalse(plan.requiresReflection)
         XCTAssertTrue(plan.requiresRefraction)
+        XCTAssertNil(plan.refractionFog)
         XCTAssertEqual(plan.targetFlags(for: beneath), 2)
 
         XCTAssertNil(GModMetalWaterRenderTargetContract.plan(
@@ -111,6 +112,55 @@ final class GModMetalWaterSourceContractTests: XCTestCase {
             ))],
             cameraZ: 0
         ))
+    }
+
+    func testAboveWaterRefractionCarriesOnlyOneAuthoredFogRange() throws {
+        let top = material(
+            fogEnabled: true,
+            fogStart: 0,
+            fogEnd: 1_024,
+            reflectionAmount: 0.4,
+            refractionAmount: 1
+        )
+        let plan = try XCTUnwrap(GModMetalWaterRenderTargetContract.plan(
+            materialRanges: [range(material: top)],
+            cameraZ: 300
+        ))
+
+        XCTAssertEqual(
+            plan.refractionFog,
+            GModMetalWaterRefractionFog(
+                sourceSurfaceZ: 128,
+                fogStart: 0,
+                fogEnd: 1_024
+            )
+        )
+
+        let conflicting = material(
+            fogEnabled: true,
+            fogStart: 16,
+            fogEnd: 2_048,
+            reflectionAmount: nil,
+            refractionAmount: 1
+        )
+        XCTAssertNil(try XCTUnwrap(GModMetalWaterRenderTargetContract.plan(
+            materialRanges: [
+                range(material: top),
+                range(material: conflicting),
+            ],
+            cameraZ: 300
+        )).refractionFog)
+
+        let missingEnable = material(
+            fogStart: 0,
+            fogEnd: 1_024,
+            reflectionAmount: nil,
+            refractionAmount: 1
+        )
+        XCTAssertNil(try XCTUnwrap(GModMetalWaterRenderTargetContract.plan(
+            materialRanges: [range(material: missingEnable)],
+            cameraZ: 300
+        )).refractionFog)
     }
 
     func testRenderTargetFlagsIntersectMaterialKeysWithRenderedPasses() throws {
@@ -182,6 +232,23 @@ final class GModMetalWaterSourceContractTests: XCTestCase {
         XCTAssertEqual(coordinates.refraction.y, -0.04, accuracy: 0.000_001)
     }
 
+    func testAboveWaterDepthAlphaScalesBothDependentUVAmounts() {
+        let coordinates = GModMetalWaterSamplingContract
+            .dependentTextureCoordinates(
+                reflectionBase: SIMD2<Float>(0.25, 0.75),
+                refractionBase: SIMD2<Float>(0.6, 0.2),
+                decodedNormal: SIMD4<Float>(0.5, -0.25, 1, 0.8),
+                reflectionAmount: -0.4,
+                refractionAmount: 1.2,
+                unwarpedRefractionDepth: 0.25
+            )
+
+        XCTAssertEqual(coordinates.reflection.x, 0.21, accuracy: 0.000_001)
+        XCTAssertEqual(coordinates.reflection.y, 0.77, accuracy: 0.000_001)
+        XCTAssertEqual(coordinates.refraction.x, 0.72, accuracy: 0.000_001)
+        XCTAssertEqual(coordinates.refraction.y, 0.14, accuracy: 0.000_001)
+    }
+
     func testMetalReflectionRenderTargetInvertsScreenYOnly() {
         let bases = GModMetalWaterSamplingContract.renderTargetBases(
             screenUV: SIMD2<Float>(0.25, 0.75)
@@ -193,6 +260,9 @@ final class GModMetalWaterSourceContractTests: XCTestCase {
 
     private func material(
         isAboveWater: Bool = true,
+        fogEnabled: Bool? = nil,
+        fogStart: Float? = nil,
+        fogEnd: Float? = nil,
         reflectionAmount: Float?,
         refractionAmount: Float?
     ) -> GModMetalWorldWaterMaterial {
@@ -200,8 +270,9 @@ final class GModMetalWaterSourceContractTests: XCTestCase {
             resourceIdentifier: "materials/water/source_contract.vmt",
             isAboveWater: isAboveWater,
             fogColor: .zero,
-            fogStart: nil,
-            fogEnd: nil,
+            fogEnabled: fogEnabled,
+            fogStart: fogStart,
+            fogEnd: fogEnd,
             reflectionAmount: reflectionAmount,
             refractionAmount: refractionAmount,
             normalBitmap: nil,

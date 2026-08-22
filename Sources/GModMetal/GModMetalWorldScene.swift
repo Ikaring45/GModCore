@@ -521,6 +521,7 @@ public struct GModMetalWorldWaterMaterial: Sendable, Equatable {
     public let resourceIdentifier: String
     public let isAboveWater: Bool
     public let fogColor: SIMD3<Float>
+    public let fogEnabled: Bool?
     public let fogStart: Float?
     public let fogEnd: Float?
     public let reflectionAmount: Float?
@@ -534,6 +535,7 @@ public struct GModMetalWorldWaterMaterial: Sendable, Equatable {
         resourceIdentifier: String,
         isAboveWater: Bool,
         fogColor: SIMD3<Float>,
+        fogEnabled: Bool? = nil,
         fogStart: Float?,
         fogEnd: Float?,
         reflectionAmount: Float?,
@@ -546,6 +548,7 @@ public struct GModMetalWorldWaterMaterial: Sendable, Equatable {
         self.resourceIdentifier = resourceIdentifier
         self.isAboveWater = isAboveWater
         self.fogColor = fogColor
+        self.fogEnabled = fogEnabled
         self.fogStart = fogStart
         self.fogEnd = fogEnd
         self.reflectionAmount = reflectionAmount
@@ -564,6 +567,7 @@ public struct GModMetalWorldWaterMaterial: Sendable, Equatable {
             resourceIdentifier: resourceIdentifier,
             isAboveWater: isAboveWater,
             fogColor: fogColor,
+            fogEnabled: fogEnabled,
             fogStart: fogStart,
             fogEnd: fogEnd,
             reflectionAmount: reflectionAmount,
@@ -665,18 +669,20 @@ enum GModMetalWaterSamplingContract {
 
     /// Mirrors the dependent texture-coordinate calculation in
     /// `water_ps2x_helper.h`. Normal alpha scales both offsets, while each VMT
-    /// amount remains separate and signed.
+    /// amount remains separate and signed. For no-base-texture Water, Source
+    /// also multiplies both amounts by the unwarped refraction depth alpha.
     static func dependentTextureCoordinates(
         reflectionBase: SIMD2<Float>,
         refractionBase: SIMD2<Float>,
         decodedNormal: SIMD4<Float>,
         reflectionAmount: Float,
-        refractionAmount: Float
+        refractionAmount: Float,
+        unwarpedRefractionDepth: Float = 1
     ) -> GModMetalWaterDependentTextureCoordinates {
         let normalOffset = SIMD2<Float>(
             decodedNormal.x * decodedNormal.w,
             decodedNormal.y * decodedNormal.w
-        )
+        ) * unwarpedRefractionDepth
         return GModMetalWaterDependentTextureCoordinates(
             reflection: reflectionBase + normalOffset * reflectionAmount,
             refraction: refractionBase + normalOffset * refractionAmount
@@ -688,10 +694,32 @@ enum GModMetalWaterSamplingContract {
 /// range on that plane. Multiple visible heights require separate reflected
 /// views and therefore stay on the diagnosed fallback path instead of sampling
 /// a render target produced for the wrong plane.
+struct GModMetalWaterRefractionFog: Sendable, Equatable {
+    let sourceSurfaceZ: Float
+    let fogStart: Float
+    let fogEnd: Float
+}
+
 struct GModMetalWaterRenderTargetPlan: Sendable, Equatable {
     let sourceSurfaceZ: Float
     let requiresReflection: Bool
     let requiresRefraction: Bool
+    /// Source writes water depth to refraction-target alpha only for the
+    /// above-water view. One shared target can represent the plane only when
+    /// every refracting material agrees on the authored fog range.
+    let refractionFog: GModMetalWaterRefractionFog?
+
+    init(
+        sourceSurfaceZ: Float,
+        requiresReflection: Bool,
+        requiresRefraction: Bool,
+        refractionFog: GModMetalWaterRefractionFog? = nil
+    ) {
+        self.sourceSurfaceZ = sourceSurfaceZ
+        self.requiresReflection = requiresReflection
+        self.requiresRefraction = requiresRefraction
+        self.refractionFog = refractionFog
+    }
 
     func targetFlags(for material: GModMetalWorldWaterMaterial) -> UInt32 {
         let reflection: UInt32 = requiresReflection &&
@@ -733,10 +761,43 @@ enum GModMetalWaterRenderTargetContract {
             $0.material.refractionAmount != nil
         }
         guard requiresReflection || requiresRefraction else { return nil }
+        let refractionFog: GModMetalWaterRefractionFog?
+        if cameraZ >= first.surface.surfaceZ, requiresRefraction {
+            let refractingMaterials = visible.compactMap {
+                $0.material.refractionAmount == nil ? nil : $0.material
+            }
+            let authoredRanges: [SIMD2<Float>] = refractingMaterials.compactMap {
+                material in
+                guard material.fogEnabled == true,
+                      let start = material.fogStart,
+                      let end = material.fogEnd,
+                      start.isFinite,
+                      end.isFinite,
+                      end > start else { return nil }
+                return SIMD2<Float>(start, end)
+            }
+            if let firstRange = authoredRanges.first,
+               authoredRanges.count == refractingMaterials.count,
+               authoredRanges.allSatisfy({
+                   $0.x.bitPattern == firstRange.x.bitPattern &&
+                       $0.y.bitPattern == firstRange.y.bitPattern
+               }) {
+                refractionFog = GModMetalWaterRefractionFog(
+                    sourceSurfaceZ: first.surface.surfaceZ,
+                    fogStart: firstRange.x,
+                    fogEnd: firstRange.y
+                )
+            } else {
+                refractionFog = nil
+            }
+        } else {
+            refractionFog = nil
+        }
         return GModMetalWaterRenderTargetPlan(
             sourceSurfaceZ: first.surface.surfaceZ,
             requiresReflection: requiresReflection,
-            requiresRefraction: requiresRefraction
+            requiresRefraction: requiresRefraction,
+            refractionFog: refractionFog
         )
     }
 }

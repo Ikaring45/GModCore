@@ -1014,6 +1014,7 @@ final class GModMetalWorldSceneTests: XCTestCase {
 
         XCTAssertTrue(water.isAboveWater)
         XCTAssertEqual(water.fogColor, SIMD3<Float>(7, 58, 66) / 255)
+        XCTAssertEqual(water.fogEnabled, true)
         XCTAssertEqual(water.fogStart, 0)
         XCTAssertEqual(water.fogEnd, 1_024)
         XCTAssertEqual(water.reflectionAmount, 0.4)

@@ -476,6 +476,12 @@ public struct GModMetalView:
             let fogStartEndDensityRadial: SIMD4<Float>
             let fogCameraEye: SIMD4<Float>
             let fogCameraForward: SIMD4<Float>
+            /// Source Water refraction pass: surface Y, inverse fog range,
+            /// enabled bit, followed by the camera ray basis used to encode
+            /// `CalcWaterFogAlpha` into target alpha.
+            let waterFogSurfaceInverseRangeAndEnabled: SIMD4<Float>
+            let waterFogCameraEye: SIMD4<Float>
+            let waterFogCameraForward: SIMD4<Float>
 
             init(
                 viewProjection: simd_float4x4,
@@ -483,7 +489,10 @@ public struct GModMetalView:
                 directLinearRGB: SIMD4<Float>,
                 ambientLinearRGB: SIMD4<Float>,
                 clipPlane: SIMD4<Float>,
-                fog: GModMetalSky3DFogUniforms? = nil
+                fog: GModMetalSky3DFogUniforms? = nil,
+                waterRefractionFog: GModMetalWaterRefractionFog? = nil,
+                waterFogCameraEye: SIMD3<Float> = .zero,
+                waterFogCameraForward: SIMD3<Float> = .zero
             ) {
                 self.viewProjection = viewProjection
                 self.lightDirection = lightDirection
@@ -506,6 +515,28 @@ public struct GModMetalView:
                     fogCameraEye = .zero
                     fogCameraForward = .zero
                 }
+                if let waterRefractionFog,
+                   waterRefractionFog.fogEnd > waterRefractionFog.fogStart {
+                    waterFogSurfaceInverseRangeAndEnabled = SIMD4<Float>(
+                        waterRefractionFog.sourceSurfaceZ,
+                        1 / (waterRefractionFog.fogEnd -
+                            waterRefractionFog.fogStart),
+                        1,
+                        0
+                    )
+                    self.waterFogCameraEye = SIMD4<Float>(
+                        waterFogCameraEye,
+                        0
+                    )
+                    self.waterFogCameraForward = SIMD4<Float>(
+                        waterFogCameraForward,
+                        0
+                    )
+                } else {
+                    waterFogSurfaceInverseRangeAndEnabled = .zero
+                    self.waterFogCameraEye = .zero
+                    self.waterFogCameraForward = .zero
+                }
             }
         }
 
@@ -518,6 +549,9 @@ public struct GModMetalView:
             let sourceAmountsAndViewport: SIMD4<Float>
             /// Metal camera eye and target-presence bits (reflect=1, refract=2).
             let cameraEyeAndTargetFlags: SIMD4<Float>
+            /// Authored fog start/end, above-water bit, enabled bit.
+            let fogStartEndAboveAndEnabled: SIMD4<Float>
+            let cameraForwardAndPadding: SIMD4<Float>
         }
 
         private struct WorldSunSpriteUniforms {
@@ -3205,6 +3239,7 @@ public struct GModMetalView:
                             sourceSurfaceZ: waterPlan.sourceSurfaceZ,
                             sourceCameraZ: pair.scene.cameraEye.z
                         ),
+                        waterRefractionFog: waterPlan.refractionFog,
                         rendersWater: false,
                         drawsDynamicEntities: true,
                         usesWorldVisibility: false,
@@ -3708,6 +3743,9 @@ public struct GModMetalView:
                 let targetFlags: Float =
                     (material.reflectionAmount == nil ? 0 : 1) +
                     (material.refractionAmount == nil ? 0 : 2)
+                let hasValidWaterFog = material.fogEnabled == true &&
+                    material.fogStart != nil && material.fogEnd != nil &&
+                    material.fogEnd! > material.fogStart!
                 var uniforms = WorldWaterUniforms(
                     fogColorAndAlpha: SIMD4<Float>(
                         material.fogColor,
@@ -3728,6 +3766,16 @@ public struct GModMetalView:
                     cameraEyeAndTargetFlags: SIMD4<Float>(
                         metalCameraEye,
                         targetFlags
+                    ),
+                    fogStartEndAboveAndEnabled: SIMD4<Float>(
+                        material.fogStart ?? 0,
+                        material.fogEnd ?? 0,
+                        material.isAboveWater ? 1 : 0,
+                        hasValidWaterFog ? 1 : 0
+                    ),
+                    cameraForwardAndPadding: SIMD4<Float>(
+                        metalCameraForward,
+                        0
                     )
                 )
                 withUnsafeBytes(of: &uniforms) { bytes in
@@ -3877,6 +3925,7 @@ public struct GModMetalView:
             metalCameraForward: SIMD3<Float>,
             metalCameraUp: SIMD3<Float>,
             clipPlane: SIMD4<Float>,
+            waterRefractionFog: GModMetalWaterRefractionFog? = nil,
             rendersWater: Bool,
             drawsDynamicEntities: Bool,
             usesWorldVisibility: Bool,
@@ -3973,7 +4022,10 @@ public struct GModMetalView:
                     ambientLinearRGB: SIMD4<Float>(
                         ambient.x, ambient.y, ambient.z, 0
                     ),
-                    clipPlane: clipPlane
+                    clipPlane: clipPlane,
+                    waterRefractionFog: waterRefractionFog,
+                    waterFogCameraEye: eye,
+                    waterFogCameraForward: metalCameraForward
                 )
                 withUnsafeBytes(of: &uniforms) { bytes in
                     guard let address = bytes.baseAddress else { return }
@@ -4172,6 +4224,9 @@ public struct GModMetalView:
                 let targetFlags: Float =
                     (material.reflectionAmount == nil ? 0 : 1) +
                     (material.refractionAmount == nil ? 0 : 2)
+                let hasValidWaterFog = material.fogEnabled == true &&
+                    material.fogStart != nil && material.fogEnd != nil &&
+                    material.fogEnd! > material.fogStart!
                 var uniforms = WorldWaterUniforms(
                     fogColorAndAlpha: SIMD4<Float>(
                         material.fogColor,
@@ -4192,6 +4247,16 @@ public struct GModMetalView:
                     cameraEyeAndTargetFlags: SIMD4<Float>(
                         metalCameraEye,
                         targetFlags
+                    ),
+                    fogStartEndAboveAndEnabled: SIMD4<Float>(
+                        material.fogStart ?? 0,
+                        material.fogEnd ?? 0,
+                        material.isAboveWater ? 1 : 0,
+                        hasValidWaterFog ? 1 : 0
+                    ),
+                    cameraForwardAndPadding: SIMD4<Float>(
+                        metalCameraForward,
+                        0
                     )
                 )
                 withUnsafeBytes(of: &uniforms) { bytes in
@@ -4374,6 +4439,11 @@ public struct GModMetalView:
                     sin(angleRadians)
                 )
                 let targetFlags = Float(plan.targetFlags(for: material))
+                let hasAuthoredWaterFog = material.fogEnabled == true &&
+                    material.fogStart != nil && material.fogEnd != nil &&
+                    material.fogEnd! > material.fogStart!
+                let hasRenderableWaterFog = hasAuthoredWaterFog &&
+                    (!material.isAboveWater || plan.refractionFog != nil)
                 var waterUniforms = WorldWaterUniforms(
                     fogColorAndAlpha: SIMD4<Float>(
                         material.fogColor,
@@ -4394,6 +4464,16 @@ public struct GModMetalView:
                     cameraEyeAndTargetFlags: SIMD4<Float>(
                         scene.metalCameraEye,
                         targetFlags
+                    ),
+                    fogStartEndAboveAndEnabled: SIMD4<Float>(
+                        material.fogStart ?? 0,
+                        material.fogEnd ?? 0,
+                        material.isAboveWater ? 1 : 0,
+                        hasRenderableWaterFog ? 1 : 0
+                    ),
+                    cameraForwardAndPadding: SIMD4<Float>(
+                        scene.metalCameraForward,
+                        0
                     )
                 )
                 withUnsafeBytes(of: &waterUniforms) { bytes in
@@ -5829,6 +5909,9 @@ public struct GModMetalView:
             float4 fogStartEndDensityRadial;
             float4 fogCameraEye;
             float4 fogCameraForward;
+            float4 waterFogSurfaceInverseRangeAndEnabled;
+            float4 waterFogCameraEye;
+            float4 waterFogCameraForward;
         };
 
         struct WorldWaterUniforms
@@ -5837,6 +5920,8 @@ public struct GModMetalView:
             float4 scrollDirectionRateAndTime;
             float4 sourceAmountsAndViewport;
             float4 cameraEyeAndTargetFlags;
+            float4 fogStartEndAboveAndEnabled;
+            float4 cameraForwardAndPadding;
         };
 
         struct WorldSunSpriteUniforms
@@ -6001,9 +6086,39 @@ public struct GModMetalView:
             float alpha
         )
         {
+            float outputAlpha = alpha;
+            if (uniforms.waterFogSurfaceInverseRangeAndEnabled.z > 0.5)
+            {
+                constexpr float nearPlane = 1.0;
+                constexpr float farPlane = 65536.0;
+                float forwardDistance = dot(
+                    input.worldPosition - uniforms.waterFogCameraEye.xyz,
+                    uniforms.waterFogCameraForward.xyz
+                );
+                float projectedDepth = (
+                    forwardDistance * farPlane - nearPlane * farPlane
+                ) / (farPlane - nearPlane);
+                float depthFromEye = uniforms.waterFogCameraEye.y
+                    - input.worldPosition.y;
+                float fractionBelowWater = 0.0;
+                if (abs(depthFromEye) > 1.0e-7)
+                {
+                    fractionBelowWater = saturate(
+                        (uniforms.waterFogSurfaceInverseRangeAndEnabled.x
+                            - input.worldPosition.y) / depthFromEye
+                    );
+                }
+                // Source `CalcWaterFogAlpha`: the above-water refraction
+                // target carries water depth in alpha for the later Water
+                // shader. Source Z is Metal world Y.
+                outputAlpha = saturate(
+                    fractionBelowWater * projectedDepth *
+                        uniforms.waterFogSurfaceInverseRangeAndEnabled.y
+                );
+            }
             return gmodWorldOutput(
                 gmodApplyWorldFog(input, uniforms, linearRGB),
-                alpha
+                outputAlpha
             );
         }
 
@@ -6419,23 +6534,70 @@ public struct GModMetalView:
                 float2(1.0)
             );
             float2 baseUV = input.position.xy / viewport;
-            float2 amounts = water.sourceAmountsAndViewport.xy;
-            float2 normalOffset = tangentNormal.xy * normalAlpha;
-            float2 reflectionBase = float2(baseUV.x, 1.0 - baseUV.y);
-            float2 reflectionUV = reflectionBase + normalOffset * amounts.x;
-            float2 refractionUV = baseUV + normalOffset * amounts.y;
-            float3 refracted = gmodDecodeDisplaySRGB(
-                refractionColor.sample(sceneSampler, refractionUV).rgb
-            );
-            float3 reflected = gmodDecodeDisplaySRGB(
-                reflectionColor.sample(sceneSampler, reflectionUV).rgb
-            );
-            float3 fog = gmodDecodeDisplaySRGB(water.fogColorAndAlpha.rgb);
             uint targetFlags = uint(
                 max(water.cameraEyeAndTargetFlags.w, 0.0) + 0.5
             );
             bool hasReflection = (targetFlags & 1u) != 0u;
             bool hasRefraction = (targetFlags & 2u) != 0u;
+            bool isAboveWater = water.fogStartEndAboveAndEnabled.z > 0.5;
+            bool hasWaterFog = water.fogStartEndAboveAndEnabled.w > 0.5;
+            float waterFogDepthValue = 1.0;
+            if (isAboveWater && hasRefraction && hasWaterFog)
+            {
+                waterFogDepthValue = refractionColor.sample(
+                    sceneSampler,
+                    baseUV
+                ).a;
+            }
+            float2 amounts = water.sourceAmountsAndViewport.xy;
+            // `water_ps2x_helper.h` scales both dependent UV amounts by the
+            // unwarped depth target for Water materials without `$basetexture`.
+            amounts *= waterFogDepthValue;
+            float2 normalOffset = tangentNormal.xy * normalAlpha;
+            float2 reflectionBase = float2(baseUV.x, 1.0 - baseUV.y);
+            float2 reflectionUV = reflectionBase + normalOffset * amounts.x;
+            float2 refractionUV = baseUV + normalOffset * amounts.y;
+            float4 refractedSample = refractionColor.sample(
+                sceneSampler,
+                refractionUV
+            );
+            if (isAboveWater && hasRefraction && hasWaterFog)
+            {
+                waterFogDepthValue = refractedSample.a;
+            }
+            float3 refracted = gmodDecodeDisplaySRGB(refractedSample.rgb);
+            float3 reflected = gmodDecodeDisplaySRGB(
+                reflectionColor.sample(sceneSampler, reflectionUV).rgb
+            );
+            float3 fog = gmodDecodeDisplaySRGB(water.fogColorAndAlpha.rgb);
+            if (hasRefraction && hasWaterFog)
+            {
+                float fogFactor;
+                if (isAboveWater)
+                {
+                    fogFactor = saturate(waterFogDepthValue - 0.05);
+                }
+                else
+                {
+                    constexpr float nearPlane = 1.0;
+                    constexpr float farPlane = 65536.0;
+                    float forwardDistance = dot(
+                        input.worldPosition -
+                            water.cameraEyeAndTargetFlags.xyz,
+                        water.cameraForwardAndPadding.xyz
+                    );
+                    float projectedDepth = (
+                        forwardDistance * farPlane - nearPlane * farPlane
+                    ) / (farPlane - nearPlane);
+                    fogFactor = saturate(
+                        (projectedDepth -
+                            water.fogStartEndAboveAndEnabled.x) /
+                        (water.fogStartEndAboveAndEnabled.y -
+                            water.fogStartEndAboveAndEnabled.x)
+                    );
+                }
+                refracted = mix(refracted, fog, fogFactor);
+            }
             float3 composed = fog;
             if (hasReflection && hasRefraction)
             {
@@ -6448,6 +6610,12 @@ public struct GModMetalView:
                 );
                 float normalDotEye = saturate(dot(worldNormal, eyeVector));
                 float fresnel = pow(1.0 - normalDotEye, 5.0);
+                if (hasWaterFog)
+                {
+                    fresnel *= saturate(
+                        (waterFogDepthValue - 0.05) * 20.0
+                    );
+                }
                 composed = mix(refracted, reflected, fresnel);
             }
             else if (hasReflection)
