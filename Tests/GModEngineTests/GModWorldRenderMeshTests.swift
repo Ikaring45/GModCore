@@ -4,6 +4,51 @@ import XCTest
 @testable import GModGameSession
 
 final class GModWorldRenderMeshTests: XCTestCase {
+    func testBundledMapsRetainAuthoredSkyCameraFog() throws {
+        let expectations: [(
+            map: GModBundledMap,
+            direction: SourceVector3,
+            color: SourceVector3,
+            start: Float,
+            end: Float
+        )] = [
+            (
+                .construct,
+                SourceVector3(1, 0, 0),
+                SourceVector3(142.0 / 255, 164.0 / 255, 178.0 / 255),
+                -4_000,
+                320_000
+            ),
+            (
+                .flatgrass,
+                SourceVector3(-1, 0, 0),
+                SourceVector3(100.0 / 255, 125.0 / 255, 130.0 / 255),
+                1,
+                90_000
+            ),
+        ]
+
+        for expectation in expectations {
+            let bsp = try SourceBSP(
+                data: GModGameAssets.data(for: expectation.map, kind: .bsp)
+            )
+            let sky = try XCTUnwrap(GModWorldRenderMesh.build(from: bsp).sky3D)
+            guard case let .available(fog) = sky.fogStatus else {
+                XCTFail("expected valid sky_camera fog for \(expectation.map)")
+                continue
+            }
+            XCTAssertTrue(fog.blendsColors)
+            XCTAssertEqual(fog.sourcePrimaryDirection, expectation.direction)
+            XCTAssertEqual(fog.primaryDisplayRGB, expectation.color)
+            XCTAssertEqual(fog.secondaryDisplayRGB, expectation.color)
+            XCTAssertEqual(fog.start, expectation.start)
+            XCTAssertEqual(fog.end, expectation.end)
+            XCTAssertEqual(fog.maximumDensity, 1)
+            XCTAssertFalse(fog.isRadial)
+            XCTAssertEqual(sky.scale, 16)
+        }
+    }
+
     func testBundledMapsCompileAuthoredAngleDrivenSunSprites() throws {
         let expectations: [(
             map: GModBundledMap,

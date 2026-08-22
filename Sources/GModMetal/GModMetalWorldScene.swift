@@ -52,15 +52,54 @@ enum GModMetalSkyVisibilityRenderContract {
     }
 }
 
+/// Renderer-facing static `sky_camera` fog. Colors remain authored
+/// display-sRGB values until the Metal boundary converts them to linear.
+public struct GModMetalWorldSky3DFog: Sendable, Equatable {
+    public let blendsColors: Bool
+    public let sourcePrimaryDirection: SIMD3<Float>
+    public let primaryDisplayRGB: SIMD3<Float>
+    public let secondaryDisplayRGB: SIMD3<Float>
+    public let start: Float
+    public let end: Float
+    public let maximumDensity: Float
+    public let isRadial: Bool
+
+    public init(
+        blendsColors: Bool,
+        sourcePrimaryDirection: SIMD3<Float>,
+        primaryDisplayRGB: SIMD3<Float>,
+        secondaryDisplayRGB: SIMD3<Float>,
+        start: Float,
+        end: Float,
+        maximumDensity: Float,
+        isRadial: Bool
+    ) {
+        self.blendsColors = blendsColors
+        self.sourcePrimaryDirection = sourcePrimaryDirection
+        self.primaryDisplayRGB = primaryDisplayRGB
+        self.secondaryDisplayRGB = secondaryDisplayRGB
+        self.start = start
+        self.end = end
+        self.maximumDensity = maximumDensity
+        self.isRadial = isRadial
+    }
+}
+
 public struct GModMetalWorldSky3D: Sendable, Equatable {
     /// `sky_camera` origin in Source coordinates before mesh baking.
     public let sourceOrigin: SIMD3<Float>
     /// Positive Source `sky_camera` scale used by `(vertex - origin) * scale`.
     public let scale: Float
+    public let fog: GModMetalWorldSky3DFog?
 
-    public init(sourceOrigin: SIMD3<Float>, scale: Float) {
+    public init(
+        sourceOrigin: SIMD3<Float>,
+        scale: Float,
+        fog: GModMetalWorldSky3DFog? = nil
+    ) {
         self.sourceOrigin = sourceOrigin
         self.scale = scale
+        self.fog = fog
     }
 }
 
@@ -350,6 +389,121 @@ enum GModMetalSky3DProjectionContract {
         sky: GModMetalWorldSky3D
     ) -> SIMD3<Float> {
         sky.sourceOrigin + worldEye / sky.scale
+    }
+}
+
+struct GModMetalSky3DFogUniforms: Sendable, Equatable {
+    let linearRGB: SIMD3<Float>
+    let start: Float
+    let end: Float
+    let maximumDensity: Float
+    let isRadial: Bool
+    let metalCameraEye: SIMD3<Float>
+    let metalCameraForward: SIMD3<Float>
+}
+
+/// CPU oracle for the pinned Source 2013 sky-fog path. Source draws miniature
+/// geometry and divides start/end by sky scale. Our mesh bakes geometry by the
+/// reciprocal transform, so authored start/end are already the equivalent
+/// baked-space distances. Range fog then squares the saturated factor in the
+/// pixel shader, matching `CalcRangeFog` + `BlendPixelFog`.
+enum GModMetalSky3DFogContract {
+    static func uniforms(
+        fog: GModMetalWorldSky3DFog,
+        sourceCameraForward: SIMD3<Float>,
+        metalCameraEye: SIMD3<Float>,
+        metalCameraForward: SIMD3<Float>
+    ) -> GModMetalSky3DFogUniforms? {
+        guard finite(fog.primaryDisplayRGB),
+              finite(fog.secondaryDisplayRGB),
+              channelsAreDisplayRGB(fog.primaryDisplayRGB),
+              channelsAreDisplayRGB(fog.secondaryDisplayRGB),
+              fog.start.isFinite,
+              fog.end.isFinite,
+              fog.end > fog.start,
+              fog.maximumDensity.isFinite,
+              finite(metalCameraEye),
+              let normalizedMetalForward = normalized(metalCameraForward),
+              let displayRGB = resolvedDisplayRGB(
+                fog: fog,
+                sourceCameraForward: sourceCameraForward
+              ) else { return nil }
+        return GModMetalSky3DFogUniforms(
+            linearRGB: GModMetalWorldColorSpaceContract.decodeDisplaySRGB(
+                displayRGB
+            ),
+            start: fog.start,
+            end: fog.end,
+            maximumDensity: fog.maximumDensity,
+            isRadial: fog.isRadial,
+            metalCameraEye: metalCameraEye,
+            metalCameraForward: normalizedMetalForward
+        )
+    }
+
+    static func resolvedDisplayRGB(
+        fog: GModMetalWorldSky3DFog,
+        sourceCameraForward: SIMD3<Float>
+    ) -> SIMD3<Float>? {
+        guard finite(fog.primaryDisplayRGB),
+              finite(fog.secondaryDisplayRGB),
+              finite(fog.sourcePrimaryDirection),
+              let forward = normalized(sourceCameraForward) else { return nil }
+        guard fog.blendsColors else { return fog.primaryDisplayRGB }
+        // Source's GetSkyboxFogColor dots the normalized view forward against
+        // the raw FIELD_VECTOR keyfield. It does not normalize or clamp the
+        // authored fog direction, so preserve that behavior here.
+        let blend = 0.5 * dot(forward, fog.sourcePrimaryDirection) + 0.5
+        return fog.primaryDisplayRGB * blend +
+            fog.secondaryDisplayRGB * (1 - blend)
+    }
+
+    static func sourceShaderMixFactor(
+        distance: Float,
+        fog: GModMetalWorldSky3DFog
+    ) -> Float? {
+        guard distance.isFinite,
+              fog.start.isFinite,
+              fog.end.isFinite,
+              fog.end > fog.start,
+              fog.maximumDensity.isFinite else { return nil }
+        let unsquared = Swift.max(
+            0,
+            Swift.min(
+                1,
+                Swift.min(
+                    fog.maximumDensity,
+                    (distance - fog.start) / (fog.end - fog.start)
+                )
+            )
+        )
+        return unsquared * unsquared
+    }
+
+    private static func channelsAreDisplayRGB(_ value: SIMD3<Float>) -> Bool {
+        (0...1).contains(value.x) &&
+            (0...1).contains(value.y) &&
+            (0...1).contains(value.z)
+    }
+
+    private static func finite(_ value: SIMD3<Float>) -> Bool {
+        value.x.isFinite && value.y.isFinite && value.z.isFinite
+    }
+
+    private static func dot(
+        _ lhs: SIMD3<Float>,
+        _ rhs: SIMD3<Float>
+    ) -> Float {
+        lhs.x * rhs.x + lhs.y * rhs.y + lhs.z * rhs.z
+    }
+
+    private static func normalized(
+        _ value: SIMD3<Float>
+    ) -> SIMD3<Float>? {
+        guard finite(value) else { return nil }
+        let lengthSquared = dot(value, value)
+        guard lengthSquared > Float.ulpOfOne else { return nil }
+        return value / lengthSquared.squareRoot()
     }
 }
 

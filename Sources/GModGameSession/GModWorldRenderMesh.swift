@@ -69,10 +69,55 @@ private struct GModWorldSky3DContext {
     let area: UInt16
     let cluster: Int16
     let faceIndices: Set<Int>
+    let fogStatus: GModWorldSky3DFogStatus
 
     func transform(_ position: SourceVector3) -> SourceVector3 {
         (position - origin) * scale
     }
+}
+
+/// Static `sky_camera` fog authored in the BSP entity lump. Colors remain in
+/// display-sRGB space, matching Source's `color32` keyfields. Start/end remain
+/// in authored world units: Valve divides them by `sky_camera.scale` while
+/// drawing miniature geometry, which is projection-equivalent to leaving them
+/// unchanged after this mesh bakes `(vertex - origin) * scale`.
+public struct GModWorldSky3DFog: Sendable, Equatable {
+    public let blendsColors: Bool
+    public let sourcePrimaryDirection: SourceVector3
+    public let primaryDisplayRGB: SourceVector3
+    public let secondaryDisplayRGB: SourceVector3
+    public let start: Float
+    public let end: Float
+    public let maximumDensity: Float
+    public let isRadial: Bool
+
+    public init(
+        blendsColors: Bool,
+        sourcePrimaryDirection: SourceVector3,
+        primaryDisplayRGB: SourceVector3,
+        secondaryDisplayRGB: SourceVector3,
+        start: Float,
+        end: Float,
+        maximumDensity: Float,
+        isRadial: Bool
+    ) {
+        self.blendsColors = blendsColors
+        self.sourcePrimaryDirection = sourcePrimaryDirection
+        self.primaryDisplayRGB = primaryDisplayRGB
+        self.secondaryDisplayRGB = secondaryDisplayRGB
+        self.start = start
+        self.end = end
+        self.maximumDensity = maximumDensity
+        self.isRadial = isRadial
+    }
+}
+
+/// Keeps malformed static fog distinct from an authored disabled fog. Dynamic
+/// server changes and client fog overrides are not inferred from BSP text.
+public enum GModWorldSky3DFogStatus: Sendable, Equatable {
+    case disabled
+    case available(GModWorldSky3DFog)
+    case unavailableInvalidValue(key: String)
 }
 
 /// Real BSP `sky_camera` metadata and the area used to separate its miniature
@@ -84,19 +129,22 @@ public struct GModWorldSky3D: Sendable, Equatable {
     public let area: UInt16
     public let cluster: Int16
     public let sourceFaceCount: Int
+    public let fogStatus: GModWorldSky3DFogStatus
 
     public init(
         origin: SourceVector3,
         scale: Float,
         area: UInt16,
         cluster: Int16,
-        sourceFaceCount: Int
+        sourceFaceCount: Int,
+        fogStatus: GModWorldSky3DFogStatus = .disabled
     ) {
         self.origin = origin
         self.scale = scale
         self.area = area
         self.cluster = cluster
         self.sourceFaceCount = sourceFaceCount
+        self.fogStatus = fogStatus
     }
 }
 
@@ -1116,7 +1164,8 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
                 scale: $0.scale,
                 area: $0.area,
                 cluster: $0.cluster,
-                sourceFaceCount: $0.faceIndices.count
+                sourceFaceCount: $0.faceIndices.count,
+                fogStatus: $0.fogStatus
             )
         }
         return Self(
@@ -2069,8 +2118,102 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
             scale: scale,
             area: cameraLeaf.area,
             cluster: cameraLeaf.cluster,
-            faceIndices: faceIndices
+            faceIndices: faceIndices,
+            fogStatus: sky3DFogStatus(from: entity)
         )
+    }
+
+    /// Mirrors the pinned SDK `CSkyCamera` keyfields and constructor defaults.
+    /// `use_angles` replaces `fogdir` with the negated entity forward vector in
+    /// `CSkyCamera::Activate`; other dynamic activation behavior is out of this
+    /// immutable BSP compilation boundary.
+    private static func sky3DFogStatus(
+        from entity: SourceBSPParsedEntity
+    ) -> GModWorldSky3DFogStatus {
+        func boolean(_ key: String, default defaultValue: Bool) -> Bool? {
+            guard let text = entity.value(forKey: key) else {
+                return defaultValue
+            }
+            guard let integer = Int(
+                text.trimmingCharacters(in: .whitespacesAndNewlines)
+            ) else { return nil }
+            return integer != 0
+        }
+        func float(_ key: String, default defaultValue: Float) -> Float? {
+            guard let text = entity.value(forKey: key) else {
+                return defaultValue
+            }
+            return finiteFloat(text)
+        }
+        func vector(
+            _ key: String,
+            default defaultValue: SourceVector3
+        ) -> SourceVector3? {
+            guard let text = entity.value(forKey: key) else {
+                return defaultValue
+            }
+            return sourceVector(from: text)
+        }
+        func color(_ key: String) -> SourceVector3? {
+            guard let text = entity.value(forKey: key) else { return .zero }
+            return sourceColor(from: text).map { $0 / 255 }
+        }
+
+        guard let enabled = boolean("fogenable", default: false) else {
+            return .unavailableInvalidValue(key: "fogenable")
+        }
+        guard enabled else { return .disabled }
+        guard let blendsColors = boolean("fogblend", default: false) else {
+            return .unavailableInvalidValue(key: "fogblend")
+        }
+        guard let usesAngles = boolean("use_angles", default: false) else {
+            return .unavailableInvalidValue(key: "use_angles")
+        }
+        let direction: SourceVector3
+        if usesAngles {
+            guard let angles = vector("angles", default: .zero) else {
+                return .unavailableInvalidValue(key: "angles")
+            }
+            direction = -SourceQAngle(
+                pitch: angles.x,
+                yaw: angles.y,
+                roll: angles.z
+            ).sourceBasis.forward
+        } else {
+            guard let parsedDirection = vector("fogdir", default: .zero) else {
+                return .unavailableInvalidValue(key: "fogdir")
+            }
+            direction = parsedDirection
+        }
+        guard let primary = color("fogcolor") else {
+            return .unavailableInvalidValue(key: "fogcolor")
+        }
+        guard let secondary = color("fogcolor2") else {
+            return .unavailableInvalidValue(key: "fogcolor2")
+        }
+        guard let start = float("fogstart", default: 0) else {
+            return .unavailableInvalidValue(key: "fogstart")
+        }
+        guard let end = float("fogend", default: 0) else {
+            return .unavailableInvalidValue(key: "fogend")
+        }
+        // CSkyCamera's constructor is the authoritative default.
+        guard let maximumDensity = float("fogmaxdensity", default: 1) else {
+            return .unavailableInvalidValue(key: "fogmaxdensity")
+        }
+        guard let isRadial = boolean("fogradial", default: false) else {
+            return .unavailableInvalidValue(key: "fogradial")
+        }
+        return .available(GModWorldSky3DFog(
+            blendsColors: blendsColors,
+            sourcePrimaryDirection: direction,
+            primaryDisplayRGB: primary,
+            secondaryDisplayRGB: secondary,
+            start: start,
+            end: end,
+            maximumDensity: maximumDensity,
+            isRadial: isRadial
+        ))
     }
 
     private static func skyVisibility(

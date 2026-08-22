@@ -473,6 +473,43 @@ public struct GModMetalView:
             /// Metal-space plane; fragments with a negative signed distance
             /// are outside the active water render-target half-space.
             let clipPlane: SIMD4<Float>
+            /// Linear fog RGB and an enabled bit in W.
+            let fogColorAndEnabled: SIMD4<Float>
+            /// Authored baked-space start/end, max density, radial bit.
+            let fogStartEndDensityRadial: SIMD4<Float>
+            let fogCameraEye: SIMD4<Float>
+            let fogCameraForward: SIMD4<Float>
+
+            init(
+                viewProjection: simd_float4x4,
+                lightDirection: SIMD4<Float>,
+                directLinearRGB: SIMD4<Float>,
+                ambientLinearRGB: SIMD4<Float>,
+                clipPlane: SIMD4<Float>,
+                fog: GModMetalSky3DFogUniforms? = nil
+            ) {
+                self.viewProjection = viewProjection
+                self.lightDirection = lightDirection
+                self.directLinearRGB = directLinearRGB
+                self.ambientLinearRGB = ambientLinearRGB
+                self.clipPlane = clipPlane
+                if let fog {
+                    fogColorAndEnabled = SIMD4<Float>(fog.linearRGB, 1)
+                    fogStartEndDensityRadial = SIMD4<Float>(
+                        fog.start,
+                        fog.end,
+                        fog.maximumDensity,
+                        fog.isRadial ? 1 : 0
+                    )
+                    fogCameraEye = SIMD4<Float>(fog.metalCameraEye, 0)
+                    fogCameraForward = SIMD4<Float>(fog.metalCameraForward, 0)
+                } else {
+                    fogColorAndEnabled = .zero
+                    fogStartEndDensityRadial = .zero
+                    fogCameraEye = .zero
+                    fogCameraForward = .zero
+                }
+            }
         }
 
         private struct WorldWaterUniforms {
@@ -3338,7 +3375,8 @@ public struct GModMetalView:
 
             func setUniforms(
                 eye: SIMD3<Float>,
-                projection: simd_float4x4
+                projection: simd_float4x4,
+                fog: GModMetalSky3DFogUniforms? = nil
             ) {
                 let view = Self.makeViewMatrix(
                     eye: eye,
@@ -3363,7 +3401,8 @@ public struct GModMetalView:
                     ambientLinearRGB: SIMD4<Float>(
                         ambient.x, ambient.y, ambient.z, 0
                     ),
-                    clipPlane: GModMetalWaterClipPlaneContract.disabled
+                    clipPlane: GModMetalWaterClipPlaneContract.disabled,
+                    fog: fog
                 )
                 withUnsafeBytes(of: &uniforms) { bytes in
                     guard let address = bytes.baseAddress else { return }
@@ -3449,9 +3488,18 @@ public struct GModMetalView:
                 near: clipPlanes.near,
                 far: clipPlanes.far
             )
+            let sky3DFog = sky3D.fog.flatMap {
+                GModMetalSky3DFogContract.uniforms(
+                    fog: $0,
+                    sourceCameraForward: scene.cameraForward,
+                    metalCameraEye: metalCameraEye,
+                    metalCameraForward: metalCameraForward
+                )
+            }
             setUniforms(
                 eye: metalCameraEye,
-                projection: sky3DProjection
+                projection: sky3DProjection,
+                fog: sky3DFog
             )
             encoder.setDepthStencilState(worldDepthState)
             encoder.setFragmentSamplerState(worldSampler, index: 0)
@@ -5467,6 +5515,10 @@ public struct GModMetalView:
             float4 directLinearRGB;
             float4 ambientLinearRGB;
             float4 clipPlane;
+            float4 fogColorAndEnabled;
+            float4 fogStartEndDensityRadial;
+            float4 fogCameraEye;
+            float4 fogCameraForward;
         };
 
         struct WorldWaterUniforms
@@ -5605,6 +5657,46 @@ public struct GModMetalView:
             }
         }
 
+        float3 gmodApplyWorldFog(
+            WorldVertexOutput input,
+            constant WorldUniforms &uniforms,
+            float3 linearRGB
+        )
+        {
+            if (uniforms.fogColorAndEnabled.w < 0.5)
+            {
+                return linearRGB;
+            }
+            float3 eyeDelta = input.worldPosition - uniforms.fogCameraEye.xyz;
+            float fogDistance = uniforms.fogStartEndDensityRadial.w > 0.5
+                ? length(eyeDelta)
+                : max(dot(eyeDelta, uniforms.fogCameraForward.xyz), 0.0);
+            float start = uniforms.fogStartEndDensityRadial.x;
+            float end = uniforms.fogStartEndDensityRadial.y;
+            float maximumDensity = uniforms.fogStartEndDensityRadial.z;
+            float factor = saturate(min(
+                maximumDensity,
+                (fogDistance - start) / (end - start)
+            ));
+            // Source's pixel range-fog path squares the saturated factor to
+            // approximate the hardware fog curve.
+            factor *= factor;
+            return mix(linearRGB, uniforms.fogColorAndEnabled.rgb, factor);
+        }
+
+        float4 gmodWorldFogOutput(
+            WorldVertexOutput input,
+            constant WorldUniforms &uniforms,
+            float3 linearRGB,
+            float alpha
+        )
+        {
+            return gmodWorldOutput(
+                gmodApplyWorldFog(input, uniforms, linearRGB),
+                alpha
+            );
+        }
+
         fragment float4 worldFragmentMain(
             WorldVertexOutput input [[stage_in]],
 
@@ -5616,7 +5708,9 @@ public struct GModMetalView:
             float3 baseLinear = gmodDecodeDisplaySRGB(
                 float3(0.48, 0.61, 0.72)
             );
-            return gmodWorldOutput(
+            return gmodWorldFogOutput(
+                input,
+                uniforms,
                 baseLinear * gmodWorldEnvironmentLight(input.normal, uniforms),
                 1.0
             );
@@ -5635,7 +5729,9 @@ public struct GModMetalView:
         {
             gmodApplyWorldClip(input, uniforms);
             float4 sample = baseTexture.sample(baseSampler, input.uv);
-            return gmodWorldOutput(
+            return gmodWorldFogOutput(
+                input,
+                uniforms,
                 sample.rgb * gmodWorldEnvironmentLight(input.normal, uniforms),
                 1.0
             );
@@ -5660,7 +5756,12 @@ public struct GModMetalView:
                 lightmapSampler,
                 input.lightmapUV
             ).rgb;
-            return gmodWorldOutput(baseLinear * bakedLight, 1.0);
+            return gmodWorldFogOutput(
+                input,
+                uniforms,
+                baseLinear * bakedLight,
+                1.0
+            );
         }
 
         fragment float4 worldTexturedLightmappedFragmentMain(
@@ -5684,7 +5785,12 @@ public struct GModMetalView:
                 lightmapSampler,
                 input.lightmapUV
             ).rgb;
-            return gmodWorldOutput(baseLinear * bakedLight, 1.0);
+            return gmodWorldFogOutput(
+                input,
+                uniforms,
+                baseLinear * bakedLight,
+                1.0
+            );
         }
 
         fragment float4 worldMissingMaterialFragmentMain(
@@ -5700,7 +5806,9 @@ public struct GModMetalView:
             float3 displayColor = alternate
                 ? float3(0.92, 0.05, 0.72)
                 : float3(0.06, 0.01, 0.05);
-            return gmodWorldOutput(
+            return gmodWorldFogOutput(
+                input,
+                uniforms,
                 gmodDecodeDisplaySRGB(displayColor),
                 1.0
             );
@@ -5772,11 +5880,18 @@ public struct GModMetalView:
         }
 
         fragment float4 worldWaterSolidFragmentMain(
+            WorldVertexOutput input [[stage_in]],
+
+            constant WorldUniforms &uniforms
+                [[buffer(1)]],
+
             constant WorldWaterUniforms &water
                 [[buffer(2)]]
         )
         {
-            return gmodWorldOutput(
+            return gmodWorldFogOutput(
+                input,
+                uniforms,
                 gmodDecodeDisplaySRGB(water.fogColorAndAlpha.rgb) *
                     water.fogColorAndAlpha.a,
                 water.fogColorAndAlpha.a
@@ -5785,6 +5900,9 @@ public struct GModMetalView:
 
         fragment float4 worldWaterNormalFragmentMain(
             WorldVertexOutput input [[stage_in]],
+
+            constant WorldUniforms &uniforms
+                [[buffer(1)]],
 
             constant WorldWaterUniforms &water
                 [[buffer(2)]],
@@ -5797,7 +5915,9 @@ public struct GModMetalView:
             // The retained normal is meaningful only once scene-color targets
             // exist. The fallback keeps the authored fog visible and does not
             // invent a separate water light vector.
-            return gmodWorldOutput(
+            return gmodWorldFogOutput(
+                input,
+                uniforms,
                 gmodDecodeDisplaySRGB(water.fogColorAndAlpha.rgb) *
                     water.fogColorAndAlpha.a,
                 water.fogColorAndAlpha.a

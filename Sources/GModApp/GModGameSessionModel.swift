@@ -2222,7 +2222,8 @@ final class GModGameSessionModel: ObservableObject {
                         $0.origin.y,
                         $0.origin.z
                     ),
-                    scale: $0.scale
+                    scale: $0.scale,
+                    fog: metalSky3DFog($0.fogStatus)
                 )
             },
             skyboxVisibility: metalSkyboxVisibility(
@@ -2244,6 +2245,34 @@ final class GModGameSessionModel: ObservableObject {
         for origin: SourceVector3
     ) -> SIMD3<Float> {
         SIMD3<Float>(origin.x, origin.y, origin.z + 64)
+    }
+
+    nonisolated private static func metalSky3DFog(
+        _ status: GModWorldSky3DFogStatus
+    ) -> GModMetalWorldSky3DFog? {
+        guard case let .available(fog) = status else { return nil }
+        return GModMetalWorldSky3DFog(
+            blendsColors: fog.blendsColors,
+            sourcePrimaryDirection: SIMD3<Float>(
+                fog.sourcePrimaryDirection.x,
+                fog.sourcePrimaryDirection.y,
+                fog.sourcePrimaryDirection.z
+            ),
+            primaryDisplayRGB: SIMD3<Float>(
+                fog.primaryDisplayRGB.x,
+                fog.primaryDisplayRGB.y,
+                fog.primaryDisplayRGB.z
+            ),
+            secondaryDisplayRGB: SIMD3<Float>(
+                fog.secondaryDisplayRGB.x,
+                fog.secondaryDisplayRGB.y,
+                fog.secondaryDisplayRGB.z
+            ),
+            start: fog.start,
+            end: fog.end,
+            maximumDensity: fog.maximumDensity,
+            isRadial: fog.isRadial
+        )
     }
 
     nonisolated private static func cameraForward(

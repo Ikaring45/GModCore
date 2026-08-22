@@ -360,6 +360,139 @@ final class GModMetalWorldSceneTests: XCTestCase {
         )
     }
 
+    func testSky3DFogMatchesSourceDirectionBlendAndRangeCurve() throws {
+        let fog = GModMetalWorldSky3DFog(
+            blendsColors: true,
+            sourcePrimaryDirection: SIMD3<Float>(1, 0, 0),
+            primaryDisplayRGB: SIMD3<Float>(1, 0.25, 0),
+            secondaryDisplayRGB: SIMD3<Float>(0, 0.5, 1),
+            start: 100,
+            end: 300,
+            maximumDensity: 0.75,
+            isRadial: false
+        )
+
+        XCTAssertEqual(
+            GModMetalSky3DFogContract.resolvedDisplayRGB(
+                fog: fog,
+                sourceCameraForward: SIMD3<Float>(1, 0, 0)
+            ),
+            fog.primaryDisplayRGB
+        )
+        XCTAssertEqual(
+            GModMetalSky3DFogContract.resolvedDisplayRGB(
+                fog: fog,
+                sourceCameraForward: SIMD3<Float>(-1, 0, 0)
+            ),
+            fog.secondaryDisplayRGB
+        )
+        XCTAssertEqual(
+            GModMetalSky3DFogContract.resolvedDisplayRGB(
+                fog: fog,
+                sourceCameraForward: SIMD3<Float>(0, 1, 0)
+            ),
+            (fog.primaryDisplayRGB + fog.secondaryDisplayRGB) * 0.5
+        )
+        let rawDirectionFog = GModMetalWorldSky3DFog(
+            blendsColors: true,
+            sourcePrimaryDirection: SIMD3<Float>(2, 0, 0),
+            primaryDisplayRGB: SIMD3<Float>(1, 0, 0),
+            secondaryDisplayRGB: SIMD3<Float>(0, 0, 1),
+            start: 0,
+            end: 1,
+            maximumDensity: 1,
+            isRadial: false
+        )
+        XCTAssertEqual(
+            GModMetalSky3DFogContract.resolvedDisplayRGB(
+                fog: rawDirectionFog,
+                sourceCameraForward: SIMD3<Float>(1, 0, 0)
+            ),
+            SIMD3<Float>(1.5, 0, -0.5),
+            "Source uses the raw FIELD_VECTOR fog direction without normalization"
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(GModMetalSky3DFogContract.sourceShaderMixFactor(
+                distance: 100,
+                fog: fog
+            )),
+            0,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(GModMetalSky3DFogContract.sourceShaderMixFactor(
+                distance: 200,
+                fog: fog
+            )),
+            0.25,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(GModMetalSky3DFogContract.sourceShaderMixFactor(
+                distance: 300,
+                fog: fog
+            )),
+            0.5625,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(GModMetalSky3DFogContract.sourceShaderMixFactor(
+                distance: 1_000,
+                fog: fog
+            )),
+            0.5625,
+            accuracy: 0.000_001
+        )
+
+        let uniforms = try XCTUnwrap(GModMetalSky3DFogContract.uniforms(
+            fog: fog,
+            sourceCameraForward: SIMD3<Float>(1, 0, 0),
+            metalCameraEye: SIMD3<Float>(4, 5, 6),
+            metalCameraForward: SIMD3<Float>(0, 0, -2)
+        ))
+        XCTAssertEqual(
+            uniforms.linearRGB,
+            GModMetalWorldColorSpaceContract.decodeDisplaySRGB(
+                fog.primaryDisplayRGB
+            )
+        )
+        XCTAssertEqual(uniforms.start, 100)
+        XCTAssertEqual(uniforms.end, 300)
+        XCTAssertEqual(uniforms.maximumDensity, 0.75)
+        XCTAssertFalse(uniforms.isRadial)
+        XCTAssertEqual(uniforms.metalCameraEye, SIMD3<Float>(4, 5, 6))
+        XCTAssertEqual(uniforms.metalCameraForward, SIMD3<Float>(0, 0, -1))
+
+        let sky = GModMetalWorldSky3D(
+            sourceOrigin: .zero,
+            scale: 16,
+            fog: fog
+        )
+        XCTAssertEqual(sky.fog, fog)
+        XCTAssertEqual(
+            uniforms.start,
+            fog.start,
+            "baked sky geometry uses authored fog distances without a second scale"
+        )
+
+        let invalidRange = GModMetalWorldSky3DFog(
+            blendsColors: false,
+            sourcePrimaryDirection: .zero,
+            primaryDisplayRGB: .zero,
+            secondaryDisplayRGB: .zero,
+            start: 300,
+            end: 300,
+            maximumDensity: 1,
+            isRadial: true
+        )
+        XCTAssertNil(GModMetalSky3DFogContract.uniforms(
+            fog: invalidRange,
+            sourceCameraForward: SIMD3<Float>(1, 0, 0),
+            metalCameraEye: .zero,
+            metalCameraForward: SIMD3<Float>(0, 0, -1)
+        ))
+    }
+
     func testWorldBitmapRetentionChargesSharedRangeIdentityOnce() throws {
         let shared = try fixtureBitmap(named: "shared")
         let other = try fixtureBitmap(named: "other")

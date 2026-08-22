@@ -7,6 +7,64 @@ import GModMetal
 @testable import GModGameSession
 
 final class GModWorldSceneAdapterTests: XCTestCase {
+    func testMakeWorldSceneCarriesValidatedSkyCameraFogIntoMetal() throws {
+        let sourceFog = GModWorldSky3DFog(
+            blendsColors: true,
+            sourcePrimaryDirection: SourceVector3(1, 0, 0),
+            primaryDisplayRGB: SourceVector3(0.2, 0.4, 0.6),
+            secondaryDisplayRGB: SourceVector3(0.1, 0.3, 0.5),
+            start: -4_000,
+            end: 320_000,
+            maximumDensity: 0.75,
+            isRadial: false
+        )
+        let mesh = GModWorldRenderMesh(
+            vertices: [],
+            indices: [],
+            minimum: .zero,
+            maximum: .zero,
+            sky3D: GModWorldSky3D(
+                origin: SourceVector3(64, 128, 256),
+                scale: 16,
+                area: 2,
+                cluster: 3,
+                sourceFaceCount: 4,
+                fogStatus: .available(sourceFog)
+            ),
+            diagnostics: GModWorldRenderMeshDiagnostics(
+                sourceFaceCount: 0,
+                emittedFaceCount: 0,
+                degenerateFaceCount: 0,
+                displacementBaseFaceCount: 0
+            )
+        )
+
+        let scene = try GModGameSessionModel.makeWorldScene(
+            map: .construct,
+            sessionGeneration: 19,
+            mesh: mesh,
+            playerOrigin: .zero,
+            viewAngles: .zero,
+            textureResolver: GModMetalSurfaceSourceMaterialResolver { _ in nil }
+        )
+
+        let sky = try XCTUnwrap(scene.sky3D)
+        XCTAssertEqual(sky.sourceOrigin, SIMD3<Float>(64, 128, 256))
+        XCTAssertEqual(sky.scale, 16)
+        let fog = try XCTUnwrap(sky.fog)
+        XCTAssertEqual(fog.blendsColors, sourceFog.blendsColors)
+        XCTAssertEqual(
+            fog.sourcePrimaryDirection,
+            SIMD3<Float>(1, 0, 0)
+        )
+        XCTAssertEqual(fog.primaryDisplayRGB, SIMD3<Float>(0.2, 0.4, 0.6))
+        XCTAssertEqual(fog.secondaryDisplayRGB, SIMD3<Float>(0.1, 0.3, 0.5))
+        XCTAssertEqual(fog.start, sourceFog.start)
+        XCTAssertEqual(fog.end, sourceFog.end)
+        XCTAssertEqual(fog.maximumDensity, sourceFog.maximumDensity)
+        XCTAssertEqual(fog.isRadial, sourceFog.isRadial)
+    }
+
     func testMakeWorldSceneChargesWaterNormalAgainstSharedRetentionBudget() throws {
         let files: [String: Data] = [
             "materials/water/bounded.vmt": Data(

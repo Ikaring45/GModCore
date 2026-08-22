@@ -126,6 +126,8 @@ required_pipeline_contract = {
     "descriptor.mipmapLevelCount = bitmap.mipLevels.count",
     "for (level, mip) in bitmap.mipLevels.enumerated()",
     "GModMetalSky3DProjectionContract.bakedClipPlanes",
+    "GModMetalSky3DFogContract.uniforms(",
+    "float3 gmodApplyWorldFog(",
     "GModMetalSurfaceTextureUploadContract.mipmapLevelCount",
     "$0.renderLayer == .sky3D && $0.waterSurface != nil",
     "private let dynamicEntityScene: GModMetalDynamicEntityScene?",
