@@ -386,9 +386,10 @@ public enum SourceCanonicalWeaponCombatBridge {
             }
             let captures = SourceCanonicalCameraCaptureRequestState()
             runtime.cameraCaptureRequests = captures
+            let timerScheduler = runtime.timerScheduler
             try dispatcher.registerEngineCommand("jpeg") { _ in
                 try captures.enqueue(
-                    requestedAt: runtime.timerScheduler?.currentTime ?? 0
+                    requestedAt: timerScheduler?.currentTime ?? 0
                 )
                 return .handled
             }

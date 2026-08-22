@@ -178,15 +178,40 @@ private final class GMLuaReadOnlyHostDirectoryCache: @unchecked Sendable {
     }
 }
 
-/// A sandboxed host-directory adapter used by the Windows corpus runner and by
-/// app-owned unpacked content on iPad. Every access is containment checked.
-public final class GMLuaHostDirectoryFileSystem: LuaVirtualFileSystem, @unchecked Sendable {
-    private static let readOnlyCacheRegistryLock = NSLock()
-    private static let readOnlyCaches: NSCache<NSString, GMLuaReadOnlyHostDirectoryCache> = {
+/// Owns the process-wide immutable-directory cache behind one synchronization
+/// boundary. `NSCache` itself is not `Sendable` on Apple platforms; all access
+/// is nevertheless serialized here and callers only receive the separately
+/// locked cache values.
+private final class GMLuaReadOnlyHostDirectoryCacheRegistry: @unchecked Sendable {
+    private let lock = NSLock()
+    private let caches: NSCache<NSString, GMLuaReadOnlyHostDirectoryCache> = {
         let cache = NSCache<NSString, GMLuaReadOnlyHostDirectoryCache>()
         cache.countLimit = 8
         return cache
     }()
+
+    func cache(
+        for root: URL,
+        createIfMissing: Bool
+    ) -> GMLuaReadOnlyHostDirectoryCache? {
+        let key = root.path.replacingOccurrences(of: "\\", with: "/") as NSString
+        lock.lock()
+        defer { lock.unlock() }
+        if let cached = caches.object(forKey: key) {
+            return cached
+        }
+        guard createIfMissing else { return nil }
+        let cache = GMLuaReadOnlyHostDirectoryCache(rootURL: root)
+        caches.setObject(cache, forKey: key)
+        return cache
+    }
+}
+
+/// A sandboxed host-directory adapter used by the Windows corpus runner and by
+/// app-owned unpacked content on iPad. Every access is containment checked.
+public final class GMLuaHostDirectoryFileSystem: LuaVirtualFileSystem, @unchecked Sendable {
+    private static let readOnlyCacheRegistry =
+        GMLuaReadOnlyHostDirectoryCacheRegistry()
 
     private let rootURL: URL
     private let writable: Bool
@@ -204,16 +229,10 @@ public final class GMLuaHostDirectoryFileSystem: LuaVirtualFileSystem, @unchecke
         if writable {
             readOnlyCache = nil
         } else {
-            let key = root.path.replacingOccurrences(of: "\\", with: "/")
-            Self.readOnlyCacheRegistryLock.lock()
-            if let cached = Self.readOnlyCaches.object(forKey: key as NSString) {
-                readOnlyCache = cached
-            } else {
-                let cache = GMLuaReadOnlyHostDirectoryCache(rootURL: root)
-                Self.readOnlyCaches.setObject(cache, forKey: key as NSString)
-                readOnlyCache = cache
-            }
-            Self.readOnlyCacheRegistryLock.unlock()
+            readOnlyCache = Self.readOnlyCacheRegistry.cache(
+                for: root,
+                createIfMissing: true
+            )
         }
     }
 
@@ -225,10 +244,10 @@ public final class GMLuaHostDirectoryFileSystem: LuaVirtualFileSystem, @unchecke
         forRootURL rootURL: URL
     ) -> GMLuaHostDirectoryCacheDiagnostics? {
         let root = rootURL.standardizedFileURL.resolvingSymlinksInPath()
-        let key = root.path.replacingOccurrences(of: "\\", with: "/")
-        readOnlyCacheRegistryLock.lock()
-        defer { readOnlyCacheRegistryLock.unlock() }
-        return readOnlyCaches.object(forKey: key as NSString)?.diagnostics()
+        return readOnlyCacheRegistry.cache(
+            for: root,
+            createIfMissing: false
+        )?.diagnostics()
     }
 
     public func fileExists(at path: String) -> Bool {

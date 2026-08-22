@@ -139,6 +139,18 @@ private final class SourceCanonicalToolWeakRegistry: @unchecked Sendable {
     }
 }
 
+/// Gameplay-event delivery is serialized by the endpoint before this weak
+/// reference is read. The wrapper prevents the transport's `@Sendable`
+/// closure from claiming that the lane-confined Lua runtime itself is
+/// generally Sendable.
+private final class SourceCanonicalToolWeakRuntime: @unchecked Sendable {
+    weak var value: GMLuaRuntime?
+
+    init(_ value: GMLuaRuntime) {
+        self.value = value
+    }
+}
+
 /// Native engine bridge needed by the stock toolgun action after its Source
 /// trace succeeds. SERVER mutations target canonical state; effects, sounds,
 /// and animation requests enter the net/console/entity transport FIFO.
@@ -625,9 +637,11 @@ public final class SourceCanonicalToolActionBridge: @unchecked Sendable {
             guard let clientState else {
                 throw LuaError.runtime("CLIENT gameplay event state is unavailable")
             }
+            let runtimeReference = SourceCanonicalToolWeakRuntime(runtime)
             try endpoint.connectGameplayEventHandler {
-                [weak runtime, clientState] delivery in
-                guard let runtime, !runtime.isClosed else {
+                [runtimeReference, clientState] delivery in
+                guard let runtime = runtimeReference.value,
+                      !runtime.isClosed else {
                     throw LuaError.runtime(
                         "gameplay event CLIENT runtime is unavailable"
                     )
