@@ -293,6 +293,18 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
                 try self.vector(snapshot.localAxisAlignedBounds.maxs),
             ]
         }
+        // Stock duplicator/player code uses the physics object to recover its
+        // owning Entity. Resolve the complete EHANDLE through the canonical
+        // registry; an entry-index-only lookup could return a reused slot.
+        try setPhysicsReadMethod("GetEntity") { snapshot in
+            let identity = snapshot.bodyID.entityIdentity
+            let value = self.entityRegistry.entity(at: identity.entryIndex)
+            guard self.entityRegistry.canonicalSnapshot(for: value)?.identity ==
+                    identity else {
+                return [self.state.getGlobal("NULL")]
+            }
+            return [value]
+        }
         try setPhysicsReadMethod("GetMass") { snapshot in
             [.number(Double(snapshot.massProperties.massKilograms))]
         }
@@ -325,6 +337,68 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
                 snapshot.transform.inverseTransformPointToLocal(world)
             )]
         }
+        try setPhysicsReadMethod("LocalToWorldVector") { snapshot, arguments in
+            let local = try self.requiredVector(
+                arguments,
+                at: 1,
+                function: "PhysObj:LocalToWorldVector"
+            )
+            return [try self.vector(
+                snapshot.transform.transformDirectionFromLocal(local)
+            )]
+        }
+        try setPhysicsReadMethod("WorldToLocalVector") { snapshot, arguments in
+            let world = try self.requiredVector(
+                arguments,
+                at: 1,
+                function: "PhysObj:WorldToLocalVector"
+            )
+            return [try self.vector(
+                snapshot.transform.inverseTransformDirectionToLocal(world)
+            )]
+        }
+        // IPhysicsObject::CalculateVelocityOffset reports the immediate
+        // linear/angular velocity change for an impulse at a world position.
+        // Use the same mass, principal inertia, body basis, and degree-space
+        // angular result as the deterministic backend's ApplyForceOffset.
+        try setPhysicsReadMethod("CalculateVelocityOffset") {
+            snapshot, arguments in
+            let impulse = try self.requiredFiniteVector(
+                arguments,
+                at: 1,
+                function: "PhysObj:CalculateVelocityOffset"
+            )
+            let worldPosition = try self.requiredFiniteVector(
+                arguments,
+                at: 2,
+                function: "PhysObj:CalculateVelocityOffset"
+            )
+            let offset = worldPosition - snapshot.transform.origin
+            let angularImpulse = Self.cross(offset, impulse)
+            let localAngularImpulse = snapshot.transform
+                .inverseTransformDirectionToLocal(angularImpulse)
+            let inertia = snapshot.massProperties.principalInertia
+            let localAngularVelocity = SourceVector3(
+                localAngularImpulse.x / inertia.x,
+                localAngularImpulse.y / inertia.y,
+                localAngularImpulse.z / inertia.z
+            )
+            let angularVelocity = snapshot.transform
+                .transformDirectionFromLocal(localAngularVelocity) *
+                (180 / Float.pi)
+            let linearVelocity = impulse /
+                snapshot.massProperties.massKilograms
+            guard Self.isFinite(linearVelocity),
+                  Self.isFinite(angularVelocity) else {
+                throw LuaError.runtime(
+                    "PhysObj:CalculateVelocityOffset produced non-finite velocity"
+                )
+            }
+            return [
+                try self.vector(linearVelocity),
+                try self.vector(angularVelocity),
+            ]
+        }
         try setPhysicsReadMethod("GetVelocity") { snapshot in
             [try self.vector(snapshot.linearVelocity)]
         }
@@ -344,6 +418,11 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
             [.number(Double(snapshot.damping.angular))]
         }
         try setPhysicsReadMethod("IsMotionEnabled") { snapshot in
+            [.boolean(snapshot.isMotionEnabled)]
+        }
+        // Legacy stock scripts still call IsMoveable. In VPhysics this is the
+        // motion-enable state, not a separately guessed capability flag.
+        try setPhysicsReadMethod("IsMoveable") { snapshot in
             [.boolean(snapshot.isMotionEnabled)]
         }
         try setPhysicsReadMethod("IsGravityEnabled") { snapshot in
@@ -700,6 +779,40 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
             Float(components.1),
             Float(components.2)
         )
+    }
+
+    private func requiredFiniteVector(
+        _ arguments: [LuaValue],
+        at index: Int,
+        function: String
+    ) throws -> SourceVector3 {
+        let value = try requiredVector(
+            arguments,
+            at: index,
+            function: function
+        )
+        guard Self.isFinite(value) else {
+            throw LuaError.runtime(
+                "bad argument #\(index) to '\(function)' " +
+                "(finite Vector expected)"
+            )
+        }
+        return value
+    }
+
+    private static func cross(
+        _ lhs: SourceVector3,
+        _ rhs: SourceVector3
+    ) -> SourceVector3 {
+        SourceVector3(
+            lhs.y * rhs.z - lhs.z * rhs.y,
+            lhs.z * rhs.x - lhs.x * rhs.z,
+            lhs.x * rhs.y - lhs.y * rhs.x
+        )
+    }
+
+    private static func isFinite(_ value: SourceVector3) -> Bool {
+        value.x.isFinite && value.y.isFinite && value.z.isFinite
     }
 
     private func requiredAngle(

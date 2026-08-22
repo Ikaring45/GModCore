@@ -46,6 +46,7 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
             local phys = prop:GetPhysicsObject()
             assert(IsValid(phys))
             assert(phys == prop:GetPhysicsObject())
+            assert(phys:GetEntity() == prop)
             assert(phys:GetMass() == 12)
 
             local inertia = phys:GetInertia()
@@ -68,6 +69,7 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
 
             assert(phys.GetMassCenter == nil)
             assert(phys:IsMotionEnabled() == true)
+            assert(phys:IsMoveable() == true)
             assert(type(phys.SetMass) == "function")
             assert(type(phys.SetPos) == "function")
             assert(type(phys.SetAngles) == "function")
@@ -286,6 +288,79 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
             """#,
             sourceName: "=(canonical simulated PhysObj transition)"
         )
+    }
+
+    func testStockDirectionAndVelocityOffsetReadsUseAuthoritativeBodyState()
+        throws
+    {
+        let runtime = makeRuntime()
+        defer { _ = runtime.close() }
+        let typeSystem = try XCTUnwrap(runtime.typeSystem)
+        try typeSystem.installFallbackUtilities()
+
+        let entity = makeProp(
+            entryIndex: 61,
+            serialNumber: 14,
+            lifecycle: .active,
+            transform: SourceEntityTransform(
+                origin: SourceVector3(10, 20, 30),
+                angles: SourceQAngle(pitch: 0, yaw: 90, roll: 0)
+            )
+        )
+        let body = try SourceCanonicalPhysicsObjectSnapshot(
+            pendingEntity: entity,
+            definition: makeDefinition(solidIndex: 0)
+        )
+        let host = RecordingCanonicalPhysicsObjectHost()
+        host.publish(body, asPrimary: true)
+        _ = try XCTUnwrap(runtime.entityRegistry)
+            .applyAuthoritativeSnapshot(entity)
+        _ = try SourceCanonicalPhysicsObjectGLuaBridge.install(
+            into: runtime,
+            host: host
+        )
+
+        try runtime.execute(
+            #"""
+            local prop = Entity(61)
+            local phys = prop:GetPhysicsObject()
+            assert(phys:GetEntity() == prop)
+            assert(phys:IsMoveable() == phys:IsMotionEnabled())
+
+            local worldZero = phys:LocalToWorldVector(Vector(0, 0, 0))
+            assert(worldZero.x == 0 and worldZero.y == 0 and worldZero.z == 0)
+            local world = phys:LocalToWorldVector(Vector(3, 4, 5))
+            local roundTrip = phys:WorldToLocalVector(world)
+            assert(math.abs(roundTrip.x - 3) < 0.0001)
+            assert(math.abs(roundTrip.y - 4) < 0.0001)
+            assert(math.abs(roundTrip.z - 5) < 0.0001)
+
+            -- yaw 90 maps local +X to world +Y. The impulse is applied one
+            -- world unit along +X from the body's origin, yielding +Z torque.
+            local linear, angular = phys:CalculateVelocityOffset(
+                Vector(0, 24, 0),
+                Vector(11, 20, 30)
+            )
+            assert(math.abs(linear.x) < 0.0001)
+            assert(math.abs(linear.y - 2) < 0.0001)
+            assert(math.abs(linear.z) < 0.0001)
+            assert(math.abs(angular.x) < 0.0001)
+            assert(math.abs(angular.y) < 0.0001)
+            assert(math.abs(angular.z - 343.7747) < 0.001)
+
+            local ok, message = pcall(function()
+                phys:CalculateVelocityOffset(
+                    Vector(0 / 0, 0, 0),
+                    Vector(11, 20, 30)
+                )
+            end)
+            assert(ok == false)
+            assert(string.find(message, "finite Vector expected", 1, true))
+            """#,
+            sourceName: "=(stock canonical PhysObj direction and offset reads)"
+        )
+
+        XCTAssertEqual(host.mutations, [])
     }
 
     func testCacheUsesFullBodyIdentityAndInvalidatesReusedEntityGeneration() throws {
