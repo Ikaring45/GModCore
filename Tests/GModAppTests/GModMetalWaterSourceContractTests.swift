@@ -43,6 +43,12 @@ final class GModMetalWaterSourceContractTests: XCTestCase {
         )
 
         XCTAssertEqual(GModMetalWaterClipPlaneContract.sourceFudge, 2)
+        XCTAssertEqual(
+            GModMetalWaterClipPlaneContract.underwaterMain(
+                sourceSurfaceZ: 128
+            ),
+            SIMD4<Float>(0, -1, 0, 130)
+        )
         XCTAssertEqual(aboveRefraction, SIMD4<Float>(0, -1, 0, 130))
         XCTAssertEqual(aboveReflection, SIMD4<Float>(0, 1, 0, -126))
         XCTAssertEqual(belowRefraction, SIMD4<Float>(0, 1, 0, -126))
@@ -80,6 +86,21 @@ final class GModMetalWaterSourceContractTests: XCTestCase {
             ))],
             cameraZ: 300
         ))
+    }
+
+    func testUnderwaterViewDoesNotCreateSourceReflectionPass() throws {
+        let beneath = material(
+            isAboveWater: false,
+            reflectionAmount: 0.4,
+            refractionAmount: 1
+        )
+        let plan = try XCTUnwrap(GModMetalWaterRenderTargetContract.plan(
+            materialRanges: [range(material: beneath)],
+            cameraZ: 0
+        ))
+
+        XCTAssertFalse(plan.requiresReflection)
+        XCTAssertTrue(plan.requiresRefraction)
     }
 
     func testSourceFresnelUsesFifthPowerOfOneMinusSaturatedNDotV() {
@@ -131,12 +152,13 @@ final class GModMetalWaterSourceContractTests: XCTestCase {
     }
 
     private func material(
+        isAboveWater: Bool = true,
         reflectionAmount: Float?,
         refractionAmount: Float?
     ) -> GModMetalWorldWaterMaterial {
         GModMetalWorldWaterMaterial(
             resourceIdentifier: "materials/water/source_contract.vmt",
-            isAboveWater: true,
+            isAboveWater: isAboveWater,
             fogColor: .zero,
             fogStart: nil,
             fogEnd: nil,

@@ -140,19 +140,24 @@ struct GModMetalSunSpriteDrawParameters: Sendable, Equatable {
     let hdrColorScale: Float
 }
 
-/// Source SDK 2013 `CGlowOverlay` constants and directional billboard math.
-/// Static/dynamic opaque geometry is rendered after this sky pass and provides
-/// the real obstruction boundary; no screen-space placement or sprite size is
-/// invented by the Metal host.
+enum GModMetalSunSpriteLayerRole: Sendable, Equatable {
+    case core
+    case overlay
+}
+
+/// Source SDK 2013 `C_SunGlowOverlay` sizing/color modulation and inherited
+/// directional billboard math. Static/dynamic opaque geometry is rendered
+/// after this sky pass and provides the geometry obstruction boundary.
 enum GModMetalSunSpriteRenderContract {
-    static let overlayRangeCosine = cos(Float(40) * .pi / 180)
     static let distance: Float = 100
-    static let sizeAtOverlayRangeMultiplier: Float = 150
-    static let sizeAtOneMultiplier: Float = 70
+    static let overlayFadeStartDot: Float = 0.9
+    static let overlayMaximumOpacity: Float = 0.75
+    static let overlaySizeMultiplier: Float = 6
 
     static func parameters(
         sun: GModMetalWorldSunSprite,
         layer: GModMetalWorldSunSpriteLayer,
+        role: GModMetalSunSpriteLayerRole,
         cameraEye: SIMD3<Float>,
         cameraForward: SIMD3<Float>
     ) -> GModMetalSunSpriteDrawParameters? {
@@ -162,16 +167,24 @@ enum GModMetalSunSpriteRenderContract {
               sun.hdrColorScale.isFinite, sun.hdrColorScale >= 0,
               finite(layer.displayRGB) else { return nil }
         let viewDot = dot(direction, forward)
-        guard viewDot > overlayRangeCosine else { return nil }
-        let fraction = Swift.min(
-            1,
-            Swift.max(
-                0,
-                (viewDot - overlayRangeCosine) / (1 - overlayRangeCosine)
+        let opacity: Float
+        let sizeMultiplier: Float
+        switch role {
+        case .core:
+            opacity = 1
+            sizeMultiplier = 1
+        case .overlay:
+            opacity = Swift.min(
+                overlayMaximumOpacity,
+                Swift.max(
+                    0,
+                    (viewDot - overlayFadeStartDot) /
+                        (1 - overlayFadeStartDot) * overlayMaximumOpacity
+                )
             )
-        )
-        let sizeMultiplier = sizeAtOverlayRangeMultiplier +
-            (sizeAtOneMultiplier - sizeAtOverlayRangeMultiplier) * fraction
+            sizeMultiplier = overlaySizeMultiplier
+            guard opacity > 0 else { return nil }
+        }
         let extent = layer.size * sizeMultiplier
         let worldUp = SIMD3<Float>(0, 1, 0)
         guard let right = normalized(cross(direction, worldUp)),
@@ -181,7 +194,7 @@ enum GModMetalSunSpriteRenderContract {
             rightExtent: right * extent,
             upExtent: up * extent,
             displayRGB: layer.displayRGB,
-            opacity: fraction,
+            opacity: opacity,
             hdrColorScale: sun.hdrColorScale
         )
     }
@@ -476,9 +489,10 @@ enum GModMetalWaterRenderTargetContract {
         guard surfaceBits.count == 1 else { return nil }
         return GModMetalWaterRenderTargetPlan(
             sourceSurfaceZ: first.surface.surfaceZ,
-            requiresReflection: visible.contains {
-                $0.material.reflectionAmount != nil
-            },
+            // `CUnderWaterView` creates only an out-of-water refraction view;
+            // Source's reflected view belongs to `CAboveWaterView`.
+            requiresReflection: cameraZ >= first.surface.surfaceZ &&
+                visible.contains { $0.material.reflectionAmount != nil },
             requiresRefraction: visible.contains {
                 $0.material.refractionAmount != nil
             }
@@ -523,6 +537,10 @@ enum GModMetalWaterClipPlaneContract {
     /// `CBaseWorldView::PushView` expands the retained side by two Source
     /// units to keep geometry at the water boundary from leaving a seam.
     static let sourceFudge: Float = 2
+
+    static func underwaterMain(sourceSurfaceZ: Float) -> SIMD4<Float> {
+        SIMD4<Float>(0, -1, 0, sourceSurfaceZ + sourceFudge)
+    }
 
     static func refraction(
         sourceSurfaceZ: Float,
