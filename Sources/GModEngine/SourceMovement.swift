@@ -119,7 +119,8 @@ public struct SourceEntityGroundContact: Equatable, Sendable {
     }
 }
 
-/// Field-for-field gameplay payload of Source 1 `CUserCmd`.
+/// Source 1 `CUserCmd` gameplay payload plus Garry's Mod's command-local
+/// mouse-wheel extension exposed by `CUserCmd:GetMouseWheel`.
 public struct SourceUserCommand: Equatable, Sendable {
     public var commandNumber: Int32
     public var tickCount: Int32
@@ -135,6 +136,7 @@ public struct SourceUserCommand: Equatable, Sendable {
     public var serverRandomSeed: Int32
     public var mouseDX: Int16
     public var mouseDY: Int16
+    public var mouseWheel: Int8
     public var hasBeenPredicted: Bool
     public var entityGroundContacts: [SourceEntityGroundContact]
 
@@ -153,6 +155,7 @@ public struct SourceUserCommand: Equatable, Sendable {
         serverRandomSeed: Int32 = 0,
         mouseDX: Int16 = 0,
         mouseDY: Int16 = 0,
+        mouseWheel: Int8 = 0,
         hasBeenPredicted: Bool = false,
         entityGroundContacts: [SourceEntityGroundContact] = []
     ) {
@@ -170,6 +173,7 @@ public struct SourceUserCommand: Equatable, Sendable {
         self.serverRandomSeed = serverRandomSeed
         self.mouseDX = mouseDX
         self.mouseDY = mouseDY
+        self.mouseWheel = mouseWheel
         self.hasBeenPredicted = hasBeenPredicted
         self.entityGroundContacts = entityGroundContacts
     }

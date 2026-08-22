@@ -237,6 +237,7 @@ public enum SourceCanonicalPhysgunFailureStage: String, Equatable, Sendable {
     case unfreezeMotion
     case unfreezeHook
     case motion
+    case presentation
     case dropHook
 }
 
@@ -263,6 +264,229 @@ public struct SourceCanonicalPhysgunTickReport: Equatable, Sendable {
     }
 
     public static let idle = SourceCanonicalPhysgunTickReport()
+}
+
+/// Renderer-neutral CLIENT view of the local physgun. The enabled form is
+/// produced only after resolving the replicated Player, Weapon, target and
+/// complete target EHANDLE inside the CLIENT registry. A pending removal,
+/// missing target, or serial mismatch therefore becomes a disabled frame
+/// before the SERVER controller clears its private bookkeeping next tick.
+public struct SourceCanonicalPhysgunClientPresentation:
+    Equatable,
+    Sendable
+{
+    public let player: SourceCanonicalEntityIdentity
+    public let weapon: SourceCanonicalEntityIdentity
+    public let enabled: Bool
+    public let target: SourceCanonicalEntityIdentity?
+    public let bodyID: SourcePhysicsBodyID?
+    public let localGrabPoint: SourceVector3
+    public let grabDistance: Float
+    public let targetAngles: SourceQAngle
+    public let sourceWeaponRevision: UInt64
+    public let sourceTargetRevision: UInt64?
+
+    public init(
+        player: SourceCanonicalEntityIdentity,
+        weapon: SourceCanonicalEntityIdentity,
+        enabled: Bool,
+        target: SourceCanonicalEntityIdentity?,
+        bodyID: SourcePhysicsBodyID?,
+        localGrabPoint: SourceVector3,
+        grabDistance: Float,
+        targetAngles: SourceQAngle,
+        sourceWeaponRevision: UInt64,
+        sourceTargetRevision: UInt64?
+    ) {
+        self.player = player
+        self.weapon = weapon
+        self.enabled = enabled
+        self.target = target
+        self.bodyID = bodyID
+        self.localGrabPoint = localGrabPoint
+        self.grabDistance = grabDistance
+        self.targetAngles = targetAngles
+        self.sourceWeaponRevision = sourceWeaponRevision
+        self.sourceTargetRevision = sourceTargetRevision
+    }
+}
+
+public struct SourceCanonicalPhysgunClientFrameReport: Equatable, Sendable {
+    public let presentation: SourceCanonicalPhysgunClientPresentation
+    /// `false` is the documented `GM:DrawPhysgunBeam` interception result.
+    /// The host renderer may draw native effects only while this remains true.
+    public let drawsDefaultEffects: Bool
+
+    public init(
+        presentation: SourceCanonicalPhysgunClientPresentation,
+        drawsDefaultEffects: Bool
+    ) {
+        self.presentation = presentation
+        self.drawsDefaultEffects = drawsDefaultEffects
+    }
+}
+
+/// CLIENT-only presentation boundary for native physgun effects and the
+/// documented `GM:DrawPhysgunBeam` hook. It reads no SERVER host or mutable
+/// gameplay controller state.
+public final class SourceCanonicalPhysgunClientPresentationController {
+    private let runtime: GMLuaRuntime
+
+    public init(runtime: GMLuaRuntime) {
+        precondition(runtime.realm == .client)
+        self.runtime = runtime
+    }
+
+    public func currentPresentation()
+        -> SourceCanonicalPhysgunClientPresentation?
+    {
+        guard let registry = runtime.entityRegistry else { return nil }
+        let playerValue = registry.localPlayer()
+        guard let player = registry.canonicalSnapshot(for: playerValue),
+              player.kind == .player,
+              player.lifecycle == .spawned || player.lifecycle == .active,
+              let weaponIdentity = player.weaponInventory.activeWeapon,
+              let weapon = registry.canonicalSnapshot(
+                  at: weaponIdentity.entryIndex
+              ),
+              weapon.identity == weaponIdentity,
+              weapon.kind == .weapon,
+              weapon.className ==
+                SourceCanonicalPhysgunWeaponDefinition.className,
+              weapon.lifecycle == .spawned || weapon.lifecycle == .active
+        else { return nil }
+
+        let hold = weapon.weaponRuntime.physgunHold
+        guard hold.isActive,
+              let targetIdentity = hold.target,
+              let bodyID = hold.bodyID,
+              bodyID.entityIdentity == targetIdentity,
+              let target = registry.canonicalSnapshot(
+                  at: targetIdentity.entryIndex
+              ),
+              target.identity == targetIdentity,
+              target.kind == .propPhysics,
+              target.lifecycle == .spawned || target.lifecycle == .active
+        else {
+            return SourceCanonicalPhysgunClientPresentation(
+                player: player.identity,
+                weapon: weapon.identity,
+                enabled: false,
+                target: nil,
+                bodyID: nil,
+                localGrabPoint: .zero,
+                grabDistance: 0,
+                targetAngles: .zero,
+                sourceWeaponRevision: weapon.revision,
+                sourceTargetRevision: nil
+            )
+        }
+        return SourceCanonicalPhysgunClientPresentation(
+            player: player.identity,
+            weapon: weapon.identity,
+            enabled: true,
+            target: target.identity,
+            bodyID: bodyID,
+            localGrabPoint: hold.localGrabPoint,
+            grabDistance: hold.grabDistance,
+            targetAngles: hold.targetAngles,
+            sourceWeaponRevision: weapon.revision,
+            sourceTargetRevision: target.revision
+        )
+    }
+
+    public func runClientFrame() throws
+        -> SourceCanonicalPhysgunClientFrameReport?
+    {
+        guard let presentation = currentPresentation(),
+              let registry = runtime.entityRegistry else { return nil }
+        let playerValue = registry.player(at: presentation.player.entryIndex)
+        let weaponValue = registry.entity(at: presentation.weapon.entryIndex)
+        guard registry.canonicalIdentity(for: playerValue) ==
+                presentation.player,
+              registry.canonicalIdentity(for: weaponValue) ==
+                presentation.weapon else { return nil }
+        let targetValue: LuaValue
+        let physicsBone: Int
+        let hitPosition: SourceVector3
+        if presentation.enabled,
+           let target = presentation.target,
+           let bodyID = presentation.bodyID {
+            let resolved = registry.entity(at: target.entryIndex)
+            guard registry.canonicalIdentity(for: resolved) == target else {
+                return nil
+            }
+            targetValue = resolved
+            physicsBone = bodyID.solidIndex
+            hitPosition = presentation.localGrabPoint
+        } else {
+            targetValue = registry.entity(at: -1)
+            physicsBone = 0
+            hitPosition = .zero
+        }
+
+        guard case let .table(hookLibrary) = runtime.state.getGlobal("hook")
+        else {
+            throw LuaError.runtime(
+                "weapon_physgun CLIENT presentation requires hook table"
+            )
+        }
+        let call = try runtime.state.rawTableValue(
+            for: .string("Call"),
+            in: hookLibrary
+        )
+        switch call {
+        case .luaFunction, .nativeFunction:
+            break
+        default:
+            throw LuaError.runtime(
+                "hook.Call is \(call.typeName), expected function"
+            )
+        }
+        let result = try runtime.state.call(
+            call,
+            arguments: [
+                .string("DrawPhysgunBeam"),
+                runtime.state.getGlobal("GAMEMODE"),
+                playerValue,
+                weaponValue,
+                .boolean(presentation.enabled),
+                targetValue,
+                .number(Double(physicsBone)),
+                try vector(hitPosition),
+            ]
+        ).first ?? .nilValue
+        let drawsDefaultEffects: Bool
+        if case let .boolean(value) = result, value == false {
+            drawsDefaultEffects = false
+        } else {
+            drawsDefaultEffects = true
+        }
+        return SourceCanonicalPhysgunClientFrameReport(
+            presentation: presentation,
+            drawsDefaultEffects: drawsDefaultEffects
+        )
+    }
+
+    private func vector(_ value: SourceVector3) throws -> LuaValue {
+        let constructor = runtime.state.getGlobal("Vector")
+        switch constructor {
+        case .luaFunction, .nativeFunction:
+            break
+        default:
+            throw LuaError.runtime(
+                "Vector is \(constructor.typeName), expected function"
+            )
+        }
+        return try runtime.state.call(
+            constructor,
+            arguments: [
+                .number(Double(value.x)),
+                .number(Double(value.y)),
+                .number(Double(value.z)),
+            ]
+        ).first ?? .nilValue
+    }
 }
 
 private final class SourceCanonicalPhysgunWeakEntityHost: @unchecked Sendable {
@@ -292,15 +516,23 @@ public final class SourceCanonicalPhysgunGameplayController {
     public static let maximumAngularSpeed: Float = 3_600
     /// Source's generic MAX_TRACE_LENGTH: diagonal of the +/-16384 world box.
     public static let maximumTraceLength: Float = 56_755.84
+    /// Defaults attested by the bundled Sandbox utilities menu. Live ConVar
+    /// replication is outside this controller; these values keep the native
+    /// command path deterministic until that shared user-info surface exists.
+    public static let distanceStep: Float = 10
+    public static let rotationSensitivity: Float = 0.05
+    public static let snapAngle: Float = 45
+    public static let maximumGrabDistance: Float = 4_096
+    public static let minimumGrabDistance: Float = 0
 
     private struct HeldBody {
         let player: SourceCanonicalEntityIdentity
         let weapon: SourceCanonicalEntityIdentity
         let entity: SourceCanonicalEntityIdentity
         let bodyID: SourcePhysicsBodyID
-        let grabDistance: Float
+        var grabDistance: Float
         let localGrabPoint: SourceVector3
-        let targetAngles: SourceQAngle
+        var targetAngles: SourceQAngle
     }
 
     private struct TraceHit {
@@ -324,6 +556,8 @@ public final class SourceCanonicalPhysgunGameplayController {
     private let runtime: GMLuaRuntime
     private weak var host: (any SourceCanonicalPhysgunHost)?
     private var heldByPlayer: [SourceCanonicalEntityIdentity: HeldBody] = [:]
+    private var pendingPresentationClearByPlayer:
+        [SourceCanonicalEntityIdentity: HeldBody] = [:]
     private var pendingUnfreezeResults:
         [SourceCanonicalEntityIdentity: [TargetedUnfreezeResult]] = [:]
     private var targetedPhysgunUnfreezeBridgeInstalled = false
@@ -365,20 +599,44 @@ public final class SourceCanonicalPhysgunGameplayController {
     }
 
     public func runServerTick(
-        playerIdentity: SourceCanonicalEntityIdentity
+        playerIdentity: SourceCanonicalEntityIdentity,
+        command: SourceUserCommand
     ) -> SourceCanonicalPhysgunTickReport {
-        guard let host,
-              let registry = runtime.entityRegistry,
+        var failures: [SourceCanonicalPhysgunFailure] = []
+        guard let host else {
+            if let held = heldByPlayer.removeValue(forKey: playerIdentity) {
+                pendingPresentationClearByPlayer[playerIdentity] = held
+            }
+            return .idle
+        }
+        retryPendingPresentationClear(
+            for: playerIdentity,
+            host: host,
+            failures: &failures
+        )
+        guard let registry = runtime.entityRegistry,
               let player = host.canonicalSnapshot(for: playerIdentity),
               player.kind == .player,
               player.lifecycle == .active else {
-            heldByPlayer.removeValue(forKey: playerIdentity)
-            return .idle
+            if let held = heldByPlayer.removeValue(forKey: playerIdentity) {
+                requestPresentationClear(
+                    for: held,
+                    host: host,
+                    failures: &failures
+                )
+            }
+            return SourceCanonicalPhysgunTickReport(failures: failures)
         }
         let playerValue = registry.player(at: player.identity.entryIndex)
         guard registry.canonicalIdentity(for: playerValue) == player.identity else {
-            heldByPlayer.removeValue(forKey: playerIdentity)
-            return .idle
+            if let held = heldByPlayer.removeValue(forKey: playerIdentity) {
+                requestPresentationClear(
+                    for: held,
+                    host: host,
+                    failures: &failures
+                )
+            }
+            return SourceCanonicalPhysgunTickReport(failures: failures)
         }
         let buttons = registry.playerInputButtonState(for: playerValue) ?? (
             current: SourceInputButtons(),
@@ -386,7 +644,6 @@ public final class SourceCanonicalPhysgunGameplayController {
         )
 
         var events: [SourceCanonicalPhysgunEvent] = []
-        var failures: [SourceCanonicalPhysgunFailure] = []
         let activeWeapon = player.weaponInventory.activeWeapon.flatMap {
             host.canonicalSnapshot(for: $0)
         }
@@ -406,12 +663,17 @@ public final class SourceCanonicalPhysgunGameplayController {
             failures.append(contentsOf: report.failures)
         }
 
-        if let held = heldByPlayer[player.identity] {
+        if var held = heldByPlayer[player.identity] {
             guard let activeWeapon,
                   activeWeapon.identity == held.weapon,
                   activeWeapon.className == SourceCanonicalPhysgunWeaponDefinition.className,
                   buttons.current.contains(.attack) else {
                 heldByPlayer.removeValue(forKey: player.identity)
+                requestPresentationClear(
+                    for: held,
+                    host: host,
+                    failures: &failures
+                )
                 if let entity = host.canonicalSnapshot(for: held.entity),
                    entity.lifecycle == .spawned || entity.lifecycle == .active {
                     dispatchDropHook(
@@ -435,8 +697,16 @@ public final class SourceCanonicalPhysgunGameplayController {
                   let body = host.canonicalPhysicsObject(for: held.bodyID),
                   body.bodyID.entityIdentity == held.entity else {
                 heldByPlayer.removeValue(forKey: player.identity)
+                requestPresentationClear(
+                    for: held,
+                    host: host,
+                    failures: &failures
+                )
                 events.append(event(.staleHoldCleared, held: held))
-                return SourceCanonicalPhysgunTickReport(events: events)
+                return SourceCanonicalPhysgunTickReport(
+                    events: events,
+                    failures: failures
+                )
             }
             if buttons.current.contains(.attack2),
                !buttons.previous.contains(.attack2) {
@@ -445,8 +715,16 @@ public final class SourceCanonicalPhysgunGameplayController {
                 guard registry.canonicalIdentity(for: entityValue) == held.entity,
                       registry.canonicalIdentity(for: weaponValue) == held.weapon else {
                     heldByPlayer.removeValue(forKey: player.identity)
+                    requestPresentationClear(
+                        for: held,
+                        host: host,
+                        failures: &failures
+                    )
                     events.append(event(.staleHoldCleared, held: held))
-                    return SourceCanonicalPhysgunTickReport(events: events)
+                    return SourceCanonicalPhysgunTickReport(
+                        events: events,
+                        failures: failures
+                    )
                 }
                 do {
                     let gamemodeRan = try dispatchFreezeHook(
@@ -456,6 +734,11 @@ public final class SourceCanonicalPhysgunGameplayController {
                         held: held
                     )
                     heldByPlayer.removeValue(forKey: player.identity)
+                    requestPresentationClear(
+                        for: held,
+                        host: host,
+                        failures: &failures
+                    )
                     events.append(event(
                         gamemodeRan ? .freeze : .freezeIntercepted,
                         held: held
@@ -478,6 +761,12 @@ public final class SourceCanonicalPhysgunGameplayController {
                     failures: failures
                 )
             }
+            applyControlInput(
+                to: &held,
+                buttons: buttons.current,
+                command: command
+            )
+            heldByPlayer[player.identity] = held
             do {
                 try queueMotion(
                     held: held,
@@ -489,6 +778,14 @@ public final class SourceCanonicalPhysgunGameplayController {
             } catch {
                 failures.append(SourceCanonicalPhysgunFailure(
                     stage: .motion,
+                    message: GMLuaRuntime.describe(error)
+                ))
+            }
+            do {
+                try publishPresentation(for: held, host: host)
+            } catch {
+                failures.append(SourceCanonicalPhysgunFailure(
+                    stage: .presentation,
                     message: GMLuaRuntime.describe(error)
                 ))
             }
@@ -550,7 +847,13 @@ public final class SourceCanonicalPhysgunGameplayController {
         }
 
         let eye = player.transform.origin + player.viewOffset
-        let distance = (traceHit.hitPosition - eye).length
+        let distance = min(
+            max(
+                (traceHit.hitPosition - eye).length,
+                Self.minimumGrabDistance
+            ),
+            Self.maximumGrabDistance
+        )
         let held = HeldBody(
             player: player.identity,
             weapon: activeWeapon.identity,
@@ -577,8 +880,28 @@ public final class SourceCanonicalPhysgunGameplayController {
             )
         } catch {
             heldByPlayer.removeValue(forKey: player.identity)
+            requestPresentationClear(
+                for: held,
+                host: host,
+                failures: &failures
+            )
             failures.append(SourceCanonicalPhysgunFailure(
                 stage: .motion,
+                message: GMLuaRuntime.describe(error)
+            ))
+            return SourceCanonicalPhysgunTickReport(failures: failures)
+        }
+        do {
+            try publishPresentation(for: held, host: host)
+        } catch {
+            heldByPlayer.removeValue(forKey: player.identity)
+            requestPresentationClear(
+                for: held,
+                host: host,
+                failures: &failures
+            )
+            failures.append(SourceCanonicalPhysgunFailure(
+                stage: .presentation,
                 message: GMLuaRuntime.describe(error)
             ))
             return SourceCanonicalPhysgunTickReport(failures: failures)
@@ -626,7 +949,9 @@ public final class SourceCanonicalPhysgunGameplayController {
             )
         }
         let eye = player.transform.origin + player.viewOffset
-        let end = eye + player.transform.angles.sourceBasis.forward * Self.maximumTraceLength
+        let end = eye +
+            player.transform.angles.sourceBasis.forward *
+                Self.maximumGrabDistance
         let filter = LuaTable()
         try runtime.state.setRawTableValue(
             playerValue,
@@ -971,6 +1296,129 @@ public final class SourceCanonicalPhysgunGameplayController {
                 stage: stage,
                 message: GMLuaRuntime.describe(error)
             )]
+        )
+    }
+
+    /// Applies the same command-local inputs exposed to Lua's CUserCmd. Garry's
+    /// Mod mouse-wheel steps and E+W/S share one distance path. Rotation
+    /// consumes real mouse deltas only while Use is held, and Shift snaps the
+    /// result to the bundled default `gm_snapangles` grid.
+    private func applyControlInput(
+        to held: inout HeldBody,
+        buttons: SourceInputButtons,
+        command: SourceUserCommand
+    ) {
+        var distanceSteps = Float(command.mouseWheel)
+        if buttons.contains(.use) {
+            if buttons.contains(.forward) { distanceSteps += 1 }
+            if buttons.contains(.back) { distanceSteps -= 1 }
+        }
+        if distanceSteps != 0 {
+            held.grabDistance = min(
+                max(
+                    held.grabDistance + distanceSteps * Self.distanceStep,
+                    Self.minimumGrabDistance
+                ),
+                Self.maximumGrabDistance
+            )
+        }
+
+        guard buttons.contains(.use),
+              command.mouseDX != 0 || command.mouseDY != 0 else { return }
+        held.targetAngles.pitch = normalizedAngle(
+            held.targetAngles.pitch +
+                Float(command.mouseDY) * Self.rotationSensitivity
+        )
+        held.targetAngles.yaw = normalizedAngle(
+            held.targetAngles.yaw +
+                Float(command.mouseDX) * Self.rotationSensitivity
+        )
+        held.targetAngles.roll = normalizedAngle(held.targetAngles.roll)
+        if buttons.contains(.speed) {
+            held.targetAngles = SourceQAngle(
+                pitch: snappedAngle(held.targetAngles.pitch),
+                yaw: snappedAngle(held.targetAngles.yaw),
+                roll: snappedAngle(held.targetAngles.roll)
+            )
+        }
+    }
+
+    private func snappedAngle(_ angle: Float) -> Float {
+        normalizedAngle(
+            (normalizedAngle(angle) / Self.snapAngle).rounded() *
+                Self.snapAngle
+        )
+    }
+
+    private func publishPresentation(
+        for held: HeldBody,
+        host: any SourceCanonicalPhysgunHost
+    ) throws {
+        let desired = SourceCanonicalPhysgunHoldState(
+            target: held.entity,
+            bodyID: held.bodyID,
+            localGrabPoint: held.localGrabPoint,
+            grabDistance: held.grabDistance,
+            targetAngles: held.targetAngles
+        )
+        if host.canonicalSnapshot(for: held.weapon)?
+            .weaponRuntime.physgunHold == desired {
+            return
+        }
+        _ = try host.updateCanonicalEntity(held.weapon) { state in
+            state.weaponRuntime.physgunHold = desired
+        }
+    }
+
+    private func clearPresentation(
+        for held: HeldBody,
+        host: any SourceCanonicalPhysgunHost
+    ) throws {
+        guard let weapon = host.canonicalSnapshot(for: held.weapon) else {
+            return
+        }
+        let current = weapon.weaponRuntime.physgunHold
+        guard current.target == held.entity,
+              current.bodyID == held.bodyID else { return }
+        _ = try host.updateCanonicalEntity(held.weapon) { state in
+            let current = state.weaponRuntime.physgunHold
+            guard current.target == held.entity,
+                  current.bodyID == held.bodyID else { return }
+            state.weaponRuntime.physgunHold = .inactive
+        }
+    }
+
+    private func requestPresentationClear(
+        for held: HeldBody,
+        host: any SourceCanonicalPhysgunHost,
+        failures: inout [SourceCanonicalPhysgunFailure]
+    ) {
+        do {
+            try clearPresentation(for: held, host: host)
+            pendingPresentationClearByPlayer.removeValue(
+                forKey: held.player
+            )
+        } catch {
+            pendingPresentationClearByPlayer[held.player] = held
+            failures.append(SourceCanonicalPhysgunFailure(
+                stage: .presentation,
+                message: GMLuaRuntime.describe(error)
+            ))
+        }
+    }
+
+    private func retryPendingPresentationClear(
+        for player: SourceCanonicalEntityIdentity,
+        host: any SourceCanonicalPhysgunHost,
+        failures: inout [SourceCanonicalPhysgunFailure]
+    ) {
+        guard let held = pendingPresentationClearByPlayer[player] else {
+            return
+        }
+        requestPresentationClear(
+            for: held,
+            host: host,
+            failures: &failures
         )
     }
 

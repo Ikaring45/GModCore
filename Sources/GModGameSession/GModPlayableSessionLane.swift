@@ -102,6 +102,7 @@ public struct GModPlayableHostFrameReport: Sendable, Equatable {
     public let fixedTicks: [GModPlayableFixedTickReport]
     public let inputButtons: GModPlayableInputButtonReport
     public let clientFrame: GMLuaSourceRuntimeRunReport?
+    public let clientPhysgunFrame: SourceCanonicalPhysgunClientFrameReport?
     public let clientVGUIFrame: GMLuaSurfaceFrameSnapshot?
     /// Ordered, exactly-once handoff of CLIENT `surface.PlaySound` calls made
     /// since the preceding host-frame drain. Repeated paths remain repeated.
@@ -117,6 +118,7 @@ public struct GModPlayableHostFrameReport: Sendable, Equatable {
         fixedTicks: [GModPlayableFixedTickReport],
         inputButtons: GModPlayableInputButtonReport,
         clientFrame: GMLuaSourceRuntimeRunReport?,
+        clientPhysgunFrame: SourceCanonicalPhysgunClientFrameReport?,
         clientVGUIFrame: GMLuaSurfaceFrameSnapshot?,
         clientSurfaceSounds: GMLuaSurfaceSoundRequestReport,
         viewportChanged: Bool,
@@ -128,6 +130,7 @@ public struct GModPlayableHostFrameReport: Sendable, Equatable {
         self.fixedTicks = fixedTicks
         self.inputButtons = inputButtons
         self.clientFrame = clientFrame
+        self.clientPhysgunFrame = clientPhysgunFrame
         self.clientVGUIFrame = clientVGUIFrame
         self.clientSurfaceSounds = clientSurfaceSounds
         self.viewportChanged = viewportChanged
@@ -368,10 +371,13 @@ public actor GModPlayableSessionLane {
                 movementInput.buttons
             )
         } else {
-            for _ in 0..<fixedTickCount {
+            for tickIndex in 0..<fixedTickCount {
+                let tickInput = tickIndex == 0
+                    ? movementInput
+                    : movementInput.consumingOneShotCommandInput
                 fixedTicks.append(
                     try session.runFixedTick(
-                        movementInput: movementInput,
+                        movementInput: tickInput,
                         maximumDeliveries: maximumDeliveries
                     )
                 )
@@ -391,6 +397,9 @@ public actor GModPlayableSessionLane {
             fixedTicks: fixedTicks,
             inputButtons: inputButtons,
             clientFrame: clientFrame,
+            clientPhysgunFrame: renderClientFrame
+                ? session.lastClientPhysgunFrameReport
+                : nil,
             clientVGUIFrame: clientVGUIFrame,
             clientSurfaceSounds: clientSurfaceSounds,
             viewportChanged: viewportChanged,

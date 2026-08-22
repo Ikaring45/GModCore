@@ -225,12 +225,14 @@ public final class GMLuaSharedSession: @unchecked Sendable {
         return clientByUserID.keys.sorted()
     }
 
-    /// Publishes one connected player's current Source button word into every
-    /// realm-local mirror. The caller supplies the already-decided digital
-    /// buttons; this boundary never infers them from analog movement axes.
+    /// Publishes one connected player's current Source input into every
+    /// realm-local mirror. A fixed tick supplies its immutable CUserCmd;
+    /// gesture-only frames explicitly clear that command while retaining the
+    /// already-decided digital button word.
     public func updatePlayerInputButtons(
         for client: GMLuaRuntime,
-        buttons: SourceInputButtons
+        buttons: SourceInputButtons,
+        currentUserCommand: SourceUserCommand? = nil
     ) throws {
         connectionMutationLock.lock()
         defer { connectionMutationLock.unlock() }
@@ -256,7 +258,8 @@ public final class GMLuaSharedSession: @unchecked Sendable {
         guard serverRegistry.setPlayerInputButtons(
             index: record.playerIndex,
             generation: record.playerGeneration,
-            buttons: buttons
+            buttons: buttons,
+            currentUserCommand: currentUserCommand
         ) else {
             throw GMLuaSharedSessionError.missingRuntimeSurface(
                 .server,
@@ -278,7 +281,8 @@ public final class GMLuaSharedSession: @unchecked Sendable {
             guard registry.setPlayerInputButtons(
                 index: record.playerIndex,
                 generation: record.playerGeneration,
-                buttons: buttons
+                buttons: buttons,
+                currentUserCommand: currentUserCommand
             ) else {
                 throw GMLuaSharedSessionError.missingRuntimeSurface(
                     .client,

@@ -552,6 +552,59 @@ public struct SourceCanonicalCombatState: Equatable, Sendable {
     )
 }
 
+/// Replicated native physgun hold carried by the owning Weapon snapshot.
+///
+/// The target and physics body retain their complete EHANDLE generation. A
+/// CLIENT must still resolve `target` in its own canonical registry and show
+/// effects only while that exact snapshot is spawned or active. This makes a
+/// pending removal disappear immediately without exposing the SERVER
+/// controller's mutable hold dictionary to rendering code.
+public struct SourceCanonicalPhysgunHoldState: Equatable, Sendable {
+    public var target: SourceCanonicalEntityIdentity?
+    public var bodyID: SourcePhysicsBodyID?
+    public var localGrabPoint: SourceVector3
+    public var grabDistance: Float
+    public var targetAngles: SourceQAngle
+
+    public init(
+        target: SourceCanonicalEntityIdentity? = nil,
+        bodyID: SourcePhysicsBodyID? = nil,
+        localGrabPoint: SourceVector3 = .zero,
+        grabDistance: Float = 0,
+        targetAngles: SourceQAngle = .zero
+    ) {
+        self.target = target
+        self.bodyID = bodyID
+        self.localGrabPoint = localGrabPoint
+        self.grabDistance = grabDistance
+        self.targetAngles = targetAngles
+    }
+
+    public static let inactive = SourceCanonicalPhysgunHoldState()
+
+    public var isActive: Bool {
+        target != nil && bodyID != nil
+    }
+
+    fileprivate var isStructurallyValid: Bool {
+        guard target != nil || bodyID != nil else {
+            return localGrabPoint == .zero && grabDistance == 0 &&
+                targetAngles == .zero
+        }
+        guard let target, let bodyID,
+              bodyID.entityIdentity == target,
+              localGrabPoint.x.isFinite,
+              localGrabPoint.y.isFinite,
+              localGrabPoint.z.isFinite,
+              grabDistance.isFinite,
+              grabDistance >= 0,
+              targetAngles.pitch.isFinite,
+              targetAngles.yaw.isFinite,
+              targetAngles.roll.isFinite else { return false }
+        return true
+    }
+}
+
 /// Native Weapon fields used by ItemPostFrame and generated data-table
 /// accessors. Values are copied in the same full-EHANDLE snapshot as the
 /// Weapon; neither realm owns an independent clip/cooldown mirror.
@@ -568,6 +621,7 @@ public struct SourceCanonicalWeaponRuntimeState: Equatable, Sendable {
     /// Zero is the real unavailable-duration result while no decoded Studio
     /// sequence metadata is mounted. It is not promoted to a guessed duration.
     public var animationSequenceDuration: Float
+    public var physgunHold: SourceCanonicalPhysgunHoldState
 
     public init(
         clip1: Int32 = 0,
@@ -579,7 +633,8 @@ public struct SourceCanonicalWeaponRuntimeState: Equatable, Sendable {
         animationSequence: Int32 = -1,
         animationSequenceName: String = "",
         animationPlaybackRate: Float = 1,
-        animationSequenceDuration: Float = 0
+        animationSequenceDuration: Float = 0,
+        physgunHold: SourceCanonicalPhysgunHoldState = .inactive
     ) {
         self.clip1 = clip1
         self.clip2 = clip2
@@ -591,6 +646,7 @@ public struct SourceCanonicalWeaponRuntimeState: Equatable, Sendable {
         self.animationSequenceName = animationSequenceName
         self.animationPlaybackRate = animationPlaybackRate
         self.animationSequenceDuration = animationSequenceDuration
+        self.physgunHold = physgunHold
     }
 }
 
@@ -1870,6 +1926,11 @@ public final class SourceCanonicalEntityStore {
               weaponRuntime.animationSequenceDuration.isFinite,
               weaponRuntime.animationSequenceDuration >= 0 else {
             throw SourceCanonicalEntityError.invalidWeaponRuntime("animation")
+        }
+        guard weaponRuntime.physgunHold.isStructurallyValid else {
+            throw SourceCanonicalEntityError.invalidWeaponRuntime(
+                "physgun hold"
+            )
         }
         guard state.combat.maximumHealth >= 0,
               (0...3).contains(state.combat.takeDamageMode) else {

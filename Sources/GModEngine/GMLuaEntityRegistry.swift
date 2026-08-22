@@ -47,6 +47,7 @@ private final class GMLuaEntityValue: @unchecked Sendable {
     var className: String
     var inputButtons: SourceInputButtons = []
     var previousInputButtons: SourceInputButtons = []
+    var currentUserCommand: SourceUserCommand?
     var luaTable: LuaTable? = LuaTable()
     var canonicalSnapshot: SourceCanonicalEntitySnapshot?
 
@@ -946,7 +947,8 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
     func setPlayerInputButtons(
         index: Int,
         generation: UInt64,
-        buttons: SourceInputButtons
+        buttons: SourceInputButtons,
+        currentUserCommand: SourceUserCommand? = nil
     ) -> Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -958,6 +960,7 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
               payload.generation == generation else { return false }
         payload.previousInputButtons = payload.inputButtons
         payload.inputButtons = buttons
+        payload.currentUserCommand = currentUserCommand
         return true
     }
 
@@ -978,6 +981,28 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
               case let .userdata(canonical)? = values[payload.index],
               canonical === userdata else { return nil }
         return (payload.inputButtons, payload.previousInputButtons)
+    }
+
+    /// Returns the immutable host command admitted for this exact Player
+    /// generation. `Player:GetCurrentCommand` captures this value into its
+    /// CUserCmd userdata, so a reused entity slot cannot change the command
+    /// after Lua obtained it and mouse deltas are never fabricated.
+    func playerCurrentUserCommand(
+        for value: LuaValue
+    ) -> SourceUserCommand? {
+        guard case let .userdata(userdata) = value,
+              let object = GMLuaTypeSystem.typedObject(from: value),
+              let payload = object.payload as? GMLuaEntityValue else {
+            return nil
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        guard object.isValid,
+              object.metaName == GMLuaEntityKind.player.rawValue,
+              payload.kind == .player,
+              case let .userdata(canonical)? = values[payload.index],
+              canonical === userdata else { return nil }
+        return payload.currentUserCommand
     }
 
     /// Reduces a state-local Entity userdata to the engine identity that is

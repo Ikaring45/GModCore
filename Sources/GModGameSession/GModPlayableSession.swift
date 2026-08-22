@@ -308,22 +308,45 @@ public struct GModPlayableMovementInput: Equatable, Sendable {
     public let sideMove: Float
     public let upMove: Float
     public let buttons: SourceInputButtons
+    /// One admitted Source CUserCmd delta. Host catch-up consumes this only on
+    /// the first fixed tick; persistent view angles and buttons remain held.
+    public let mouseDX: Int16
+    public let mouseDY: Int16
+    public let mouseWheel: Int8
 
     public init(
         viewAngles: SourceQAngle? = nil,
         forwardMove: Float = 0,
         sideMove: Float = 0,
         upMove: Float = 0,
-        buttons: SourceInputButtons = []
+        buttons: SourceInputButtons = [],
+        mouseDX: Int16 = 0,
+        mouseDY: Int16 = 0,
+        mouseWheel: Int8 = 0
     ) {
         self.viewAngles = viewAngles
         self.forwardMove = forwardMove
         self.sideMove = sideMove
         self.upMove = upMove
         self.buttons = buttons
+        self.mouseDX = mouseDX
+        self.mouseDY = mouseDY
+        self.mouseWheel = mouseWheel
     }
 
     public static let idle = GModPlayableMovementInput()
+
+    /// Clears command-local mouse and wheel pulses while preserving held
+    /// movement/action state for later catch-up ticks in the same host frame.
+    public var consumingOneShotCommandInput: GModPlayableMovementInput {
+        return GModPlayableMovementInput(
+            viewAngles: viewAngles,
+            forwardMove: forwardMove,
+            sideMove: sideMove,
+            upMove: upMove,
+            buttons: buttons
+        )
+    }
 }
 
 public struct GModPlayableSessionCloseReport: Equatable, Sendable {
@@ -457,6 +480,10 @@ public final class GModPlayableSession {
     private let weaponPickupController: SourceCanonicalWeaponPickupController
     private let physgunGameplayController:
         SourceCanonicalPhysgunGameplayController
+    private let physgunClientPresentationController:
+        SourceCanonicalPhysgunClientPresentationController
+    public private(set) var lastClientPhysgunFrameReport:
+        SourceCanonicalPhysgunClientFrameReport?
     private let serverRopeConstraintCommandQueue:
         SourceCanonicalRopePhysicsCommandQueue
     private var nextCommandNumber: Int32 = 1
@@ -1292,6 +1319,10 @@ public final class GModPlayableSession {
             weaponGameplayController = loadedWeaponGameplayController
             weaponPickupController = loadedWeaponPickupController
             physgunGameplayController = loadedPhysgunGameplayController
+            physgunClientPresentationController =
+                SourceCanonicalPhysgunClientPresentationController(
+                    runtime: client
+                )
             worldWalkSolver = SourceWorldWalkSolver(
                 collisionProvider: loadedWorldWalkCollisionProvider,
                 configuration: SourceWorldWalkConfiguration(
@@ -1435,10 +1466,21 @@ public final class GModPlayableSession {
     public func updateCurrentPlayerInputButtons(
         _ buttons: SourceInputButtons
     ) throws -> GModPlayableInputButtonReport {
+        try updateCurrentPlayerInput(
+            buttons: buttons,
+            currentUserCommand: nil
+        )
+    }
+
+    private func updateCurrentPlayerInput(
+        buttons: SourceInputButtons,
+        currentUserCommand: SourceUserCommand?
+    ) throws -> GModPlayableInputButtonReport {
         try ensureOpen()
         try sharedSession.updatePlayerInputButtons(
             for: clientRuntime,
-            buttons: buttons
+            buttons: buttons,
+            currentUserCommand: currentUserCommand
         )
         return GModPlayableInputButtonReport(
             buttons: buttons,
@@ -1476,7 +1518,10 @@ public final class GModPlayableSession {
             forwardMove: movementInput.forwardMove,
             sideMove: movementInput.sideMove,
             upMove: movementInput.upMove,
-            buttons: movementInput.buttons
+            buttons: movementInput.buttons,
+            mouseDX: movementInput.mouseDX,
+            mouseDY: movementInput.mouseDY,
+            mouseWheel: movementInput.mouseWheel
         )
         let movement: GModPlayableMovementResult
         do {
@@ -1508,8 +1553,9 @@ public final class GModPlayableSession {
             ))
         }
         nextCommandNumber &+= 1
-        let inputButtons = try updateCurrentPlayerInputButtons(
-            movementInput.buttons
+        let inputButtons = try updateCurrentPlayerInput(
+            buttons: movementInput.buttons,
+            currentUserCommand: command
         )
         serverRuntime.fireBulletsBridge?.beginAuthoritativeCommand(command)
         let weaponGameplay = weaponGameplayController.runServerTick(
@@ -1524,7 +1570,8 @@ public final class GModPlayableSession {
             commandNumber: command.commandNumber
         )
         let physgunGameplay = physgunGameplayController.runServerTick(
-            playerIdentity: playerIdentity
+            playerIdentity: playerIdentity,
+            command: command
         )
         let serverReport = try sourceAdapter.runServerFixedTick()
         let physicsInputs = try sourceAdapter.prepareCanonicalPropPhysicsStep()
@@ -1558,7 +1605,24 @@ public final class GModPlayableSession {
     @discardableResult
     public func runClientFrame() throws -> GMLuaSourceRuntimeRunReport {
         try ensureOpen()
-        return try sourceAdapter.runClientFrame()
+        let report = try sourceAdapter.runClientFrame()
+        do {
+            lastClientPhysgunFrameReport = try
+                physgunClientPresentationController.runClientFrame()
+        } catch {
+            lastClientPhysgunFrameReport = nil
+            throw error
+        }
+        return report
+    }
+
+    /// Resolves the current native physgun frame from CLIENT canonical state
+    /// without dispatching a Lua render hook or reading SERVER bookkeeping.
+    public func clientPhysgunPresentation()
+        throws -> SourceCanonicalPhysgunClientPresentation?
+    {
+        try ensureOpen()
+        return physgunClientPresentationController.currentPresentation()
     }
 
     /// Paints the live CLIENT VGUI tree into renderer-neutral surface
@@ -1711,6 +1775,7 @@ public final class GModPlayableSession {
         }
         _ = try dynamicEntityRenderSceneProjector?.reset()
         _ = try firstPersonViewModelSceneProjector?.reset()
+        lastClientPhysgunFrameReport = nil
         studioRenderableModelCache?.removeAll()
         studioModelRepository?.removeAllCachedAssets()
         try sourceAdapter.close()

@@ -62,6 +62,266 @@ private final class PhysgunDynamicProvider:
 }
 
 final class SourceCanonicalPhysgunGameplayTests: XCTestCase {
+    func testDistanceRotationCurrentCommandAndClientPresentation() throws {
+        let fixture = try makeHeldFixture()
+        let session = fixture.session
+        defer { _ = try? session.close() }
+
+        let initialWeapon = try XCTUnwrap(
+            session.sourceAdapter.canonicalSnapshot(for: fixture.weapon)
+        )
+        let initialHold = initialWeapon.weaponRuntime.physgunHold
+        XCTAssertTrue(initialHold.isActive)
+        XCTAssertEqual(initialHold.target, fixture.target.entity.identity)
+        XCTAssertEqual(initialHold.bodyID, fixture.target.body.bodyID)
+        XCTAssertEqual(initialHold.grabDistance, 36, accuracy: 0.001)
+
+        let initialClient = try XCTUnwrap(
+            session.clientPhysgunPresentation()
+        )
+        XCTAssertTrue(initialClient.enabled)
+        XCTAssertEqual(initialClient.player, fixture.player)
+        XCTAssertEqual(initialClient.weapon, fixture.weapon)
+        XCTAssertEqual(initialClient.target, fixture.target.entity.identity)
+        XCTAssertEqual(initialClient.bodyID, fixture.target.body.bodyID)
+        XCTAssertEqual(initialClient.localGrabPoint, initialHold.localGrabPoint)
+
+        try session.clientRuntime.execute(
+            """
+            PHYSGUN_CLIENT_FRAMES = 0
+            hook.Add("DrawPhysgunBeam", "canonical_physgun_client", function(
+                ply, weapon, enabled, target, bone, hitPos
+            )
+                assert(ply == LocalPlayer())
+                assert(weapon == LocalPlayer():GetActiveWeapon())
+                assert(enabled == true)
+                assert(target == Entity(\(fixture.target.entity.identity.entryIndex)))
+                assert(bone == \(fixture.target.body.bodyID.solidIndex))
+                assert(isvector(hitPos))
+                PHYSGUN_CLIENT_FRAMES = PHYSGUN_CLIENT_FRAMES + 1
+                return false
+            end)
+            """,
+            sourceName: "=(authoritative CLIENT physgun presentation)"
+        )
+        _ = try session.runClientFrame()
+        let initialFrame = try XCTUnwrap(
+            session.lastClientPhysgunFrameReport
+        )
+        XCTAssertTrue(initialFrame.presentation.enabled)
+        XCTAssertFalse(initialFrame.drawsDefaultEffects)
+
+        try session.serverRuntime.execute(
+            """
+            PHYSGUN_COMMAND_X = nil
+            PHYSGUN_COMMAND_Y = nil
+            PHYSGUN_COMMAND_WHEEL = nil
+            hook.Add("Think", "canonical_physgun_command", function()
+                local command = Player(\(session.configuration.playerUserID)):GetCurrentCommand()
+                PHYSGUN_COMMAND_X = command:GetMouseX()
+                PHYSGUN_COMMAND_Y = command:GetMouseY()
+                PHYSGUN_COMMAND_WHEEL = command:GetMouseWheel()
+            end)
+            """,
+            sourceName: "=(real CUserCmd input fixture)"
+        )
+        let farther = try session.runFixedTick(
+            movementInput: .init(buttons: [.attack], mouseWheel: 1)
+        )
+        XCTAssertEqual(farther.physgunGameplay.events.map(\.kind), [.move])
+        let fartherHold = try XCTUnwrap(
+            session.sourceAdapter.canonicalSnapshot(for: fixture.weapon)
+        ).weaponRuntime.physgunHold
+        XCTAssertEqual(
+            fartherHold.grabDistance,
+            initialHold.grabDistance +
+                SourceCanonicalPhysgunGameplayController.distanceStep,
+            accuracy: 0.001
+        )
+        try session.serverRuntime.execute(
+            "assert(PHYSGUN_COMMAND_WHEEL == 1)",
+            sourceName: "=(real CUserCmd wheel assertion)"
+        )
+
+        _ = try session.runFixedTick(
+            movementInput: .init(buttons: [.attack], mouseWheel: -1)
+        )
+        let restoredHold = try XCTUnwrap(
+            session.sourceAdapter.canonicalSnapshot(for: fixture.weapon)
+        ).weaponRuntime.physgunHold
+        XCTAssertEqual(
+            restoredHold.grabDistance,
+            initialHold.grabDistance,
+            accuracy: 0.001
+        )
+
+        let rotated = try session.runFixedTick(
+            movementInput: .init(
+                buttons: [.attack, .use],
+                mouseDX: 100,
+                mouseDY: -50
+            )
+        )
+        XCTAssertEqual(rotated.physgunGameplay.events.map(\.kind), [.move])
+        let rotatedHold = try XCTUnwrap(
+            session.sourceAdapter.canonicalSnapshot(for: fixture.weapon)
+        ).weaponRuntime.physgunHold
+        XCTAssertEqual(
+            rotatedHold.targetAngles.yaw,
+            initialHold.targetAngles.yaw + 5,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            rotatedHold.targetAngles.pitch,
+            initialHold.targetAngles.pitch - 2.5,
+            accuracy: 0.001
+        )
+        try session.serverRuntime.execute(
+            """
+            assert(PHYSGUN_COMMAND_X == 100)
+            assert(PHYSGUN_COMMAND_Y == -50)
+            assert(PHYSGUN_COMMAND_WHEEL == 0)
+            """,
+            sourceName: "=(real CUserCmd mouse assertion)"
+        )
+
+        let clientRotated = try XCTUnwrap(
+            session.clientPhysgunPresentation()
+        )
+        XCTAssertTrue(clientRotated.enabled)
+        XCTAssertEqual(clientRotated.targetAngles, rotatedHold.targetAngles)
+        XCTAssertEqual(
+            clientRotated.sourceTargetRevision,
+            session.clientCanonicalEntitySnapshots.first {
+                $0.identity == fixture.target.entity.identity
+            }?.revision
+        )
+
+        let released = try session.runFixedTick()
+        XCTAssertEqual(released.physgunGameplay.events.map(\.kind), [.drop])
+        let releasedClient = try XCTUnwrap(
+            session.clientPhysgunPresentation()
+        )
+        XCTAssertFalse(releasedClient.enabled)
+        XCTAssertNil(releasedClient.target)
+        XCTAssertEqual(
+            try XCTUnwrap(
+                session.sourceAdapter.canonicalSnapshot(for: fixture.weapon)
+            ).weaponRuntime.physgunHold,
+            .inactive
+        )
+    }
+
+    func testStockUndoWhileHeldHidesClientThenClearsFullHandle() throws {
+        let fixture = try makeHeldFixture()
+        let session = fixture.session
+        defer { _ = try? session.close() }
+
+        try session.serverRuntime.execute(
+            """
+            PHYSGUN_UNDO_DROPS = 0
+            hook.Add("PhysgunDrop", "canonical_physgun_undo_drop", function()
+                PHYSGUN_UNDO_DROPS = PHYSGUN_UNDO_DROPS + 1
+            end)
+            undo.Create("prop_physics")
+            undo.SetPlayer(Player(\(session.configuration.playerUserID)))
+            undo.AddEntity(Entity(\(fixture.target.entity.identity.entryIndex)))
+            undo.Finish("canonical held prop")
+            """,
+            sourceName: "=(stock held prop undo fixture)"
+        )
+        try session.requestUndo()
+
+        let undoDelivery = try session.runFixedTick(
+            movementInput: .init(buttons: [.attack])
+        )
+        XCTAssertEqual(undoDelivery.actionFailures, [])
+        XCTAssertEqual(undoDelivery.server.removedEntities, [])
+        XCTAssertEqual(
+            undoDelivery.physgunGameplay.events.map(\.kind),
+            [.move]
+        )
+        XCTAssertEqual(
+            session.sourceAdapter.canonicalSnapshot(
+                for: fixture.target.entity.identity
+            )?.lifecycle,
+            .pendingRemoval
+        )
+        XCTAssertEqual(
+            session.clientCanonicalEntitySnapshots.first {
+                $0.identity == fixture.target.entity.identity
+            }?.lifecycle,
+            .pendingRemoval
+        )
+        XCTAssertNil(
+            session.sourceAdapter.canonicalPhysicsObject(
+                for: fixture.target.body.bodyID
+            )
+        )
+        let hidden = try XCTUnwrap(session.clientPhysgunPresentation())
+        XCTAssertFalse(hidden.enabled)
+        XCTAssertNil(hidden.target)
+        XCTAssertEqual(
+            try XCTUnwrap(
+                session.sourceAdapter.canonicalSnapshot(for: fixture.weapon)
+            ).weaponRuntime.physgunHold.target,
+            fixture.target.entity.identity,
+            "SERVER hold remains exact until the next controller tick"
+        )
+
+        let removal = try session.runFixedTick(
+            movementInput: .init(buttons: [.attack])
+        )
+        XCTAssertEqual(
+            removal.physgunGameplay.events.map(\.kind),
+            [.staleHoldCleared]
+        )
+        XCTAssertEqual(
+            removal.server.removedEntities,
+            [fixture.target.entity.identity]
+        )
+        XCTAssertNil(
+            session.sourceAdapter.canonicalSnapshot(
+                for: fixture.target.entity.identity
+            )
+        )
+        XCTAssertFalse(session.clientCanonicalEntitySnapshots.contains {
+            $0.identity == fixture.target.entity.identity
+        })
+        XCTAssertEqual(
+            try XCTUnwrap(
+                session.sourceAdapter.canonicalSnapshot(for: fixture.weapon)
+            ).weaponRuntime.physgunHold,
+            .inactive
+        )
+        XCTAssertFalse(try XCTUnwrap(
+            session.clientPhysgunPresentation()
+        ).enabled)
+        try session.serverRuntime.execute(
+            "assert(PHYSGUN_UNDO_DROPS == 0)",
+            sourceName: "=(stale held prop has no drop callback)"
+        )
+    }
+
+    func testCatchUpInputConsumesMouseAndWheelPulsesOnce() {
+        let first = GModPlayableMovementInput(
+            viewAngles: SourceQAngle(pitch: 1, yaw: 2, roll: 3),
+            forwardMove: 25,
+            buttons: [.attack, .use, .weapon1],
+            mouseDX: 7,
+            mouseDY: -9,
+            mouseWheel: 1
+        )
+        let later = first.consumingOneShotCommandInput
+        XCTAssertEqual(later.viewAngles, first.viewAngles)
+        XCTAssertEqual(later.forwardMove, first.forwardMove)
+        XCTAssertTrue(later.buttons.contains([.attack, .use]))
+        XCTAssertTrue(later.buttons.contains(.weapon1))
+        XCTAssertEqual(later.mouseDX, 0)
+        XCTAssertEqual(later.mouseDY, 0)
+        XCTAssertEqual(later.mouseWheel, 0)
+    }
+
     func testNativeDefinitionPickupShadowMoveDropRejectAndStaleRemoval()
         throws
     {
@@ -578,6 +838,94 @@ final class SourceCanonicalPhysgunGameplayTests: XCTestCase {
     private struct Target {
         let entity: SourceCanonicalEntitySnapshot
         let body: SourceCanonicalPhysicsObjectSnapshot
+    }
+
+    private struct HeldFixture {
+        let session: GModPlayableSession
+        let player: SourceCanonicalEntityIdentity
+        let weapon: SourceCanonicalEntityIdentity
+        let target: Target
+    }
+
+    private func makeHeldFixture() throws -> HeldFixture {
+        let model = SourceEntityModelReference(
+            "models/props/physgun_control_target.mdl"
+        )
+        let propAsset = try makeAttestedPropPhysicsTestAsset(
+            modelPath: model.path
+        )
+        let session = try GModPlayableSession(
+            configuration: .init(map: .construct),
+            textMeasurer: nil,
+            logger: { _, _ in },
+            worldWalkCollisionProvider: nil,
+            canonicalModelValidator: { requested, kind in
+                requested == model && kind == .propPhysics ? .valid : .invalid
+            },
+            canonicalPropPhysicsAssetResolverForTesting:
+                makeAttestedPropPhysicsTestResolver(asset: propAsset)
+        )
+        do {
+            let dynamic = PhysgunDynamicProvider()
+            session.serverRuntime.traceBridge?.connect(provider:
+                GMLuaCompositeTraceProvider(
+                    world: PhysgunWorldMissProvider(),
+                    dynamic: dynamic
+                )
+            )
+            try session.serverRuntime.execute(
+                """
+                local ply = Player(\(session.configuration.playerUserID))
+                assert(IsValid(ply:Give("weapon_physgun")))
+                ply:SelectWeapon("weapon_physgun")
+                """,
+                sourceName: "=(focused native physgun fixture)"
+            )
+            _ = try session.runFixedTick()
+            let initialPlayer = try canonicalPlayer(in: session)
+            _ = try session.sourceAdapter.updateCanonicalEntity(
+                initialPlayer.identity
+            ) { state in
+                state.transform.origin = SourceVector3(0, 0, 12_000)
+                state.transform.angles = .zero
+                state.motion.linearVelocity = .zero
+                state.motion.isOnGround = false
+                state.moveType = .noClip
+            }
+            _ = try session.runFixedTick(
+                movementInput: .init(viewAngles: .zero)
+            )
+            let player = try canonicalPlayer(in: session)
+            let weapon = try XCTUnwrap(
+                player.weaponInventory.activeWeapon
+            )
+            let target = try createTarget(
+                in: session,
+                model: model,
+                viewAngles: .zero
+            )
+            dynamic.candidates = [try candidate(for: target)]
+            let pickup = try session.runFixedTick(
+                movementInput: .init(
+                    viewAngles: .zero,
+                    buttons: [.attack]
+                )
+            )
+            XCTAssertEqual(pickup.physgunGameplay.failures, [])
+            XCTAssertEqual(
+                pickup.physgunGameplay.events.map(\.kind),
+                [.pickup]
+            )
+            return HeldFixture(
+                session: session,
+                player: player.identity,
+                weapon: weapon,
+                target: target
+            )
+        } catch {
+            _ = try? session.close()
+            throw error
+        }
     }
 
     private func createTarget(

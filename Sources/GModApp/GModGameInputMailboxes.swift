@@ -47,6 +47,10 @@ enum GModGameWorldInputPolicy {
         sideAxis: Float,
         jumpPressed: Bool,
         heldActionButtons: SourceInputButtons = [],
+        mouseDX: Int16 = 0,
+        mouseDY: Int16 = 0,
+        mouseWheel: Int8 = 0,
+        suppressesMovementAxes: Bool = false,
         speed: Float = 250
     ) -> GModPlayableMovementInput {
         guard acceptsWorldInput else { return .idle }
@@ -63,10 +67,22 @@ enum GModGameWorldInputPolicy {
         )
         return GModPlayableMovementInput(
             viewAngles: viewAngles,
-            forwardMove: forwardAxis * speed,
-            sideMove: sideAxis * speed,
-            buttons: buttons
+            forwardMove: suppressesMovementAxes ? 0 : forwardAxis * speed,
+            sideMove: suppressesMovementAxes ? 0 : sideAxis * speed,
+            buttons: buttons,
+            mouseDX: mouseDX,
+            mouseDY: mouseDY,
+            mouseWheel: mouseWheel
         )
+    }
+
+    static func sourceMouseDelta(_ value: Float) -> Int16 {
+        guard value.isFinite else { return 0 }
+        let clamped = Swift.max(
+            Float(Int16.min),
+            Swift.min(Float(Int16.max), value.rounded())
+        )
+        return Int16(clamped)
     }
 }
 

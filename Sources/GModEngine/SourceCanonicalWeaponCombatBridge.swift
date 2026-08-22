@@ -89,9 +89,14 @@ private final class SourceCanonicalViewModelValue: @unchecked Sendable {
 
 private final class SourceCanonicalUserCommandValue: @unchecked Sendable {
     let player: SourceCanonicalEntityIdentity
+    let command: SourceUserCommand
 
-    init(player: SourceCanonicalEntityIdentity) {
+    init(
+        player: SourceCanonicalEntityIdentity,
+        command: SourceUserCommand
+    ) {
         self.player = player
+        self.command = command
     }
 }
 
@@ -1023,9 +1028,20 @@ public enum SourceCanonicalWeaponCombatBridge {
                 function: "Player:GetCurrentCommand",
                 kind: .player
             )
+            let playerValue = registry.entity(at: player.identity.entryIndex)
+            let command = registry.playerCurrentUserCommand(
+                for: playerValue
+            ) ?? SourceUserCommand(
+                viewAngles: player.transform.angles,
+                buttons: registry.playerInputButtonState(for: playerValue)?
+                    .current ?? []
+            )
             return [try typeSystem.makeObject(
                 metaName: "CUserCmd",
-                payload: SourceCanonicalUserCommandValue(player: player.identity)
+                payload: SourceCanonicalUserCommandValue(
+                    player: player.identity,
+                    command: command
+                )
             )]
         }
         try setMethod("CUserCmd:KeyDown", on: commandMetatable) { arguments in
@@ -1038,22 +1054,31 @@ public enum SourceCanonicalWeaponCombatBridge {
                 index: 1,
                 function: "CUserCmd:KeyDown"
             )
-            let playerValue = registry.entity(at: command.player.entryIndex)
-            let buttons = registry.playerInputButtonState(for: playerValue)?
-                .current ?? SourceInputButtons()
-            return [.boolean(buttons.contains(SourceInputButtons(
+            return [.boolean(command.command.buttons.contains(SourceInputButtons(
                 rawValue: UInt32(bitPattern: raw)
             )))]
         }
-        for name in ["GetMouseX", "GetMouseY"] {
-            try setMethod("CUserCmd:\(name)", on: commandMetatable) { arguments in
-                _ = try commandPayload(
-                    arguments.first,
-                    function: "CUserCmd:\(name)"
-                )
-                // Touch look is angular input, not a fabricated mouse delta.
-                return [.number(0)]
-            }
+        try setMethod("CUserCmd:GetMouseX", on: commandMetatable) { arguments in
+            let command = try commandPayload(
+                arguments.first,
+                function: "CUserCmd:GetMouseX"
+            )
+            return [.number(Double(command.command.mouseDX))]
+        }
+        try setMethod("CUserCmd:GetMouseY", on: commandMetatable) { arguments in
+            let command = try commandPayload(
+                arguments.first,
+                function: "CUserCmd:GetMouseY"
+            )
+            return [.number(Double(command.command.mouseDY))]
+        }
+        try setMethod("CUserCmd:GetMouseWheel", on: commandMetatable) {
+            arguments in
+            let command = try commandPayload(
+                arguments.first,
+                function: "CUserCmd:GetMouseWheel"
+            )
+            return [.number(Double(command.command.mouseWheel))]
         }
 
         state.setGlobal(

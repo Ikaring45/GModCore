@@ -133,6 +133,9 @@ private final class GModGameFrameMailbox: @unchecked Sendable {
     private var pendingTicks = 0
     private var pendingViewport = GMLuaViewportSize.logicalDesktopDefault
     private var movementInput = GModPlayableMovementInput.idle
+    private var pendingMouseDX = 0
+    private var pendingMouseDY = 0
+    private var pendingMouseWheel = 0
     private var hasPendingFrame = false
 
     func disable() {
@@ -140,6 +143,10 @@ private final class GModGameFrameMailbox: @unchecked Sendable {
         enabled = false
         pendingTicks = 0
         hasPendingFrame = false
+        movementInput = .idle
+        pendingMouseDX = 0
+        pendingMouseDY = 0
+        pendingMouseWheel = 0
         lock.unlock()
     }
 
@@ -149,6 +156,10 @@ private final class GModGameFrameMailbox: @unchecked Sendable {
             // Never relabel a frame admitted under an older input boundary.
             pendingTicks = 0
             hasPendingFrame = false
+            movementInput = .idle
+            pendingMouseDX = 0
+            pendingMouseDY = 0
+            pendingMouseWheel = 0
         }
         token = replacement
         enabled = true
@@ -157,7 +168,32 @@ private final class GModGameFrameMailbox: @unchecked Sendable {
 
     func setMovementInput(_ replacement: GModPlayableMovementInput) {
         lock.lock()
-        movementInput = replacement
+        if replacement == .idle {
+            movementInput = .idle
+            pendingMouseDX = 0
+            pendingMouseDY = 0
+            pendingMouseWheel = 0
+        } else {
+            movementInput = GModPlayableMovementInput(
+                viewAngles: replacement.viewAngles,
+                forwardMove: replacement.forwardMove,
+                sideMove: replacement.sideMove,
+                upMove: replacement.upMove,
+                buttons: replacement.buttons
+            )
+            pendingMouseDX = Self.accumulatingMouseDelta(
+                pendingMouseDX,
+                replacement.mouseDX
+            )
+            pendingMouseDY = Self.accumulatingMouseDelta(
+                pendingMouseDY,
+                replacement.mouseDY
+            )
+            pendingMouseWheel = Self.accumulatingMouseWheel(
+                pendingMouseWheel,
+                replacement.mouseWheel
+            )
+        }
         lock.unlock()
     }
 
@@ -203,15 +239,53 @@ private final class GModGameFrameMailbox: @unchecked Sendable {
             drainScheduled = false
             return nil
         }
+        let admittedInput = GModPlayableMovementInput(
+            viewAngles: movementInput.viewAngles,
+            forwardMove: movementInput.forwardMove,
+            sideMove: movementInput.sideMove,
+            upMove: movementInput.upMove,
+            buttons: movementInput.buttons,
+            mouseDX: Int16(clamping: pendingMouseDX),
+            mouseDY: Int16(clamping: pendingMouseDY),
+            mouseWheel: Int8(clamping: pendingMouseWheel)
+        )
         let batch = GModGameFrameBatch(
             token: token,
             fixedTickCount: pendingTicks,
             viewport: pendingViewport,
-            movementInput: movementInput
+            movementInput: admittedInput
         )
+        if pendingTicks > 0 {
+            movementInput = movementInput.consumingOneShotCommandInput
+            pendingMouseDX = 0
+            pendingMouseDY = 0
+            pendingMouseWheel = 0
+        }
         pendingTicks = 0
         hasPendingFrame = false
         return batch
+    }
+
+    private static func accumulatingMouseDelta(
+        _ current: Int,
+        _ incoming: Int16
+    ) -> Int {
+        let sum = current + Int(incoming)
+        return Swift.max(
+            Int(Int16.min),
+            Swift.min(Int(Int16.max), sum)
+        )
+    }
+
+    private static func accumulatingMouseWheel(
+        _ current: Int,
+        _ incoming: Int8
+    ) -> Int {
+        let sum = current + Int(incoming)
+        return Swift.max(
+            Int(Int8.min),
+            Swift.min(Int(Int8.max), sum)
+        )
     }
 }
 
@@ -306,6 +380,8 @@ final class GModGameSessionModel: ObservableObject {
         GModMetalWorldRendererFailure?
     @Published private(set) var dynamicEntityScene:
         GModMetalDynamicEntityScene?
+    @Published private(set) var clientPhysgunFrame:
+        SourceCanonicalPhysgunClientFrameReport?
     @Published private(set) var firstPersonViewModelScene:
         GModMetalFirstPersonViewModelScene?
     @Published private(set) var surfaceScene: GModMetalSurfaceScene?
@@ -499,6 +575,7 @@ final class GModGameSessionModel: ObservableObject {
         worldScene = nil
         worldSkyVisibility = nil
         dynamicEntityScene = nil
+        clientPhysgunFrame = nil
         firstPersonViewModelScene = nil
         lastRendererFailure = nil
         surfaceScene = nil
@@ -771,8 +848,17 @@ final class GModGameSessionModel: ObservableObject {
     }
 
     private func requestAdjacentWeapon(next: Bool) {
-        guard acceptsWorldInput,
-              let requestedLaneGeneration = laneGeneration else {
+        guard acceptsWorldInput else {
+            rejectLateWorldInput()
+            return
+        }
+        if clientPhysgunFrame?.presentation.enabled == true {
+            // The existing previous/next controls are the touch equivalent of
+            // the wheel. A positive wheel step follows the previous direction.
+            publishMovementInput(mouseWheel: next ? -1 : 1)
+            return
+        }
+        guard let requestedLaneGeneration = laneGeneration else {
             rejectLateWorldInput()
             return
         }
@@ -862,15 +948,23 @@ final class GModGameSessionModel: ObservableObject {
             rejectLateWorldInput()
             return
         }
-        viewAngles = GModTouchLookPolicy.adjustedAngles(
-            current: viewAngles,
-            deltaX: deltaX,
-            deltaY: deltaY,
-            sensitivity: inputVideoSettings.touchLookSensitivity,
-            invertY: inputVideoSettings.invertTouchLookY
+        let manipulatesHeldProp = isManipulatingPhysgun
+        if !manipulatesHeldProp {
+            viewAngles = GModTouchLookPolicy.adjustedAngles(
+                current: viewAngles,
+                deltaX: deltaX,
+                deltaY: deltaY,
+                sensitivity: inputVideoSettings.touchLookSensitivity,
+                invertY: inputVideoSettings.invertTouchLookY
+            )
+        }
+        publishMovementInput(
+            mouseDX: GModGameWorldInputPolicy.sourceMouseDelta(deltaX),
+            mouseDY: GModGameWorldInputPolicy.sourceMouseDelta(deltaY)
         )
-        publishMovementInput()
-        publishCameraScene()
+        if !manipulatesHeldProp {
+            publishCameraScene()
+        }
     }
 
     /// Idempotently closes every host-input path before the app loses active
@@ -953,6 +1047,7 @@ final class GModGameSessionModel: ObservableObject {
         publishMovementInput()
         invalidateSurfaceRequests()
         invalidateDynamicEntityScene()
+        clientPhysgunFrame = nil
         invalidateFirstPersonViewModelScene()
         unmountOwnedMapPak()
         frameMailbox.disable()
@@ -1028,6 +1123,7 @@ final class GModGameSessionModel: ObservableObject {
         publishMovementInput()
         invalidateSurfaceRequests()
         invalidateDynamicEntityScene()
+        clientPhysgunFrame = nil
         invalidateFirstPersonViewModelScene()
         unmountOwnedMapPak()
         frameMailbox.disable()
@@ -1309,6 +1405,7 @@ final class GModGameSessionModel: ObservableObject {
             if let clientFrame = report.clientFrame {
                 reportFailures(clientFrame)
             }
+            clientPhysgunFrame = report.clientPhysgunFrame
             playClientSurfaceSounds(report.clientSurfaceSounds)
             await refreshDynamicEntitySceneIfNeeded(
                 applicationGeneration: activeToken.generation.application,
@@ -1909,6 +2006,7 @@ final class GModGameSessionModel: ObservableObject {
         isReady = false
         invalidateSurfaceRequests()
         invalidateDynamicEntityScene()
+        clientPhysgunFrame = nil
         invalidateFirstPersonViewModelScene()
         frameMailbox.disable()
         pointerMailbox.setEnabled(false)
@@ -2096,7 +2194,12 @@ final class GModGameSessionModel: ObservableObject {
         heldActionButtons = []
     }
 
-    private func publishMovementInput() {
+    private func publishMovementInput(
+        mouseDX: Int16 = 0,
+        mouseDY: Int16 = 0,
+        mouseWheel: Int8 = 0
+    ) {
+        let manipulatesHeldProp = isManipulatingPhysgun
         frameMailbox.setMovementInput(
             GModGameWorldInputPolicy.movementInput(
                 acceptsWorldInput: acceptsWorldInput,
@@ -2104,9 +2207,18 @@ final class GModGameSessionModel: ObservableObject {
                 forwardAxis: forwardAxis,
                 sideAxis: sideAxis,
                 jumpPressed: jumpPressed,
-                heldActionButtons: heldActionButtons
+                heldActionButtons: heldActionButtons,
+                mouseDX: mouseDX,
+                mouseDY: mouseDY,
+                mouseWheel: mouseWheel,
+                suppressesMovementAxes: manipulatesHeldProp
             )
         )
+    }
+
+    private var isManipulatingPhysgun: Bool {
+        heldActionButtons.contains(.use) &&
+            clientPhysgunFrame?.presentation.enabled == true
     }
 
     private func publishCameraScene() {
