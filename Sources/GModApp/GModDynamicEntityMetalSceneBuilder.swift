@@ -395,7 +395,7 @@ public final class GModDynamicEntityMetalSceneBuilder: @unchecked Sendable {
 }
 
 private extension GModDynamicEntityMetalSceneBuilder {
-    func makeState(
+    private func makeState(
         generation: GModMetalDynamicEntitySceneGeneration,
         publicationRevision: UInt64,
         sourceRevision: UInt64,
@@ -472,7 +472,7 @@ private extension GModDynamicEntityMetalSceneBuilder {
         )
     }
 
-    static func plan(
+    private static func plan(
         snapshot: GModDynamicEntityRenderSceneSnapshot,
         animatedPublication: GModDynamicEntityAnimatedMetalPublication?
     ) throws -> PlannedScene {

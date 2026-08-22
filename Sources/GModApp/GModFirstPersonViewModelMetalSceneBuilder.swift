@@ -361,7 +361,7 @@ public final class GModFirstPersonViewModelMetalSceneBuilder:
 }
 
 private extension GModFirstPersonViewModelMetalSceneBuilder {
-    func makeState(
+    private func makeState(
         generation: GModMetalDynamicEntitySceneGeneration,
         publicationRevision: UInt64,
         sourceRevision: UInt64,
