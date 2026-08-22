@@ -241,6 +241,18 @@ public final class SourceDeterministicPhysicsEnvironment:
         case invalidConfiguration(field: String)
         case duplicateBody(SourcePhysicsBodyID)
         case missingBody(SourcePhysicsBodyID)
+        case duplicateConstraint(SourcePhysicsConstraintID)
+        case retiredConstraint(SourcePhysicsConstraintID)
+        case missingConstraint(SourcePhysicsConstraintID)
+        case constraintBodyMissing(
+            constraintID: SourcePhysicsConstraintID,
+            bodyID: SourcePhysicsBodyID
+        )
+        case bodyHasLiveConstraint(
+            bodyID: SourcePhysicsBodyID,
+            constraintID: SourcePhysicsConstraintID
+        )
+        case nonFiniteConstraintResult(SourcePhysicsConstraintID)
         case bodyDoesNotSupportMotion(SourcePhysicsBodyID)
         case bodyMotionDisabled(SourcePhysicsBodyID)
         case nonFiniteMutationResult(
@@ -292,6 +304,16 @@ public final class SourceDeterministicPhysicsEnvironment:
             motionType == .dynamicBody && isMotionEnabled
         }
         var isMovable: Bool { supportsMotion && isMotionEnabled }
+    }
+
+    private struct FixedConstraintState: Equatable {
+        let creation: SourcePhysicsFixedConstraintCreationCommand
+        let relativePose: SourcePhysicsFixedConstraintPose
+        var simulationTick: UInt64
+
+        var constraintID: SourcePhysicsConstraintID {
+            creation.constraintID
+        }
     }
 
     private struct Bounds {
@@ -454,6 +476,10 @@ public final class SourceDeterministicPhysicsEnvironment:
         DynamicBroadphaseDiagnostics
 
     private var bodies: [SourcePhysicsBodyID: BodyState] = [:]
+    private var fixedConstraints: [
+        SourcePhysicsConstraintID: FixedConstraintState
+    ] = [:]
+    private var retiredConstraintIDs = Set<SourcePhysicsConstraintID>()
     private var simulationTick: UInt64 = 0
     private var hasSimulated = false
     private var lastProcessedCommandSequence: UInt64?
@@ -651,6 +677,8 @@ public final class SourceDeterministicPhysicsEnvironment:
         }
 
         var candidateBodies = bodies
+        var candidateFixedConstraints = fixedConstraints
+        var candidateRetiredConstraintIDs = retiredConstraintIDs
         var candidateTick = simulationTick
         var candidateHasSimulated = hasSimulated
         var candidateContacts = latestContacts
@@ -683,6 +711,19 @@ public final class SourceDeterministicPhysicsEnvironment:
                 )
 
             case let .deleteBody(deletion):
+                if let constraint = candidateFixedConstraints.values
+                    .filter({
+                        $0.creation.referenceBodyID == deletion.bodyID ||
+                            $0.creation.attachedBodyID == deletion.bodyID
+                    })
+                    .min(by: {
+                        $0.constraintID.rawValue < $1.constraintID.rawValue
+                    }) {
+                    throw Error.bodyHasLiveConstraint(
+                        bodyID: deletion.bodyID,
+                        constraintID: constraint.constraintID
+                    )
+                }
                 guard candidateBodies.removeValue(forKey: deletion.bodyID) != nil else {
                     throw Error.missingBody(deletion.bodyID)
                 }
@@ -694,6 +735,49 @@ public final class SourceDeterministicPhysicsEnvironment:
                 try apply(command.mutation, to: &body)
                 candidateBodies[command.bodyID] = body
 
+            case let .createFixedConstraint(creation):
+                guard candidateFixedConstraints[creation.constraintID] == nil else {
+                    throw Error.duplicateConstraint(creation.constraintID)
+                }
+                guard !candidateRetiredConstraintIDs.contains(
+                    creation.constraintID
+                ) else {
+                    throw Error.retiredConstraint(creation.constraintID)
+                }
+                guard let reference = candidateBodies[
+                    creation.referenceBodyID
+                ] else {
+                    throw Error.constraintBodyMissing(
+                        constraintID: creation.constraintID,
+                        bodyID: creation.referenceBodyID
+                    )
+                }
+                guard let attached = candidateBodies[
+                    creation.attachedBodyID
+                ] else {
+                    throw Error.constraintBodyMissing(
+                        constraintID: creation.constraintID,
+                        bodyID: creation.attachedBodyID
+                    )
+                }
+                candidateFixedConstraints[creation.constraintID] =
+                    FixedConstraintState(
+                        creation: creation,
+                        relativePose: SourcePhysicsFixedConstraintPose(
+                            reference: reference.transform,
+                            attached: attached.transform
+                        ),
+                        simulationTick: candidateTick
+                    )
+
+            case let .deleteConstraint(deletion):
+                guard candidateFixedConstraints.removeValue(
+                    forKey: deletion.constraintID
+                ) != nil else {
+                    throw Error.missingConstraint(deletion.constraintID)
+                }
+                candidateRetiredConstraintIDs.insert(deletion.constraintID)
+
             case let .simulate(simulate):
                 if candidateHasSimulated, simulate.simulationTick <= candidateTick {
                     throw Error.simulationTickNotIncreasing(
@@ -703,6 +787,7 @@ public final class SourceDeterministicPhysicsEnvironment:
                 }
                 candidateContacts = try simulateOneFixedStep(
                     bodies: &candidateBodies,
+                    fixedConstraints: &candidateFixedConstraints,
                     simulationTick: simulate.simulationTick
                 )
                 candidateTick = simulate.simulationTick
@@ -722,12 +807,15 @@ public final class SourceDeterministicPhysicsEnvironment:
             lastProcessedCommandSequence
         let snapshot = try makeSnapshot(
             bodies: candidateBodies,
+            fixedConstraints: candidateFixedConstraints,
             simulationTick: candidateTick,
             lastProcessedCommandSequence: finalSequence,
             queryResults: queryResults
         )
 
         bodies = candidateBodies
+        fixedConstraints = candidateFixedConstraints
+        retiredConstraintIDs = candidateRetiredConstraintIDs
         simulationTick = candidateTick
         hasSimulated = candidateHasSimulated
         latestContacts = candidateContacts
@@ -910,6 +998,9 @@ public final class SourceDeterministicPhysicsEnvironment:
 
     private func simulateOneFixedStep(
         bodies: inout [SourcePhysicsBodyID: BodyState],
+        fixedConstraints: inout [
+            SourcePhysicsConstraintID: FixedConstraintState
+        ],
         simulationTick: UInt64
     ) throws -> [ContactSnapshot] {
         let delta = SourcePhysicsContract.fixedTimeStepSeconds
@@ -1000,6 +1091,11 @@ public final class SourceDeterministicPhysicsEnvironment:
         var supportedBodies = Set<SourcePhysicsBodyID>()
         var firstIterationContacts: [Contact] = []
         for iteration in 0 ..< configuration.contactSolverIterations {
+            try solveFixedConstraints(
+                &fixedConstraints,
+                bodies: &bodies,
+                supportedBodies: &supportedBodies
+            )
             var contacts = detectContacts(bodies: bodies)
             if iteration == 0, !continuousContacts.isEmpty {
                 // A zero-thickness world triangle can be crossed between two
@@ -1009,7 +1105,10 @@ public final class SourceDeterministicPhysicsEnvironment:
                 contacts.insert(contentsOf: continuousContacts, at: 0)
             }
             if iteration == 0 { firstIterationContacts = contacts }
-            guard !contacts.isEmpty else { break }
+            guard !contacts.isEmpty else {
+                if fixedConstraints.isEmpty { break }
+                continue
+            }
             for contact in contacts {
                 try resolve(
                     contact,
@@ -1017,6 +1116,10 @@ public final class SourceDeterministicPhysicsEnvironment:
                     supportedBodies: &supportedBodies
                 )
             }
+        }
+
+        for constraintID in fixedConstraints.keys {
+            fixedConstraints[constraintID]?.simulationTick = simulationTick
         }
 
         for bodyID in orderedIDs {
@@ -1040,6 +1143,128 @@ public final class SourceDeterministicPhysicsEnvironment:
                 penetration: $0.penetration,
                 simulationTick: simulationTick
             )
+        }
+    }
+
+    /// Solves the six fixed degrees of freedom in stable constraint-ID order.
+    /// Dynamic endpoints share correction by inverse mass; static,
+    /// kinematic, and motion-disabled endpoints have zero inverse mass and
+    /// therefore act as the fixed reference for the other body. This is the
+    /// deterministic backend's minimal fixed-joint solver, not a claim about
+    /// undocumented VPhysics break thresholds or motor behavior.
+    private func solveFixedConstraints(
+        _ constraints: inout [
+            SourcePhysicsConstraintID: FixedConstraintState
+        ],
+        bodies: inout [SourcePhysicsBodyID: BodyState],
+        supportedBodies: inout Set<SourcePhysicsBodyID>
+    ) throws {
+        let orderedConstraintIDs = constraints.keys.sorted {
+            $0.rawValue < $1.rawValue
+        }
+        for constraintID in orderedConstraintIDs {
+            guard let constraint = constraints[constraintID] else { continue }
+            let referenceID = constraint.creation.referenceBodyID
+            let attachedID = constraint.creation.attachedBodyID
+            guard var reference = bodies[referenceID] else {
+                throw Error.constraintBodyMissing(
+                    constraintID: constraintID,
+                    bodyID: referenceID
+                )
+            }
+            guard var attached = bodies[attachedID] else {
+                throw Error.constraintBodyMissing(
+                    constraintID: constraintID,
+                    bodyID: attachedID
+                )
+            }
+
+            let referenceInverseMass = inverseMass(reference)
+            let attachedInverseMass = inverseMass(attached)
+            let inverseMassSum = referenceInverseMass + attachedInverseMass
+            guard inverseMassSum > 0 else { continue }
+            let referenceShare = referenceInverseMass / inverseMassSum
+            let attachedShare = attachedInverseMass / inverseMassSum
+
+            let originalReference = reference
+            let originalAttached = attached
+            let desiredReference = constraint.relativePose
+                .desiredReferenceTransform(attached: attached.transform)
+            let desiredAttached = constraint.relativePose
+                .desiredAttachedTransform(reference: reference.transform)
+
+            let referenceRotation = SourcePhysicsConstraintQuaternion(
+                reference.transform.angles
+            ).interpolated(
+                toward: SourcePhysicsConstraintQuaternion(
+                    desiredReference.angles
+                ),
+                fraction: referenceShare
+            )
+            let attachedRotation = SourcePhysicsConstraintQuaternion(
+                attached.transform.angles
+            ).interpolated(
+                toward: SourcePhysicsConstraintQuaternion(
+                    desiredAttached.angles
+                ),
+                fraction: attachedShare
+            )
+            reference.transform.angles = referenceRotation.sourceAngles
+            attached.transform.angles = attachedRotation.sourceAngles
+
+            let desiredAttachedOrigin = reference.transform
+                .transformPointFromLocal(
+                    constraint.relativePose.attachedOriginInReference
+                )
+            let positionError = attached.transform.origin -
+                desiredAttachedOrigin
+            reference.transform.origin += positionError * referenceShare
+            attached.transform.origin -= positionError * attachedShare
+
+            let angularVelocityError = attached.angularVelocity -
+                reference.angularVelocity
+            reference.angularVelocity += angularVelocityError * referenceShare
+            attached.angularVelocity -= angularVelocityError * attachedShare
+
+            let offset = attached.transform.origin - reference.transform.origin
+            let angularRadians = reference.angularVelocity *
+                (Float.pi / 180)
+            let linearVelocityError = attached.linearVelocity -
+                reference.linearVelocity - angularRadians.cross(offset)
+            reference.linearVelocity += linearVelocityError * referenceShare
+            attached.linearVelocity -= linearVelocityError * attachedShare
+
+            guard reference.transform.origin.isSourcePhysicsFinite,
+                  reference.transform.angles.pitch.isFinite,
+                  reference.transform.angles.yaw.isFinite,
+                  reference.transform.angles.roll.isFinite,
+                  reference.linearVelocity.isSourcePhysicsFinite,
+                  reference.angularVelocity.isSourcePhysicsFinite,
+                  attached.transform.origin.isSourcePhysicsFinite,
+                  attached.transform.angles.pitch.isFinite,
+                  attached.transform.angles.yaw.isFinite,
+                  attached.transform.angles.roll.isFinite,
+                  attached.linearVelocity.isSourcePhysicsFinite,
+                  attached.angularVelocity.isSourcePhysicsFinite else {
+                throw Error.nonFiniteConstraintResult(constraintID)
+            }
+
+            if reference != originalReference, reference.isDynamic {
+                reference.settledTicks = 0
+                wake(&reference)
+            }
+            if attached != originalAttached, attached.isDynamic {
+                attached.settledTicks = 0
+                wake(&attached)
+            }
+            if referenceInverseMass == 0, attached.isDynamic {
+                supportedBodies.insert(attachedID)
+            }
+            if attachedInverseMass == 0, reference.isDynamic {
+                supportedBodies.insert(referenceID)
+            }
+            bodies[referenceID] = reference
+            bodies[attachedID] = attached
         }
     }
 
@@ -2632,6 +2857,9 @@ public final class SourceDeterministicPhysicsEnvironment:
 
     private func makeSnapshot(
         bodies: [SourcePhysicsBodyID: BodyState],
+        fixedConstraints: [
+            SourcePhysicsConstraintID: FixedConstraintState
+        ],
         simulationTick: UInt64,
         lastProcessedCommandSequence: UInt64?,
         queryResults: [SourcePhysicsQueryResultSnapshot]
@@ -2656,11 +2884,24 @@ public final class SourceDeterministicPhysicsEnvironment:
                     simulationTick: body.simulationTick
                 )
             }
+        let constraintSnapshots = try fixedConstraints.values
+            .sorted { $0.constraintID.rawValue < $1.constraintID.rawValue }
+            .map { constraint in
+                try SourcePhysicsFixedConstraintSnapshot(
+                    constraintID: constraint.constraintID,
+                    referenceBodyID: constraint.creation.referenceBodyID,
+                    attachedBodyID: constraint.creation.attachedBodyID,
+                    attachedPoseInReference: constraint.relativePose
+                        .snapshotTransform,
+                    simulationTick: constraint.simulationTick
+                )
+            }
         return try SourcePhysicsEnvironmentSnapshot(
             simulationTick: simulationTick,
             lastProcessedCommandSequence: lastProcessedCommandSequence,
             bodies: snapshots,
-            queryResults: queryResults
+            queryResults: queryResults,
+            fixedConstraints: constraintSnapshots
         )
     }
 

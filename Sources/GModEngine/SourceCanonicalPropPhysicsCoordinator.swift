@@ -542,7 +542,11 @@ public final class SourceCanonicalPropPhysicsCoordinator {
                     throw SourceCanonicalPropPhysicsCoordinatorError
                         .pendingMutationBodyUnavailable(mutation.bodyID)
                 }
-            case .deleteBody, .simulate, .query:
+            case .deleteBody,
+                 .createFixedConstraint,
+                 .deleteConstraint,
+                 .simulate,
+                 .query:
                 throw SourceCanonicalPropPhysicsCoordinatorError
                     .unsupportedPendingCommand(command.sequence)
             }
@@ -660,7 +664,10 @@ public final class SourceCanonicalPropPhysicsCoordinator {
                         massKilograms: massKilograms
                     )
                 }
-            case .simulate, .query:
+            case .createFixedConstraint,
+                 .deleteConstraint,
+                 .simulate,
+                 .query:
                 break
             }
         }

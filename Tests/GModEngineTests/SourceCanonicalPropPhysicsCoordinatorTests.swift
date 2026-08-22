@@ -589,6 +589,8 @@ private final class RecordingPhysicsEnvironment: SourcePhysicsEnvironment {
                     body,
                     by: mutation.mutation
                 )
+            case .createFixedConstraint, .deleteConstraint:
+                break
             case let .simulate(simulate):
                 candidateTick = simulate.simulationTick
                 for (bodyID, body) in candidateBodies {
