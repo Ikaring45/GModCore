@@ -257,7 +257,22 @@ private extension SourceDeterministicPhysicsOpenTriangleMeshTests {
             geometry: geometry,
             contents: .solid
         )
-        return SourceDeterministicPhysicsEnvironment(staticCollisionScene: scene)
+        let coefficients = try SourcePhysicsContactMaterialCoefficients(
+            staticFriction: 0,
+            dynamicFriction: 0,
+            restitution: 0
+        )
+        let materials = try SourcePhysicsMaterialTable(interactions: [
+            SourcePhysicsMaterialInteraction(
+                firstMaterialIndex: 4,
+                secondMaterialIndex: 11,
+                coefficients: coefficients
+            )
+        ])
+        return SourceDeterministicPhysicsEnvironment(
+            staticCollisionScene: scene,
+            materialTable: materials
+        )
     }
 
     func bodyID(entry: Int, serial: Int) throws -> SourcePhysicsBodyID {

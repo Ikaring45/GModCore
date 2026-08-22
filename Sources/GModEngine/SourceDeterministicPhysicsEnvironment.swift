@@ -249,6 +249,10 @@ public final class SourceDeterministicPhysicsEnvironment:
         )
         case commandSequenceNotIncreasing(previous: UInt64, current: UInt64)
         case simulationTickNotIncreasing(previous: UInt64, current: UInt64)
+        case nonFiniteContactImpulse(
+            firstBodyID: SourcePhysicsBodyID,
+            secondBodyID: SourcePhysicsBodyID
+        )
     }
 
     /// One solver-authored contact from the most recently committed fixed
@@ -256,6 +260,8 @@ public final class SourceDeterministicPhysicsEnvironment:
     public struct ContactSnapshot: Equatable, Sendable {
         public let firstBodyID: SourcePhysicsBodyID
         public let secondBodyID: SourcePhysicsBodyID
+        public let firstMaterialIndex: Int?
+        public let secondMaterialIndex: Int?
         /// Unit normal pointing from `firstBodyID` toward `secondBodyID`.
         public let normal: SourceVector3
         public let position: SourceVector3
@@ -375,6 +381,8 @@ public final class SourceDeterministicPhysicsEnvironment:
     private struct Contact {
         let firstBodyID: SourcePhysicsBodyID
         let secondBodyID: SourcePhysicsBodyID
+        let firstMaterialIndex: Int?
+        let secondMaterialIndex: Int?
         var normal: SourceVector3
         var position: SourceVector3
         var penetration: Float
@@ -402,6 +410,10 @@ public final class SourceDeterministicPhysicsEnvironment:
 
     public let configuration: Configuration
     public let staticCollisionScene: SourceDeterministicPhysicsStaticScene?
+    /// Every contact pair resolves fail-closed. The default empty table keeps
+    /// construction source-compatible while ensuring an unconfigured solver
+    /// cannot silently substitute invented inert coefficients.
+    public let materialTable: SourcePhysicsMaterialTable
 
     /// The immutable BSP scene is transformed once, not rebuilt for every
     /// 0.015-second simulation step or query.
@@ -435,10 +447,12 @@ public final class SourceDeterministicPhysicsEnvironment:
 
     public init(
         configuration: Configuration = .sourceDefault,
-        staticCollisionScene: SourceDeterministicPhysicsStaticScene? = nil
+        staticCollisionScene: SourceDeterministicPhysicsStaticScene? = nil,
+        materialTable: SourcePhysicsMaterialTable = .unconfigured
     ) {
         self.configuration = configuration
         self.staticCollisionScene = staticCollisionScene
+        self.materialTable = materialTable
         let staticPartCount = staticCollisionScene?.geometry.parts.count ?? 0
         latestStaticBroadphaseDiagnostics = StaticBroadphaseDiagnostics(
             totalPartCount: staticPartCount,
@@ -870,7 +884,7 @@ public final class SourceDeterministicPhysicsEnvironment:
             if iteration == 0 { firstIterationContacts = contacts }
             guard !contacts.isEmpty else { break }
             for contact in contacts {
-                resolve(
+                try resolve(
                     contact,
                     bodies: &bodies,
                     supportedBodies: &supportedBodies
@@ -892,6 +906,8 @@ public final class SourceDeterministicPhysicsEnvironment:
             ContactSnapshot(
                 firstBodyID: $0.firstBodyID,
                 secondBodyID: $0.secondBodyID,
+                firstMaterialIndex: $0.firstMaterialIndex,
+                secondMaterialIndex: $0.secondMaterialIndex,
                 normal: $0.normal,
                 position: $0.position,
                 penetration: $0.penetration,
@@ -973,6 +989,8 @@ public final class SourceDeterministicPhysicsEnvironment:
             contact: Contact(
                 firstBodyID: scene.bodyID,
                 secondBodyID: body.bodyID,
+                firstMaterialIndex: hit.materialIndex,
+                secondMaterialIndex: body.creation.materialIndex,
                 normal: hit.normal,
                 position: contactPoint,
                 penetration: 0
@@ -1009,8 +1027,10 @@ public final class SourceDeterministicPhysicsEnvironment:
                       firstShape.bounds.intersects(secondShape.bounds),
                       let contact = contact(
                           firstID: firstID,
+                          firstMaterialIndex: first.creation.materialIndex,
                           firstShape: firstShape,
                           secondID: secondID,
+                          secondMaterialIndex: second.creation.materialIndex,
                           secondShape: secondShape
                       ) else { continue }
                 contacts.append(contact)
@@ -1029,6 +1049,7 @@ public final class SourceDeterministicPhysicsEnvironment:
                           sceneID: scene.bodyID,
                           sceneShape: sceneShape,
                           bodyID: bodyID,
+                          bodyMaterialIndex: body.creation.materialIndex,
                           bodyShape: bodyShape
                       ) else { continue }
                 contacts.append(sceneContact)
@@ -1041,6 +1062,7 @@ public final class SourceDeterministicPhysicsEnvironment:
         sceneID: SourcePhysicsBodyID,
         sceneShape: WorldShape,
         bodyID: SourcePhysicsBodyID,
+        bodyMaterialIndex: Int,
         bodyShape: WorldShape
     ) -> Contact? {
         // Dynamic PHY bodies are independently attested convex parts. A
@@ -1056,13 +1078,17 @@ public final class SourceDeterministicPhysicsEnvironment:
                 for triangle in scenePart.triangles {
                     if let reversed = convexTriangleContact(
                         firstID: bodyID,
+                        firstMaterialIndex: bodyMaterialIndex,
                         convex: bodyPart,
                         secondID: sceneID,
+                        secondMaterialIndex: triangle.materialIndex,
                         triangle: triangle
                     ) {
                         chooseDeeper(Contact(
                             firstBodyID: sceneID,
                             secondBodyID: bodyID,
+                            firstMaterialIndex: triangle.materialIndex,
+                            secondMaterialIndex: bodyMaterialIndex,
                             normal: -reversed.normal,
                             position: reversed.position,
                             penetration: reversed.penetration
@@ -1076,8 +1102,10 @@ public final class SourceDeterministicPhysicsEnvironment:
 
     private func contact(
         firstID: SourcePhysicsBodyID,
+        firstMaterialIndex: Int,
         firstShape: WorldShape,
         secondID: SourcePhysicsBodyID,
+        secondMaterialIndex: Int,
         secondShape: WorldShape
     ) -> Contact? {
         var best: Contact?
@@ -1090,8 +1118,10 @@ public final class SourceDeterministicPhysicsEnvironment:
                     chooseDeeper(
                         convexContact(
                             firstID: firstID,
+                            firstMaterialIndex: firstMaterialIndex,
                             firstPart: firstPart,
                             secondID: secondID,
+                            secondMaterialIndex: secondMaterialIndex,
                             secondPart: secondPart
                         ),
                         into: &best
@@ -1107,8 +1137,10 @@ public final class SourceDeterministicPhysicsEnvironment:
                         chooseDeeper(
                             convexTriangleContact(
                                 firstID: firstID,
+                                firstMaterialIndex: firstMaterialIndex,
                                 convex: firstPart,
                                 secondID: secondID,
+                                secondMaterialIndex: secondMaterialIndex,
                                 triangle: triangle
                             ),
                             into: &best
@@ -1124,13 +1156,17 @@ public final class SourceDeterministicPhysicsEnvironment:
                     for triangle in firstPart.triangles {
                         if let reversed = convexTriangleContact(
                             firstID: secondID,
+                            firstMaterialIndex: secondMaterialIndex,
                             convex: secondPart,
                             secondID: firstID,
+                            secondMaterialIndex: firstMaterialIndex,
                             triangle: triangle
                         ) {
                             chooseDeeper(Contact(
                                 firstBodyID: firstID,
                                 secondBodyID: secondID,
+                                firstMaterialIndex: firstMaterialIndex,
+                                secondMaterialIndex: secondMaterialIndex,
                                 normal: -reversed.normal,
                                 position: reversed.position,
                                 penetration: reversed.penetration
@@ -1158,8 +1194,10 @@ public final class SourceDeterministicPhysicsEnvironment:
 
     private func convexContact(
         firstID: SourcePhysicsBodyID,
+        firstMaterialIndex: Int,
         firstPart: WorldPart,
         secondID: SourcePhysicsBodyID,
+        secondMaterialIndex: Int,
         secondPart: WorldPart
     ) -> Contact? {
         var axes = firstPart.faceNormals + secondPart.faceNormals
@@ -1173,9 +1211,11 @@ public final class SourceDeterministicPhysicsEnvironment:
         }
         return separatingAxisContact(
             firstID: firstID,
+            firstMaterialIndex: firstMaterialIndex,
             firstVertices: firstPart.vertices,
             firstCenter: firstPart.center,
             secondID: secondID,
+            secondMaterialIndex: secondMaterialIndex,
             secondVertices: secondPart.vertices,
             secondCenter: secondPart.center,
             axes: axes
@@ -1184,8 +1224,10 @@ public final class SourceDeterministicPhysicsEnvironment:
 
     private func convexTriangleContact(
         firstID: SourcePhysicsBodyID,
+        firstMaterialIndex: Int?,
         convex: WorldPart,
         secondID: SourcePhysicsBodyID,
+        secondMaterialIndex: Int?,
         triangle: WorldTriangle
     ) -> Contact? {
         var axes = convex.faceNormals
@@ -1200,9 +1242,11 @@ public final class SourceDeterministicPhysicsEnvironment:
         }
         guard var contact = separatingAxisContact(
             firstID: firstID,
+            firstMaterialIndex: firstMaterialIndex,
             firstVertices: convex.vertices,
             firstCenter: convex.center,
             secondID: secondID,
+            secondMaterialIndex: secondMaterialIndex,
             secondVertices: triangle.vertices,
             secondCenter: triangle.center,
             axes: axes
@@ -1223,9 +1267,11 @@ public final class SourceDeterministicPhysicsEnvironment:
 
     private func separatingAxisContact(
         firstID: SourcePhysicsBodyID,
+        firstMaterialIndex: Int?,
         firstVertices: [SourceVector3],
         firstCenter: SourceVector3,
         secondID: SourcePhysicsBodyID,
+        secondMaterialIndex: Int?,
         secondVertices: [SourceVector3],
         secondCenter: SourceVector3,
         axes: [SourceVector3]
@@ -1266,6 +1312,8 @@ public final class SourceDeterministicPhysicsEnvironment:
         return Contact(
             firstBodyID: firstID,
             secondBodyID: secondID,
+            firstMaterialIndex: firstMaterialIndex,
+            secondMaterialIndex: secondMaterialIndex,
             normal: minimumAxis,
             position: (firstSupport + secondSupport) * 0.5,
             penetration: max(0, minimumPenetration)
@@ -1276,13 +1324,17 @@ public final class SourceDeterministicPhysicsEnvironment:
         _ contact: Contact,
         bodies: inout [SourcePhysicsBodyID: BodyState],
         supportedBodies: inout Set<SourcePhysicsBodyID>
-    ) {
+    ) throws {
         var first = bodies[contact.firstBodyID]
         var second = bodies[contact.secondBodyID]
         let sceneIsFirst = staticCollisionScene?.bodyID == contact.firstBodyID
         let sceneIsSecond = staticCollisionScene?.bodyID == contact.secondBodyID
         guard first != nil || sceneIsFirst,
               second != nil || sceneIsSecond else { return }
+
+        let materialCoefficients = try contactMaterialCoefficients(
+            for: contact
+        )
 
         let firstInverseMass = first.map(inverseMass) ?? 0
         let secondInverseMass = second.map(inverseMass) ?? 0
@@ -1332,6 +1384,7 @@ public final class SourceDeterministicPhysicsEnvironment:
             }
         }
 
+        var appliedNormalImpulseMagnitude: Float = 0
         if relativeNormalSpeed < 0 {
             let firstAngularTerm = first.map {
                 angularEffectiveMass(
@@ -1350,9 +1403,14 @@ public final class SourceDeterministicPhysicsEnvironment:
             let denominator = inverseMassSum +
                 firstAngularTerm + secondAngularTerm
             if denominator > 0, denominator.isFinite {
-                // A zero-restitution non-penetration impulse adds no material
-                // behavior that is absent from the validated asset contract.
-                let magnitude = -relativeNormalSpeed / denominator
+                let magnitude = -(1 + materialCoefficients.restitution) *
+                    relativeNormalSpeed / denominator
+                guard magnitude.isFinite else {
+                    throw Error.nonFiniteContactImpulse(
+                        firstBodyID: contact.firstBodyID,
+                        secondBodyID: contact.secondBodyID
+                    )
+                }
                 let impulse = contact.normal * magnitude
                 if var value = first {
                     applyImpulse(-impulse, at: firstOffset, to: &value)
@@ -1361,6 +1419,83 @@ public final class SourceDeterministicPhysicsEnvironment:
                 if var value = second {
                     applyImpulse(impulse, at: secondOffset, to: &value)
                     second = value
+                }
+                appliedNormalImpulseMagnitude = magnitude
+            }
+        }
+
+        if appliedNormalImpulseMagnitude > 0 {
+            let updatedFirstOrigin = first?.transform.origin ??
+                staticCollisionScene!.transform.origin
+            let updatedSecondOrigin = second?.transform.origin ??
+                staticCollisionScene!.transform.origin
+            let updatedFirstOffset = contact.position - updatedFirstOrigin
+            let updatedSecondOffset = contact.position - updatedSecondOrigin
+            let updatedFirstPointVelocity = first.map {
+                pointVelocity($0, offset: updatedFirstOffset)
+            } ?? .zero
+            let updatedSecondPointVelocity = second.map {
+                pointVelocity($0, offset: updatedSecondOffset)
+            } ?? .zero
+            let relativeVelocity = updatedSecondPointVelocity -
+                updatedFirstPointVelocity
+            let tangentVelocity = relativeVelocity - contact.normal *
+                relativeVelocity.dot(contact.normal)
+            let tangentSpeedSquared = tangentVelocity.lengthSquared
+            if tangentSpeedSquared > 1e-12 {
+                let tangent = tangentVelocity.normalizedOrZero
+                let firstAngularTerm = first.map {
+                    angularEffectiveMass(
+                        body: $0,
+                        offset: updatedFirstOffset,
+                        normal: tangent
+                    )
+                } ?? 0
+                let secondAngularTerm = second.map {
+                    angularEffectiveMass(
+                        body: $0,
+                        offset: updatedSecondOffset,
+                        normal: tangent
+                    )
+                } ?? 0
+                let denominator = inverseMassSum +
+                    firstAngularTerm + secondAngularTerm
+                if denominator > 0, denominator.isFinite {
+                    let cancellationMagnitude = -relativeVelocity.dot(
+                        tangent
+                    ) / denominator
+                    let staticLimit = materialCoefficients.staticFriction *
+                        appliedNormalImpulseMagnitude
+                    let magnitude: Float
+                    if abs(cancellationMagnitude) <= staticLimit {
+                        magnitude = cancellationMagnitude
+                    } else {
+                        magnitude = -materialCoefficients.dynamicFriction *
+                            appliedNormalImpulseMagnitude
+                    }
+                    guard magnitude.isFinite else {
+                        throw Error.nonFiniteContactImpulse(
+                            firstBodyID: contact.firstBodyID,
+                            secondBodyID: contact.secondBodyID
+                        )
+                    }
+                    let impulse = tangent * magnitude
+                    if var value = first {
+                        applyImpulse(
+                            -impulse,
+                            at: updatedFirstOffset,
+                            to: &value
+                        )
+                        first = value
+                    }
+                    if var value = second {
+                        applyImpulse(
+                            impulse,
+                            at: updatedSecondOffset,
+                            to: &value
+                        )
+                        second = value
+                    }
                 }
             }
         }
@@ -1373,6 +1508,25 @@ public final class SourceDeterministicPhysicsEnvironment:
         }
         if let first { bodies[contact.firstBodyID] = first }
         if let second { bodies[contact.secondBodyID] = second }
+    }
+
+    private func contactMaterialCoefficients(
+        for contact: Contact
+    ) throws -> SourcePhysicsContactMaterialCoefficients {
+        guard let firstMaterialIndex = contact.firstMaterialIndex else {
+            throw SourcePhysicsMaterialTableError.missingContactMaterialIndex(
+                bodyID: contact.firstBodyID
+            )
+        }
+        guard let secondMaterialIndex = contact.secondMaterialIndex else {
+            throw SourcePhysicsMaterialTableError.missingContactMaterialIndex(
+                bodyID: contact.secondBodyID
+            )
+        }
+        return try materialTable.coefficients(
+            firstMaterialIndex: firstMaterialIndex,
+            secondMaterialIndex: secondMaterialIndex
+        )
     }
 
     private func inverseMass(_ body: BodyState) -> Float {

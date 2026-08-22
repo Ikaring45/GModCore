@@ -4,7 +4,7 @@ import Testing
 
 @Suite("Real BSP static physics bridge")
 struct SourceBSPStaticPhysicsBridgeTests {
-    @Test("gm_construct builds massless world collision, queries, and lands a prop")
+    @Test("gm_construct queries work and unattested contact fails closed")
     func constructWorldQueriesAndLanding() throws {
         let data = try GModGameAssets.data(for: .construct, kind: .bsp)
         let bsp = try SourceBSP(data: data)
@@ -153,17 +153,19 @@ struct SourceBSPStaticPhysicsBridgeTests {
                 ))
             ))
         }
-        snapshot = try environment.execute(
-            SourcePhysicsCommandBatch(commands: commands)
-        )
-        let prop = try #require(snapshot.bodies.first { $0.bodyID == propID })
-        #expect(snapshot.bodies.map(\.bodyID) == [propID])
-        #expect(abs(prop.transform.origin.z - (sourceLine.endPosition.z + 1)) < 0.1)
-        #expect(prop.linearVelocity == .zero)
-        #expect(prop.isSleeping)
-        #expect(environment.latestContacts.contains {
-            $0.firstBodyID == scene.bodyID && $0.secondBodyID == propID
-        })
+        #expect(throws: SourcePhysicsMaterialTableError
+            .missingContactMaterialIndex(bodyID: scene.bodyID)) {
+            _ = try environment.execute(
+                SourcePhysicsCommandBatch(commands: commands)
+            )
+        }
+
+        // The create and all preceding simulation commands belonged to the
+        // same FIFO slice, so an unattested surface rolls back the whole batch.
+        snapshot = try environment.execute(SourcePhysicsCommandBatch(commands: [
+            SourcePhysicsCommand(sequence: 3, payload: .query(lineQuery))
+        ]))
+        #expect(snapshot.bodies.isEmpty)
     }
 
     @Test("gm_flatgrass referenced brushes also produce usable world geometry")
