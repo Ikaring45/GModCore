@@ -30,6 +30,17 @@ public protocol SourceCanonicalEntityLuaHost: AnyObject {
         _ mutation: (inout SourceCanonicalEntityState) throws -> Void
     ) throws -> SourceCanonicalEntitySnapshot
 
+    func giveCanonicalWeapon(
+        className: String,
+        to player: SourceCanonicalEntityIdentity
+    ) throws -> SourceCanonicalEntitySnapshot
+
+    @discardableResult
+    func selectCanonicalWeapon(
+        className: String,
+        for player: SourceCanonicalEntityIdentity
+    ) throws -> SourceCanonicalEntitySnapshot
+
     func setCanonicalBodyGroups(
         _ subModelIDs: String,
         for identity: SourceCanonicalEntityIdentity
@@ -112,9 +123,10 @@ public enum SourceCanonicalEntityGLuaBridge {
         }
         guard let typeSystem = runtime.typeSystem,
               let entityMetatable = typeSystem.metatable(named: "Entity"),
-              let playerMetatable = typeSystem.metatable(named: "Player") else {
+              let playerMetatable = typeSystem.metatable(named: "Player"),
+              let weaponMetatable = typeSystem.metatable(named: "Weapon") else {
             throw SourceCanonicalEntityGLuaBridgeError.missingRuntimeSurface(
-                "Entity and Player metatables"
+                "Entity, Player, and Weapon metatables"
             )
         }
 
@@ -168,6 +180,31 @@ public enum SourceCanonicalEntityGLuaBridge {
                 )
             }
             return snapshot
+        }
+
+        func liveWeaponValue(
+            _ record: SourceCanonicalWeaponRecord
+        ) -> LuaValue? {
+            guard let registry = registryBox.value else { return nil }
+            let value = registry.entity(at: record.identity.entryIndex)
+            guard let snapshot = registry.canonicalSnapshot(for: value),
+                  snapshot.identity == record.identity,
+                  snapshot.kind == .weapon,
+                  snapshot.className.caseInsensitiveCompare(record.className)
+                    == .orderedSame,
+                  snapshot.lifecycle != .pendingRemoval,
+                  snapshot.lifecycle != .removed else { return nil }
+            return value
+        }
+
+        func weaponRecord(
+            in snapshot: SourceCanonicalEntitySnapshot,
+            className: String
+        ) -> SourceCanonicalWeaponRecord? {
+            guard let record = snapshot.weaponInventory.weapon(
+                className: className
+            ), liveWeaponValue(record) != nil else { return nil }
+            return record
         }
 
         func requiredString(
@@ -383,7 +420,7 @@ public enum SourceCanonicalEntityGLuaBridge {
                 function: "Entity:IsConstraint"
             )
             switch snapshot.kind {
-            case .world, .player, .propPhysics:
+            case .world, .player, .propPhysics, .weapon:
                 return [.boolean(false)]
             }
         }
@@ -393,13 +430,26 @@ public enum SourceCanonicalEntityGLuaBridge {
                 function: "Entity:IsWidget"
             )
             switch snapshot.kind {
-            case .world, .player, .propPhysics:
+            case .world, .player, .propPhysics, .weapon:
                 return [.boolean(false)]
             }
         }
         try setMethod("Entity:GetSkin", on: entityMetatable) { arguments in
             let snapshot = try requiredSnapshot(arguments.first, function: "Entity:GetSkin")
             return [.number(Double(snapshot.skin))]
+        }
+        try setMethod("Weapon:GetHoldType", on: weaponMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Weapon:GetHoldType",
+                kind: .weapon
+            )
+            guard let holdType = snapshot.weaponHoldType else {
+                throw LuaError.runtime(
+                    "Weapon:GetHoldType canonical hold type is unavailable"
+                )
+            }
+            return [.string(LuaString(holdType))]
         }
 
         try setMethod("Player:Alive", on: playerMetatable) { arguments in
@@ -409,6 +459,21 @@ public enum SourceCanonicalEntityGLuaBridge {
                 kind: .player
             )
             return [.boolean(snapshot.motion.isAlive)]
+        }
+        for method in ["Nick", "Name", "GetName"] {
+            try setMethod("Player:\(method)", on: playerMetatable) { arguments in
+                let snapshot = try requiredSnapshot(
+                    arguments.first,
+                    function: "Player:\(method)",
+                    kind: .player
+                )
+                guard let displayName = snapshot.playerDisplayName else {
+                    throw LuaError.runtime(
+                        "Player:\(method) canonical display name is unavailable"
+                    )
+                }
+                return [.string(LuaString(displayName))]
+            }
         }
         try setMethod("Player:GetShootPos", on: playerMetatable) { arguments in
             let snapshot = try requiredSnapshot(
@@ -440,10 +505,141 @@ public enum SourceCanonicalEntityGLuaBridge {
             }
             return [value]
         }
+        try setMethod("Player:HasWeapon", on: playerMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Player:HasWeapon",
+                kind: .player
+            )
+            let className = try requiredString(
+                arguments,
+                index: 1,
+                function: "Player:HasWeapon"
+            )
+            return [.boolean(
+                weaponRecord(in: snapshot, className: className) != nil
+            )]
+        }
+        try setMethod("Player:GetWeapon", on: playerMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Player:GetWeapon",
+                kind: .player
+            )
+            let className = try requiredString(
+                arguments,
+                index: 1,
+                function: "Player:GetWeapon"
+            )
+            guard let record = weaponRecord(
+                in: snapshot,
+                className: className
+            ), let value = liveWeaponValue(record) else { return [nullValue] }
+            return [value]
+        }
+        try setMethod("Player:GetWeapons", on: playerMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Player:GetWeapons",
+                kind: .player
+            )
+            let table = LuaTable()
+            var luaIndex = 1
+            for record in snapshot.weaponInventory.weapons {
+                guard let value = liveWeaponValue(record) else { continue }
+                try state.setRawTableValue(
+                    value,
+                    for: .number(Double(luaIndex)),
+                    in: table
+                )
+                luaIndex += 1
+            }
+            return [.table(table)]
+        }
+        try setMethod("Player:GetActiveWeapon", on: playerMetatable) { arguments in
+            let snapshot = try requiredSnapshot(
+                arguments.first,
+                function: "Player:GetActiveWeapon",
+                kind: .player
+            )
+            guard let identity = snapshot.weaponInventory.activeWeapon,
+                  let record = snapshot.weaponInventory.weapon(identity: identity),
+                  let value = liveWeaponValue(record) else { return [nullValue] }
+            return [value]
+        }
 
         // CLIENT owns immutable replicated snapshots only. Returning here
         // keeps every mutation surface and ents.Create SERVER-exclusive.
         guard runtime.realm == .server else { return }
+
+        try setMethod("Weapon:SetHoldType", on: weaponMetatable) { arguments in
+            let weapon = try requiredSnapshot(
+                arguments.first,
+                function: "Weapon:SetHoldType",
+                kind: .weapon
+            )
+            let holdType = try requiredString(
+                arguments,
+                index: 1,
+                function: "Weapon:SetHoldType"
+            )
+            let host = try requiredHost("Weapon:SetHoldType")
+            _ = try host.updateCanonicalEntity(weapon.identity) { candidate in
+                candidate.weaponHoldType = holdType
+            }
+            return []
+        }
+
+        try setMethod("Player:Give", on: playerMetatable) { arguments in
+            let player = try requiredSnapshot(
+                arguments.first,
+                function: "Player:Give",
+                kind: .player
+            )
+            let className = try requiredString(
+                arguments,
+                index: 1,
+                function: "Player:Give"
+            )
+            guard SourceCanonicalEntityKind
+                .isStructurallyValidWeaponClassName(className) else {
+                throw LuaError.runtime(
+                    "bad argument #1 to 'Give' (valid Weapon class name expected)"
+                )
+            }
+            let host = try requiredHost("Player:Give")
+            let weapon = try host.giveCanonicalWeapon(
+                className: className,
+                to: player.identity
+            )
+            guard let value = liveWeaponValue(SourceCanonicalWeaponRecord(
+                identity: weapon.identity,
+                className: weapon.className
+            )) else {
+                throw LuaError.runtime(
+                    "Player:Give did not publish the exact canonical Weapon EHANDLE"
+                )
+            }
+            return [value]
+        }
+        try setMethod("Player:SelectWeapon", on: playerMetatable) { arguments in
+            let player = try requiredSnapshot(
+                arguments.first,
+                function: "Player:SelectWeapon",
+                kind: .player
+            )
+            let className = try requiredString(
+                arguments,
+                index: 1,
+                function: "Player:SelectWeapon"
+            )
+            let host = try requiredHost("Player:SelectWeapon")
+            _ = try host.selectCanonicalWeapon(
+                className: className,
+                for: player.identity
+            )
+            return []
+        }
 
         try setMethod("Entity:SetModel", on: entityMetatable) { arguments in
             let snapshot = try requiredSnapshot(

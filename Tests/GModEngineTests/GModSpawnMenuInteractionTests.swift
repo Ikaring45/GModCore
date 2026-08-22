@@ -258,17 +258,39 @@ final class GModSpawnMenuInteractionTests: XCTestCase {
         XCTAssertFalse(weaponSoundReport.requests[0].hasAudioBacking)
         XCTAssertFalse(weaponSoundReport.diagnostics.overflowed)
         let weaponActionTick = try session.runFixedTick()
-        XCTAssertEqual(weaponActionTick.actionFailures.count, 1)
-        let weaponFailure = try XCTUnwrap(weaponActionTick.actionFailures.first)
-        XCTAssertEqual(weaponFailure.command, "gm_giveswep")
-        XCTAssertEqual(weaponFailure.arguments, [weaponSpawnName.utf8String])
-        XCTAssertTrue(weaponFailure.message.contains("GetNWString"))
+        XCTAssertEqual(weaponActionTick.actionFailures, [])
+        XCTAssertEqual(weaponActionTick.server.timerFailures, [])
+        XCTAssertEqual(weaponActionTick.client.timerFailures, [])
         let canonicalPlayer = try XCTUnwrap(
             session.sourceAdapter.canonicalEntitySnapshots.first {
                 $0.kind == .player
             }
         )
         XCTAssertTrue(canonicalPlayer.motion.isAlive)
+        let canonicalWeaponRecord = try XCTUnwrap(
+            canonicalPlayer.weaponInventory.weapon(
+                className: weaponSpawnName.utf8String
+            )
+        )
+        XCTAssertEqual(
+            canonicalPlayer.weaponInventory.activeWeapon,
+            canonicalWeaponRecord.identity
+        )
+        let canonicalWeapon = try XCTUnwrap(
+            session.sourceAdapter.canonicalEntitySnapshots.first {
+                $0.identity == canonicalWeaponRecord.identity
+            }
+        )
+        XCTAssertEqual(canonicalWeapon.kind, .weapon)
+        XCTAssertEqual(canonicalWeapon.className, weaponSpawnName.utf8String)
+        XCTAssertEqual(canonicalWeapon.creator, canonicalPlayer.identity)
+        XCTAssertEqual(canonicalWeapon.lifecycle, .active)
+        XCTAssertEqual(
+            session.clientCanonicalEntitySnapshots.first {
+                $0.identity == canonicalWeapon.identity
+            },
+            canonicalWeapon
+        )
         XCTAssertFalse(session.isClosed)
         XCTAssertFalse(session.clientRuntime.isClosed)
         XCTAssertFalse(session.serverRuntime.isClosed)
@@ -454,11 +476,28 @@ final class GModSpawnMenuInteractionTests: XCTestCase {
             "unexpected stock SpawnIcon release state: \(buttonIconReleaseState)"
         )
         let buttonCommandTick = try session.runFixedTick()
-        XCTAssertEqual(buttonCommandTick.actionFailures.count, 1)
-        let toolSelectionFailure = try XCTUnwrap(buttonCommandTick.actionFailures.first)
-        XCTAssertEqual(toolSelectionFailure.command, "gmod_tool")
-        XCTAssertEqual(toolSelectionFailure.arguments, ["button"])
-        XCTAssertFalse(toolSelectionFailure.message.isEmpty)
+        XCTAssertEqual(buttonCommandTick.actionFailures, [])
+        XCTAssertEqual(buttonCommandTick.server.timerFailures, [])
+        XCTAssertEqual(buttonCommandTick.client.timerFailures, [])
+        XCTAssertEqual(
+            session.clientRuntime.conVarRegistry?.stringValue(for: "gmod_toolmode"),
+            "button"
+        )
+        let postToolSelectionPlayer = try XCTUnwrap(
+            session.sourceAdapter.canonicalEntitySnapshots.first {
+                $0.identity == canonicalPlayer.identity
+            }
+        )
+        XCTAssertEqual(
+            postToolSelectionPlayer.weaponInventory.activeWeapon,
+            canonicalWeaponRecord.identity
+        )
+        XCTAssertEqual(
+            postToolSelectionPlayer.weaponInventory.weapon(
+                className: weaponSpawnName.utf8String
+            )?.identity,
+            canonicalWeaponRecord.identity
+        )
         XCTAssertFalse(session.isClosed)
         XCTAssertFalse(session.clientRuntime.isClosed)
         XCTAssertFalse(session.serverRuntime.isClosed)

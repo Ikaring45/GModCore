@@ -809,6 +809,8 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
             return .entity
         case .player:
             return .player
+        case .weapon:
+            return .weapon
         }
     }
 
@@ -829,7 +831,7 @@ public final class GMLuaEntityRegistry: @unchecked Sendable {
                 snapshot.identity.handle
             )
         }
-        guard snapshot.className == snapshot.kind.className else {
+        guard snapshot.kind.accepts(className: snapshot.className) else {
             throw GMLuaCanonicalEntityRegistryError.classNameKindMismatch(
                 handle: snapshot.identity.handle,
                 expected: snapshot.kind.className,

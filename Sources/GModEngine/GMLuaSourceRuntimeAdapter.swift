@@ -552,6 +552,174 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
         }
     }
 
+    /// Implements Player:Give as one engine-owned Weapon allocation followed
+    /// by one Player inventory snapshot update. Every step uses the canonical
+    /// SourceEntityList EHANDLE and the ordinary SERVER replication journal;
+    /// no realm-local gameplay mirror participates.
+    @discardableResult
+    public func giveCanonicalWeapon(
+        className: String,
+        to player: SourceCanonicalEntityIdentity
+    ) throws -> SourceCanonicalEntitySnapshot {
+        try withMutationBoundary {
+            try requireCanonicalServerProjectionLocked(player)
+            guard let currentPlayer = canonicalEntities.snapshot(for: player),
+                  currentPlayer.kind == .player else {
+                throw GMLuaSourceRuntimeAdapterError.unknownEntity(player)
+            }
+            if let existing = currentPlayer.weaponInventory.weapon(
+                className: className
+            ) {
+                guard let weapon = canonicalEntities.snapshot(
+                    for: existing.identity
+                ), weapon.kind == .weapon,
+                   weapon.className.caseInsensitiveCompare(existing.className)
+                    == .orderedSame,
+                   weapon.lifecycle != .pendingRemoval,
+                   weapon.lifecycle != .removed else {
+                    throw SourceCanonicalEntityError.invalidWeaponInventory(
+                        "stored Weapon class does not resolve to its live full EHANDLE"
+                    )
+                }
+                return weapon
+            }
+
+            guard SourceCanonicalEntityKind
+                .isStructurallyValidWeaponClassName(className) else {
+                throw SourceCanonicalEntityError.invalidClassName(
+                    kind: .weapon,
+                    className: className
+                )
+            }
+            // Create, DispatchSpawn, Activate, then Player inventory update.
+            // All four immutable snapshots retain FIFO order.
+            try preflightCanonicalMutationJournalLocked(additionalOperations: 4)
+            let journalCheckpoint = canonicalMutationJournal.count
+            var state = SourceCanonicalEntityState.defaults(for: .weapon)
+            state.creator = player
+            state.creationTime = kernel.globals.currentTime
+            let registry = try requiredServerRegistryLocked()
+            let created = try canonicalEntities.create(
+                kind: .weapon,
+                className: className,
+                state: state,
+                publishing: { [unowned self] snapshot in
+                    _ = try registry.applyAuthoritativeSnapshot(snapshot)
+                    self.canonicalMutationJournal.append(.create(snapshot))
+                }
+            )
+            canonicalEntityHandleOrder.append(created.identity.handle.rawValue)
+
+            do {
+                _ = try canonicalEntities.spawn(
+                    created.identity,
+                    publishing: { [unowned self] snapshot in
+                        _ = try registry.applyAuthoritativeSnapshot(snapshot)
+                        self.canonicalMutationJournal.append(.update(snapshot))
+                    }
+                )
+                let active = try canonicalEntities.activate(
+                    created.identity,
+                    publishing: { [unowned self] snapshot in
+                        _ = try registry.applyAuthoritativeSnapshot(snapshot)
+                        self.canonicalMutationJournal.append(.update(snapshot))
+                    }
+                )
+                _ = try canonicalEntities.update(
+                    player,
+                    { candidate in
+                        let inserted = candidate.weaponInventory.insert(
+                            SourceCanonicalWeaponRecord(
+                                identity: active.identity,
+                                className: active.className
+                            )
+                        )
+                        guard inserted else {
+                            throw SourceCanonicalEntityError.invalidWeaponInventory(
+                                "duplicate Weapon class or EHANDLE"
+                            )
+                        }
+                    },
+                    publishing: { [unowned self] snapshot in
+                        _ = try registry.applyAuthoritativeSnapshot(snapshot)
+                        self.canonicalMutationJournal.append(.update(snapshot))
+                    }
+                )
+                return active
+            } catch {
+                // Nothing has left the pending host journal. Remove only this
+                // exact new handle and its journal suffix; pre-existing Player
+                // state remains untouched because store update publishes
+                // before it commits.
+                _ = try canonicalEntities.rollbackUnpublished(
+                    created.identity,
+                    publishing: { removal in
+                        guard try registry.applyAuthoritativeRemoval(removal) else {
+                            throw GMLuaSourceRuntimeAdapterError
+                                .canonicalRemovalProjectionMissing(removal.identity)
+                        }
+                    }
+                )
+                guard canonicalEntityHandleOrder.last ==
+                        created.identity.handle.rawValue else {
+                    throw GMLuaSourceRuntimeAdapterError
+                        .forwardedConsoleCommandTransactionCheckpointChanged
+                }
+                canonicalEntityHandleOrder.removeLast()
+                canonicalMutationJournal.removeLast(
+                    canonicalMutationJournal.count - journalCheckpoint
+                )
+                throw error
+            }
+        }
+    }
+
+    /// Source SelectWeapon is a no-op when the Player does not own the class.
+    /// A real selection changes only the canonical Player snapshot and enters
+    /// the same ordered FIFO as the preceding Weapon creation.
+    @discardableResult
+    public func selectCanonicalWeapon(
+        className: String,
+        for player: SourceCanonicalEntityIdentity
+    ) throws -> SourceCanonicalEntitySnapshot {
+        try withMutationBoundary {
+            try requireCanonicalServerProjectionLocked(player)
+            guard let current = canonicalEntities.snapshot(for: player),
+                  current.kind == .player else {
+                throw GMLuaSourceRuntimeAdapterError.unknownEntity(player)
+            }
+            guard let record = current.weaponInventory.weapon(
+                className: className
+            ), let weapon = canonicalEntities.snapshot(for: record.identity),
+               weapon.kind == .weapon,
+               weapon.className.caseInsensitiveCompare(record.className)
+                == .orderedSame,
+               weapon.lifecycle != .pendingRemoval,
+               weapon.lifecycle != .removed else { return current }
+            guard current.weaponInventory.activeWeapon != record.identity else {
+                return current
+            }
+            try preflightCanonicalMutationJournalLocked(additionalOperations: 1)
+            return try canonicalEntities.update(
+                player,
+                { candidate in
+                    guard candidate.weaponInventory.select(
+                        className: className
+                    ) else {
+                        throw SourceCanonicalEntityError.invalidWeaponInventory(
+                            "selected Weapon class disappeared during transaction"
+                        )
+                    }
+                },
+                publishing: { [unowned self] snapshot in
+                    _ = try self.requiredServerRegistryLocked()
+                        .applyAuthoritativeSnapshot(snapshot)
+                    self.canonicalMutationJournal.append(.update(snapshot))
+                }
+            )
+        }
+    }
+
     /// Commits one legacy NW string through the same prospective
     /// snapshot/registry/journal transaction as every canonical Entity field.
     /// Repeating the exact key/value bytes is a no-op and consumes neither a

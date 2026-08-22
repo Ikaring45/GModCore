@@ -10,8 +10,32 @@ public enum SourceCanonicalEntityKind: String, CaseIterable, Equatable, Hashable
     case world = "worldspawn"
     case player = "player"
     case propPhysics = "prop_physics"
+    /// One concrete SWEP owned by the canonical entity list. Its snapshot
+    /// `className` is the actual registered SWEP class rather than this
+    /// category spelling.
+    case weapon = "weapon"
 
     public var className: String { rawValue }
+
+    func accepts(className: String) -> Bool {
+        switch self {
+        case .weapon:
+            return Self.isStructurallyValidWeaponClassName(className)
+        case .world, .player, .propPhysics:
+            return className == self.className
+        }
+    }
+
+    static func isStructurallyValidWeaponClassName(_ className: String) -> Bool {
+        !className.isEmpty &&
+            className.utf8.count < 260 &&
+            !className.contains("\0") &&
+            !className.contains("/") &&
+            !className.contains("\\") &&
+            !className.unicodeScalars.contains(where: {
+                CharacterSet.whitespacesAndNewlines.contains($0)
+            })
+    }
 }
 
 /// Engine-owned pose. Source simulation remains Float based; renderers may
@@ -425,6 +449,63 @@ public struct SourceEntityNetworkVariables: Equatable, Sendable {
     }
 }
 
+/// One Player-owned SWEP. Both ownership and lookup retain the complete
+/// packed EHANDLE, so a recycled entity index cannot silently become an item
+/// in an older Player's inventory.
+public struct SourceCanonicalWeaponRecord: Equatable, Sendable {
+    public let identity: SourceCanonicalEntityIdentity
+    public let className: String
+
+    public init(identity: SourceCanonicalEntityIdentity, className: String) {
+        self.identity = identity
+        self.className = className
+    }
+}
+
+/// Ordered, engine-owned Player inventory carried by canonical snapshots.
+/// Realm registries resolve these immutable identities to their own userdata;
+/// Lua never owns or directly mirrors this state.
+public struct SourceCanonicalWeaponInventory: Equatable, Sendable {
+    public private(set) var weapons: [SourceCanonicalWeaponRecord]
+    public private(set) var activeWeapon: SourceCanonicalEntityIdentity?
+
+    public init(
+        weapons: [SourceCanonicalWeaponRecord] = [],
+        activeWeapon: SourceCanonicalEntityIdentity? = nil
+    ) {
+        self.weapons = weapons
+        self.activeWeapon = activeWeapon
+    }
+
+    public func weapon(className: String) -> SourceCanonicalWeaponRecord? {
+        weapons.first {
+            $0.className.caseInsensitiveCompare(className) == .orderedSame
+        }
+    }
+
+    public func weapon(
+        identity: SourceCanonicalEntityIdentity
+    ) -> SourceCanonicalWeaponRecord? {
+        weapons.first { $0.identity == identity }
+    }
+
+    @discardableResult
+    public mutating func insert(_ weapon: SourceCanonicalWeaponRecord) -> Bool {
+        guard self.weapon(className: weapon.className) == nil,
+              self.weapon(identity: weapon.identity) == nil else { return false }
+        weapons.append(weapon)
+        return true
+    }
+
+    @discardableResult
+    public mutating func select(className: String) -> Bool {
+        guard let weapon = weapon(className: className) else { return false }
+        guard activeWeapon != weapon.identity else { return false }
+        activeWeapon = weapon.identity
+        return true
+    }
+}
+
 /// Mutable state used by one atomic engine-owned update transaction.
 ///
 /// Lifecycle and EHANDLE identity are intentionally absent. Callers may alter
@@ -454,6 +535,9 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
     /// state; neither relationship is reduced to an entry index.
     public var vehicle: SourceCanonicalEntityIdentity?
     public var creator: SourceCanonicalEntityIdentity?
+    /// Host-configured local display name for a canonical Player. It is part
+    /// of the replicated entity snapshot rather than a Lua-side nickname.
+    public var playerDisplayName: String?
     /// Source-relative time at which the engine allocated this entity.
     /// CLIENT receives the SERVER value in the canonical snapshot so
     /// `GetCreationTime` remains comparable with the shared `CurTime` clock.
@@ -465,6 +549,13 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
     /// realm-local Lua side table. CLIENT receives this value only inside the
     /// existing full-EHANDLE snapshot FIFO.
     public var networkVariables: SourceEntityNetworkVariables
+    /// Player-only SWEP ownership and active selection. This remains empty on
+    /// world, prop, and Weapon entities.
+    public var weaponInventory: SourceCanonicalWeaponInventory
+    /// Weapon-only hold type exposed by the native Weapon ABI. The value is
+    /// engine-owned and replicated with the same full-EHANDLE snapshot as the
+    /// Weapon instead of living in one realm's scripted table.
+    public var weaponHoldType: String?
 
     public init(
         transform: SourceEntityTransform = .identity,
@@ -478,9 +569,12 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
         viewOffset: SourceVector3 = .zero,
         vehicle: SourceCanonicalEntityIdentity? = nil,
         creator: SourceCanonicalEntityIdentity? = nil,
+        playerDisplayName: String? = nil,
         creationTime: Float = 0,
         spawnEffect: Bool = false,
-        networkVariables: SourceEntityNetworkVariables = .init()
+        networkVariables: SourceEntityNetworkVariables = .init(),
+        weaponInventory: SourceCanonicalWeaponInventory = .init(),
+        weaponHoldType: String? = nil
     ) {
         self.transform = transform
         self.motion = motion
@@ -493,9 +587,12 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
         self.viewOffset = viewOffset
         self.vehicle = vehicle
         self.creator = creator
+        self.playerDisplayName = playerDisplayName
         self.creationTime = creationTime
         self.spawnEffect = spawnEffect
         self.networkVariables = networkVariables
+        self.weaponInventory = weaponInventory
+        self.weaponHoldType = weaponHoldType
     }
 
     /// Converts the canonical Player state into the existing movement core's
@@ -549,10 +646,13 @@ public struct SourceCanonicalEntityState: Equatable, Sendable {
             return Self(
                 solidType: .boundingBox,
                 moveType: .walk,
-                viewOffset: SourceVector3(0, 0, 64)
+                viewOffset: SourceVector3(0, 0, 64),
+                playerDisplayName: "Player"
             )
         case .propPhysics:
             return Self(solidType: .vPhysics, moveType: .vPhysics)
+        case .weapon:
+            return Self(weaponHoldType: "normal")
         }
     }
 }
@@ -597,9 +697,12 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
     public let viewOffset: SourceVector3
     public let vehicle: SourceCanonicalEntityIdentity?
     public let creator: SourceCanonicalEntityIdentity?
+    public let playerDisplayName: String?
     public let creationTime: Float
     public let spawnEffect: Bool
     public let networkVariables: SourceEntityNetworkVariables
+    public let weaponInventory: SourceCanonicalWeaponInventory
+    public let weaponHoldType: String?
     public let lifecycle: SourceCanonicalEntityLifecycle
     public let isNetworkable: Bool
     public let revision: UInt64
@@ -622,9 +725,12 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         viewOffset: SourceVector3 = .zero,
         vehicle: SourceCanonicalEntityIdentity? = nil,
         creator: SourceCanonicalEntityIdentity? = nil,
+        playerDisplayName: String? = nil,
         creationTime: Float = 0,
         spawnEffect: Bool = false,
-        networkVariables: SourceEntityNetworkVariables = .init()
+        networkVariables: SourceEntityNetworkVariables = .init(),
+        weaponInventory: SourceCanonicalWeaponInventory = .init(),
+        weaponHoldType: String? = nil
     ) {
         self.identity = identity
         self.kind = kind
@@ -640,9 +746,12 @@ public struct SourceCanonicalEntitySnapshot: Equatable, Sendable {
         self.viewOffset = viewOffset
         self.vehicle = vehicle
         self.creator = creator
+        self.playerDisplayName = playerDisplayName
         self.creationTime = creationTime
         self.spawnEffect = spawnEffect
         self.networkVariables = networkVariables
+        self.weaponInventory = weaponInventory
+        self.weaponHoldType = weaponHoldType
         self.lifecycle = lifecycle
         self.isNetworkable = isNetworkable
         self.revision = revision
@@ -681,6 +790,14 @@ public enum SourceCanonicalEntityError: Error, Equatable, CustomStringConvertibl
     case invalidSkin(Int)
     case invalidBodyValue(Int)
     case invalidCreationTime(Float)
+    case invalidClassName(kind: SourceCanonicalEntityKind, className: String)
+    case weaponInventoryRequiresPlayer
+    case invalidWeaponInventory(String)
+    case weaponHoldTypeRequired
+    case weaponHoldTypeRequiresWeapon
+    case invalidWeaponHoldType(String)
+    case playerDisplayNameRequired
+    case playerDisplayNameRequiresPlayer
     case invalidModelPath(String)
     case modelRequired(SourceCanonicalEntityKind)
     case modelValidationUnavailable(SourceEntityModelReference)
@@ -710,6 +827,22 @@ public enum SourceCanonicalEntityError: Error, Equatable, CustomStringConvertibl
             return "Source entity Studio body value is invalid: \(value)"
         case let .invalidCreationTime(value):
             return "Source entity creation time is invalid: \(value)"
+        case let .invalidClassName(kind, className):
+            return "Source \(kind.rawValue) class name is invalid: \(className)"
+        case .weaponInventoryRequiresPlayer:
+            return "canonical Weapon inventory is only valid on a Player"
+        case let .invalidWeaponInventory(message):
+            return "canonical Player Weapon inventory is invalid: \(message)"
+        case .weaponHoldTypeRequired:
+            return "canonical Weapon requires an engine-owned hold type"
+        case .weaponHoldTypeRequiresWeapon:
+            return "canonical Weapon hold type is only valid on a Weapon"
+        case let .invalidWeaponHoldType(value):
+            return "canonical Weapon hold type is invalid: \(value)"
+        case .playerDisplayNameRequired:
+            return "canonical Player requires a host-owned display name"
+        case .playerDisplayNameRequiresPlayer:
+            return "canonical Player display name is only valid on a Player"
         case let .invalidModelPath(path):
             return "Source entity model path is structurally invalid: \(path)"
         case let .modelRequired(kind):
@@ -737,6 +870,7 @@ public final class SourceCanonicalEntity: SourceEntity {
 
     fileprivate init(
         kind: SourceCanonicalEntityKind,
+        className: String,
         state: SourceCanonicalEntityState,
         lifecycle: SourceCanonicalEntityLifecycle = .created,
         revision: UInt64 = 0
@@ -745,7 +879,7 @@ public final class SourceCanonicalEntity: SourceEntity {
         stateStorage = state
         self.lifecycle = lifecycle
         self.revision = revision
-        super.init(className: kind.className)
+        super.init(className: className)
     }
 
     public var state: SourceCanonicalEntityState { stateStorage }
@@ -799,9 +933,12 @@ public final class SourceCanonicalEntity: SourceEntity {
             viewOffset: state.viewOffset,
             vehicle: state.vehicle,
             creator: state.creator,
+            playerDisplayName: state.playerDisplayName,
             creationTime: state.creationTime,
             spawnEffect: state.spawnEffect,
-            networkVariables: state.networkVariables
+            networkVariables: state.networkVariables,
+            weaponInventory: state.weaponInventory,
+            weaponHoldType: state.weaponHoldType
         )
     }
 }
@@ -855,11 +992,13 @@ public final class SourceCanonicalEntityStore {
     @discardableResult
     public func create(
         kind: SourceCanonicalEntityKind,
+        className: String? = nil,
         at requestedEntryIndex: Int? = nil,
         state requestedState: SourceCanonicalEntityState? = nil
     ) throws -> SourceCanonicalEntitySnapshot {
         try create(
             kind: kind,
+            className: className,
             at: requestedEntryIndex,
             state: requestedState,
             publishing: { _ in }
@@ -873,15 +1012,27 @@ public final class SourceCanonicalEntityStore {
     @discardableResult
     func create(
         kind: SourceCanonicalEntityKind,
+        className requestedClassName: String? = nil,
         at requestedEntryIndex: Int? = nil,
         state requestedState: SourceCanonicalEntityState? = nil,
         publishing publish: (SourceCanonicalEntitySnapshot) throws -> Void
     ) throws -> SourceCanonicalEntitySnapshot {
         let entryIndex = try resolveEntryIndex(for: kind, requested: requestedEntryIndex)
+        let className = requestedClassName ?? kind.className
+        guard kind.accepts(className: className) else {
+            throw SourceCanonicalEntityError.invalidClassName(
+                kind: kind,
+                className: className
+            )
+        }
         let state = requestedState ?? .defaults(for: kind)
         try validate(state: state, kind: kind, lifecycle: .created)
 
-        let entity = SourceCanonicalEntity(kind: kind, state: state)
+        let entity = SourceCanonicalEntity(
+            kind: kind,
+            className: className,
+            state: state
+        )
         let handle: SourceBaseHandle
         do {
             handle = try entityList.addNetworkableEntity(entity, at: entryIndex)
@@ -1266,6 +1417,70 @@ public final class SourceCanonicalEntityStore {
         for relationship in [state.vehicle, state.creator].compactMap({ $0 }) {
             guard entity(for: relationship) != nil else {
                 throw SourceCanonicalEntityError.unknownEntity(relationship)
+            }
+        }
+
+        if kind != .player, !state.weaponInventory.weapons.isEmpty ||
+            state.weaponInventory.activeWeapon != nil {
+            throw SourceCanonicalEntityError.weaponInventoryRequiresPlayer
+        }
+        if kind == .weapon {
+            guard let holdType = state.weaponHoldType else {
+                throw SourceCanonicalEntityError.weaponHoldTypeRequired
+            }
+            guard !holdType.isEmpty,
+                  holdType.utf8.count <= 64,
+                  !holdType.contains("\0") else {
+                throw SourceCanonicalEntityError.invalidWeaponHoldType(holdType)
+            }
+        } else if state.weaponHoldType != nil {
+            throw SourceCanonicalEntityError.weaponHoldTypeRequiresWeapon
+        }
+        if kind == .player {
+            guard state.playerDisplayName != nil else {
+                throw SourceCanonicalEntityError.playerDisplayNameRequired
+            }
+        } else if state.playerDisplayName != nil {
+            throw SourceCanonicalEntityError.playerDisplayNameRequiresPlayer
+        }
+        if kind == .player {
+            var classNames: [String] = []
+            var identities: Set<SourceCanonicalEntityIdentity> = []
+            for record in state.weaponInventory.weapons {
+                guard SourceCanonicalEntityKind
+                    .isStructurallyValidWeaponClassName(record.className) else {
+                    throw SourceCanonicalEntityError.invalidWeaponInventory(
+                        "invalid class name \(record.className)"
+                    )
+                }
+                let folded = record.className.lowercased()
+                guard !classNames.contains(folded) else {
+                    throw SourceCanonicalEntityError.invalidWeaponInventory(
+                        "duplicate class name \(record.className)"
+                    )
+                }
+                classNames.append(folded)
+                guard identities.insert(record.identity).inserted else {
+                    throw SourceCanonicalEntityError.invalidWeaponInventory(
+                        "duplicate EHANDLE \(record.identity.handle.rawValue)"
+                    )
+                }
+                guard let weapon = snapshot(for: record.identity),
+                      weapon.kind == .weapon,
+                      weapon.className.caseInsensitiveCompare(record.className)
+                        == .orderedSame,
+                      weapon.lifecycle != .pendingRemoval,
+                      weapon.lifecycle != .removed else {
+                    throw SourceCanonicalEntityError.invalidWeaponInventory(
+                        "weapon \(record.className) does not resolve to its live full EHANDLE"
+                    )
+                }
+            }
+            if let active = state.weaponInventory.activeWeapon,
+               state.weaponInventory.weapon(identity: active) == nil {
+                throw SourceCanonicalEntityError.invalidWeaponInventory(
+                    "active EHANDLE is not present in the ordered inventory"
+                )
             }
         }
 

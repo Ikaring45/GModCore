@@ -494,7 +494,7 @@ public struct SourceEntityReplicationClientState: Sendable {
               handle.entryIndex < SourceEntityConstants.maxEdicts else {
             return .nonNetworkableEntity(handle)
         }
-        guard entity.className == entity.kind.className else {
+        guard entity.kind.accepts(className: entity.className) else {
             return .classNameKindMismatch(
                 handle: handle,
                 expected: entity.kind.className,
