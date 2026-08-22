@@ -993,6 +993,17 @@ public struct GModMainView: View {
                 .onChange(of: dermaMenuSettings) { settings in
                     dermaMenu.replaceSettings(settings)
                 }
+                .onChange(of: dermaMenu.failure) { failure in
+                    guard let failure else { return }
+                    activeHomeUtility = nil
+                    diagnostics.record(
+                        kind: .compatibility,
+                        severity: .error,
+                        title: "#garryspad.problem.menu",
+                        detail: failure,
+                        source: "MENU Derma"
+                    )
+                }
                 .onChange(of: activeHomeUtility) { utility in
                     if let utility {
                         activateDermaMenu()

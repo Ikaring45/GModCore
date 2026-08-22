@@ -417,6 +417,7 @@ public final class GMLuaMenuSession: @unchecked Sendable {
         viewportHeight: Int
     ) throws -> GMLuaPointerDispatchResult {
         try requireActive()
+        _ = runtime.updateViewport(width: viewportWidth, height: viewportHeight)
         guard let registry = runtime.vguiRegistry else {
             throw GMLuaMenuSessionError.missingRuntimeSurface("VGUI registry")
         }
