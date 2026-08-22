@@ -2447,65 +2447,7 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
     /// Children are lower-left, lower-right, upper-left, upper-right; each
     /// power-one leaf fans eight triangles around its center.
     static func displacementTriangleIndices(power: Int) -> [UInt32] {
-        precondition((2...4).contains(power))
-        let sideLength = (1 << power) + 1
-        let winding = [
-            (0, 1), (0, 0), (1, 0), (2, 0), (2, 1),
-            (2, 2), (1, 2), (0, 2), (0, 1),
-        ]
-        let children = [
-            ((0, 0), (1, 1)),
-            ((1, 0), (2, 1)),
-            ((0, 1), (1, 2)),
-            ((1, 1), (2, 2)),
-        ]
-        func coordinate(
-            _ lower: (Int, Int),
-            _ upper: (Int, Int),
-            _ selector: (Int, Int)
-        ) -> (Int, Int) {
-            func component(_ lower: Int, _ upper: Int, _ selector: Int) -> Int {
-                switch selector {
-                case 0: return lower
-                case 1: return (lower + upper) >> 1
-                default: return upper
-                }
-            }
-            return (
-                component(lower.0, upper.0, selector.0),
-                component(lower.1, upper.1, selector.1)
-            )
-        }
-        var indices: [UInt32] = []
-        indices.reserveCapacity((1 << power) * (1 << power) * 6)
-        func generate(
-            lower: (Int, Int),
-            upper: (Int, Int),
-            remainingPower: Int
-        ) {
-            if remainingPower == 1 {
-                let center = coordinate(lower, upper, (1, 1))
-                var previous = coordinate(lower, upper, winding[0])
-                for selector in winding.dropFirst() {
-                    let current = coordinate(lower, upper, selector)
-                    for vertex in [current, previous, center] {
-                        indices.append(UInt32(vertex.1 * sideLength + vertex.0))
-                    }
-                    previous = current
-                }
-                return
-            }
-            for child in children {
-                generate(
-                    lower: coordinate(lower, upper, child.0),
-                    upper: coordinate(lower, upper, child.1),
-                    remainingPower: remainingPower - 1
-                )
-            }
-        }
-        let extent = 1 << power
-        generate(lower: (0, 0), upper: (extent, extent), remainingPower: power)
-        return indices
+        SourceBSPDisplacementTopology.triangleIndices(power: power)
     }
 
     private static func lerp(
