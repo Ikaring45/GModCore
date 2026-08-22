@@ -2184,6 +2184,49 @@ final class GModGameSessionModel: ObservableObject {
             }
             return (resolved, .notApplicable)
         }
+        func retainTerrainResolution(
+            _ resolution: GModMetalWorldMaterialResolution
+        ) -> GModMetalWorldMaterialResolution {
+            guard case let .resolved(bitmap) = resolution else {
+                return resolution
+            }
+            let requiredByteCount = bitmap.totalByteCount
+            guard retentionBudget.retain(bitmap) else {
+                return .retentionCapacityExceeded(
+                    requiredByteCount: requiredByteCount,
+                    retainedByteCount: retentionBudget.retainedByteCount,
+                    maximumByteCount: retentionBudget.maximumByteCount
+                )
+            }
+            return resolution
+        }
+        func resolveWorldTerrainMaterial(
+            named name: String
+        ) -> GModMetalWorldTerrainMaterial? {
+            guard let resolved = try? textureResolver
+                .resolveWorldTerrainMaterial(named: name) else {
+                return nil
+            }
+            let detail = resolved.detail.map {
+                $0.replacingTextureResolution(
+                    retainTerrainResolution($0.textureResolution)
+                )
+            }
+            let transition = resolved.vertexTransition.map { transition in
+                transition.replacingResolutions(
+                    baseTexture2: retainTerrainResolution(
+                        transition.baseTexture2Resolution
+                    ),
+                    blendModulate: transition.blendModulateResolution.map(
+                        retainTerrainResolution
+                    )
+                )
+            }
+            return GModMetalWorldTerrainMaterial(
+                detail: detail,
+                vertexTransition: transition
+            )
+        }
         let meshIdentifier =
             "session-\(sessionGeneration):\(map.rawValue):" +
             "\(mesh.vertices.count):\(mesh.indices.count)"
@@ -2198,6 +2241,9 @@ final class GModGameSessionModel: ObservableObject {
                 range.materialName.map(resolveWorldWaterMaterial(named:))
             }
             let waterMaterial = waterResolution?.material
+            let terrainMaterial = waterSurface == nil
+                ? range.materialName.flatMap(resolveWorldTerrainMaterial(named:))
+                : nil
             let materialResolution: GModMetalWorldMaterialResolution
             if waterSurface != nil {
                 materialResolution = waterResolution?.resolution ?? .notApplicable
@@ -2219,6 +2265,7 @@ final class GModGameSessionModel: ObservableObject {
                 materialResolution: materialResolution,
                 waterSurface: waterSurface,
                 waterMaterial: waterMaterial,
+                terrainMaterial: terrainMaterial,
                 renderLayer: renderLayer
             )
         }
@@ -2372,6 +2419,9 @@ final class GModGameSessionModel: ObservableObject {
                 let coordinate = $0.lightmapCoordinate ?? unlitLightmapCoordinate ?? .zero
                 return SIMD2<Float>(coordinate.u, coordinate.v)
             },
+            sourceDisplacementAlphas: mesh.vertices.map(
+                \.sourceDisplacementAlpha
+            ),
             indices: mesh.indices,
             materialRanges: ranges,
             lightmapAtlas: lightmapAtlas,

@@ -608,6 +608,17 @@ enum GModMetalWorldTextureCacheContract {
             if let bitmap = range.bitmap {
                 keys.insert(key(for: bitmap, isSRGB: true))
             }
+            if let bitmap = range.terrainMaterial?.detail?.bitmap {
+                keys.insert(key(for: bitmap, isSRGB: true))
+            }
+            if let bitmap = range.terrainMaterial?.vertexTransition?
+                .baseTexture2Bitmap {
+                keys.insert(key(for: bitmap, isSRGB: true))
+            }
+            if let bitmap = range.terrainMaterial?.vertexTransition?
+                .blendModulateBitmap {
+                keys.insert(key(for: bitmap, isSRGB: false))
+            }
             if let normalBitmap = range.waterMaterial?.normalBitmap {
                 keys.insert(key(for: normalBitmap, isSRGB: false))
             }
@@ -915,6 +926,120 @@ public enum GModMetalWorldMaterialResolution: Sendable, Equatable {
     }
 }
 
+/// Two affine rows consumed by Source world texture-coordinate transforms.
+/// The retained rows map `(u, v, 1)` directly, matching the first two rows
+/// uploaded by `CBaseVSShader::SetVertexShaderTexture*Transform`.
+public struct GModMetalWorldUVTransform: Sendable, Equatable {
+    public let row0: SIMD3<Float>
+    public let row1: SIMD3<Float>
+
+    public init(row0: SIMD3<Float>, row1: SIMD3<Float>) {
+        self.row0 = row0
+        self.row1 = row1
+    }
+
+    public static let identity = Self(
+        row0: SIMD3<Float>(1, 0, 0),
+        row1: SIMD3<Float>(0, 1, 0)
+    )
+
+    public func applying(to uv: SIMD2<Float>) -> SIMD2<Float> {
+        SIMD2<Float>(
+            row0.x * uv.x + row0.y * uv.y + row0.z,
+            row1.x * uv.x + row1.y * uv.y + row1.z
+        )
+    }
+}
+
+public struct GModMetalWorldDetailMaterial: Sendable, Equatable {
+    public let textureName: String
+    public let textureResolution: GModMetalWorldMaterialResolution
+    public var bitmap: GModMetalSurfaceBitmap? { textureResolution.bitmap }
+    public let textureTransform: GModMetalWorldUVTransform
+    public let blendFactor: Float
+    public let blendMode: Int
+
+    public init(
+        textureName: String,
+        textureResolution: GModMetalWorldMaterialResolution,
+        textureTransform: GModMetalWorldUVTransform,
+        blendFactor: Float,
+        blendMode: Int
+    ) {
+        self.textureName = textureName
+        self.textureResolution = textureResolution
+        self.textureTransform = textureTransform
+        self.blendFactor = blendFactor
+        self.blendMode = blendMode
+    }
+
+    public func replacingTextureResolution(
+        _ resolution: GModMetalWorldMaterialResolution
+    ) -> Self {
+        Self(
+            textureName: textureName,
+            textureResolution: resolution,
+            textureTransform: textureTransform,
+            blendFactor: blendFactor,
+            blendMode: blendMode
+        )
+    }
+}
+
+public struct GModMetalWorldVertexTransitionMaterial: Sendable, Equatable {
+    public let baseTexture2Name: String
+    public let baseTexture2Resolution: GModMetalWorldMaterialResolution
+    public var baseTexture2Bitmap: GModMetalSurfaceBitmap? {
+        baseTexture2Resolution.bitmap
+    }
+    public let blendModulateTextureName: String?
+    public let blendModulateResolution: GModMetalWorldMaterialResolution?
+    public var blendModulateBitmap: GModMetalSurfaceBitmap? {
+        blendModulateResolution?.bitmap
+    }
+    public let blendMaskTransform: GModMetalWorldUVTransform
+
+    public init(
+        baseTexture2Name: String,
+        baseTexture2Resolution: GModMetalWorldMaterialResolution,
+        blendModulateTextureName: String? = nil,
+        blendModulateResolution: GModMetalWorldMaterialResolution? = nil,
+        blendMaskTransform: GModMetalWorldUVTransform = .identity
+    ) {
+        self.baseTexture2Name = baseTexture2Name
+        self.baseTexture2Resolution = baseTexture2Resolution
+        self.blendModulateTextureName = blendModulateTextureName
+        self.blendModulateResolution = blendModulateResolution
+        self.blendMaskTransform = blendMaskTransform
+    }
+
+    public func replacingResolutions(
+        baseTexture2: GModMetalWorldMaterialResolution,
+        blendModulate: GModMetalWorldMaterialResolution?
+    ) -> Self {
+        Self(
+            baseTexture2Name: baseTexture2Name,
+            baseTexture2Resolution: baseTexture2,
+            blendModulateTextureName: blendModulateTextureName,
+            blendModulateResolution: blendModulate,
+            blendMaskTransform: blendMaskTransform
+        )
+    }
+}
+
+public struct GModMetalWorldTerrainMaterial: Sendable, Equatable {
+    public let detail: GModMetalWorldDetailMaterial?
+    public let vertexTransition: GModMetalWorldVertexTransitionMaterial?
+
+    public init(
+        detail: GModMetalWorldDetailMaterial? = nil,
+        vertexTransition: GModMetalWorldVertexTransitionMaterial? = nil
+    ) {
+        self.detail = detail
+        self.vertexTransition = vertexTransition
+    }
+}
+
 public struct GModMetalWorldMaterialRange: Sendable, Equatable {
     public let materialName: String?
     public let firstIndex: Int
@@ -925,6 +1050,7 @@ public struct GModMetalWorldMaterialRange: Sendable, Equatable {
     public let skyboxFace: GModMetalSkyboxFace?
     public let waterSurface: GModMetalWorldWaterSurface?
     public let waterMaterial: GModMetalWorldWaterMaterial?
+    public let terrainMaterial: GModMetalWorldTerrainMaterial?
     public let renderLayer: GModMetalWorldRenderLayer
     public var samplerConfiguration: GModMetalWorldSamplerConfiguration? {
         bitmap.map {
@@ -942,6 +1068,7 @@ public struct GModMetalWorldMaterialRange: Sendable, Equatable {
         bitmap: GModMetalSurfaceBitmap?,
         waterSurface: GModMetalWorldWaterSurface? = nil,
         waterMaterial: GModMetalWorldWaterMaterial? = nil,
+        terrainMaterial: GModMetalWorldTerrainMaterial? = nil,
         renderLayer: GModMetalWorldRenderLayer = .world
     ) {
         self.materialName = materialName
@@ -949,6 +1076,7 @@ public struct GModMetalWorldMaterialRange: Sendable, Equatable {
         self.indexCount = indexCount
         self.waterSurface = waterSurface
         self.waterMaterial = waterMaterial
+        self.terrainMaterial = terrainMaterial
         self.renderLayer = renderLayer
         if let bitmap {
             materialResolution = .resolved(bitmap)
@@ -971,6 +1099,7 @@ public struct GModMetalWorldMaterialRange: Sendable, Equatable {
         materialResolution: GModMetalWorldMaterialResolution,
         waterSurface: GModMetalWorldWaterSurface? = nil,
         waterMaterial: GModMetalWorldWaterMaterial? = nil,
+        terrainMaterial: GModMetalWorldTerrainMaterial? = nil,
         renderLayer: GModMetalWorldRenderLayer = .world
     ) {
         self.materialName = materialName
@@ -979,6 +1108,7 @@ public struct GModMetalWorldMaterialRange: Sendable, Equatable {
         self.materialResolution = materialResolution
         self.waterSurface = waterSurface
         self.waterMaterial = waterMaterial
+        self.terrainMaterial = terrainMaterial
         self.renderLayer = renderLayer
         let skybox = renderLayer == .sky2D
             ? Self.skyboxBinding(for: materialName)
@@ -1746,6 +1876,9 @@ public struct GModMetalWorldScene: Sendable, Equatable {
     public let sourceNormals: [SIMD3<Float>]
     public let sourceTextureCoordinates: [SIMD2<Float>]
     public let sourceLightmapTextureCoordinates: [SIMD2<Float>]
+    /// Raw `CDispVert::m_Alpha` values. Ordinary BSP vertices retain zero;
+    /// displacement vertices retain the authored 0...255 transition input.
+    public let sourceDisplacementAlphas: [Float]
     public let metalPositions: [SIMD3<Float>]
     public let metalNormals: [SIMD3<Float>]
     public let indices: [UInt32]
@@ -1788,6 +1921,7 @@ public struct GModMetalWorldScene: Sendable, Equatable {
         sourceNormals: [SIMD3<Float>],
         sourceTextureCoordinates: [SIMD2<Float>] = [],
         sourceLightmapTextureCoordinates: [SIMD2<Float>] = [],
+        sourceDisplacementAlphas: [Float] = [],
         indices: [UInt32],
         materialRanges: [GModMetalWorldMaterialRange] = [],
         lightmapAtlas: GModMetalWorldLightmapAtlas? = nil,
@@ -1814,6 +1948,9 @@ public struct GModMetalWorldScene: Sendable, Equatable {
             sourceLightmapTextureCoordinates.isEmpty
                 ? Array(repeating: .zero, count: sourcePositions.count)
                 : sourceLightmapTextureCoordinates
+        self.sourceDisplacementAlphas = sourceDisplacementAlphas.isEmpty
+            ? Array(repeating: 0, count: sourcePositions.count)
+            : sourceDisplacementAlphas
         self.metalPositions = sourcePositions.map(Self.convertSourceVector)
         self.metalNormals = sourceNormals.map(Self.convertSourceVector)
         self.indices = indices
@@ -1852,6 +1989,7 @@ public struct GModMetalWorldScene: Sendable, Equatable {
             sourceNormals: sourceNormals,
             sourceTextureCoordinates: sourceTextureCoordinates,
             sourceLightmapTextureCoordinates: sourceLightmapTextureCoordinates,
+            sourceDisplacementAlphas: sourceDisplacementAlphas,
             metalPositions: metalPositions,
             metalNormals: metalNormals,
             indices: indices,
@@ -1886,6 +2024,7 @@ public struct GModMetalWorldScene: Sendable, Equatable {
         sourceNormals: [SIMD3<Float>],
         sourceTextureCoordinates: [SIMD2<Float>],
         sourceLightmapTextureCoordinates: [SIMD2<Float>],
+        sourceDisplacementAlphas: [Float],
         metalPositions: [SIMD3<Float>],
         metalNormals: [SIMD3<Float>],
         indices: [UInt32],
@@ -1908,6 +2047,7 @@ public struct GModMetalWorldScene: Sendable, Equatable {
         self.sourceNormals = sourceNormals
         self.sourceTextureCoordinates = sourceTextureCoordinates
         self.sourceLightmapTextureCoordinates = sourceLightmapTextureCoordinates
+        self.sourceDisplacementAlphas = sourceDisplacementAlphas
         self.metalPositions = metalPositions
         self.metalNormals = metalNormals
         self.indices = indices

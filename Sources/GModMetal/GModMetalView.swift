@@ -460,6 +460,9 @@ public struct GModMetalView:
             let normal: SIMD4<Float>
             let uv: SIMD2<Float>
             let lightmapUV: SIMD2<Float>
+            /// Normalized displacement alpha in X; remaining lanes are
+            /// reserved for future Source vertex shader inputs.
+            let sourceParameters: SIMD4<Float>
         }
 
         private struct WorldUniforms {
@@ -552,6 +555,29 @@ public struct GModMetalView:
             /// Authored fog start/end, above-water bit, enabled bit.
             let fogStartEndAboveAndEnabled: SIMD4<Float>
             let cameraForwardAndPadding: SIMD4<Float>
+        }
+
+        /// Secondary bindings used by LightmappedGeneric and
+        /// WorldVertexTransition. Every field is four-float aligned so the
+        /// Swift value has the same layout as its Metal counterpart.
+        private struct WorldTerrainUniforms {
+            let detailRow0: SIMD4<Float>
+            let detailRow1: SIMD4<Float>
+            let blendMaskRow0: SIMD4<Float>
+            let blendMaskRow1: SIMD4<Float>
+            /// Detail factor, detail mode, has-detail, has-base2.
+            let controls: SIMD4<Float>
+            /// Has blend-modulate texture; remaining lanes are reserved.
+            let flags: SIMD4<Float>
+
+            static let disabled = Self(
+                detailRow0: SIMD4<Float>(1, 0, 0, 0),
+                detailRow1: SIMD4<Float>(0, 1, 0, 0),
+                blendMaskRow0: SIMD4<Float>(1, 0, 0, 0),
+                blendMaskRow1: SIMD4<Float>(0, 1, 0, 0),
+                controls: .zero,
+                flags: .zero
+            )
         }
 
         private struct WorldSunSpriteUniforms {
@@ -785,6 +811,7 @@ public struct GModMetalView:
             case convertedArrayMismatch
             case textureCoordinateArrayMismatch
             case lightmapTextureCoordinateArrayMismatch
+            case displacementAlphaArrayMismatch
             case emptyIndices
             case incompleteTriangle(indexCount: Int)
             case invalidPosition(index: Int)
@@ -793,7 +820,9 @@ public struct GModMetalView:
             case invalidIndex(index: UInt32, vertexCount: Int)
             case invalidTextureCoordinate(index: Int)
             case invalidLightmapTextureCoordinate(index: Int)
+            case invalidDisplacementAlpha(index: Int)
             case invalidMaterialRange(index: Int)
+            case invalidTerrainMaterialRange(index: Int)
             case invalidSkyboxRanges
             case invalidSky3DMetadata
             case invalidWaterMaterialRange(index: Int)
@@ -822,6 +851,8 @@ public struct GModMetalView:
                     return "position/texture-coordinate counts differ"
                 case .lightmapTextureCoordinateArrayMismatch:
                     return "position/lightmap-coordinate counts differ"
+                case .displacementAlphaArrayMismatch:
+                    return "position/displacement-alpha counts differ"
                 case .emptyIndices:
                     return "mesh has no indices"
                 case let .incompleteTriangle(indexCount):
@@ -838,8 +869,12 @@ public struct GModMetalView:
                     return "texture coordinate \(index) is non-finite"
                 case let .invalidLightmapTextureCoordinate(index):
                     return "lightmap coordinate \(index) is outside finite 0...1"
+                case let .invalidDisplacementAlpha(index):
+                    return "displacement alpha \(index) is outside finite 0...255"
                 case let .invalidMaterialRange(index):
                     return "material range \(index) is invalid or overlaps the index buffer"
+                case let .invalidTerrainMaterialRange(index):
+                    return "terrain material range \(index) contains invalid Source shader inputs"
                 case .invalidSkyboxRanges:
                     return "skybox ranges must contain one named set of six unique faces"
                 case .invalidSky3DMetadata:
@@ -2310,7 +2345,19 @@ public struct GModMetalView:
                     position: SIMD4<Float>(scene.metalPositions[index], 1),
                     normal: SIMD4<Float>(scene.metalNormals[index], 0),
                     uv: scene.sourceTextureCoordinates[index],
-                    lightmapUV: scene.sourceLightmapTextureCoordinates[index]
+                    lightmapUV: scene.sourceLightmapTextureCoordinates[index],
+                    sourceParameters: SIMD4<Float>(
+                        Swift.max(
+                            0,
+                            Swift.min(
+                                1,
+                                scene.sourceDisplacementAlphas[index] / 255
+                            )
+                        ),
+                        0,
+                        0,
+                        0
+                    )
                 )
             }
 
@@ -2516,6 +2563,10 @@ public struct GModMetalView:
                     scene.sourcePositions.count else {
                 throw WorldSceneError.lightmapTextureCoordinateArrayMismatch
             }
+            guard scene.sourceDisplacementAlphas.count ==
+                    scene.sourcePositions.count else {
+                throw WorldSceneError.displacementAlphaArrayMismatch
+            }
             guard !scene.indices.isEmpty else {
                 throw WorldSceneError.emptyIndices
             }
@@ -2554,6 +2605,12 @@ public struct GModMetalView:
                         lightmapUV.y >= 0 && lightmapUV.y <= 1
                       ) else {
                     throw WorldSceneError.invalidLightmapTextureCoordinate(index: index)
+                }
+                let displacementAlpha = scene.sourceDisplacementAlphas[index]
+                guard displacementAlpha.isFinite,
+                      displacementAlpha >= 0,
+                      displacementAlpha <= 255 else {
+                    throw WorldSceneError.invalidDisplacementAlpha(index: index)
                 }
             }
 
@@ -2597,6 +2654,19 @@ public struct GModMetalView:
                     }
                 } else if range.waterMaterial != nil {
                     throw WorldSceneError.invalidWaterMaterialRange(index: index)
+                }
+                if let terrain = range.terrainMaterial {
+                    let detail = terrain.detail
+                    let transition = terrain.vertexTransition
+                    let detailTransform = detail?.textureTransform
+                    let blendTransform = transition?.blendMaskTransform
+                    guard detail?.blendFactor.isFinite ?? true,
+                          detailTransform.map(Self.isFinite) ?? true,
+                          blendTransform.map(Self.isFinite) ?? true else {
+                        throw WorldSceneError.invalidTerrainMaterialRange(
+                            index: index
+                        )
+                    }
                 }
                 covered += range.indexCount
             }
@@ -2740,6 +2810,26 @@ public struct GModMetalView:
                         isSRGB: true
                     )] = bitmap
                 }
+                if let bitmap = range.terrainMaterial?.detail?.bitmap {
+                    required[Self.worldTextureKey(
+                        for: bitmap,
+                        isSRGB: true
+                    )] = bitmap
+                }
+                if let bitmap = range.terrainMaterial?.vertexTransition?
+                    .baseTexture2Bitmap {
+                    required[Self.worldTextureKey(
+                        for: bitmap,
+                        isSRGB: true
+                    )] = bitmap
+                }
+                if let bitmap = range.terrainMaterial?.vertexTransition?
+                    .blendModulateBitmap {
+                    required[Self.worldTextureKey(
+                        for: bitmap,
+                        isSRGB: false
+                    )] = bitmap
+                }
                 let waterCameraZ: Float
                 if range.renderLayer == .sky3D, let sky3D = scene.sky3D {
                     waterCameraZ = GModMetalSky3DProjectionContract.sourceCameraEye(
@@ -2820,6 +2910,12 @@ public struct GModMetalView:
 
         private static func isFinite(_ value: SIMD3<Float>) -> Bool {
             value.x.isFinite && value.y.isFinite && value.z.isFinite
+        }
+
+        private static func isFinite(
+            _ value: GModMetalWorldUVTransform
+        ) -> Bool {
+            isFinite(value.row0) && isFinite(value.row1)
         }
 
         public func draw(
@@ -3697,6 +3793,14 @@ public struct GModMetalView:
                        ) {
                         encoder.setFragmentSamplerState(sampler, index: 0)
                     }
+                    bindWorldTerrainMaterial(
+                        range: range,
+                        fallbackTexture: texture,
+                        device: device,
+                        uploadBudget: &uploadBudget,
+                        defaultSampler: worldSampler,
+                        encoder: encoder
+                    )
                 } else if range.bitmap != nil {
                     encoder.setRenderPipelineState(
                         lightmapTexture == nil
@@ -4122,6 +4226,14 @@ public struct GModMetalView:
                            ) {
                             encoder.setFragmentSamplerState(sampler, index: 0)
                         }
+                        bindWorldTerrainMaterial(
+                            range: range,
+                            fallbackTexture: texture,
+                            device: device,
+                            uploadBudget: &uploadBudget,
+                            defaultSampler: worldSampler,
+                            encoder: encoder
+                        )
                         texturedRangeCount += 1
                         if lightmapTexture != nil {
                             lightmappedRangeCount += 1
@@ -5298,6 +5410,122 @@ public struct GModMetalView:
             return sampler
         }
 
+        /// Binds the optional secondary Source material textures without
+        /// inventing pixels when an authored VTF is absent or still waiting
+        /// for the bounded upload lane. Declared Metal resources always get a
+        /// valid fallback binding; feature bits decide whether they contribute.
+        private func bindWorldTerrainMaterial(
+            range: GModMetalWorldMaterialRange,
+            fallbackTexture: MTLTexture,
+            device: MTLDevice,
+            uploadBudget: inout WorldUploadBudget,
+            defaultSampler: MTLSamplerState,
+            encoder: MTLRenderCommandEncoder
+        ) {
+            var base2Texture = fallbackTexture
+            var detailTexture = fallbackTexture
+            var blendTexture = fallbackTexture
+            var base2Sampler = defaultSampler
+            var detailSampler = defaultSampler
+            var blendSampler = defaultSampler
+            var hasBase2 = false
+            var hasDetail = false
+            var hasBlendModulate = false
+
+            if let bitmap = range.terrainMaterial?.vertexTransition?
+                .baseTexture2Bitmap,
+               let texture = worldTexture(
+                    for: bitmap,
+                    device: device,
+                    uploadBudget: &uploadBudget
+               ) {
+                base2Texture = texture
+                hasBase2 = true
+                let configuration = GModMetalWorldSamplerConfiguration(
+                    bitmap: bitmap,
+                    renderLayer: range.renderLayer
+                )
+                base2Sampler = samplerStateForWorldTexture(
+                    for: configuration,
+                    device: device
+                ) ?? defaultSampler
+            }
+            if let bitmap = range.terrainMaterial?.detail?.bitmap,
+               let texture = worldTexture(
+                    for: bitmap,
+                    device: device,
+                    uploadBudget: &uploadBudget
+               ) {
+                detailTexture = texture
+                hasDetail = true
+                let configuration = GModMetalWorldSamplerConfiguration(
+                    bitmap: bitmap,
+                    renderLayer: range.renderLayer
+                )
+                detailSampler = samplerStateForWorldTexture(
+                    for: configuration,
+                    device: device
+                ) ?? defaultSampler
+            }
+            if hasBase2,
+               let bitmap = range.terrainMaterial?.vertexTransition?
+                .blendModulateBitmap,
+               let texture = worldTexture(
+                    for: bitmap,
+                    device: device,
+                    uploadBudget: &uploadBudget,
+                    isSRGB: false
+               ) {
+                blendTexture = texture
+                hasBlendModulate = true
+                let configuration = GModMetalWorldSamplerConfiguration(
+                    bitmap: bitmap,
+                    renderLayer: range.renderLayer
+                )
+                blendSampler = samplerStateForWorldTexture(
+                    for: configuration,
+                    device: device
+                ) ?? defaultSampler
+            }
+
+            let detailTransform = range.terrainMaterial?.detail?
+                .textureTransform ?? .identity
+            let blendTransform = range.terrainMaterial?.vertexTransition?
+                .blendMaskTransform ?? .identity
+            var uniforms = WorldTerrainUniforms(
+                detailRow0: SIMD4<Float>(detailTransform.row0, 0),
+                detailRow1: SIMD4<Float>(detailTransform.row1, 0),
+                blendMaskRow0: SIMD4<Float>(blendTransform.row0, 0),
+                blendMaskRow1: SIMD4<Float>(blendTransform.row1, 0),
+                controls: SIMD4<Float>(
+                    range.terrainMaterial?.detail?.blendFactor ?? 0,
+                    Float(range.terrainMaterial?.detail?.blendMode ?? 0),
+                    hasDetail ? 1 : 0,
+                    hasBase2 ? 1 : 0
+                ),
+                flags: SIMD4<Float>(
+                    hasBlendModulate ? 1 : 0,
+                    0,
+                    0,
+                    0
+                )
+            )
+            withUnsafeBytes(of: &uniforms) { bytes in
+                guard let address = bytes.baseAddress else { return }
+                encoder.setFragmentBytes(
+                    address,
+                    length: bytes.count,
+                    index: 2
+                )
+            }
+            encoder.setFragmentTexture(base2Texture, index: 2)
+            encoder.setFragmentTexture(detailTexture, index: 3)
+            encoder.setFragmentTexture(blendTexture, index: 4)
+            encoder.setFragmentSamplerState(base2Sampler, index: 2)
+            encoder.setFragmentSamplerState(detailSampler, index: 3)
+            encoder.setFragmentSamplerState(blendSampler, index: 4)
+        }
+
         private func drawSurface(
             scene: GModMetalSurfaceScene,
             device: MTLDevice,
@@ -5871,6 +6099,7 @@ public struct GModMetalView:
             float4 normal;
             float2 uv;
             float2 lightmapUV;
+            float4 sourceParameters;
         };
 
         struct DynamicEntityVertex
@@ -5924,6 +6153,16 @@ public struct GModMetalView:
             float4 cameraForwardAndPadding;
         };
 
+        struct WorldTerrainUniforms
+        {
+            float4 detailRow0;
+            float4 detailRow1;
+            float4 blendMaskRow0;
+            float4 blendMaskRow1;
+            float4 controls;
+            float4 flags;
+        };
+
         struct WorldSunSpriteUniforms
         {
             float4x4 viewProjection;
@@ -5941,6 +6180,7 @@ public struct GModMetalView:
             float3 normal;
             float2 uv;
             float2 lightmapUV;
+            float displacementAlpha;
         };
 
         vertex WorldVertexOutput worldVertexMain(
@@ -5962,6 +6202,7 @@ public struct GModMetalView:
             output.normal = sourceVertex.normal.xyz;
             output.uv = sourceVertex.uv;
             output.lightmapUV = sourceVertex.lightmapUV;
+            output.displacementAlpha = sourceVertex.sourceParameters.x;
             return output;
         }
 
@@ -5996,6 +6237,7 @@ public struct GModMetalView:
             output.normal = worldNormal;
             output.uv = sourceVertex.uv;
             output.lightmapUV = float2(0.0);
+            output.displacementAlpha = 0.0;
             return output;
         }
 
@@ -6021,6 +6263,7 @@ public struct GModMetalView:
             output.normal = normalize(sourceVertex.normal.xyz);
             output.uv = sourceVertex.uv;
             output.lightmapUV = float2(0.0);
+            output.displacementAlpha = 0.0;
             return output;
         }
 
@@ -6122,6 +6365,208 @@ public struct GModMetalView:
             );
         }
 
+        float2 gmodTerrainUV(
+            float2 uv,
+            float4 row0,
+            float4 row1
+        )
+        {
+            float3 homogeneous = float3(uv, 1.0);
+            return float2(
+                dot(row0.xyz, homogeneous),
+                dot(row1.xyz, homogeneous)
+            );
+        }
+
+        float4 gmodApplyDetailBeforeLighting(
+            float4 baseColor,
+            float4 detailColor,
+            int mode,
+            float factor
+        )
+        {
+            switch (mode)
+            {
+                case 0:
+                    baseColor.rgb *= mix(
+                        float3(1.0),
+                        2.0 * detailColor.rgb,
+                        factor
+                    );
+                    break;
+                case 1:
+                    baseColor.rgb += factor * detailColor.rgb;
+                    break;
+                case 2:
+                    baseColor.rgb = mix(
+                        baseColor.rgb,
+                        detailColor.rgb,
+                        factor * detailColor.a
+                    );
+                    break;
+                case 3:
+                    baseColor = mix(baseColor, detailColor, factor);
+                    break;
+                case 4:
+                    baseColor.rgb = mix(
+                        baseColor.rgb,
+                        detailColor.rgb,
+                        factor * (1.0 - baseColor.a)
+                    );
+                    baseColor.a = detailColor.a;
+                    break;
+                case 7:
+                {
+                    float monochrome = mix(
+                        detailColor.r,
+                        detailColor.a,
+                        baseColor.a
+                    );
+                    baseColor.rgb *= mix(
+                        float3(1.0),
+                        float3(2.0 * monochrome),
+                        factor
+                    );
+                    break;
+                }
+                case 8:
+                    baseColor = mix(
+                        baseColor,
+                        baseColor * detailColor,
+                        factor
+                    );
+                    break;
+                case 9:
+                    baseColor.a = mix(
+                        baseColor.a,
+                        baseColor.a * detailColor.a,
+                        factor
+                    );
+                    break;
+                case 11:
+                    baseColor.rgb *= dot(
+                        detailColor.rgb,
+                        float3(2.0 / 3.0)
+                    );
+                    break;
+                default:
+                    // Modes 5 and 6 are post-lighting. Mode 10 is the
+                    // SSBump path and remains inactive until the real bump
+                    // basis is available.
+                    break;
+            }
+            return baseColor;
+        }
+
+        float4 gmodSampleTerrainBase(
+            WorldVertexOutput input,
+            constant WorldTerrainUniforms &terrain,
+            texture2d<float> baseTexture,
+            texture2d<float> baseTexture2,
+            texture2d<float> detailTexture,
+            texture2d<float> blendModulateTexture,
+            sampler baseSampler,
+            sampler baseSampler2,
+            sampler detailSampler,
+            sampler blendModulateSampler
+        )
+        {
+            float4 baseColor = baseTexture.sample(baseSampler, input.uv);
+            if (terrain.controls.w > 0.5)
+            {
+                float blendFactor = saturate(input.displacementAlpha);
+                if (terrain.flags.x > 0.5)
+                {
+                    float2 blendUV = gmodTerrainUV(
+                        input.uv,
+                        terrain.blendMaskRow0,
+                        terrain.blendMaskRow1
+                    );
+                    float2 modulate = blendModulateTexture.sample(
+                        blendModulateSampler,
+                        blendUV
+                    ).gr;
+                    float minimumBlend = saturate(modulate.x - modulate.y);
+                    float maximumBlend = saturate(modulate.x + modulate.y);
+                    blendFactor = smoothstep(
+                        minimumBlend,
+                        maximumBlend,
+                        blendFactor
+                    );
+                }
+                float4 secondColor = baseTexture2.sample(
+                    baseSampler2,
+                    input.uv
+                );
+                baseColor.rgb = mix(
+                    baseColor.rgb,
+                    secondColor.rgb,
+                    blendFactor
+                );
+            }
+            if (terrain.controls.z > 0.5)
+            {
+                float2 detailUV = gmodTerrainUV(
+                    input.uv,
+                    terrain.detailRow0,
+                    terrain.detailRow1
+                );
+                float4 detailColor = detailTexture.sample(
+                    detailSampler,
+                    detailUV
+                );
+                baseColor = gmodApplyDetailBeforeLighting(
+                    baseColor,
+                    detailColor,
+                    int(terrain.controls.y),
+                    terrain.controls.x
+                );
+            }
+            return baseColor;
+        }
+
+        float3 gmodApplyDetailAfterLighting(
+            WorldVertexOutput input,
+            constant WorldTerrainUniforms &terrain,
+            texture2d<float> detailTexture,
+            sampler detailSampler,
+            float3 litColor
+        )
+        {
+            if (terrain.controls.z < 0.5)
+            {
+                return litColor;
+            }
+            int mode = int(terrain.controls.y);
+            if (mode != 5 && mode != 6)
+            {
+                return litColor;
+            }
+            float2 detailUV = gmodTerrainUV(
+                input.uv,
+                terrain.detailRow0,
+                terrain.detailRow1
+            );
+            float3 detailColor = detailTexture.sample(
+                detailSampler,
+                detailUV
+            ).rgb;
+            float factor = terrain.controls.x;
+            if (mode == 5)
+            {
+                return litColor + factor * detailColor;
+            }
+            float multiplier = factor >= 0.5
+                ? 1.0 / factor
+                : 4.0 * factor;
+            float additive = factor >= 0.5
+                ? 1.0 - multiplier
+                : -0.5 * multiplier;
+            return litColor + saturate(
+                multiplier * detailColor + additive
+            );
+        }
+
         fragment float4 worldFragmentMain(
             WorldVertexOutput input [[stage_in]],
 
@@ -6147,17 +6592,52 @@ public struct GModMetalView:
             constant WorldUniforms &uniforms
                 [[buffer(1)]],
 
+            constant WorldTerrainUniforms &terrain
+                [[buffer(2)]],
+
             texture2d<float> baseTexture [[texture(0)]],
 
-            sampler baseSampler [[sampler(0)]]
+            texture2d<float> baseTexture2 [[texture(2)]],
+
+            texture2d<float> detailTexture [[texture(3)]],
+
+            texture2d<float> blendModulateTexture [[texture(4)]],
+
+            sampler baseSampler [[sampler(0)]],
+
+            sampler baseSampler2 [[sampler(2)]],
+
+            sampler detailSampler [[sampler(3)]],
+
+            sampler blendModulateSampler [[sampler(4)]]
         )
         {
             gmodApplyWorldClip(input, uniforms);
-            float4 sample = baseTexture.sample(baseSampler, input.uv);
+            float4 sample = gmodSampleTerrainBase(
+                input,
+                terrain,
+                baseTexture,
+                baseTexture2,
+                detailTexture,
+                blendModulateTexture,
+                baseSampler,
+                baseSampler2,
+                detailSampler,
+                blendModulateSampler
+            );
+            float3 litColor = sample.rgb
+                * gmodWorldEnvironmentLight(input.normal, uniforms);
+            litColor = gmodApplyDetailAfterLighting(
+                input,
+                terrain,
+                detailTexture,
+                detailSampler,
+                litColor
+            );
             return gmodWorldFogOutput(
                 input,
                 uniforms,
-                sample.rgb * gmodWorldEnvironmentLight(input.normal, uniforms),
+                litColor,
                 1.0
             );
         }
@@ -6195,25 +6675,59 @@ public struct GModMetalView:
             constant WorldUniforms &uniforms
                 [[buffer(1)]],
 
+            constant WorldTerrainUniforms &terrain
+                [[buffer(2)]],
+
             texture2d<float> baseTexture [[texture(0)]],
 
             texture2d<float> lightmapTexture [[texture(1)]],
 
+            texture2d<float> baseTexture2 [[texture(2)]],
+
+            texture2d<float> detailTexture [[texture(3)]],
+
+            texture2d<float> blendModulateTexture [[texture(4)]],
+
             sampler baseSampler [[sampler(0)]],
 
-            sampler lightmapSampler [[sampler(1)]]
+            sampler lightmapSampler [[sampler(1)]],
+
+            sampler baseSampler2 [[sampler(2)]],
+
+            sampler detailSampler [[sampler(3)]],
+
+            sampler blendModulateSampler [[sampler(4)]]
         )
         {
             gmodApplyWorldClip(input, uniforms);
-            float3 baseLinear = baseTexture.sample(baseSampler, input.uv).rgb;
+            float4 base = gmodSampleTerrainBase(
+                input,
+                terrain,
+                baseTexture,
+                baseTexture2,
+                detailTexture,
+                blendModulateTexture,
+                baseSampler,
+                baseSampler2,
+                detailSampler,
+                blendModulateSampler
+            );
             float3 bakedLight = lightmapTexture.sample(
                 lightmapSampler,
                 input.lightmapUV
             ).rgb;
+            float3 litColor = base.rgb * bakedLight;
+            litColor = gmodApplyDetailAfterLighting(
+                input,
+                terrain,
+                detailTexture,
+                detailSampler,
+                litColor
+            );
             return gmodWorldFogOutput(
                 input,
                 uniforms,
-                baseLinear * bakedLight,
+                litColor,
                 1.0
             );
         }

@@ -7,6 +7,96 @@ import GModMetal
 @testable import GModGameSession
 
 final class GModWorldSceneAdapterTests: XCTestCase {
+    func testMakeWorldSceneCarriesAuthoredTerrainBlendInputs() throws {
+        let files: [String: Data] = [
+            "materials/terrain/blended.vmt": Data(
+                """
+                "WorldVertexTransition"
+                {
+                    "$basetexture" "terrain/base"
+                    "$basetexture2" "terrain/rock"
+                    "$blendmodulatetexture" "terrain/blend"
+                    "$blendmasktransform" "center .5 .5 scale 2 3 rotate 0 translate .1 .2"
+                    "$detail" "terrain/detail"
+                    "$detailscale" "4"
+                    "$detailblendfactor" ".5"
+                    "$detailblendmode" "7"
+                }
+                """.utf8
+            ),
+            "materials/terrain/base.vtf": makeRGBA8888VTF(
+                pixels: [10, 20, 30, 255]
+            ),
+            "materials/terrain/rock.vtf": makeRGBA8888VTF(
+                pixels: [40, 50, 60, 255]
+            ),
+            "materials/terrain/blend.vtf": makeRGBA8888VTF(
+                pixels: [70, 80, 90, 255]
+            ),
+            "materials/terrain/detail.vtf": makeRGBA8888VTF(
+                pixels: [100, 110, 120, 255]
+            ),
+        ]
+        let resolver = GModMetalSurfaceSourceMaterialResolver { path in
+            files[path.lowercased()]
+        }
+        let vertices = [Float(0), 127.5, 255].enumerated().map { pair in
+            let (index, alpha) = pair
+            GModWorldRenderVertex(
+                position: SourceVector3(Float(index), 0, 0),
+                normal: SourceVector3(0, 0, 1),
+                sourceDisplacementAlpha: alpha
+            )
+        }
+        let mesh = GModWorldRenderMesh(
+            vertices: vertices,
+            indices: [0, 1, 2],
+            minimum: .zero,
+            maximum: SourceVector3(2, 0, 0),
+            materialRanges: [GModWorldMaterialRange(
+                materialName: "terrain/blended",
+                firstIndex: 0,
+                indexCount: 3
+            )],
+            diagnostics: GModWorldRenderMeshDiagnostics(
+                sourceFaceCount: 1,
+                emittedFaceCount: 1,
+                degenerateFaceCount: 0,
+                displacementBaseFaceCount: 1
+            )
+        )
+
+        let scene = try GModGameSessionModel.makeWorldScene(
+            map: .construct,
+            sessionGeneration: 21,
+            mesh: mesh,
+            playerOrigin: .zero,
+            viewAngles: .zero,
+            textureResolver: resolver
+        )
+
+        XCTAssertEqual(scene.sourceDisplacementAlphas, [0, 127.5, 255])
+        let terrain = try XCTUnwrap(scene.materialRanges.first?.terrainMaterial)
+        let detail = try XCTUnwrap(terrain.detail)
+        XCTAssertEqual(detail.textureName, "materials/terrain/detail.vtf")
+        XCTAssertNotNil(detail.bitmap)
+        XCTAssertEqual(detail.blendFactor, 0.5)
+        XCTAssertEqual(detail.blendMode, 7)
+        XCTAssertEqual(detail.textureTransform.row0, SIMD3<Float>(4, 0, 0))
+        XCTAssertEqual(detail.textureTransform.row1, SIMD3<Float>(0, 4, 0))
+        let transition = try XCTUnwrap(terrain.vertexTransition)
+        XCTAssertNotNil(transition.baseTexture2Bitmap)
+        XCTAssertNotNil(transition.blendModulateBitmap)
+        XCTAssertEqual(
+            transition.blendMaskTransform.row0,
+            SIMD3<Float>(2, 0, -0.4)
+        )
+        XCTAssertEqual(
+            transition.blendMaskTransform.row1,
+            SIMD3<Float>(0, 3, -0.8)
+        )
+    }
+
     func testMakeWorldSceneBridgesImmutableBSPVisibilityAndMetalBounds() throws {
         var visibilityData = Data()
         func appendInt32(_ value: Int32) {

@@ -19,6 +19,14 @@ public enum GModMetalStudioMaterialCandidateError:
     case resolvedMaterialHasNoBitmap(String)
 }
 
+public enum GModMetalWorldTerrainMaterialError:
+    Error,
+    Sendable,
+    Equatable
+{
+    case invalidTextureTransform(String)
+}
+
 /// Metal-facing adapter over the same VMT/VTF core used by IMaterial and
 /// ITexture. It performs only the alpha-premultiplication required by the
 /// Surface shader and retains a separately bounded bitmap cache so a frame
@@ -116,6 +124,87 @@ public final class GModMetalSurfaceSourceMaterialResolver:
         try resolveTexture(named: logicalName, retainingAuthoredMipChain: true)
     }
 
+    /// Resolves secondary terrain bindings only when the real VMT declares
+    /// them. Defaults are the values authored by Valve's Source shaders:
+    /// detail scale 4, blend factor 1, and combine mode 0.
+    public func resolveWorldTerrainMaterial(
+        named logicalName: String
+    ) throws -> GModMetalWorldTerrainMaterial? {
+        let resolved = try sourceMaterialResolver.resolve(
+            named: logicalName,
+            mipPolicy: .authoredChain
+        )
+
+        func textureResolution(
+            _ textureName: String
+        ) -> GModMetalWorldMaterialResolution {
+            do {
+                return try resolveWorldSourceTexture(named: textureName).map {
+                    .resolved($0)
+                } ?? .sourceMissing
+            } catch {
+                return .decodeFailed(String(describing: error))
+            }
+        }
+
+        let detail: GModMetalWorldDetailMaterial?
+        if let parameters = resolved.detailParameters {
+            let scale = parameters.scale ?? 4
+            let blendFactor = parameters.blendFactor ?? 1
+            let blendMode = parameters.blendMode ?? 0
+            guard scale.isFinite, blendFactor.isFinite,
+                  let transform = Self.makeUVTransform(
+                    parameters.textureTransform,
+                    scale: scale
+                  ) else {
+                throw GModMetalWorldTerrainMaterialError
+                    .invalidTextureTransform(parameters.textureName)
+            }
+            detail = GModMetalWorldDetailMaterial(
+                textureName: parameters.textureName,
+                textureResolution: textureResolution(parameters.textureName),
+                textureTransform: transform,
+                blendFactor: blendFactor,
+                blendMode: blendMode
+            )
+        } else {
+            detail = nil
+        }
+
+        let vertexTransition: GModMetalWorldVertexTransitionMaterial?
+        if let parameters = resolved.worldVertexTransitionParameters {
+            guard let blendMaskTransform = Self.makeUVTransform(
+                parameters.blendMaskTransform,
+                scale: 1
+            ) else {
+                throw GModMetalWorldTerrainMaterialError
+                    .invalidTextureTransform(
+                        parameters.blendModulateTextureName ??
+                            parameters.baseTexture2Name
+                    )
+            }
+            vertexTransition = GModMetalWorldVertexTransitionMaterial(
+                baseTexture2Name: parameters.baseTexture2Name,
+                baseTexture2Resolution: textureResolution(
+                    parameters.baseTexture2Name
+                ),
+                blendModulateTextureName:
+                    parameters.blendModulateTextureName,
+                blendModulateResolution:
+                    parameters.blendModulateTextureName.map(textureResolution),
+                blendMaskTransform: blendMaskTransform
+            )
+        } else {
+            vertexTransition = nil
+        }
+
+        guard detail != nil || vertexTransition != nil else { return nil }
+        return GModMetalWorldTerrainMaterial(
+            detail: detail,
+            vertexTransition: vertexTransition
+        )
+    }
+
     /// Resolves one ordered Studio VMT candidate without collapsing distinct
     /// Source absence/failure boundaries into an optional bitmap.
     public func resolveStudioMaterialCandidate(
@@ -202,6 +291,103 @@ public final class GModMetalSurfaceSourceMaterialResolver:
         )
         store(.bitmap(bitmap), for: key)
         return bitmap
+    }
+
+    private func resolveWorldSourceTexture(
+        named textureName: String
+    ) throws -> GModMetalSurfaceBitmap? {
+        let logicalKey = textureName
+            .replacingOccurrences(of: "\\", with: "/")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !logicalKey.isEmpty else { return nil }
+        let key = CacheKey(
+            contentEpoch: contentEpochProvider(),
+            logicalKey: "world-vtf:" + logicalKey
+        )
+        if let cached = cachedValue(for: key) {
+            switch cached {
+            case .missing: return nil
+            case let .bitmap(bitmap): return bitmap
+            }
+        }
+        guard let texture = try sourceMaterialResolver.resolveTexture(
+            named: textureName,
+            mipPolicy: .authoredChain
+        ), texture.status == .decoded,
+        let width = texture.width,
+        let height = texture.height,
+        let rgbaBytes = texture.rgbaBytes else {
+            store(.missing, for: key)
+            return nil
+        }
+        let bitmap = try makeBitmap(
+            resourceIdentifier: texture.logicalPath.lowercased(),
+            width: width,
+            height: height,
+            rgbaBytes: rgbaBytes,
+            mipImages: texture.mipImages,
+            flags: texture.flags,
+            alphaRepresentation: .straight
+        )
+        store(.bitmap(bitmap), for: key)
+        return bitmap
+    }
+
+    private static func makeUVTransform(
+        _ source: SourceVMTMatrix?,
+        scale: Float
+    ) -> GModMetalWorldUVTransform? {
+        guard scale.isFinite else { return nil }
+        var row0: SIMD3<Float>
+        var row1: SIMD3<Float>
+        switch source {
+        case nil:
+            row0 = SIMD3<Float>(1, 0, 0)
+            row1 = SIMD3<Float>(0, 1, 0)
+        case let .matrix4x4(values):
+            guard values.count == 16 else { return nil }
+            row0 = SIMD3<Float>(
+                Float(values[0]), Float(values[1]), Float(values[3])
+            )
+            row1 = SIMD3<Float>(
+                Float(values[4]), Float(values[5]), Float(values[7])
+            )
+        case let .textureTransform(
+            center,
+            authoredScale,
+            rotationDegrees,
+            translation
+        ):
+            let radians = rotationDegrees * .pi / 180
+            let cosine = cos(radians)
+            let sine = sin(radians)
+            let m00 = cosine * authoredScale.x
+            let m01 = -sine * authoredScale.y
+            let m10 = sine * authoredScale.x
+            let m11 = cosine * authoredScale.y
+            row0 = SIMD3<Float>(
+                Float(m00),
+                Float(m01),
+                Float(center.x + translation.x - m00 * center.x -
+                    m01 * center.y)
+            )
+            row1 = SIMD3<Float>(
+                Float(m10),
+                Float(m11),
+                Float(center.y + translation.y - m10 * center.x -
+                    m11 * center.y)
+            )
+        }
+        // Source scales both the two basis coefficients and translation after
+        // resolving the material matrix (`SetVertexShaderTextureScaledTransform`).
+        row0 *= scale
+        row1 *= scale
+        guard row0.x.isFinite, row0.y.isFinite, row0.z.isFinite,
+              row1.x.isFinite, row1.y.isFinite, row1.z.isFinite else {
+            return nil
+        }
+        return GModMetalWorldUVTransform(row0: row0, row1: row1)
     }
 
     /// Resolves only values present in a real Source `Water` VMT. Missing
