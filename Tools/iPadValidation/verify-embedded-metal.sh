@@ -153,6 +153,11 @@ required_pipeline_contract = {
     "float2 reflectionBase = float2(baseUV.x, 1.0 - baseUV.y)",
     "float2 reflectionUV = reflectionBase + normalOffset * amounts.x",
     "float2 refractionUV = baseUV + normalOffset * amounts.y",
+    "usesWorldVisibility: true",
+    "usesWorldVisibility: false",
+    "worldVisibilityWorkspace.update(",
+    "firstIndex: span.firstIndex",
+    "indexCount: span.indexCount",
 }
 missing_contract = sorted(
     phrase for phrase in required_pipeline_contract if phrase not in normalized_swift
@@ -185,7 +190,8 @@ if "compositeEncoder.setRenderPipelineState(worldSceneCopyPipeline)" in normaliz
     )
 
 opaque_loop = normalized_swift.find(
-    "for range in ranges where range.renderLayer == .world && "
+    "for (materialRangeIndex, range) in ranges.enumerated() where "
+    "range.renderLayer == .world && "
     "range.waterSurface == nil"
 )
 dynamic_draw = normalized_swift.find(
