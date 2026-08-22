@@ -256,7 +256,11 @@ private final class GModGamePointerMailbox: @unchecked Sendable {
         lock.unlock()
 
         if shouldSchedule {
-            Task {
+            // Pointer callbacks are the direct-response path for the live
+            // Derma tree. Give this drain priority over ordinary render-frame
+            // catch-up so a queued multi-tick host frame cannot repeatedly
+            // win scheduling while the user is dragging or tapping VGUI.
+            Task(priority: .high) {
                 while let next = self.takePendingSample() {
                     await consume(next)
                 }
@@ -1633,7 +1637,7 @@ final class GModGameSessionModel: ObservableObject {
             generation: generation
         ))
         guard surfaceRefreshTask == nil else { return }
-        surfaceRefreshTask = Task { [weak self] in
+        surfaceRefreshTask = Task(priority: .userInitiated) { [weak self] in
             guard let self else { return }
             await self.drainClientSurfaceRefreshes()
         }
