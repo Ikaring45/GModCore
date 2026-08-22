@@ -139,12 +139,14 @@ final class GModMetalSky3DVisibilityTests: XCTestCase {
                     materialName: "sky/visible",
                     firstIndex: 0,
                     indexCount: 3,
+                    bitmap: nil,
                     renderLayer: .sky3D
                 ),
                 GModMetalWorldMaterialRange(
                     materialName: "sky/pvs-hidden",
                     firstIndex: 3,
                     indexCount: 3,
+                    bitmap: nil,
                     renderLayer: .sky3D
                 ),
             ],

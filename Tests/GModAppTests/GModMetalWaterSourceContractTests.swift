@@ -266,7 +266,7 @@ final class GModMetalWaterSourceContractTests: XCTestCase {
 
         XCTAssertEqual(water.distortionEncoding, .duDvRG)
         XCTAssertEqual(
-            water.normalBitmap?.rgbaBytes,
+            water.normalBitmap?.premultipliedRGBA8,
             Data([16, 240, 0, 255])
         )
         XCTAssertEqual(

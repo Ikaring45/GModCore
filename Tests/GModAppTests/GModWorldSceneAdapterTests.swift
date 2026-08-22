@@ -42,7 +42,7 @@ final class GModWorldSceneAdapterTests: XCTestCase {
         }
         let vertices = [Float(0), 127.5, 255].enumerated().map { pair in
             let (index, alpha) = pair
-            GModWorldRenderVertex(
+            return GModWorldRenderVertex(
                 position: SourceVector3(Float(index), 0, 0),
                 normal: SourceVector3(0, 0, 1),
                 sourceDisplacementAlpha: alpha
