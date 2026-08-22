@@ -2411,7 +2411,8 @@ final class GModGameSessionModel: ObservableObject {
                 waterSurface: waterSurface,
                 waterMaterial: waterMaterial,
                 terrainMaterial: terrainMaterial,
-                renderLayer: renderLayer
+                renderLayer: renderLayer,
+                isDisplacement: range.isDisplacement
             )
         }
         func metalVisibility(

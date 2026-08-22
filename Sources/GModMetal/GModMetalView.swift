@@ -568,7 +568,8 @@ public struct GModMetalView:
             let blendMaskRow1: SIMD4<Float>
             /// Detail factor, detail mode, has-detail, has-base2.
             let controls: SIMD4<Float>
-            /// Has blend-modulate texture; remaining lanes are reserved.
+            /// Has blend-modulate texture, uses displacement derivative LOD;
+            /// remaining lanes are reserved.
             let flags: SIMD4<Float>
 
             static let disabled = Self(
@@ -2821,7 +2822,7 @@ public struct GModMetalView:
                 if let bitmap = range.terrainMaterial?.detail?.bitmap {
                     required[Self.worldTextureKey(
                         for: bitmap,
-                        isSRGB: true
+                        isSRGB: range.terrainMaterial?.detail?.samplesAsSRGB == true
                     )] = bitmap
                 }
                 if let bitmap = range.terrainMaterial?.vertexTransition?
@@ -5527,7 +5528,8 @@ public struct GModMetalView:
                 hasBase2 = true
                 let configuration = GModMetalWorldSamplerConfiguration(
                     bitmap: bitmap,
-                    renderLayer: range.renderLayer
+                    renderLayer: range.renderLayer,
+                    usage: range.textureUsage
                 )
                 base2Sampler = samplerStateForWorldTexture(
                     for: configuration,
@@ -5538,13 +5540,15 @@ public struct GModMetalView:
                let texture = worldTexture(
                     for: bitmap,
                     device: device,
-                    uploadBudget: &uploadBudget
+                    uploadBudget: &uploadBudget,
+                    isSRGB: range.terrainMaterial?.detail?.samplesAsSRGB == true
                ) {
                 detailTexture = texture
                 hasDetail = true
                 let configuration = GModMetalWorldSamplerConfiguration(
                     bitmap: bitmap,
-                    renderLayer: range.renderLayer
+                    renderLayer: range.renderLayer,
+                    usage: range.textureUsage
                 )
                 detailSampler = samplerStateForWorldTexture(
                     for: configuration,
@@ -5564,7 +5568,8 @@ public struct GModMetalView:
                 hasBlendModulate = true
                 let configuration = GModMetalWorldSamplerConfiguration(
                     bitmap: bitmap,
-                    renderLayer: range.renderLayer
+                    renderLayer: range.renderLayer,
+                    usage: range.textureUsage
                 )
                 blendSampler = samplerStateForWorldTexture(
                     for: configuration,
@@ -5589,7 +5594,7 @@ public struct GModMetalView:
                 ),
                 flags: SIMD4<Float>(
                     hasBlendModulate ? 1 : 0,
-                    0,
+                    range.textureUsage == .displacementTerrain ? 1 : 0,
                     0,
                     0
                 )
@@ -6542,6 +6547,28 @@ public struct GModMetalView:
             return baseColor;
         }
 
+        float4 gmodSampleTerrainTexture(
+            texture2d<float> sourceTexture,
+            sampler sourceSampler,
+            float2 uv,
+            bool usesDisplacementLOD
+        )
+        {
+            if (usesDisplacementLOD)
+            {
+                // Perspective interpolation makes these screen-space UV
+                // gradients grow with camera distance and grazing angle. The
+                // authored VTF mip chain and sampler then select/filter the
+                // footprint without an invented world-distance threshold.
+                return sourceTexture.sample(
+                    sourceSampler,
+                    uv,
+                    gradient2d(dfdx(uv), dfdy(uv))
+                );
+            }
+            return sourceTexture.sample(sourceSampler, uv);
+        }
+
         float4 gmodSampleTerrainBase(
             WorldVertexOutput input,
             constant WorldTerrainUniforms &terrain,
@@ -6555,7 +6582,13 @@ public struct GModMetalView:
             sampler blendModulateSampler
         )
         {
-            float4 baseColor = baseTexture.sample(baseSampler, input.uv);
+            bool usesDisplacementLOD = terrain.flags.y > 0.5;
+            float4 baseColor = gmodSampleTerrainTexture(
+                baseTexture,
+                baseSampler,
+                input.uv,
+                usesDisplacementLOD
+            );
             if (terrain.controls.w > 0.5)
             {
                 float blendFactor = saturate(input.displacementAlpha);
@@ -6566,9 +6599,11 @@ public struct GModMetalView:
                         terrain.blendMaskRow0,
                         terrain.blendMaskRow1
                     );
-                    float2 modulate = blendModulateTexture.sample(
+                    float2 modulate = gmodSampleTerrainTexture(
+                        blendModulateTexture,
                         blendModulateSampler,
-                        blendUV
+                        blendUV,
+                        usesDisplacementLOD
                     ).gr;
                     float minimumBlend = saturate(modulate.x - modulate.y);
                     float maximumBlend = saturate(modulate.x + modulate.y);
@@ -6578,9 +6613,11 @@ public struct GModMetalView:
                         blendFactor
                     );
                 }
-                float4 secondColor = baseTexture2.sample(
+                float4 secondColor = gmodSampleTerrainTexture(
+                    baseTexture2,
                     baseSampler2,
-                    input.uv
+                    input.uv,
+                    usesDisplacementLOD
                 );
                 baseColor.rgb = mix(
                     baseColor.rgb,
@@ -6595,9 +6632,11 @@ public struct GModMetalView:
                     terrain.detailRow0,
                     terrain.detailRow1
                 );
-                float4 detailColor = detailTexture.sample(
+                float4 detailColor = gmodSampleTerrainTexture(
+                    detailTexture,
                     detailSampler,
-                    detailUV
+                    detailUV,
+                    usesDisplacementLOD
                 );
                 baseColor = gmodApplyDetailBeforeLighting(
                     baseColor,
@@ -6631,9 +6670,11 @@ public struct GModMetalView:
                 terrain.detailRow0,
                 terrain.detailRow1
             );
-            float3 detailColor = detailTexture.sample(
+            float3 detailColor = gmodSampleTerrainTexture(
+                detailTexture,
                 detailSampler,
-                detailUV
+                detailUV,
+                terrain.flags.y > 0.5
             ).rgb;
             float factor = terrain.controls.x;
             if (mode == 5)
