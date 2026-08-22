@@ -25,6 +25,10 @@
   stale Metal scenes.
 - Reports only active Problems; the old unconditional permissions roadmap
   warning is no longer presented as a runtime fault.
+- Connects MENU `permissions.Grant`, `Revoke`, `IsGranted`, `GetAll`, and
+  `Connect` to the native persistent store. Local Connect resumes the real
+  single-player host; unsupported remote multiplayer targets still fail
+  explicitly.
 
 ## Source world and entity work
 
