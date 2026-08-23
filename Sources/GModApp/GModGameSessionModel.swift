@@ -17,6 +17,11 @@ private struct GModSurfaceBuildResult: Sendable {
     let failure: String?
 }
 
+private struct GModForegroundSurfaceBuildRequest: Sendable {
+    let snapshot: GMLuaSurfaceFrameSnapshot
+    let token: GModSurfacePublicationToken
+}
+
 struct GModDynamicEntitySceneBuildRequest: Sendable {
     let snapshot: GModDynamicEntityRenderSceneSnapshot
     let applicationGeneration: UInt64
@@ -124,13 +129,11 @@ struct GModGameMovementDiagnostic: Equatable, Sendable {
 /// serialized game actor. Slow Lua frames coalesce rather than creating an
 /// unbounded queue of MainActor tasks.
 private final class GModGameFrameMailbox: @unchecked Sendable {
-    private static let maximumCatchUpTicks = 8
-
     private let lock = NSLock()
     private var enabled = false
     private var token: GModGameFrameToken?
     private var drainScheduled = false
-    private var pendingTicks = 0
+    private var fixedTickCatchUp = GModGameFixedTickCatchUpAccumulator()
     private var pendingViewport = GMLuaViewportSize.logicalDesktopDefault
     private var movementInput = GModPlayableMovementInput.idle
     private var hasPendingFrame = false
@@ -138,7 +141,7 @@ private final class GModGameFrameMailbox: @unchecked Sendable {
     func disable() {
         lock.lock()
         enabled = false
-        pendingTicks = 0
+        fixedTickCatchUp.reset()
         hasPendingFrame = false
         lock.unlock()
     }
@@ -147,7 +150,7 @@ private final class GModGameFrameMailbox: @unchecked Sendable {
         lock.lock()
         if token != replacement {
             // Never relabel a frame admitted under an older input boundary.
-            pendingTicks = 0
+            fixedTickCatchUp.reset()
             hasPendingFrame = false
         }
         token = replacement
@@ -170,11 +173,7 @@ private final class GModGameFrameMailbox: @unchecked Sendable {
             lock.unlock()
             return
         }
-        let incomingTicks = Swift.max(0, request.fixedTickCount)
-        pendingTicks = Swift.min(
-            Self.maximumCatchUpTicks,
-            pendingTicks + incomingTicks
-        )
+        fixedTickCatchUp.submit(request.fixedTickCount)
         if request.viewportWidth > 0, request.viewportHeight > 0 {
             pendingViewport = GMLuaViewportSize(
                 width: request.viewportWidth,
@@ -205,11 +204,10 @@ private final class GModGameFrameMailbox: @unchecked Sendable {
         }
         let batch = GModGameFrameBatch(
             token: token,
-            fixedTickCount: pendingTicks,
+            fixedTickCount: fixedTickCatchUp.takePendingTicks(),
             viewport: pendingViewport,
             movementInput: movementInput
         )
-        pendingTicks = 0
         hasPendingFrame = false
         return batch
     }
@@ -399,6 +397,10 @@ final class GModGameSessionModel: ObservableObject {
     private var surfaceRequestRevision: UInt64 = 0
     private var surfaceRefreshQueue = GModGameSurfaceRefreshPendingQueue()
     private var surfaceRefreshTask: Task<Void, Never>?
+    private var pendingForegroundSurfaceBuild:
+        GModForegroundSurfaceBuildRequest?
+    private var foregroundSurfaceBuildTask: Task<Void, Never>?
+    private var lastForegroundSurfaceCompletionTime: TimeInterval?
     private var overlaySurfaceFramePacer = GModGameOverlaySurfaceFramePacer()
     private var lastDynamicEntitySourceRevision: UInt64?
     private var pendingDynamicEntitySceneBuild:
@@ -1213,6 +1215,12 @@ final class GModGameSessionModel: ObservableObject {
         let requestedGeneration = sessionGeneration
         let priorMenu = activeClientMenu
         invalidateSurfaceRequests()
+        // The Surface snapshot belongs to the prior foreground/overlay owner.
+        // Clearing it makes the structural fast path unambiguously initial for
+        // the menu that wins this transition; ordinary refreshes retain their
+        // last complete scene until the replacement is fully resolved.
+        surfaceScene = nil
+        surfaceDiagnostics = nil
         transitioningClientMenu = menu
         frameMailbox.disable()
         pointerMailbox.setEnabled(false)
@@ -1290,10 +1298,32 @@ final class GModGameSessionModel: ObservableObject {
             }
             if requestedGeneration == sessionGeneration {
                 transitioningClientMenu = nil
+                var capturedInitialMenuSurface = false
+                if !isInputSuspended,
+                   activeClientMenu != nil,
+                   requestedLaneGeneration == laneGeneration {
+                    // Keep the 120 Hz host mailbox disabled until the first
+                    // foreground snapshot has crossed the lane. Otherwise a
+                    // burst of fixed-step work can repeatedly win the actor
+                    // race and leave a successful Q lifecycle with no pixels.
+                    await refreshClientSurface(request:
+                        GModGameSurfaceRefreshRequest(
+                            generation: GModGameSessionGenerationToken(
+                                application: requestedGeneration,
+                                lane: requestedLaneGeneration
+                            ),
+                            scope: .all
+                        )
+                    )
+                    capturedInitialMenuSurface = surfaceScene != nil
+                }
                 if isInputSuspended {
                     beginInputSuspensionIfPossible()
                 } else {
-                    activateInputIfPossible()
+                    activateInputIfPossible(
+                        scheduleInitialMenuSurface:
+                            !capturedInitialMenuSurface
+                    )
                 }
             }
         }
@@ -1415,7 +1445,8 @@ final class GModGameSessionModel: ObservableObject {
             scheduleClientSurfaceRefresh(
                 applicationGeneration: activeToken.generation.application,
                 laneGeneration: activeToken.generation.lane,
-                hasVisibleOverlayPanels: hasVisibleOverlayPanels
+                hasVisibleOverlayPanels: hasVisibleOverlayPanels,
+                cause: .hostFrame
             )
         } catch {
             if isReady, !isInputSuspended,
@@ -1434,6 +1465,49 @@ final class GModGameSessionModel: ObservableObject {
         _ snapshot: GMLuaSurfaceFrameSnapshot,
         token: GModSurfacePublicationToken
     ) async {
+        if token.activeMenu != nil {
+            let needsStructuralPublication =
+                GModGameForegroundSurfaceCapturePolicy
+                .shouldPublishStructuralScene(
+                    activeMenu: token.activeMenu,
+                    hasPublishedScene: surfaceScene != nil
+                )
+            if needsStructuralPublication {
+                // The first stock Q/C frame contains hundreds of material and
+                // text commands. Publish its real Surface rectangles first so
+                // the menu becomes visible without waiting for every VTF and
+                // CoreText bitmap to resolve. Later refreshes retain the last
+                // complete scene while their replacement builds off-lane.
+                let structuralBuild = await Task.detached(
+                    priority: .userInitiated
+                ) {
+                    do {
+                        return GModSurfaceBuildResult(
+                            scene: try GModMetalSurfaceScene(
+                                snapshot: snapshot
+                            ),
+                            failure: nil
+                        )
+                    } catch {
+                        return GModSurfaceBuildResult(
+                            scene: nil,
+                            failure: String(describing: error)
+                        )
+                    }
+                }.value
+                guard surfaceTokenIsCurrent(token) else { return }
+                if let scene = structuralBuild.scene,
+                   !scene.commands.isEmpty {
+                    publishSurfaceScene(
+                        scene,
+                        statusPrefix: "VGUI structure"
+                    )
+                }
+            }
+            scheduleForegroundSurfaceBuild(snapshot: snapshot, token: token)
+            return
+        }
+
         let resolver = surfaceTextureResolver
         let rasterizer = surfaceTextRasterizer
         let build = await Task.detached(priority: .userInitiated) {
@@ -1453,31 +1527,93 @@ final class GModGameSessionModel: ObservableObject {
                 )
             }
         }.value
+        guard surfaceTokenIsCurrent(token) else { return }
+        if let scene = build.scene {
+            publishSurfaceScene(scene)
+        } else if let failure = build.failure {
+            publishSurfaceFailure("surface build failed: \(failure)")
+        }
+    }
 
-        guard isReady, !isInputSuspended, !inputSuspensionInFlight,
-              token.matches(
+    private func scheduleForegroundSurfaceBuild(
+        snapshot: GMLuaSurfaceFrameSnapshot,
+        token: GModSurfacePublicationToken
+    ) {
+        pendingForegroundSurfaceBuild = GModForegroundSurfaceBuildRequest(
+            snapshot: snapshot,
+            token: token
+        )
+        guard foregroundSurfaceBuildTask == nil else { return }
+        foregroundSurfaceBuildTask = Task { @MainActor [weak self] in
+            await self?.drainForegroundSurfaceBuilds()
+        }
+    }
+
+    private func drainForegroundSurfaceBuilds() async {
+        // Keep one resolver/CoreText build in flight. Invalidated publications
+        // fail their token check, then this worker consumes only the latest
+        // pending owner snapshot. Rapid Q/C transitions therefore cannot leave
+        // detached stale scene builds running in parallel on iPad.
+        while let request = pendingForegroundSurfaceBuild {
+            pendingForegroundSurfaceBuild = nil
+            let resolver = surfaceTextureResolver
+            let rasterizer = surfaceTextRasterizer
+            let build = await Task.detached(priority: .userInitiated) {
+                do {
+                    return GModSurfaceBuildResult(
+                        scene: try GModMetalSurfaceScene(
+                            snapshot: request.snapshot,
+                            textureResolver: resolver,
+                            textRasterizer: rasterizer
+                        ),
+                        failure: nil
+                    )
+                } catch {
+                    return GModSurfaceBuildResult(
+                        scene: nil,
+                        failure: String(describing: error)
+                    )
+                }
+            }.value
+            guard surfaceTokenIsCurrent(request.token) else { continue }
+            if let scene = build.scene {
+                publishSurfaceScene(scene)
+            } else if let failure = build.failure {
+                publishSurfaceFailure("surface build failed: \(failure)")
+            }
+            lastForegroundSurfaceCompletionTime =
+                ProcessInfo.processInfo.systemUptime
+        }
+        foregroundSurfaceBuildTask = nil
+    }
+
+    private func surfaceTokenIsCurrent(
+        _ token: GModSurfacePublicationToken
+    ) -> Bool {
+        isReady && !isInputSuspended && !inputSuspensionInFlight &&
+            token.matches(
                 application: sessionGeneration,
                 lane: laneGeneration,
                 requestRevision: surfaceRequestRevision,
                 activeMenu: activeClientMenu
-              ) else {
-            return
-        }
-        if let scene = build.scene {
-            surfaceScene = scene
-            surfaceDiagnostics = scene.diagnostics
-            let diagnostics = scene.diagnostics
-            surfaceStatus =
-                "VGUI \(diagnostics.resolvedCommandCount)/" +
-                "\(diagnostics.snapshotCommandCount) resolved; " +
-                "\(diagnostics.unresolvedCommands.count) unresolved; " +
-                "dropped capture " +
-                "\(diagnostics.captureDiagnostics.droppedCommandCount), " +
-                "scene \(diagnostics.droppedSnapshotCommandCount)"
-            lastSurfaceFailure = nil
-        } else if let failure = build.failure {
-            publishSurfaceFailure("surface build failed: \(failure)")
-        }
+            )
+    }
+
+    private func publishSurfaceScene(
+        _ scene: GModMetalSurfaceScene,
+        statusPrefix: String = "VGUI"
+    ) {
+        surfaceScene = scene
+        surfaceDiagnostics = scene.diagnostics
+        let diagnostics = scene.diagnostics
+        surfaceStatus =
+            "\(statusPrefix) \(diagnostics.resolvedCommandCount)/" +
+            "\(diagnostics.snapshotCommandCount) resolved; " +
+            "\(diagnostics.unresolvedCommands.count) unresolved; " +
+            "dropped capture " +
+            "\(diagnostics.captureDiagnostics.droppedCommandCount), " +
+            "scene \(diagnostics.droppedSnapshotCommandCount)"
+        lastSurfaceFailure = nil
     }
 
     /// Retains the last complete immutable scene on a transient UI failure.
@@ -1508,6 +1644,8 @@ final class GModGameSessionModel: ObservableObject {
     private func invalidateSurfaceRequests() {
         surfaceRequestRevision &+= 1
         surfaceRefreshQueue.removeAll()
+        pendingForegroundSurfaceBuild = nil
+        lastForegroundSurfaceCompletionTime = nil
         overlaySurfaceFramePacer.reset()
     }
 
@@ -1738,7 +1876,8 @@ final class GModGameSessionModel: ObservableObject {
     private func scheduleClientSurfaceRefresh(
         applicationGeneration: UInt64,
         laneGeneration: UInt64,
-        hasVisibleOverlayPanels: Bool = false
+        hasVisibleOverlayPanels: Bool = false,
+        cause: GModGameForegroundSurfaceCaptureCause = .hostFrame
     ) {
         guard isReady, !isInputSuspended, !inputSuspensionInFlight,
               GModGameClientSurfaceCapturePolicy.shouldCapture(
@@ -1746,10 +1885,20 @@ final class GModGameSessionModel: ObservableObject {
             transitioningMenu: transitioningClientMenu,
             hasVisibleOverlayPanels: hasVisibleOverlayPanels
         ) else {
-            surfaceRefreshQueue.removeAll()
-            overlaySurfaceFramePacer.reset()
+            let hasSurfaceWorkOrPublication =
+                surfaceRefreshTask != nil ||
+                foregroundSurfaceBuildTask != nil ||
+                pendingForegroundSurfaceBuild != nil ||
+                surfaceScene != nil || surfaceDiagnostics != nil
+            if hasSurfaceWorkOrPublication {
+                // Expiry must retire an in-flight Hint snapshot even when no
+                // earlier overlay scene has reached publication yet.
+                invalidateSurfaceRequests()
+            } else {
+                surfaceRefreshQueue.removeAll()
+                overlaySurfaceFramePacer.reset()
+            }
             if surfaceScene != nil || surfaceDiagnostics != nil {
-                surfaceRequestRevision &+= 1
                 surfaceScene = nil
                 surfaceDiagnostics = nil
                 surfaceStatus = "VGUI surface idle"
@@ -1763,9 +1912,18 @@ final class GModGameSessionModel: ObservableObject {
         let scope: GMLuaVGUIRenderScope = activeClientMenu == nil
             ? .overlay
             : .all
+        let now = ProcessInfo.processInfo.systemUptime
+        guard GModGameForegroundSurfaceCapturePolicy.shouldAdmit(
+            scope: scope,
+            cause: cause,
+            now: now,
+            lastCompletionTime: lastForegroundSurfaceCompletionTime,
+            captureOrBuildInFlight:
+                surfaceRefreshTask != nil || foregroundSurfaceBuildTask != nil
+        ) else { return }
         guard overlaySurfaceFramePacer.shouldAdmit(
             scope: scope,
-            at: ProcessInfo.processInfo.systemUptime,
+            at: now,
             captureInFlight: surfaceRefreshTask != nil
         ) else { return }
         surfaceRefreshQueue.submit(GModGameSurfaceRefreshRequest(
@@ -1799,6 +1957,15 @@ final class GModGameSessionModel: ObservableObject {
     private func refreshClientSurface(
         request: GModGameSurfaceRefreshRequest
     ) async {
+        guard request.generation.matches(
+            application: sessionGeneration,
+            lane: laneGeneration
+        ), GModGameForegroundSurfaceCapturePolicy.requestOwnsCurrentSurface(
+            scope: request.scope,
+            activeMenu: activeClientMenu
+        ) else {
+            return
+        }
         let hasVisibleOverlayPanels: Bool
         if request.scope == .overlay {
             do {
@@ -1812,14 +1979,25 @@ final class GModGameSessionModel: ObservableObject {
         } else {
             hasVisibleOverlayPanels = false
         }
+        // Ownership may change while the OverlayPanel visibility query awaits.
+        // A stale Hint request must not clear a freshly opened Q/C scene.
+        guard GModGameForegroundSurfaceCapturePolicy.requestOwnsCurrentSurface(
+            scope: request.scope,
+            activeMenu: activeClientMenu
+        ) else {
+            return
+        }
         guard isReady, !isInputSuspended, !inputSuspensionInFlight,
               GModGameClientSurfaceCapturePolicy.shouldCapture(
             activeMenu: activeClientMenu,
             transitioningMenu: transitioningClientMenu,
             hasVisibleOverlayPanels: hasVisibleOverlayPanels
-        ), (activeClientMenu == nil) == (request.scope == .overlay) else {
+        ) else {
+            // Even when there is no currently published scene, retire any
+            // in-flight snapshot captured while the Hint/overlay was visible.
+            // It must never publish once the owner has disappeared.
+            invalidateSurfaceRequests()
             if surfaceScene != nil || surfaceDiagnostics != nil {
-                invalidateSurfaceRequests()
                 surfaceScene = nil
                 surfaceDiagnostics = nil
                 surfaceStatus = "VGUI surface idle"
@@ -1888,7 +2066,8 @@ final class GModGameSessionModel: ObservableObject {
             lastPointerFailure = nil
             scheduleClientSurfaceRefresh(
                 applicationGeneration: sample.generation.application,
-                laneGeneration: sample.generation.lane
+                laneGeneration: sample.generation.lane,
+                cause: .pointerMutation
             )
         } catch {
             guard sample.generation.application == sessionGeneration,
@@ -2170,7 +2349,9 @@ final class GModGameSessionModel: ObservableObject {
         }
     }
 
-    private func activateInputIfPossible() {
+    private func activateInputIfPossible(
+        scheduleInitialMenuSurface: Bool = true
+    ) {
         guard isReady,
               !isInputSuspended,
               !inputSuspensionInFlight,
@@ -2197,10 +2378,11 @@ final class GModGameSessionModel: ObservableObject {
         // mailbox. Do not make the first visible VGUI frame depend on a later
         // MTKView callback: capture it immediately under the exact application
         // and lane generation that just regained input ownership.
-        if isClientMenuOpen {
+        if isClientMenuOpen && scheduleInitialMenuSurface {
             scheduleClientSurfaceRefresh(
                 applicationGeneration: sessionGeneration,
-                laneGeneration: laneGeneration
+                laneGeneration: laneGeneration,
+                cause: .menuTransition
             )
         }
     }

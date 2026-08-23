@@ -116,6 +116,47 @@ struct GModGameSurfaceRefreshPendingQueue: Sendable, Equatable {
     }
 }
 
+/// Coalesces fixed ticks while the serialized gameplay lane is busy without
+/// allowing a transient UI stall to become a permanent catch-up spiral.
+/// GMEngine has already accumulated elapsed time and capped one host frame at
+/// eight ticks before it submits this count, so requests received while the
+/// lane is busy must not be summed a second time. Keeping the largest single
+/// bounded budget preserves a legitimate slow host frame while letting normal
+/// one-tick cadence recover immediately after a Hint expires.
+struct GModGameFixedTickCatchUpAccumulator: Sendable, Equatable {
+    static let defaultMaximumPendingTickCount = 8
+
+    let maximumPendingTickCount: Int
+    private(set) var pendingTickCount = 0
+
+    init(
+        maximumPendingTickCount: Int =
+            Self.defaultMaximumPendingTickCount
+    ) {
+        precondition(
+            maximumPendingTickCount >= 0,
+            "fixed-tick catch-up maximum must be nonnegative"
+        )
+        self.maximumPendingTickCount = maximumPendingTickCount
+    }
+
+    mutating func submit(_ incomingTickCount: Int) {
+        pendingTickCount = min(
+            maximumPendingTickCount,
+            max(pendingTickCount, max(0, incomingTickCount))
+        )
+    }
+
+    mutating func takePendingTicks() -> Int {
+        defer { pendingTickCount = 0 }
+        return pendingTickCount
+    }
+
+    mutating func reset() {
+        pendingTickCount = 0
+    }
+}
+
 /// Limits gameplay HUD captures without changing the foreground Q/C menu
 /// cadence. OverlayPanel rendering executes original Lua on the same serial
 /// lane as movement; admitting it at the 120 Hz Metal cadence can otherwise

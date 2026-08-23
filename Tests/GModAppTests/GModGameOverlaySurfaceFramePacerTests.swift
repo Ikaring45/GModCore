@@ -2,6 +2,36 @@ import XCTest
 @testable import GModApp
 
 final class GModGameOverlaySurfaceFramePacerTests: XCTestCase {
+    func testTransientSurfaceStallCannotCreatePermanentFixedTickCatchUp() {
+        var catchUp = GModGameFixedTickCatchUpAccumulator()
+
+        // A single delayed host frame may legitimately ask GMEngine for its
+        // full eight-tick budget, but the app mailbox must not add later
+        // requests on top of that already-accumulated engine budget.
+        catchUp.submit(8)
+        XCTAssertEqual(catchUp.pendingTickCount, 8)
+        catchUp.submit(3)
+        XCTAssertEqual(catchUp.takePendingTicks(), 8)
+
+        // Model a one-second Hint Surface stall at 120 Hz. Repeated ordinary
+        // frames coalesce to the newest one-tick budget instead of replaying
+        // the entire stale interval ahead of current movement input.
+        for _ in 0..<120 {
+            catchUp.submit(1)
+        }
+        XCTAssertEqual(catchUp.pendingTickCount, 1)
+        XCTAssertEqual(catchUp.takePendingTicks(), 1)
+        XCTAssertEqual(catchUp.pendingTickCount, 0)
+
+        // Once the slow work is gone, the very next ordinary host frame is
+        // back at real-time cadence; no hidden debt survives the drain.
+        catchUp.submit(1)
+        XCTAssertEqual(catchUp.takePendingTicks(), 1)
+
+        catchUp.submit(-8)
+        XCTAssertEqual(catchUp.takePendingTicks(), 0)
+    }
+
     func testOverlayCaptureIsBoundedAndInFlightWorkDoesNotQueueCatchUp() {
         var pacer = GModGameOverlaySurfaceFramePacer(
             minimumInterval: 1.0 / 30.0

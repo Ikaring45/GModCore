@@ -1055,35 +1055,36 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     public var hasVisibleOverlayPanels: Bool {
         lock.lock()
         defer { lock.unlock() }
-        for value in panels.values {
-            guard GMLuaTypeSystem.typedObject(from: value)?.isValid == true,
-                  let panel = panelDescriptor(from: value),
+        let descriptors = livePanelDescriptorsLocked(scope: .overlay)
+        var drawableByIdentifier: [Int: Bool] = [:]
+        var visiting: Set<Int> = []
+
+        func isDrawable(_ identifier: Int) -> Bool {
+            if let cached = drawableByIdentifier[identifier] { return cached }
+            guard !visiting.contains(identifier),
+                  let panel = descriptors[identifier],
                   panel.isVisible,
                   panel.alpha > 0,
                   panel.width > 0,
                   panel.height > 0 else {
-                continue
+                drawableByIdentifier[identifier] = false
+                return false
             }
-            var current = panel
-            var visited: Set<Int> = [panel.identifier]
-            while let parentIdentifier = current.parentIdentifier {
-                if parentIdentifier == Self.overlayPanelIdentifier {
-                    return true
-                }
-                guard visited.insert(parentIdentifier).inserted,
-                      let parentValue = panels[parentIdentifier],
-                      GMLuaTypeSystem.typedObject(from: parentValue)?.isValid == true,
-                      let parent = panelDescriptor(from: parentValue),
-                      parent.isVisible,
-                      parent.alpha > 0,
-                      parent.width > 0,
-                      parent.height > 0 else {
-                    break
-                }
-                current = parent
+            visiting.insert(identifier)
+            let result: Bool
+            if panel.parentIdentifier == Self.overlayPanelIdentifier {
+                result = overlayPanelDescriptor.isVisible
+            } else if let parentIdentifier = panel.parentIdentifier {
+                result = isDrawable(parentIdentifier)
+            } else {
+                result = false
             }
+            visiting.remove(identifier)
+            drawableByIdentifier[identifier] = result
+            return result
         }
-        return false
+
+        return descriptors.keys.contains(where: isDrawable)
     }
 
     /// Called by the Apple renderer when it starts consuming panel snapshots.
@@ -1175,22 +1176,84 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         }
     }
 
+    /// Returns the live scripted panels reachable from the selected engine
+    /// root. Gameplay HUD captures must not relayout the retained WorldPanel
+    /// tree (including the hidden stock spawn menu) merely because one Hint
+    /// is attached to OverlayPanel. Building the parent index is one bounded
+    /// pass over live handles; traversal and all later docking/layout work are
+    /// proportional only to the selected subtree.
+    ///
+    /// The registry lock must be held by the caller.
+    private func livePanelDescriptorsLocked(
+        scope: GMLuaVGUIRenderScope
+    ) -> [Int: GMLuaPanelValue] {
+        let allLive = Dictionary(uniqueKeysWithValues: panels.compactMap {
+            identifier, value -> (Int, GMLuaPanelValue)? in
+            guard let descriptor = panelDescriptor(from: value),
+                  GMLuaTypeSystem.typedObject(from: value)?.isValid == true else {
+                return nil
+            }
+            return (identifier, descriptor)
+        })
+        guard scope == .overlay else { return allLive }
+
+        var childrenByParent: [Int: [Int]] = [:]
+        childrenByParent.reserveCapacity(allLive.count)
+        for (identifier, descriptor) in allLive {
+            guard let parentIdentifier = descriptor.parentIdentifier else {
+                continue
+            }
+            childrenByParent[parentIdentifier, default: []].append(identifier)
+        }
+
+        var selected: [Int: GMLuaPanelValue] = [:]
+        var pending = childrenByParent[Self.overlayPanelIdentifier] ?? []
+        selected.reserveCapacity(pending.count)
+        while let identifier = pending.popLast() {
+            guard selected[identifier] == nil,
+                  let descriptor = allLive[identifier] else { continue }
+            selected[identifier] = descriptor
+            pending.append(contentsOf: childrenByParent[identifier] ?? [])
+        }
+        return selected
+    }
+
+    /// Tests the current live ancestry without allocating a complete render
+    /// tree. The registry lock must be held by the caller.
+    private func panelIdentifierLocked(
+        _ identifier: Int,
+        isIn scope: GMLuaVGUIRenderScope
+    ) -> Bool {
+        guard scope == .overlay else { return panels[identifier] != nil }
+        var current: Int? = identifier
+        var visited: Set<Int> = []
+        while let candidate = current, visited.insert(candidate).inserted {
+            if candidate == Self.overlayPanelIdentifier { return true }
+            guard let value = panels[candidate],
+                  GMLuaTypeSystem.typedObject(from: value)?.isValid == true,
+                  let descriptor = panelDescriptor(from: value) else {
+                return false
+            }
+            current = descriptor.parentIdentifier
+        }
+        return false
+    }
+
     /// Resolves the native dock graph without executing Lua. Top-level panels
     /// dock against VGUI's world panel. The native graph uses the live
     /// viewport as that root while Lua observes the persistent WorldPanel
     /// userdata projected by ``worldPanel()``.
-    private func resolveNativeDocking(viewportWidth: Int, viewportHeight: Int) {
+    private func resolveNativeDocking(
+        viewportWidth: Int,
+        viewportHeight: Int,
+        scope: GMLuaVGUIRenderScope = .all
+    ) {
         guard viewportWidth > 0, viewportHeight > 0 else { return }
         lock.lock()
         defer { lock.unlock() }
 
-        let live = panels.compactMap { (identifier, value) -> (Int, GMLuaPanelValue)? in
-            guard let descriptor = panelDescriptor(from: value),
-                  GMLuaTypeSystem.typedObject(from: value)?.isValid == true else { return nil }
-            return (identifier, descriptor)
-        }
         applyNativeDockingLocked(
-            descriptors: Dictionary(uniqueKeysWithValues: live),
+            descriptors: livePanelDescriptorsLocked(scope: scope),
             viewport: GMLuaPanelRect(
                 x: 0,
                 y: 0,
@@ -1203,10 +1266,19 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     /// Delivers final dock dimensions only after the complete graph is
     /// observable. A callback that changes docking is deferred to a later
     /// layout phase rather than recursively restarting the solver.
-    private func dispatchPendingDockSizeChanges() throws {
+    private func dispatchPendingDockSizeChanges(
+        scope: GMLuaVGUIRenderScope = .all
+    ) throws {
         lock.lock()
-        let changes = pendingDockSizeChanges.sorted { $0.key < $1.key }
-        pendingDockSizeChanges.removeAll(keepingCapacity: true)
+        let scopedIdentifiers = Set(
+            livePanelDescriptorsLocked(scope: scope).keys
+        )
+        let changes = pendingDockSizeChanges
+            .filter { scopedIdentifiers.contains($0.key) }
+            .sorted { $0.key < $1.key }
+        for (identifier, _) in changes {
+            pendingDockSizeChanges.removeValue(forKey: identifier)
+        }
         lock.unlock()
 
         for (identifier, change) in changes {
@@ -1384,12 +1456,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        let live = panels.compactMap { (identifier, value) -> (Int, GMLuaPanelValue)? in
-            guard let descriptor = panelDescriptor(from: value),
-                  GMLuaTypeSystem.typedObject(from: value)?.isValid == true else { return nil }
-            return (identifier, descriptor)
-        }
-        let descriptors = Dictionary(uniqueKeysWithValues: live)
+        let descriptors = livePanelDescriptorsLocked(scope: scope)
 
         let viewport = GMLuaPanelRect(
             x: 0,
@@ -1941,16 +2008,24 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         // Native VGUI resolves Dock against the implicit world panel before
         // Lua PerformLayout. A second resolution after Lua layout captures any
         // size/dock changes the callbacks made before the final tree is built.
-        resolveNativeDocking(viewportWidth: viewportWidth, viewportHeight: viewportHeight)
-        try dispatchPendingDockSizeChanges()
-        _ = try performPendingLayouts()
+        resolveNativeDocking(
+            viewportWidth: viewportWidth,
+            viewportHeight: viewportHeight,
+            scope: scope
+        )
+        try dispatchPendingDockSizeChanges(scope: scope)
+        _ = try performPendingLayouts(scope: scope)
         for _ in 0..<64 {
-            _ = try performDependentLayoutsToFixedPoint()
-            resolveNativeDocking(viewportWidth: viewportWidth, viewportHeight: viewportHeight)
-            try dispatchPendingDockSizeChanges()
-            if !hasPendingDependentLayouts { break }
+            _ = try performDependentLayoutsToFixedPoint(scope: scope)
+            resolveNativeDocking(
+                viewportWidth: viewportWidth,
+                viewportHeight: viewportHeight,
+                scope: scope
+            )
+            try dispatchPendingDockSizeChanges(scope: scope)
+            if !hasPendingDependentLayouts(scope: scope) { break }
         }
-        guard !hasPendingDependentLayouts else {
+        guard !hasPendingDependentLayouts(scope: scope) else {
             throw LuaError.runtime(
                 "VGUI dependent layout/docking fixed-point exceeded 64 iterations"
             )
@@ -1960,7 +2035,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         // while SetTerm/NewAnimation work is active; executing that live Lua
         // callback is what makes DNotify expiry, AlphaTo and LerpPositions
         // real state transitions instead of inert compatibility methods.
-        try dispatchVisiblePanelFrameCallbacks()
+        try dispatchVisiblePanelFrameCallbacks(scope: scope)
         let tree = renderTree(
             viewportWidth: viewportWidth,
             viewportHeight: viewportHeight,
@@ -2028,17 +2103,11 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     /// AnimationThink is invalid before its ordinary Think callback. This also
     /// retains Panel:Remove's deferred-storage interval until the next frame's
     /// existing deletion pass.
-    private func dispatchVisiblePanelFrameCallbacks() throws {
+    private func dispatchVisiblePanelFrameCallbacks(
+        scope: GMLuaVGUIRenderScope
+    ) throws {
         lock.lock()
-        let liveDescriptors = panels.compactMap {
-            identifier, value -> (Int, GMLuaPanelValue)? in
-            guard let descriptor = panelDescriptor(from: value),
-                  GMLuaTypeSystem.typedObject(from: value)?.isValid == true else {
-                return nil
-            }
-            return (identifier, descriptor)
-        }
-        let descriptors = Dictionary(uniqueKeysWithValues: liveDescriptors)
+        let descriptors = livePanelDescriptorsLocked(scope: scope)
         var visibility: [Int: Bool] = [:]
         var visiting: Set<Int> = []
         func isVisibleInLiveHierarchy(_ identifier: Int) -> Bool {
@@ -3159,13 +3228,22 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     /// clipping, hit-testing, or renderer-backed geometry is implemented.
     @discardableResult
     public func performPendingLayouts(maxLayouts: Int = .max) throws -> Int {
+        try performPendingLayouts(scope: .all, maxLayouts: maxLayouts)
+    }
+
+    @discardableResult
+    private func performPendingLayouts(
+        scope: GMLuaVGUIRenderScope,
+        maxLayouts: Int = .max
+    ) throws -> Int {
         finalizeMarkedPanelRemovals()
         guard maxLayouts > 0 else { return 0 }
 
         lock.lock()
-        let identifiers = panels.keys.sorted().filter { identifier in
-            guard let value = panels[identifier],
-                  let descriptor = panelDescriptor(from: value) else { return false }
+        let descriptors = livePanelDescriptorsLocked(scope: scope)
+        let identifiers = descriptors.keys.sorted().filter { identifier in
+            guard let descriptor = descriptors[identifier],
+                  let value = panels[identifier] else { return false }
             return descriptor.isLayoutInvalidated &&
                 !descriptor.isPerformingLayout &&
                 GMLuaTypeSystem.typedObject(from: value)?.isValid == true
@@ -3187,6 +3265,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     /// the exact ancestor chain that measured it before the frame is painted.
     /// Both total work and per-panel recursion are bounded and fail loudly.
     private func performDependentLayoutsToFixedPoint(
+        scope: GMLuaVGUIRenderScope = .all,
         maxLayouts: Int = 16_384,
         maxLayoutsPerPanel: Int = 64
     ) throws -> Int {
@@ -3197,8 +3276,11 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
             let identifier: Int?
             let diagnostic: String?
             lock.lock()
-            if performed >= maxLayouts, !pendingDependentLayoutIdentifiers.isEmpty {
-                diagnostic = pendingDependentLayoutIdentifiers.sorted().prefix(8).map { pending in
+            let scopedPending = pendingDependentLayoutIdentifiers.filter {
+                panelIdentifierLocked($0, isIn: scope)
+            }
+            if performed >= maxLayouts, !scopedPending.isEmpty {
+                diagnostic = scopedPending.sorted().prefix(8).map { pending in
                     let className = panels[pending]
                         .flatMap { panelDescriptor(from: $0) }?.requestedClassName ?? "<removed>"
                     return "\(pending):\(className)"
@@ -3206,7 +3288,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
                 identifier = nil
             } else {
                 diagnostic = nil
-                identifier = pendingDependentLayoutIdentifiers.min()
+                identifier = scopedPending.min()
                 if let identifier {
                     pendingDependentLayoutIdentifiers.remove(identifier)
                 }
@@ -3258,10 +3340,14 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         }
     }
 
-    private var hasPendingDependentLayouts: Bool {
+    private func hasPendingDependentLayouts(
+        scope: GMLuaVGUIRenderScope = .all
+    ) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        return !pendingDependentLayoutIdentifiers.isEmpty
+        return pendingDependentLayoutIdentifiers.contains {
+            panelIdentifierLocked($0, isIn: scope)
+        }
     }
 
     private func performLayout(identifier: Int) throws -> Bool {

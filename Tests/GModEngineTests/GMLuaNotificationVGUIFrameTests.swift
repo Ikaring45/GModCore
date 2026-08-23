@@ -115,6 +115,83 @@ final class GMLuaNotificationVGUIFrameTests: XCTestCase {
         )
     }
 
+    func testOverlayFrameDoesNotLayoutOrThinkLargeWorldPanelTree() throws {
+        let clock = NotificationSystemTimeSource(150)
+        let runtime = try makeRuntime(clock: clock)
+        defer { _ = runtime.close() }
+        try runtime.loadFile("lua/includes/init.lua")
+
+        let registry = try XCTUnwrap(runtime.vguiRegistry)
+        let surface = try XCTUnwrap(runtime.surfaceCommandState)
+        try runtime.execute(
+            """
+            WORLD_LAYOUTS = 0
+            WORLD_THINKS = 0
+            WORLD_PANELS = {}
+            for index = 1, 512 do
+                local panel = assert(vgui.Create("Panel"))
+                panel:SetPos(123, index)
+                panel:SetSize(8, 8)
+                panel:Dock(TOP)
+                function panel:PerformLayout()
+                    WORLD_LAYOUTS = WORLD_LAYOUTS + 1
+                end
+                function panel:Think()
+                    WORLD_THINKS = WORLD_THINKS + 1
+                end
+                panel:InvalidateLayout()
+                table.insert(WORLD_PANELS, panel)
+            end
+
+            OVERLAY_LAYOUTS = 0
+            OVERLAY_THINKS = 0
+            OVERLAY_PANEL = assert(vgui.Create("Panel", GetOverlayPanel()))
+            OVERLAY_PANEL:SetPos(8, 8)
+            OVERLAY_PANEL:SetSize(64, 24)
+            function OVERLAY_PANEL:PerformLayout()
+                OVERLAY_LAYOUTS = OVERLAY_LAYOUTS + 1
+            end
+            function OVERLAY_PANEL:Think()
+                OVERLAY_THINKS = OVERLAY_THINKS + 1
+            end
+            OVERLAY_PANEL:InvalidateLayout()
+            """,
+            sourceName: "=(large hidden spawn-tree overlay isolation)"
+        )
+
+        _ = try registry.renderFrame(
+            surface: surface,
+            viewportWidth: 320,
+            viewportHeight: 180,
+            scope: .overlay
+        )
+        try runtime.execute(
+            """
+            local x, y = WORLD_PANELS[1]:GetPos()
+            assert(x == 123 and y == 1)
+            assert(WORLD_LAYOUTS == 0 and WORLD_THINKS == 0)
+            assert(OVERLAY_LAYOUTS == 1 and OVERLAY_THINKS == 1)
+            """,
+            sourceName: "=(overlay capture skipped WorldPanel tree)"
+        )
+
+        _ = try registry.renderFrame(
+            surface: surface,
+            viewportWidth: 320,
+            viewportHeight: 180,
+            scope: .all
+        )
+        try runtime.execute(
+            """
+            local x, y = WORLD_PANELS[1]:GetPos()
+            assert(x == 0 and y == 0)
+            assert(WORLD_LAYOUTS == 512 and WORLD_THINKS == 512)
+            assert(OVERLAY_LAYOUTS == 1 and OVERLAY_THINKS == 2)
+            """,
+            sourceName: "=(foreground capture retained full-tree behavior)"
+        )
+    }
+
     func testStockNotificationUsesOverlayLayoutAndExpiresFromThink() throws {
         let clock = NotificationSystemTimeSource(200)
         let runtime = try makeRuntime(clock: clock)
@@ -197,12 +274,14 @@ final class GMLuaNotificationVGUIFrameTests: XCTestCase {
         )
         XCTAssertFalse(registry.hasVisibleOverlayPanels)
 
-        _ = try registry.renderFrame(
+        let expiredFrame = try registry.renderFrame(
             surface: surface,
             viewportWidth: 320,
             viewportHeight: 180,
             scope: .overlay
         )
+        XCTAssertEqual(expiredFrame.commands, [])
+        XCTAssertFalse(registry.hasVisibleOverlayPanels)
         try runtime.execute(
             """
             for _, panel in ipairs(vgui.GetAll()) do
