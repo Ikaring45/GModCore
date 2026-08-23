@@ -134,6 +134,28 @@ private final class NoClipRecordingProvider:
     }
 }
 
+private struct EmbeddedNoClipProvider: SourceWorldWalkCollisionProvider {
+    func traceWorldWalk(
+        _ ray: SourceRay,
+        mask _: SourceContents
+    ) throws -> SourceGameTrace {
+        var result = SourceGameTrace(ray: ray)
+        result.startSolid = true
+        result.allSolid = true
+        result.fraction = 0
+        result.endPosition = ray.actualStart
+        result.entityHandle = SourceBaseHandle(entryIndex: 0, serialNumber: 0)
+        return result
+    }
+
+    func worldWalkPointContents(
+        at _: SourceVector3,
+        mask _: SourceContents
+    ) throws -> SourceContents {
+        .solid
+    }
+}
+
 private struct LadderContactThrowingProvider: SourceWorldWalkCollisionProvider {
     func traceWorldWalk(
         _ ray: SourceRay,
@@ -613,6 +635,32 @@ final class SourceWorldWalkTests: XCTestCase {
                 -SourceWorldWalkSolver.groundProbeDistance
             )
         })
+    }
+
+    func testNoClipCanStartEmbeddedWithoutStoppingTheSession() throws {
+        let solver = SourceWorldWalkSolver(
+            collisionProvider: EmbeddedNoClipProvider()
+        )
+        var state = SourceWorldWalkState(
+            origin: SourceVector3(32, 64, -128)
+        )
+        state.moveType = .noClip
+
+        let tick = try solver.simulate(
+            state: state,
+            command: SourceUserCommand(
+                commandNumber: 1,
+                viewAngles: .zero,
+                forwardMove: 100
+            )
+        )
+        state = tick.state
+
+        XCTAssertEqual(state.moveType, .noClip)
+        XCTAssertGreaterThan(state.origin.x, 32)
+        XCTAssertFalse(state.isOnGround)
+        XCTAssertEqual(tick.bumpCount, 0)
+        XCTAssertEqual(tick.collisionCount, 0)
     }
 
     func testDuckUsesHL2MPHullViewAndInstantEndpointTransitions() throws {

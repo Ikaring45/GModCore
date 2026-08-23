@@ -459,7 +459,11 @@ public struct SourceWorldWalkSolver: Sendable {
 
         var activeHull = playerHull(isDucked: next.isDucked)
         var initialWater = try checkWater(state: &next, hull: activeHull)
-        _ = try categorizeGround(move: &next.movement, hull: activeHull)
+        _ = try categorizeGround(
+            move: &next.movement,
+            hull: activeHull,
+            allowEmbedded: next.moveType == .noClip
+        )
 
         if command.buttons.contains(.jump),
            (next.isDucked || command.buttons.contains(.duck)),
@@ -491,7 +495,11 @@ public struct SourceWorldWalkSolver: Sendable {
         ) {
             activeHull = playerHull(isDucked: next.isDucked)
             initialWater = try checkWater(state: &next, hull: activeHull)
-            _ = try categorizeGround(move: &next.movement, hull: activeHull)
+            _ = try categorizeGround(
+                move: &next.movement,
+                hull: activeHull,
+                allowEmbedded: next.moveType == .noClip
+            )
         }
 
         // Source PlayerMove categorizes the player and runs Duck before the
@@ -1252,7 +1260,8 @@ public struct SourceWorldWalkSolver: Sendable {
     @discardableResult
     private func categorizeGround(
         move: inout SourceMoveData,
-        hull: PlayerHull
+        hull: PlayerHull,
+        allowEmbedded: Bool = false
     ) throws -> SourceGameTrace? {
         // CGameMovement::CategorizePosition clears any previous surface's
         // friction before determining the current ground. Surface properties
@@ -1266,7 +1275,8 @@ public struct SourceWorldWalkSolver: Sendable {
         let trace = try traceHull(
             start: move.origin,
             end: move.origin - SourceVector3(0, 0, Self.groundProbeDistance),
-            hull: hull
+            hull: hull,
+            allowEmbedded: allowEmbedded
         )
         move.isOnGround = trace.didHit &&
             trace.plane.normal.z >= Self.walkableNormalZ

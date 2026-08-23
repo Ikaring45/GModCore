@@ -51,6 +51,21 @@ enum GModGameForegroundSurfacePublicationPolicy {
             maximumAlphaWeightedViewportCoverage >
                 minimumAlphaWeightedViewportCoverage
     }
+
+    static func admitsResolvedForegroundScene(
+        activeMenu: GModGameClientMenu?,
+        texturedRectangleCount: Int,
+        textCount: Int,
+        maximumAlphaWeightedViewportCoverage: Double
+    ) -> Bool {
+        guard activeMenu != nil else { return true }
+        return hasResolvedForegroundContent(
+            texturedRectangleCount: texturedRectangleCount,
+            textCount: textCount,
+            maximumAlphaWeightedViewportCoverage:
+                maximumAlphaWeightedViewportCoverage
+        )
+    }
 }
 
 struct GModGameForegroundSurfaceRetryBudget: Sendable, Equatable {
@@ -1558,19 +1573,11 @@ final class GModGameSessionModel: ObservableObject {
                     snapshot: snapshot
                 )
                 guard surfaceTokenIsCurrent(token) else { return }
-                if let scene = resolvedBuild.scene,
-                   GModGameForegroundSurfacePublicationPolicy
-                    .hasResolvedForegroundContent(
-                        texturedRectangleCount:
-                            scene.diagnostics.texturedRectangleCount,
-                        textCount: scene.diagnostics.textCount,
-                        maximumAlphaWeightedViewportCoverage:
-                            scene.visibilityMetrics
-                            .maximumResolvedContentAlphaWeightedViewportCoverageUpperBound
-                    ) {
-                    publishSurfaceScene(scene)
-                    lastForegroundSurfaceCompletionTime =
-                        ProcessInfo.processInfo.systemUptime
+                if let scene = resolvedBuild.scene {
+                    if publishSurfaceScene(scene) {
+                        lastForegroundSurfaceCompletionTime =
+                            ProcessInfo.processInfo.systemUptime
+                    }
                 } else if let failure = resolvedBuild.failure {
                     publishSurfaceFailure("surface build failed: \(failure)")
                 } else {
@@ -1659,7 +1666,7 @@ final class GModGameSessionModel: ObservableObject {
             }.value
             guard surfaceTokenIsCurrent(request.token) else { continue }
             if let scene = build.scene {
-                publishSurfaceScene(scene)
+                _ = publishSurfaceScene(scene)
             } else if let failure = build.failure {
                 publishSurfaceFailure("surface build failed: \(failure)")
             }
@@ -1681,10 +1688,38 @@ final class GModGameSessionModel: ObservableObject {
             )
     }
 
+    @discardableResult
     private func publishSurfaceScene(
         _ scene: GModMetalSurfaceScene,
         statusPrefix: String = "VGUI"
-    ) {
+    ) -> Bool {
+        guard GModGameForegroundSurfacePublicationPolicy
+            .admitsResolvedForegroundScene(
+                activeMenu: activeClientMenu,
+                texturedRectangleCount:
+                    scene.diagnostics.texturedRectangleCount,
+                textCount: scene.diagnostics.textCount,
+                maximumAlphaWeightedViewportCoverage:
+                    scene.visibilityMetrics
+                    .maximumResolvedContentAlphaWeightedViewportCoverageUpperBound
+            ) else {
+            // A passive foreground capture is allowed to be temporarily
+            // incomplete while stock Derma mutates. Never let it erase the
+            // last renderer-visible Q/C frame. In particular, mounted-content
+            // resolution failures must not replace a valid Gwen scene with the
+            // incidental transparent strips emitted by the logical tree.
+            if surfaceScene == nil {
+                publishSurfaceFailure(
+                    "foreground frame produced no renderer-visible commands"
+                )
+            } else {
+                // Transient passive Derma mutations are an expected capture
+                // state, not a new Problems entry. Keep both the prior scene
+                // and its diagnostics until a complete replacement arrives.
+                surfaceStatus = "VGUI retained last complete foreground frame"
+            }
+            return false
+        }
         surfaceScene = scene
         if activeClientMenu != nil {
             foregroundSurfaceRetryBudget.cancel()
@@ -1699,6 +1734,7 @@ final class GModGameSessionModel: ObservableObject {
             "\(diagnostics.captureDiagnostics.droppedCommandCount), " +
             "scene \(diagnostics.droppedSnapshotCommandCount)"
         lastSurfaceFailure = nil
+        return true
     }
 
     /// Retains the last complete immutable scene on a transient UI failure.

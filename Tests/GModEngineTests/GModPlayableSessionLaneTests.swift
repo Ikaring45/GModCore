@@ -574,6 +574,50 @@ final class GModPlayableSessionLaneTests: XCTestCase {
         _ = try await lane.close()
     }
 
+    func testSpawnMenuRemainsTexturedAcrossPassiveHostFrames() async throws {
+        let lane = GModPlayableSessionLane()
+        let snapshot = try await lane.start(
+            configuration: GModPlayableSessionConfiguration(map: .construct)
+        )
+        _ = try await lane.runHostFrame(
+            fixedTickCount: 0,
+            renderClientFrame: true,
+            viewport: GMLuaViewportSize(width: 1_024, height: 768),
+            expectedGeneration: snapshot.generation,
+            expectedInputEpoch: snapshot.inputEpoch
+        )
+        let opened = try await lane.transitionClientMenu(
+            from: nil,
+            to: .spawn,
+            expectedGeneration: snapshot.generation,
+            expectedPointerEpoch: snapshot.pointerEpoch,
+            expectedInputEpoch: snapshot.inputEpoch
+        )
+        XCTAssertEqual(opened.committedMenu, .spawn)
+
+        for frameIndex in 0..<4 {
+            let surface = try await lane.renderClientVGUIFrame(
+                expectedGeneration: snapshot.generation
+            )
+            XCTAssertTrue(surface.commands.contains { command in
+                if case .texturedRectangle = command { return true }
+                return false
+            }, "host frame \(frameIndex) lost the stock Gwen rectangles")
+            XCTAssertTrue(surface.commands.contains { command in
+                if case .text = command { return true }
+                return false
+            }, "host frame \(frameIndex) lost stock Q text")
+            _ = try await lane.runHostFrame(
+                fixedTickCount: 1,
+                renderClientFrame: true,
+                viewport: GMLuaViewportSize(width: 1_024, height: 768),
+                expectedGeneration: snapshot.generation,
+                expectedInputEpoch: opened.inputEpoch
+            )
+        }
+        _ = try await lane.close()
+    }
+
     func testAtomicMenuTransitionRestoresPriorWhenTargetHookThrows() async throws {
         let lane = GModPlayableSessionLane()
         let snapshot = try await lane.start(

@@ -70,6 +70,49 @@ final class GModGameForegroundSurfacePublicationPolicyTests: XCTestCase {
         )
     }
 
+    func testEveryForegroundReplacementMustRemainRendererVisible() {
+        XCTAssertFalse(
+            GModGameForegroundSurfacePublicationPolicy
+                .admitsResolvedForegroundScene(
+                    activeMenu: .spawn,
+                    texturedRectangleCount: 0,
+                    textCount: 0,
+                    maximumAlphaWeightedViewportCoverage: 0.75
+                ),
+            "a later transparent/solid-only capture must not erase visible Q"
+        )
+        XCTAssertFalse(
+            GModGameForegroundSurfacePublicationPolicy
+                .admitsResolvedForegroundScene(
+                    activeMenu: .spawn,
+                    texturedRectangleCount: 1,
+                    textCount: 0,
+                    maximumAlphaWeightedViewportCoverage: 0.001
+                )
+        )
+        XCTAssertTrue(
+            GModGameForegroundSurfacePublicationPolicy
+                .admitsResolvedForegroundScene(
+                    activeMenu: .spawn,
+                    texturedRectangleCount: 1,
+                    textCount: 1,
+                    maximumAlphaWeightedViewportCoverage: 0.25
+                )
+        )
+    }
+
+    func testOverlayReplacementIsNotSubjectToForegroundCoverageGate() {
+        XCTAssertTrue(
+            GModGameForegroundSurfacePublicationPolicy
+                .admitsResolvedForegroundScene(
+                    activeMenu: nil,
+                    texturedRectangleCount: 0,
+                    textCount: 0,
+                    maximumAlphaWeightedViewportCoverage: 0
+                )
+        )
+    }
+
     func testFailedForegroundGetsOneBoundedAutomaticRetry() {
         var budget = GModGameForegroundSurfaceRetryBudget()
         XCTAssertFalse(budget.consume())

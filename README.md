@@ -13,11 +13,12 @@ Swift UI.
 
 ## Current milestone
 
-0.1.59 corrects the remaining physical-iPad stock Q publication failure in
-0.1.58. The first foreground Surface frame is no longer accepted merely because
-it contains commands: the runtime waits for resolved Derma textures or glyphs
-with material on-screen coverage before publishing it to Metal. The detailed
-validation boundary is recorded in `RELEASE_NOTES_0.1.59.md`.
+0.1.60 keeps the resolved stock Q Surface scene visible across passive host
+refreshes and lets noclip move back out of BSP terrain after starting inside a
+solid. Foreground captures that contain no renderer-visible Derma content no
+longer erase the last complete Q/C frame, while ordinary walking retains its
+strict embedded-world failure contract. The detailed validation boundary is
+recorded in `RELEASE_NOTES_0.1.60.md`.
 
 The pure-Swift `GModLua` runtime now runs the Lua 5.1 official basic test corpus
 through `final OK !!!` and all cleanup collections. The passing Windows run

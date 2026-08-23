@@ -2,7 +2,71 @@
 @testable import GModGameSession
 import XCTest
 
+private final class ToggleableEmbeddedWorldWalkProvider:
+    SourceWorldWalkCollisionProvider,
+    @unchecked Sendable
+{
+    var isEmbedded = false
+
+    func traceWorldWalk(
+        _ ray: SourceRay,
+        mask _: SourceContents
+    ) throws -> SourceGameTrace {
+        var result = SourceGameTrace(ray: ray)
+        guard isEmbedded else { return result }
+        result.startSolid = true
+        result.allSolid = true
+        result.fraction = 0
+        result.endPosition = ray.actualStart
+        result.entityHandle = SourceBaseHandle(entryIndex: 0, serialNumber: 0)
+        return result
+    }
+
+    func worldWalkPointContents(
+        at _: SourceVector3,
+        mask: SourceContents
+    ) throws -> SourceContents {
+        isEmbedded && mask.contains(.solid) ? .solid : .empty
+    }
+}
+
 final class GModPlayableNoClipIntegrationTests: XCTestCase {
+    func testEnabledNoClipLeavesAnEmbeddedWorldWithoutStoppingTheSession()
+        throws
+    {
+        let collision = ToggleableEmbeddedWorldWalkProvider()
+        let session = try GModPlayableSession(
+            configuration: GModPlayableSessionConfiguration(map: .construct),
+            textMeasurer: nil,
+            logger: { _, _ in },
+            worldWalkCollisionProvider: collision
+        )
+        defer { _ = try? session.close() }
+
+        try session.requestToggleNoClip()
+        let enabled = try session.runFixedTick()
+        XCTAssertEqual(enabled.actionFailures, [])
+        XCTAssertEqual(session.playerWalkState.moveType, .noClip)
+
+        collision.isEmbedded = true
+        let embeddedOrigin = session.playerWalkState.origin
+        let escaped = try session.runFixedTick(
+            movementInput: GModPlayableMovementInput(
+                viewAngles: .zero,
+                forwardMove: 100,
+                buttons: [.forward]
+            )
+        )
+        guard case let .advanced(tick) = escaped.movement else {
+            return XCTFail("enabled noclip movement was rejected while embedded")
+        }
+        XCTAssertEqual(tick.state.moveType, .noClip)
+        XCTAssertGreaterThan(tick.state.origin.x, embeddedOrigin.x)
+        XCTAssertFalse(tick.state.isOnGround)
+        XCTAssertEqual(tick.bumpCount, 0)
+        XCTAssertEqual(tick.collisionCount, 0)
+    }
+
     func testClientToggleUsesSandboxHookAndReplicatesOrDeniesInOrder()
         async throws
     {
