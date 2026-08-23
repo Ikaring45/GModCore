@@ -91,6 +91,21 @@ final class GModMetalSurfaceSceneTests: XCTestCase {
         XCTAssertEqual(scene.diagnostics.solidRectangleCount, 1)
         XCTAssertEqual(scene.diagnostics.clippedCommandCount, 1)
         XCTAssertEqual(
+            scene.visibilityMetrics.potentiallyVisibleCommandCount,
+            1
+        )
+        XCTAssertEqual(
+            scene.visibilityMetrics
+                .maximumSingleCommandAlphaWeightedViewportCoverageUpperBound,
+            0.16 * (128.0 / 255.0),
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            scene.visibilityMetrics
+                .maximumResolvedContentAlphaWeightedViewportCoverageUpperBound,
+            0
+        )
+        XCTAssertEqual(
             scene.diagnostics.unresolvedCommands.map(\.kind),
             [.texturedRectangle, .text]
         )
@@ -733,6 +748,51 @@ final class GModMetalSurfaceSceneTests: XCTestCase {
     }
 
 #if canImport(CoreText) && canImport(GModApp)
+    func testStockQFirstVisiblePublicationRequiresResolvedGwenScene() throws {
+        let factory = GModAppRuntimeFactory()
+        let session = try factory.makePlayableSession(
+            logger: { _, _ in }
+        )
+        defer { _ = try? session.close() }
+        try session.setSpawnMenuOpen(true)
+        let snapshot = try session.renderClientVGUIFrame()
+
+        let resolverFree = try GModMetalSurfaceScene(snapshot: snapshot)
+        XCTAssertGreaterThan(snapshot.commands.count, 0)
+        XCTAssertGreaterThan(
+            snapshot.commands.count,
+            resolverFree.commands.count
+        )
+        XCTAssertGreaterThan(resolverFree.diagnostics.solidRectangleCount, 0)
+        XCTAssertEqual(resolverFree.diagnostics.texturedRectangleCount, 0)
+        XCTAssertEqual(resolverFree.diagnostics.textCount, 0)
+        XCTAssertLessThan(
+            resolverFree.visibilityMetrics
+                .maximumResolvedContentAlphaWeightedViewportCoverageUpperBound,
+            0.001,
+            "stock Q's resolver-free strips are not a visible menu publication"
+        )
+
+        let resolved = try GModMetalSurfaceScene(
+            snapshot: snapshot,
+            textureResolver: factory.surfaceTextureResolver,
+            textRasterizer: factory.surfaceTextRasterizer
+        )
+        XCTAssertTrue(resolved.commands.contains { command in
+            guard case let .texturedRectangle(rectangle) = command else {
+                return false
+            }
+            return rectangle.textureName == "gwenskin/GModDefault.png"
+        })
+        XCTAssertGreaterThan(
+            resolved.visibilityMetrics
+                .maximumResolvedContentAlphaWeightedViewportCoverageUpperBound,
+            0.25,
+            "the first published Q scene must contain a materially visible " +
+                "resolved Derma window"
+        )
+    }
+
     func testCoreTextRasterizerUsesRegisteredBundledFaceOffRenderThread() throws {
         let registry = GModBundledFontRegistry.shared
         XCTAssertTrue(registry.registerAllFonts().failures.isEmpty)

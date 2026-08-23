@@ -13,11 +13,11 @@ Swift UI.
 
 ## Current milestone
 
-0.1.58 is a device-follow-up hotfix for the stock Q menu and Hint regressions
-that remained in 0.1.57. Overlay-only frames now stay inside OverlayPanel's
-subtree, while full-menu publication no longer turns a slow first Q capture
-into a continuous gameplay-lane refresh loop. The detailed validation boundary
-is recorded in `RELEASE_NOTES_0.1.58.md`.
+0.1.59 corrects the remaining physical-iPad stock Q publication failure in
+0.1.58. The first foreground Surface frame is no longer accepted merely because
+it contains commands: the runtime waits for resolved Derma textures or glyphs
+with material on-screen coverage before publishing it to Metal. The detailed
+validation boundary is recorded in `RELEASE_NOTES_0.1.59.md`.
 
 The pure-Swift `GModLua` runtime now runs the Lua 5.1 official basic test corpus
 through `final OK !!!` and all cleanup collections. The passing Windows run

@@ -22,6 +22,61 @@ private struct GModForegroundSurfaceBuildRequest: Sendable {
     let token: GModSurfacePublicationToken
 }
 
+/// The first foreground publication is the interaction boundary for Q/C.
+/// A resolver-free scene can be nonempty while containing only incidental
+/// solid strips; it does not prove that the stock textured/text menu is
+/// visible. Keep the host frame lane paused until one real resolver-backed
+/// scene has completed, then coalesce later animation replacements.
+enum GModGameForegroundSurfacePublicationPolicy {
+    static let minimumAlphaWeightedViewportCoverage = 0.01
+
+    static func requiresResolvedPublicationBeforeReturning(
+        activeMenu: GModGameClientMenu?,
+        hasPublishedScene: Bool
+    ) -> Bool {
+        activeMenu != nil && !hasPublishedScene
+    }
+
+    /// Stock foreground Derma is materially composed from textured rectangles
+    /// and glyphs. A scene containing only solid commands can be the incidental
+    /// list stripes observed in a resolver-free Q snapshot, so it must not
+    /// satisfy the first-visible-frame boundary.
+    static func hasResolvedForegroundContent(
+        texturedRectangleCount: Int,
+        textCount: Int,
+        maximumAlphaWeightedViewportCoverage: Double
+    ) -> Bool {
+        (texturedRectangleCount > 0 || textCount > 0) &&
+            maximumAlphaWeightedViewportCoverage.isFinite &&
+            maximumAlphaWeightedViewportCoverage >
+                minimumAlphaWeightedViewportCoverage
+    }
+}
+
+struct GModGameForegroundSurfaceRetryBudget: Sendable, Equatable {
+    let maximumRetryCount: Int
+    private(set) var remainingRetryCount = 0
+
+    init(maximumRetryCount: Int = 1) {
+        precondition(maximumRetryCount >= 0)
+        self.maximumRetryCount = maximumRetryCount
+    }
+
+    mutating func arm() {
+        remainingRetryCount = maximumRetryCount
+    }
+
+    mutating func cancel() {
+        remainingRetryCount = 0
+    }
+
+    mutating func consume() -> Bool {
+        guard remainingRetryCount > 0 else { return false }
+        remainingRetryCount -= 1
+        return true
+    }
+}
+
 struct GModDynamicEntitySceneBuildRequest: Sendable {
     let snapshot: GModDynamicEntityRenderSceneSnapshot
     let applicationGeneration: UInt64
@@ -400,6 +455,9 @@ final class GModGameSessionModel: ObservableObject {
     private var pendingForegroundSurfaceBuild:
         GModForegroundSurfaceBuildRequest?
     private var foregroundSurfaceBuildTask: Task<Void, Never>?
+    private var initialForegroundSurfaceCaptureInFlight = false
+    private var foregroundSurfaceRetryBudget =
+        GModGameForegroundSurfaceRetryBudget()
     private var lastForegroundSurfaceCompletionTime: TimeInterval?
     private var overlaySurfaceFramePacer = GModGameOverlaySurfaceFramePacer()
     private var lastDynamicEntitySourceRevision: UInt64?
@@ -438,7 +496,10 @@ final class GModGameSessionModel: ObservableObject {
     var isSpawnMenuOpen: Bool { activeClientMenu == .spawn }
     var isContextMenuOpen: Bool { activeClientMenu == .context }
     var isClientMenuOpen: Bool { activeClientMenu != nil }
-    var isClientMenuTransitioning: Bool { transitioningClientMenu != nil }
+    var isClientMenuTransitioning: Bool {
+        transitioningClientMenu != nil ||
+            initialForegroundSurfaceCaptureInFlight
+    }
     var isSpawnMenuTransitioning: Bool {
         transitioningClientMenu == .spawn
     }
@@ -1214,11 +1275,20 @@ final class GModGameSessionModel: ObservableObject {
         }
         let requestedGeneration = sessionGeneration
         let priorMenu = activeClientMenu
+        if replacement {
+            foregroundSurfaceRetryBudget.arm()
+        } else {
+            foregroundSurfaceRetryBudget.cancel()
+        }
         invalidateSurfaceRequests()
+        // A new explicit Q/C lifecycle is also an explicit retry boundary for
+        // an earlier asset-resolution failure.
+        lastSurfaceFailure = nil
         // The Surface snapshot belongs to the prior foreground/overlay owner.
-        // Clearing it makes the structural fast path unambiguously initial for
-        // the menu that wins this transition; ordinary refreshes retain their
-        // last complete scene until the replacement is fully resolved.
+        // Clearing it makes the first resolver-backed publication
+        // unambiguously belong to the menu that wins this transition;
+        // ordinary refreshes retain their last complete scene until the
+        // replacement is fully resolved.
         surfaceScene = nil
         surfaceDiagnostics = nil
         transitioningClientMenu = menu
@@ -1306,6 +1376,7 @@ final class GModGameSessionModel: ObservableObject {
                     // foreground snapshot has crossed the lane. Otherwise a
                     // burst of fixed-step work can repeatedly win the actor
                     // race and leave a successful Q lifecycle with no pixels.
+                    initialForegroundSurfaceCaptureInFlight = true
                     await refreshClientSurface(request:
                         GModGameSurfaceRefreshRequest(
                             generation: GModGameSessionGenerationToken(
@@ -1315,7 +1386,12 @@ final class GModGameSessionModel: ObservableObject {
                             scope: .all
                         )
                     )
-                    capturedInitialMenuSurface = surfaceScene != nil
+                    initialForegroundSurfaceCaptureInFlight = false
+                    // A hard renderer failure also completes this one-shot
+                    // transition attempt. Passive 120 Hz host frames must not
+                    // immediately turn missing content into a rebuild loop.
+                    capturedInitialMenuSurface =
+                        surfaceScene != nil || lastSurfaceFailure != nil
                 }
                 if isInputSuspended {
                     beginInputSuspensionIfPossible()
@@ -1466,51 +1542,63 @@ final class GModGameSessionModel: ObservableObject {
         token: GModSurfacePublicationToken
     ) async {
         if token.activeMenu != nil {
-            let needsStructuralPublication =
-                GModGameForegroundSurfaceCapturePolicy
-                .shouldPublishStructuralScene(
+            let needsResolvedPublication =
+                GModGameForegroundSurfacePublicationPolicy
+                .requiresResolvedPublicationBeforeReturning(
                     activeMenu: token.activeMenu,
                     hasPublishedScene: surfaceScene != nil
                 )
-            if needsStructuralPublication {
-                // The first stock Q/C frame contains hundreds of material and
-                // text commands. Publish its real Surface rectangles first so
-                // the menu becomes visible without waiting for every VTF and
-                // CoreText bitmap to resolve. Later refreshes retain the last
-                // complete scene while their replacement builds off-lane.
-                let structuralBuild = await Task.detached(
-                    priority: .userInitiated
-                ) {
-                    do {
-                        return GModSurfaceBuildResult(
-                            scene: try GModMetalSurfaceScene(
-                                snapshot: snapshot
-                            ),
-                            failure: nil
-                        )
-                    } catch {
-                        return GModSurfaceBuildResult(
-                            scene: nil,
-                            failure: String(describing: error)
-                        )
-                    }
-                }.value
+            if needsResolvedPublication {
+                // Stock Q is primarily textured rectangles and CoreText. Its
+                // resolver-free snapshot may contain a few real solid commands
+                // yet still be visually blank. Await the first complete scene
+                // while the host mailbox remains paused so the Q tap cannot be
+                // reported as open before renderer-visible content exists.
+                let resolvedBuild = await makeResolvedSurfaceBuild(
+                    snapshot: snapshot
+                )
                 guard surfaceTokenIsCurrent(token) else { return }
-                if let scene = structuralBuild.scene,
-                   !scene.commands.isEmpty {
-                    publishSurfaceScene(
-                        scene,
-                        statusPrefix: "VGUI structure"
+                if let scene = resolvedBuild.scene,
+                   GModGameForegroundSurfacePublicationPolicy
+                    .hasResolvedForegroundContent(
+                        texturedRectangleCount:
+                            scene.diagnostics.texturedRectangleCount,
+                        textCount: scene.diagnostics.textCount,
+                        maximumAlphaWeightedViewportCoverage:
+                            scene.visibilityMetrics
+                            .maximumResolvedContentAlphaWeightedViewportCoverageUpperBound
+                    ) {
+                    publishSurfaceScene(scene)
+                    lastForegroundSurfaceCompletionTime =
+                        ProcessInfo.processInfo.systemUptime
+                } else if let failure = resolvedBuild.failure {
+                    publishSurfaceFailure("surface build failed: \(failure)")
+                } else {
+                    publishSurfaceFailure(
+                        "surface build produced no renderer-visible commands"
                     )
                 }
+                return
             }
             scheduleForegroundSurfaceBuild(snapshot: snapshot, token: token)
             return
         }
 
+        let build = await makeResolvedSurfaceBuild(snapshot: snapshot)
+        guard surfaceTokenIsCurrent(token) else { return }
+        if let scene = build.scene {
+            publishSurfaceScene(scene)
+        } else if let failure = build.failure {
+            publishSurfaceFailure("surface build failed: \(failure)")
+        }
+    }
+
+    private func makeResolvedSurfaceBuild(
+        snapshot: GMLuaSurfaceFrameSnapshot
+    ) async -> GModSurfaceBuildResult {
         let resolver = surfaceTextureResolver
         let rasterizer = surfaceTextRasterizer
-        let build = await Task.detached(priority: .userInitiated) {
+        return await Task.detached(priority: .userInitiated) {
             do {
                 return GModSurfaceBuildResult(
                     scene: try GModMetalSurfaceScene(
@@ -1527,12 +1615,6 @@ final class GModGameSessionModel: ObservableObject {
                 )
             }
         }.value
-        guard surfaceTokenIsCurrent(token) else { return }
-        if let scene = build.scene {
-            publishSurfaceScene(scene)
-        } else if let failure = build.failure {
-            publishSurfaceFailure("surface build failed: \(failure)")
-        }
     }
 
     private func scheduleForegroundSurfaceBuild(
@@ -1604,6 +1686,9 @@ final class GModGameSessionModel: ObservableObject {
         statusPrefix: String = "VGUI"
     ) {
         surfaceScene = scene
+        if activeClientMenu != nil {
+            foregroundSurfaceRetryBudget.cancel()
+        }
         surfaceDiagnostics = scene.diagnostics
         let diagnostics = scene.diagnostics
         surfaceStatus =
@@ -1620,6 +1705,10 @@ final class GModGameSessionModel: ObservableObject {
     /// The world renderer therefore continues and diagnostics remain visible.
     private func publishSurfaceFailure(_ failure: String) {
         surfaceStatus = "VGUI unavailable: \(failure)"
+        if activeClientMenu != nil {
+            lastForegroundSurfaceCompletionTime =
+                ProcessInfo.processInfo.systemUptime
+        }
         if lastSurfaceFailure != failure {
             lastSurfaceFailure = failure
             appendLog("[CLIENT][VGUI] \(failure)")
@@ -1912,6 +2001,9 @@ final class GModGameSessionModel: ObservableObject {
         let scope: GMLuaVGUIRenderScope = activeClientMenu == nil
             ? .overlay
             : .all
+        let retriesFailedForeground =
+            scope == .all && cause == .hostFrame &&
+            surfaceScene == nil && lastSurfaceFailure != nil
         let now = ProcessInfo.processInfo.systemUptime
         guard GModGameForegroundSurfaceCapturePolicy.shouldAdmit(
             scope: scope,
@@ -1919,6 +2011,7 @@ final class GModGameSessionModel: ObservableObject {
             now: now,
             lastCompletionTime: lastForegroundSurfaceCompletionTime,
             captureOrBuildInFlight:
+                initialForegroundSurfaceCaptureInFlight ||
                 surfaceRefreshTask != nil || foregroundSurfaceBuildTask != nil
         ) else { return }
         guard overlaySurfaceFramePacer.shouldAdmit(
@@ -1926,6 +2019,10 @@ final class GModGameSessionModel: ObservableObject {
             at: now,
             captureInFlight: surfaceRefreshTask != nil
         ) else { return }
+        if retriesFailedForeground,
+           !foregroundSurfaceRetryBudget.consume() {
+            return
+        }
         surfaceRefreshQueue.submit(GModGameSurfaceRefreshRequest(
             generation: generation,
             scope: scope
@@ -2016,7 +2113,7 @@ final class GModGameSessionModel: ObservableObject {
             await buildAndPublishSurfaceScene(snapshot, token: surfaceToken)
         } catch {
             guard isReady, !isInputSuspended,
-                  !isClientMenuTransitioning,
+                  transitioningClientMenu == nil,
                   surfaceToken.matches(
                       application: sessionGeneration,
                       lane: self.laneGeneration,

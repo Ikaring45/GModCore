@@ -496,6 +496,29 @@ jobs:
             COPY_PHASE_STRIP=NO \
             SWIFT_STRICT_CONCURRENCY=complete
 
+      - name: Prove the first stock Q publication is renderer-visible
+        env:
+          TEST_SCHEME: ${{ steps.package.outputs.test_scheme }}
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+        run: |
+          set -euo pipefail
+
+          xcodebuild test \
+            -scheme "$TEST_SCHEME" \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
+            -derivedDataPath "$RUNNER_TEMP/gmod-package-simulator" \
+            -resultBundlePath "$RUNNER_TEMP/GModCore-Q-Visibility.xcresult" \
+            -only-testing:GModAppTests/GModGameForegroundSurfacePublicationPolicyTests \
+            -only-testing:GModAppTests/GModMetalSurfaceSceneTests/testStockQFirstVisiblePublicationRequiresResolvedGwenScene \
+            -parallel-testing-enabled NO \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=YES \
+            IPHONEOS_DEPLOYMENT_TARGET=16.0 \
+            CODE_SIGNING_ALLOWED=NO \
+            COPY_PHASE_STRIP=NO \
+            SWIFT_STRICT_CONCURRENCY=complete
+
       - name: Run Swift package XCTest libraries on iPad Simulator
         id: package_tests
         env:

@@ -3,30 +3,6 @@ import GModEngine
 @testable import GModApp
 
 final class GModGameForegroundSurfaceCapturePolicyTests: XCTestCase {
-    func testStructuralSceneOnlyBridgesFirstForegroundPublication() {
-        XCTAssertTrue(
-            GModGameForegroundSurfaceCapturePolicy
-                .shouldPublishStructuralScene(
-                    activeMenu: .spawn,
-                    hasPublishedScene: false
-                )
-        )
-        XCTAssertFalse(
-            GModGameForegroundSurfaceCapturePolicy
-                .shouldPublishStructuralScene(
-                    activeMenu: .spawn,
-                    hasPublishedScene: true
-                )
-        )
-        XCTAssertFalse(
-            GModGameForegroundSurfaceCapturePolicy
-                .shouldPublishStructuralScene(
-                    activeMenu: nil,
-                    hasPublishedScene: false
-                )
-        )
-    }
-
     func testPassiveHostFramesCannotChainBehindForegroundWork() {
         XCTAssertFalse(GModGameForegroundSurfaceCapturePolicy.shouldAdmit(
             scope: .all,

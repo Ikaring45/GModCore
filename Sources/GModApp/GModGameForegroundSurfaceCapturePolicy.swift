@@ -50,13 +50,4 @@ enum GModGameForegroundSurfaceCapturePolicy {
         (scope == .overlay) == (activeMenu == nil)
     }
 
-    /// The resolver-free scene is only an initial visibility bridge. Once a
-    /// foreground scene exists, pointer/host refreshes retain it until the
-    /// next fully resolved immutable replacement is ready.
-    static func shouldPublishStructuralScene(
-        activeMenu: GModGameClientMenu?,
-        hasPublishedScene: Bool
-    ) -> Bool {
-        activeMenu != nil && !hasPublishedScene
-    }
 }

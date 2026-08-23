@@ -453,6 +453,30 @@ public struct GModMetalSurfaceDiagnostics: Sendable, Equatable {
     }
 }
 
+/// Conservative evidence that a fully resolved Surface scene can change the
+/// drawable. Logical command counts alone are insufficient: a resolver-free
+/// stock Q frame retains a handful of nearly transparent scrollbar rectangles
+/// while dropping the textured Derma windows and all text.
+///
+/// Bitmap alpha is measured inside each command's sampled UV interval, expanded
+/// by one texel for linear filtering. Coverage remains an upper bound because
+/// command overlap and clipping by later draws are deliberately not inferred.
+/// It is suitable for rejecting a definitely ineffective first frame, not for
+/// claiming exact final framebuffer coverage.
+public struct GModMetalSurfaceVisibilityMetrics: Sendable, Equatable {
+    public let potentiallyVisibleCommandCount: Int
+    public let maximumSingleCommandAlphaWeightedViewportCoverageUpperBound:
+        Double
+    public let maximumResolvedContentAlphaWeightedViewportCoverageUpperBound:
+        Double
+    public let cumulativeAlphaWeightedViewportCoverageUpperBound: Double
+
+    public var hasPotentiallyVisiblePixels: Bool {
+        potentiallyVisibleCommandCount > 0 &&
+            maximumSingleCommandAlphaWeightedViewportCoverageUpperBound > 0
+    }
+}
+
 /// Final render-thread guard. Capture and scene construction are independently
 /// bounded, but the renderer still treats every incoming immutable scene as
 /// untrusted so a future producer cannot multiply draw calls without limit.
@@ -503,6 +527,7 @@ public struct GModMetalSurfaceScene: Sendable, Equatable {
     public let viewportHeight: Int
     public let commands: [GModMetalSurfaceCommand]
     public let diagnostics: GModMetalSurfaceDiagnostics
+    public let visibilityMetrics: GModMetalSurfaceVisibilityMetrics
 
     public init(
         snapshot: GMLuaSurfaceFrameSnapshot,
@@ -795,6 +820,11 @@ public struct GModMetalSurfaceScene: Sendable, Equatable {
         viewportWidth = snapshot.viewportWidth
         viewportHeight = snapshot.viewportHeight
         commands = resolved
+        visibilityMetrics = Self.visibilityMetrics(
+            commands: resolved,
+            viewportWidth: snapshot.viewportWidth,
+            viewportHeight: snapshot.viewportHeight
+        )
         diagnostics = GModMetalSurfaceDiagnostics(
             snapshotCommandCount: snapshot.commands.count,
             captureDiagnostics: snapshot.captureDiagnostics,
@@ -809,6 +839,137 @@ public struct GModMetalSurfaceScene: Sendable, Equatable {
             retainedBitmapCount: bitmapRetention.retainedCount,
             retainedBitmapByteCount: bitmapRetention.retainedByteCount,
             unresolvedCommands: unresolved
+        )
+    }
+
+    private static func visibilityMetrics(
+        commands: [GModMetalSurfaceCommand],
+        viewportWidth: Int,
+        viewportHeight: Int
+    ) -> GModMetalSurfaceVisibilityMetrics {
+        let viewportArea = Double(viewportWidth) * Double(viewportHeight)
+        guard viewportArea.isFinite, viewportArea > 0 else {
+            return GModMetalSurfaceVisibilityMetrics(
+                potentiallyVisibleCommandCount: 0,
+                maximumSingleCommandAlphaWeightedViewportCoverageUpperBound: 0,
+                maximumResolvedContentAlphaWeightedViewportCoverageUpperBound:
+                    0,
+                cumulativeAlphaWeightedViewportCoverageUpperBound: 0
+            )
+        }
+
+        var bitmapRegionMaximumAlphaByIdentifier:
+            [String: [(bitmap: GModMetalSurfaceBitmap, maximumAlpha: Double)]] =
+                [:]
+        func maximumAlpha(
+            in bitmap: GModMetalSurfaceBitmap,
+            uv: GModMetalSurfaceRect
+        ) -> Double {
+            let minimumU = max(0, min(uv.x, uv.x + uv.width))
+            let maximumU = min(1, max(uv.x, uv.x + uv.width))
+            let minimumV = max(0, min(uv.y, uv.y + uv.height))
+            let maximumV = min(1, max(uv.y, uv.y + uv.height))
+            guard minimumU.isFinite, maximumU.isFinite,
+                  minimumV.isFinite, maximumV.isFinite,
+                  minimumU < maximumU, minimumV < maximumV else {
+                return 0
+            }
+            // Linear filtering can sample the texel immediately outside the
+            // geometric UV interval, so expand the measured region by one
+            // texel while remaining inside the validated bitmap.
+            let minimumX = max(
+                0,
+                Int(floor(Double(minimumU) * Double(bitmap.width))) - 1
+            )
+            let maximumX = min(
+                bitmap.width,
+                Int(ceil(Double(maximumU) * Double(bitmap.width))) + 1
+            )
+            let minimumY = max(
+                0,
+                Int(floor(Double(minimumV) * Double(bitmap.height))) - 1
+            )
+            let maximumY = min(
+                bitmap.height,
+                Int(ceil(Double(maximumV) * Double(bitmap.height))) + 1
+            )
+            guard minimumX < maximumX, minimumY < maximumY else { return 0 }
+            let regionIdentifier =
+                "\(bitmap.cacheIdentifier):\(minimumX):\(maximumX):" +
+                "\(minimumY):\(maximumY)"
+            if let cached = bitmapRegionMaximumAlphaByIdentifier[
+                regionIdentifier
+            ]?.first(where: { $0.bitmap == bitmap }) {
+                return cached.maximumAlpha
+            }
+            var maximum: UInt8 = 0
+            let pixels = bitmap.premultipliedRGBA8
+            if pixels.count >= 4 {
+                for y in minimumY..<maximumY {
+                    var alphaIndex = (y * bitmap.width + minimumX) * 4 + 3
+                    for _ in minimumX..<maximumX {
+                        maximum = Swift.max(maximum, pixels[alphaIndex])
+                        if maximum == UInt8.max { break }
+                        alphaIndex += 4
+                    }
+                    if maximum == UInt8.max { break }
+                }
+            }
+            let normalized = Double(maximum) / 255
+            bitmapRegionMaximumAlphaByIdentifier[
+                regionIdentifier,
+                default: []
+            ].append((bitmap, normalized))
+            return normalized
+        }
+
+        var potentiallyVisibleCommandCount = 0
+        var maximumCoverage = 0.0
+        var maximumResolvedContentCoverage = 0.0
+        var cumulativeCoverage = 0.0
+        for command in commands {
+            let frame: GModMetalSurfaceRect
+            let effectiveAlpha: Double
+            let isResolvedContent: Bool
+            switch command {
+            case let .solidRectangle(rectangle):
+                frame = rectangle.frame
+                effectiveAlpha = Double(rectangle.color.alpha)
+                isResolvedContent = false
+            case let .texturedRectangle(rectangle):
+                frame = rectangle.frame
+                effectiveAlpha = Double(rectangle.color.alpha) *
+                    maximumAlpha(in: rectangle.bitmap, uv: rectangle.uv)
+                isResolvedContent = true
+            case let .text(text):
+                frame = text.frame
+                effectiveAlpha = Double(text.color.alpha) *
+                    maximumAlpha(in: text.glyphBitmap, uv: text.uv)
+                isResolvedContent = true
+            }
+            guard effectiveAlpha.isFinite, effectiveAlpha > 0 else { continue }
+            let area = Double(frame.width) * Double(frame.height)
+            guard area.isFinite, area > 0 else { continue }
+            let coverage = min(1, max(0, area / viewportArea * effectiveAlpha))
+            guard coverage > 0 else { continue }
+            potentiallyVisibleCommandCount += 1
+            maximumCoverage = max(maximumCoverage, coverage)
+            if isResolvedContent {
+                maximumResolvedContentCoverage = max(
+                    maximumResolvedContentCoverage,
+                    coverage
+                )
+            }
+            cumulativeCoverage = min(1, cumulativeCoverage + coverage)
+        }
+        return GModMetalSurfaceVisibilityMetrics(
+            potentiallyVisibleCommandCount: potentiallyVisibleCommandCount,
+            maximumSingleCommandAlphaWeightedViewportCoverageUpperBound:
+                maximumCoverage,
+            maximumResolvedContentAlphaWeightedViewportCoverageUpperBound:
+                maximumResolvedContentCoverage,
+            cumulativeAlphaWeightedViewportCoverageUpperBound:
+                cumulativeCoverage
         )
     }
 
