@@ -131,9 +131,11 @@ private actor GModDermaMenuSessionLane {
 
     func insertText(
         _ text: String,
+        focusedTextEntry: Int,
         expectedGeneration: UInt64
     ) throws -> [GMLuaMenuAction] {
         let session = try requiredSession(expectedGeneration: expectedGeneration)
+        guard try session.insertText("") == focusedTextEntry else { return [] }
         if text == "\n" || text == "\r" {
             _ = try session.submitFocusedTextEntry()
         } else {
@@ -142,9 +144,10 @@ private actor GModDermaMenuSessionLane {
         return session.drainActions()
     }
 
-    func deleteTextBackward(expectedGeneration: UInt64) throws {
-        _ = try requiredSession(expectedGeneration: expectedGeneration)
-            .deleteTextBackward()
+    func deleteTextBackward(focusedTextEntry: Int, expectedGeneration: UInt64) throws {
+        let session = try requiredSession(expectedGeneration: expectedGeneration)
+        guard try session.insertText("") == focusedTextEntry else { return }
+        _ = try session.deleteTextBackward()
     }
 
     private func requiredSession(
@@ -487,7 +490,7 @@ final class GModDermaMenuModel: ObservableObject {
         _ text: String,
         onActions: @escaping ([GMLuaMenuAction]) -> Void
     ) {
-        guard !text.isEmpty, hasSession else { return }
+        guard !text.isEmpty, hasSession, let focus = focusedTextEntry else { return }
         let generation = sessionGeneration
         let installation = installationTask
         let previousMutation = mutationTask
@@ -498,6 +501,7 @@ final class GModDermaMenuModel: ObservableObject {
             do {
                 let actions = try await sessionLane.insertText(
                     text,
+                    focusedTextEntry: focus,
                     expectedGeneration: generation
                 )
                 guard generation == sessionGeneration else { return }
@@ -512,7 +516,7 @@ final class GModDermaMenuModel: ObservableObject {
     }
 
     func deleteTextBackward() {
-        guard hasSession else { return }
+        guard hasSession, let focus = focusedTextEntry else { return }
         let generation = sessionGeneration
         let installation = installationTask
         let previousMutation = mutationTask
@@ -522,6 +526,7 @@ final class GModDermaMenuModel: ObservableObject {
             await installation?.value
             do {
                 try await sessionLane.deleteTextBackward(
+                    focusedTextEntry: focus,
                     expectedGeneration: generation
                 )
                 guard generation == sessionGeneration else { return }

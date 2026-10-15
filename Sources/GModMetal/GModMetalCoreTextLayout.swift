@@ -36,18 +36,28 @@ public struct GModMetalCoreTextLayout {
             let width = CTLineGetTypographicBounds(line, &ascent, &descent, &leading)
             return (width, ascent, descent, leading)
         }
-        var shaped = shape(font)
         let tall = CGFloat(max(1, requestedTall))
-        let maximumHeight = shaped.map { line -> CGFloat in
-            let m = metrics(line)
-            return m.ascent + m.descent + max(0, m.leading)
-        }.max() ?? 0
+        // Normalize per font, never per input string: measuring "ABC" as a
+        // caret prefix must use the same size as "ABC日本語" in the full line.
+        let probe = CTLineCreateWithAttributedString(NSAttributedString(
+            string: "Ag日本語かなカナ",
+            attributes: [
+                NSAttributedString.Key(kCTFontAttributeName as String): font,
+                NSAttributedString.Key(kCTLanguageAttributeName as String): "ja"
+            ]
+        ))
+        let m = metrics(probe)
+        let maximumHeight = max(
+            CTFontGetAscent(font) + CTFontGetDescent(font) + CTFontGetLeading(font),
+            m.ascent + m.descent + max(0, m.leading)
+        )
+        var fitted = font
         if maximumHeight.isFinite, maximumHeight > tall + 0.01 {
-            let fitted = CTFontCreateCopyWithAttributes(
+            fitted = CTFontCreateCopyWithAttributes(
                 font, CTFontGetSize(font) * tall / maximumHeight, nil, nil
             )
-            shaped = shape(fitted)
         }
+        let shaped = shape(fitted)
         let measured = shaped.map(metrics)
         lines = shaped
         widths = measured.map(\.width)

@@ -4,9 +4,21 @@ import GModEngine
 import GModGameAssets
 import GModLua
 import GModMetal
+import CoreText
 @testable import GModApp
 
 final class GModBundledFontsTests: XCTestCase {
+    func testMixedJapaneseCaretPrefixKeepsTheSameFontScale() {
+        let font = CTFontCreateWithName("Helvetica" as CFString, 13, nil)
+        let prefix = GModMetalCoreTextLayout(text: "ABC", font: font, requestedTall: 13)
+        let full = GModMetalCoreTextLayout(text: "ABC日本語", font: font, requestedTall: 13)
+        XCTAssertEqual(
+            prefix.widths[0],
+            Double(CTLineGetOffsetForStringIndex(full.lines[0], 3, nil)),
+            accuracy: 0.001
+        )
+    }
+
     func testJapaneseFallbackMeasurementMatchesVisibleRasterAtDermaSizes() throws {
         let factory = GModAppRuntimeFactory()
         let client = factory.makeRuntime(realm: .client, logger: { _ in })
