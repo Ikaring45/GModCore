@@ -40,4 +40,6 @@ jobs:
           swift --version
           # Linux deliberately has no native image decoder. Stock Sandbox
           # sessions require PNG decoding and are covered by the Apple job.
-          swift test --jobs 2 --filter 'SourceWorldWalkTests|GMLuaLanguageTests|GMLuaNotificationVGUIFrameTests'
+          # Stock notification skin icons also need the native image decoder.
+          # The image-free overlay tests still prove bounded Think/layout work.
+          swift test --jobs 2 --filter 'SourceWorldWalkTests|GMLuaLanguageTests|GMLuaNotificationVGUIFrameTests/testOverlayFrameDoesNotLayoutOrThinkLargeWorldPanelTree|GMLuaNotificationVGUIFrameTests/testVisiblePanelAnimationAndThinkAdvanceOnLiveVGUIFrames'
