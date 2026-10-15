@@ -415,6 +415,23 @@ public final class GModCoreTextMeasurer: GMLuaTextMeasurer, @unchecked Sendable 
     public let registrationReport: GModBundledFontRegistrationReport
 
     private let registry: GModBundledFontRegistry
+    private let measurementLock = NSLock()
+    private var measurements: [MeasurementKey: GMLuaTextMeasurement] = [:]
+    private var measurementOrder: [MeasurementKey] = []
+
+    private struct MeasurementKey: Hashable {
+        let text: LuaString
+        let font: LuaString
+        let size: Int
+        let weight: Int
+        let italic: Bool
+    }
+
+    public var cachedMeasurementCount: Int {
+        measurementLock.lock()
+        defer { measurementLock.unlock() }
+        return measurements.count
+    }
 
     public init(registry: GModBundledFontRegistry = .shared) {
         self.registry = registry
@@ -425,6 +442,16 @@ public final class GModCoreTextMeasurer: GMLuaTextMeasurer, @unchecked Sendable 
         _ text: LuaString,
         using descriptor: GMLuaFontDescriptor
     ) -> GMLuaTextMeasurement {
+        let key = MeasurementKey(
+            text: text, font: descriptor.font, size: descriptor.size,
+            weight: descriptor.weight, italic: descriptor.italic
+        )
+        measurementLock.lock()
+        if let cached = measurements[key] {
+            measurementLock.unlock()
+            return cached
+        }
+        measurementLock.unlock()
         registry.registerAllFonts()
         let font = makeFont(for: descriptor)
         let decoded = String(decoding: text.bytes, as: UTF8.self)
@@ -433,13 +460,28 @@ public final class GModCoreTextMeasurer: GMLuaTextMeasurer, @unchecked Sendable 
         )
         let maximumWidth = layout.widths.map(Self.pixelDimension).max() ?? 0
 
-        return GMLuaTextMeasurement(
+        let result = GMLuaTextMeasurement(
             width: maximumWidth,
             height: GMLuaSourceFontTallMetrics.exactTextHeight(
                 lineCount: layout.lines.count,
                 requestedTall: descriptor.size
             )
         )
+        // Japanese shaping and fallback lookup should not run on every Hint
+        // animation or repeated Derma layout. Bound retained Lua text to 1 MiB
+        // plus key/value overhead; very long diagnostic strings are not cached.
+        if text.count <= 4_096 {
+            measurementLock.lock()
+            if measurements[key] == nil {
+                if measurementOrder.count >= 256 {
+                    measurements.removeValue(forKey: measurementOrder.removeFirst())
+                }
+                measurementOrder.append(key)
+                measurements[key] = result
+            }
+            measurementLock.unlock()
+        }
+        return result
     }
 
     private func makeFont(for descriptor: GMLuaFontDescriptor) -> CTFont {

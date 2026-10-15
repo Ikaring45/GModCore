@@ -8,6 +8,32 @@ import CoreText
 @testable import GModApp
 
 final class GModBundledFontsTests: XCTestCase {
+    func testJapaneseMeasurementCacheIsBoundedAndTracksFontRedefinition() throws {
+        let factory = GModAppRuntimeFactory()
+        let client = factory.makeRuntime(realm: .client, logger: { _ in })
+        defer { _ = client.close() }
+        let surface = try XCTUnwrap(client.surfaceCommandState)
+        let measurer = GModCoreTextMeasurer()
+        try client.execute("surface.CreateFont('CacheProbe', {font='Tahoma',size=13})")
+        let small = try XCTUnwrap(surface.fontDescriptor(named: "CacheProbe"))
+        let first = measurer.measure("日本語の通知", using: small)
+        XCTAssertEqual(measurer.measure("日本語の通知", using: small), first)
+        XCTAssertEqual(measurer.cachedMeasurementCount, 1)
+
+        try client.execute("surface.CreateFont('CacheProbe', {font='Tahoma',size=24})")
+        let large = try XCTUnwrap(surface.fontDescriptor(named: "CacheProbe"))
+        let resized = measurer.measure("日本語の通知", using: large)
+        XCTAssertGreaterThan(resized.width, first.width)
+        XCTAssertEqual(resized.height, 24)
+        XCTAssertEqual(measurer.cachedMeasurementCount, 2)
+        for index in 0..<300 {
+            _ = measurer.measure(LuaString("通知 \(index)"), using: small)
+        }
+        XCTAssertEqual(measurer.cachedMeasurementCount, 256)
+        _ = measurer.measure(LuaString(String(repeating: "日", count: 2_000)), using: small)
+        XCTAssertEqual(measurer.cachedMeasurementCount, 256)
+    }
+
     func testMixedJapaneseCaretPrefixKeepsTheSameFontScale() {
         let font = CTFontCreateWithName("Helvetica" as CFString, 13, nil)
         let prefix = GModMetalCoreTextLayout(text: "ABC", font: font, requestedTall: 13)
