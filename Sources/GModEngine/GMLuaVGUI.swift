@@ -2248,7 +2248,8 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     /// Submits the currently focused single-line TextEntry through its real
     /// scripted `OnEnter` callback. The iPad MENU host uses this for the soft
     /// keyboard Return key; the callback remains owned by original Derma Lua,
-    /// receives only the usual Panel self argument, and no console action is
+    /// receives Panel self and the current text, as DTextEntry's original
+    /// OnKeyCodeTyped passes to OnEnter. No console action is
     /// synthesized in Swift.
     @discardableResult
     public func submitFocusedTextEntry() throws -> Int? {
@@ -2267,7 +2268,10 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         } ?? false
         lock.unlock()
         guard let identifier, acceptsInput else { return nil }
-        _ = try callPanelMethod(identifier: identifier, name: "OnEnter")
+        _ = try callPanelMethod(
+            identifier: identifier, name: "OnEnter",
+            arguments: [.string(descriptor?.text ?? LuaString(""))]
+        )
         return identifier
     }
 

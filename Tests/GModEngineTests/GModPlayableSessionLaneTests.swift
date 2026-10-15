@@ -47,7 +47,10 @@ final class GModPlayableSessionLaneTests: XCTestCase {
             JAPANESE_CHANGES = 0
             JAPANESE_SUBMITS = 0
             function JAPANESE_ENTRY:OnTextChanged() JAPANESE_CHANGES = JAPANESE_CHANGES + 1 end
-            function JAPANESE_ENTRY:OnEnter() JAPANESE_SUBMITS = JAPANESE_SUBMITS + 1 end
+            function JAPANESE_ENTRY:OnEnter(value)
+                assert(value == self:GetText())
+                JAPANESE_SUBMITS = JAPANESE_SUBMITS + 1
+            end
             """,
             realm: .client, expectedGeneration: started.generation
         )
