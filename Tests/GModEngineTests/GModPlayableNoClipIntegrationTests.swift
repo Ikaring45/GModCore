@@ -31,6 +31,75 @@ private final class ToggleableEmbeddedWorldWalkProvider:
 }
 
 final class GModPlayableNoClipIntegrationTests: XCTestCase {
+    func testEmbeddedWalkKeepsFIFOAliveForNoClipRecovery() throws {
+        let collision = ToggleableEmbeddedWorldWalkProvider()
+        let session = try GModPlayableSession(
+            configuration: GModPlayableSessionConfiguration(map: .construct),
+            textMeasurer: nil,
+            logger: { _, _ in },
+            worldWalkCollisionProvider: collision
+        )
+        defer { _ = try? session.close() }
+
+        collision.isEmbedded = true
+        let embeddedState = session.playerWalkState
+        let blocked = try session.runFixedTick()
+        XCTAssertEqual(blocked.movement.rejection?.reason, .feature(.stuckRecovery))
+        XCTAssertEqual(session.playerWalkState, embeddedState)
+        XCTAssertEqual(session.sourceAdapter.serverGlobals.tickCount, 1)
+        XCTAssertEqual(blocked.client.kind, .clientFixedTick)
+        XCTAssertFalse(session.isClosed)
+
+        try session.requestToggleNoClip()
+        XCTAssertGreaterThan(session.sharedSession.netTransport.pendingDeliveryCount, 0)
+        let enabled = try session.runFixedTick()
+        XCTAssertEqual(enabled.movement.rejection?.reason, .feature(.stuckRecovery))
+        XCTAssertEqual(enabled.actionFailures, [])
+        XCTAssertEqual(session.playerWalkState.origin, embeddedState.origin)
+        XCTAssertEqual(session.playerWalkState.moveType, .noClip)
+        XCTAssertEqual(session.sharedSession.netTransport.pendingDeliveryCount, 0)
+        try session.clientRuntime.execute(
+            "assert(LocalPlayer():GetMoveType() == MOVETYPE_NOCLIP)",
+            sourceName: "=(embedded noclip replicated through FIFO)"
+        )
+
+        let escaped = try session.runFixedTick(
+            movementInput: GModPlayableMovementInput(
+                viewAngles: .zero,
+                forwardMove: 100,
+                buttons: [.forward]
+            )
+        )
+        XCTAssertNil(escaped.movement.rejection)
+        XCTAssertGreaterThan(session.playerWalkState.origin.x, embeddedState.origin.x)
+
+        // Switching back to WALK while still in solid must leave the next
+        // noclip request deliverable instead of permanently stopping the app.
+        try session.requestToggleNoClip()
+        _ = try session.runFixedTick()
+        XCTAssertEqual(session.playerWalkState.moveType, .walk)
+        let disabledState = session.playerWalkState
+        try session.serverRuntime.execute(
+            "hook.Add('PlayerNoClip', 'DenyEmbeddedRecovery', function() return false end)",
+            sourceName: "=(deny embedded noclip recovery)"
+        )
+        try session.requestToggleNoClip()
+        let denied = try session.runFixedTick()
+        XCTAssertEqual(denied.movement.rejection?.reason, .feature(.stuckRecovery))
+        XCTAssertEqual(denied.actionFailures, [])
+        XCTAssertEqual(session.playerWalkState, disabledState)
+        XCTAssertEqual(session.sharedSession.netTransport.pendingDeliveryCount, 0)
+
+        try session.serverRuntime.execute(
+            "hook.Remove('PlayerNoClip', 'DenyEmbeddedRecovery')",
+            sourceName: "=(allow embedded noclip recovery)"
+        )
+        try session.requestToggleNoClip()
+        _ = try session.runFixedTick()
+        XCTAssertEqual(session.playerWalkState.moveType, .noClip)
+        XCTAssertFalse(session.isClosed)
+    }
+
     func testEnabledNoClipLeavesAnEmbeddedWorldWithoutStoppingTheSession()
         throws
     {

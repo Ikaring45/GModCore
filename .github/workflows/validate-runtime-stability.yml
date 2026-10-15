@@ -1,0 +1,41 @@
+name: Validate portable runtime stability
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "Package.swift"
+      - "Sources/**"
+      - "Tests/GModEngineTests/**"
+      - ".github/workflows/validate-runtime-stability.yml"
+  pull_request:
+    paths:
+      - "Package.swift"
+      - "Sources/**"
+      - "Tests/GModEngineTests/**"
+      - ".github/workflows/validate-runtime-stability.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-stability-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  runtime-stability:
+    runs-on: ubuntu-24.04
+    container: swift:6.2
+    timeout-minutes: 25
+    steps:
+      - name: Install checkout and SQLite prerequisites
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git git-lfs libsqlite3-dev
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - name: Exercise movement recovery and stock Q host frames
+        run: |
+          swift --version
+          swift test --jobs 2 --filter 'GModPlayableNoClipIntegrationTests|SourceWorldWalkTests|GModPlayableSessionTests/testNonFiniteMovementRemainsFatalAfterWaterMovement|GModPlayableSessionLaneTests/testSpawnMenuRemainsTexturedAcrossPassiveHostFrames'

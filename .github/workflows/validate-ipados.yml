@@ -513,6 +513,8 @@ jobs:
             -only-testing:GModAppTests/GModMetalSurfaceSceneTests/testStockQFirstVisiblePublicationRequiresResolvedGwenScene \
             -only-testing:GModEngineTests/GModPlayableSessionLaneTests/testSpawnMenuRemainsTexturedAcrossPassiveHostFrames \
             -only-testing:GModEngineTests/GModPlayableNoClipIntegrationTests/testEnabledNoClipLeavesAnEmbeddedWorldWithoutStoppingTheSession \
+            -only-testing:GModEngineTests/GModPlayableNoClipIntegrationTests/testEmbeddedWalkKeepsFIFOAliveForNoClipRecovery \
+            -only-testing:GModEngineTests/GModPlayableSessionTests/testNonFiniteMovementRemainsFatalAfterWaterMovement \
             -only-testing:GModEngineTests/SourceWorldWalkTests/testNoClipCanStartEmbeddedWithoutStoppingTheSession \
             -parallel-testing-enabled NO \
             ARCHS=arm64 \

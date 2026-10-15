@@ -1644,7 +1644,16 @@ public final class GModPlayableSession {
             }
             movement = .advanced(tick)
         } catch let error as SourceWorldWalkError {
-            guard let reason = error.recoverableUnsupportedReason else {
+            let reason: SourceWorldWalkUnsupportedReason
+            if case .embeddedInWorld = error {
+                // The solver cannot yet unstick a WALK hull. Preserve its
+                // transactional state, but keep the session and normal FIFO
+                // alive so Sandbox can approve noclip or a teleport. Running
+                // console commands early would change SERVER tick ordering.
+                reason = .feature(.stuckRecovery)
+            } else if let unsupported = error.recoverableUnsupportedReason {
+                reason = unsupported
+            } else {
                 throw error
             }
             movement = .rejected(GModPlayableMovementRejection(
