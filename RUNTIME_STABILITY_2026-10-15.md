@@ -33,9 +33,11 @@ Physical iPad/Swift Playgrounds validation is a separate outstanding check.
   (including embedded WALK/FIFO recovery and Sandbox denial), stock Q passive
   frame persistence, non-finite movement rejection, and all SourceWorldWalk
   tests. The test run took approximately 125 seconds after an 83-second build.
-- GitHub rejected the branch push with HTTP 403,
-  `You must verify your email address`. Neither new CI workflow has executed
-  for this branch; local tests do not establish Apple/device presentation.
+- GitHub initially rejected the branch push with HTTP 403,
+  `You must verify your email address`. Push later succeeded; the branch is
+  available remotely. See `VGUI_JAPANESE_2026-10-15.md` for the subsequent
+  Linux and Apple focused validation results. Physical-device presentation
+  remains unverified.
 - The historical 0.1.60 Apple run `32617758441` completed its focused gates,
   but its full XCTest run failed: 818 tests, 13 skipped, 15 assertion/error
   failures (2 unexpected). This is a pre-existing baseline, not a result for

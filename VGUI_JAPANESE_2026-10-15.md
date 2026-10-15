@@ -33,3 +33,18 @@ IME candidate UI and Metal presentation still need device verification.
 Linux has no native image decoder in this package. Its fast CI job now tests
 portable movement/localization/Hint contracts; stock image-backed Sandbox
 session tests run on Windows and in the dedicated iPad Simulator gate.
+
+## Results
+
+- Windows Swift 6.4.1: all 65 related VGUI/localization/Hint/MENU/session tests
+  passed. After adding the original OnEnter text argument, the 3 affected
+  MENU/session tests passed again.
+- Linux CI `38727207225`: 45 portable movement, localization and image-free
+  Hint overlay tests passed.
+- Apple CI `38726635529`, source commit `a238a3b`: strict ARM64 libraries,
+  installable iPad app, Metal pipeline smoke, Simulator install/launch and
+  accessibility smoke passed. The dedicated Japanese VGUI/IME/Q/noclip step
+  also passed, including all bundled-font and menu-localization tests and the
+  real UIKit marked-text regression.
+- The full Apple XCTest suite continues separately and is not being reported
+  as passed. No physical iPad validation was performed in this update.
