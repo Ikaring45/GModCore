@@ -27,10 +27,15 @@ Physical iPad/Swift Playgrounds validation is a separate outstanding check.
 ## Verification and next work
 
 - `git diff --check` passed for this update.
-- New runtime tests have not run yet: the previous local Windows Swift
-  toolchain is absent, and GitHub rejected the branch push with HTTP 403,
-  `You must verify your email address`. Therefore neither new CI workflow has
-  executed for this branch.
+- Installed the official Windows Swift 6.4.1 toolkit using WinGet and verified
+  its SDK with the existing Visual Studio 2022 x64 build environment.
+- Local `swift test --jobs 4` passed all 43 selected tests: noclip integration
+  (including embedded WALK/FIFO recovery and Sandbox denial), stock Q passive
+  frame persistence, non-finite movement rejection, and all SourceWorldWalk
+  tests. The test run took approximately 125 seconds after an 83-second build.
+- GitHub rejected the branch push with HTTP 403,
+  `You must verify your email address`. Neither new CI workflow has executed
+  for this branch; local tests do not establish Apple/device presentation.
 - The historical 0.1.60 Apple run `32617758441` completed its focused gates,
   but its full XCTest run failed: 818 tests, 13 skipped, 15 assertion/error
   failures (2 unexpected). This is a pre-existing baseline, not a result for
