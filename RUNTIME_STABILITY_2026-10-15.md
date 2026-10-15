@@ -23,3 +23,20 @@ stock Q persistence. Portable runtime checks now run separately so these
 regressions do not require waiting for the complete iPad build.
 
 Physical iPad/Swift Playgrounds validation is a separate outstanding check.
+
+## Verification and next work
+
+- `git diff --check` passed for this update.
+- New runtime tests have not run yet: the previous local Windows Swift
+  toolchain is absent, and GitHub rejected the branch push with HTTP 403,
+  `You must verify your email address`. Therefore neither new CI workflow has
+  executed for this branch.
+- The historical 0.1.60 Apple run `32617758441` completed its focused gates,
+  but its full XCTest run failed: 818 tests, 13 skipped, 15 assertion/error
+  failures (2 unexpected). This is a pre-existing baseline, not a result for
+  the new update.
+- That baseline includes missing Studio appearance metadata in stock prop and
+  player-hands routes, body-group resolver tests, a missing sky bitmap, stale
+  mesh allocation/terrain expectations, floating-point equality in viewmodel
+  conversion, and player respawn/combat expectations. These require separate
+  fixes with their asset and runtime contracts preserved.
