@@ -1833,6 +1833,16 @@ public final class GModPlayableSession {
         return try clientVGUIRegistry().insertText(text)
     }
 
+    public func deleteClientVGUITextBackward() throws -> Int? {
+        try ensureOpen()
+        return try clientVGUIRegistry().deleteTextBackward()
+    }
+
+    public func submitClientVGUITextEntry() throws -> Int? {
+        try ensureOpen()
+        return try clientVGUIRegistry().submitFocusedTextEntry()
+    }
+
     /// Dispatches the stock CLIENT spawn-menu lifecycle hook used by GMod's
     /// `+menu`/`-menu` commands. Visibility remains owned by Sandbox Lua.
     public func setSpawnMenuOpen(_ isOpen: Bool) throws {

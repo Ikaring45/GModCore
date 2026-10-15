@@ -426,6 +426,7 @@ final class GModGameSessionModel: ObservableObject {
     @Published private(set) var surfaceDiagnostics: GModMetalSurfaceDiagnostics?
     @Published private(set) var surfaceStatus = "VGUI surface idle"
     @Published private(set) var activeClientMenu: GModGameClientMenu?
+    @Published private(set) var focusedClientTextEntry: Int?
     @Published private(set) var transitioningClientMenu: GModGameClientMenu?
     @Published private(set) var pointerStatus = "VGUI pointer idle"
     @Published private(set) var pointerQueueDropCount = 0
@@ -467,6 +468,7 @@ final class GModGameSessionModel: ObservableObject {
     private var surfaceRequestRevision: UInt64 = 0
     private var surfaceRefreshQueue = GModGameSurfaceRefreshPendingQueue()
     private var surfaceRefreshTask: Task<Void, Never>?
+    private var clientTextMutationTask: Task<Void, Never>?
     private var pendingForegroundSurfaceBuild:
         GModForegroundSurfaceBuildRequest?
     private var foregroundSurfaceBuildTask: Task<Void, Never>?
@@ -1273,6 +1275,50 @@ final class GModGameSessionModel: ObservableObject {
         setClientMenu(.context, open: replacement)
     }
 
+    func insertClientMenuText(_ text: String) {
+        editClientMenuText(text == "\n" || text == "\r" ? .submit : .insert(text))
+    }
+
+    func deleteClientMenuTextBackward() {
+        editClientMenuText(.deleteBackward)
+    }
+
+    private func editClientMenuText(_ edit: GModPlayableClientTextEdit) {
+        guard isReady, isClientMenuOpen, !isInputSuspended,
+              !inputSuspensionInFlight, !isClientMenuTransitioning,
+              let focus = focusedClientTextEntry,
+              let laneGeneration, let pointerEpoch, let inputEpoch else { return }
+        let generation = sessionGeneration
+        let previous = clientTextMutationTask
+        clientTextMutationTask = Task { [weak self] in
+            await previous?.value
+            guard let self, generation == sessionGeneration,
+                  self.pointerEpoch == pointerEpoch, self.inputEpoch == inputEpoch,
+                  isReady, isClientMenuOpen, !isInputSuspended,
+                  !isClientMenuTransitioning else { return }
+            do {
+                _ = try await lane.editClientVGUIText(
+                    edit,
+                    focusedPanelIdentifier: focus,
+                    expectedGeneration: laneGeneration,
+                    expectedPointerEpoch: pointerEpoch,
+                    expectedInputEpoch: inputEpoch
+                )
+                guard generation == sessionGeneration,
+                      self.inputEpoch == inputEpoch else { return }
+                scheduleClientSurfaceRefresh(
+                    applicationGeneration: generation,
+                    laneGeneration: laneGeneration,
+                    cause: .pointerMutation
+                )
+            } catch {
+                guard generation == sessionGeneration,
+                      self.inputEpoch == inputEpoch else { return }
+                appendLog("[CLIENT][VGUI] Text input failed: \(GMLuaRuntime.describe(error))")
+            }
+        }
+    }
+
     private func setClientMenu(
         _ menu: GModGameClientMenu,
         open replacement: Bool
@@ -1290,6 +1336,7 @@ final class GModGameSessionModel: ObservableObject {
         }
         let requestedGeneration = sessionGeneration
         let priorMenu = activeClientMenu
+        focusedClientTextEntry = nil
         if replacement {
             foregroundSurfaceRetryBudget.arm()
         } else {
@@ -2146,6 +2193,16 @@ final class GModGameSessionModel: ObservableObject {
                 scope: request.scope,
                 expectedGeneration: request.generation.lane
             )
+            if request.scope == .all, let pointerEpoch, let inputEpoch {
+                let focus = try await lane.insertClientVGUIText(
+                    "",
+                    expectedGeneration: request.generation.lane,
+                    expectedPointerEpoch: pointerEpoch,
+                    expectedInputEpoch: inputEpoch
+                )
+                guard surfaceTokenIsCurrent(surfaceToken) else { return }
+                focusedClientTextEntry = focus
+            }
             await buildAndPublishSurfaceScene(snapshot, token: surfaceToken)
         } catch {
             guard isReady, !isInputSuspended,

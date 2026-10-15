@@ -371,6 +371,17 @@ public struct GModMainView: View {
                         }
                     }
 
+                    GModDermaMenuTextInputBridge(
+                        wantsFocus: game.isReady && game.isClientMenuOpen &&
+                            !game.isInputSuspended && !game.isClientMenuTransitioning &&
+                            game.focusedClientTextEntry != nil,
+                        focusIdentifier: game.focusedClientTextEntry,
+                        onText: game.insertClientMenuText,
+                        onDeleteBackward: game.deleteClientMenuTextBackward
+                    )
+                    .frame(width: 1, height: 1)
+                    .allowsHitTesting(false)
+
                     GeometryReader { geometry in
                         let safeArea = geometry.safeAreaInsets
                         let layout = GModInGameOverlayLayout(

@@ -3,6 +3,7 @@ import CoreText
 import Foundation
 import GModEngine
 import GModLua
+import GModMetal
 
 public struct GModBundledFontRegistrationFailure: Sendable, Equatable {
     public let bundleFile: String
@@ -427,35 +428,15 @@ public final class GModCoreTextMeasurer: GMLuaTextMeasurer, @unchecked Sendable 
         registry.registerAllFonts()
         let font = makeFont(for: descriptor)
         let decoded = String(decoding: text.bytes, as: UTF8.self)
-        let lines = decoded.split(
-            separator: "\n",
-            omittingEmptySubsequences: false
+        let layout = GModMetalCoreTextLayout(
+            text: decoded, font: font, requestedTall: descriptor.size
         )
-        let attributes = [
-            NSAttributedString.Key(kCTFontAttributeName as String): font
-        ]
-        var maximumWidth = 0
-        for line in lines {
-            let attributed = NSAttributedString(
-                string: String(line),
-                attributes: attributes
-            )
-            let coreTextLine = CTLineCreateWithAttributedString(attributed)
-            maximumWidth = max(
-                maximumWidth,
-                Self.pixelDimension(CTLineGetTypographicBounds(
-                    coreTextLine,
-                    nil,
-                    nil,
-                    nil
-                ))
-            )
-        }
+        let maximumWidth = layout.widths.map(Self.pixelDimension).max() ?? 0
 
         return GMLuaTextMeasurement(
             width: maximumWidth,
             height: GMLuaSourceFontTallMetrics.exactTextHeight(
-                lineCount: lines.count,
+                lineCount: layout.lines.count,
                 requestedTall: descriptor.size
             )
         )

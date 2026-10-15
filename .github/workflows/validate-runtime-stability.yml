@@ -35,7 +35,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           lfs: true
-      - name: Exercise movement recovery and stock Q host frames
+      - name: Exercise portable movement, localization, and Hint panels
         run: |
           swift --version
-          swift test --jobs 2 --filter 'GModPlayableNoClipIntegrationTests|SourceWorldWalkTests|GModPlayableSessionTests/testNonFiniteMovementRemainsFatalAfterWaterMovement|GModPlayableSessionLaneTests/testSpawnMenuRemainsTexturedAcrossPassiveHostFrames'
+          # Linux deliberately has no native image decoder. Stock Sandbox
+          # sessions require PNG decoding and are covered by the Apple job.
+          swift test --jobs 2 --filter 'SourceWorldWalkTests|GMLuaLanguageTests|GMLuaNotificationVGUIFrameTests'

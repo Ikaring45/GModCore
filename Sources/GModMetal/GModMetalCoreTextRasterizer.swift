@@ -183,22 +183,11 @@ public final class GModMetalCoreTextRasterizer:
             nil
         )
 
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
-        let attributes: [NSAttributedString.Key: Any] = [
-            NSAttributedString.Key(kCTFontAttributeName as String): font,
-            NSAttributedString.Key(
-                kCTForegroundColorFromContextAttributeName as String
-            ): true
-        ]
-        let coreTextLines = lines.map { line in
-            CTLineCreateWithAttributedString(NSAttributedString(
-                string: String(line),
-                attributes: attributes
-            ))
-        }
-        let widths = coreTextLines.map {
-            CTLineGetTypographicBounds($0, nil, nil, nil)
-        }
+        let layout = GModMetalCoreTextLayout(
+            text: text, font: font, requestedTall: descriptor.size
+        )
+        let coreTextLines = layout.lines
+        let widths = layout.widths
         guard widths.allSatisfy({ $0.isFinite && $0 >= 0 }) else {
             throw GModMetalCoreTextRasterizerError.invalidMetrics
         }
@@ -210,7 +199,7 @@ public final class GModMetalCoreTextRasterizer:
         }
         let width = max(1, Int(roundedWidth))
         let height = GMLuaSourceFontTallMetrics.exactTextHeight(
-            lineCount: lines.count,
+            lineCount: coreTextLines.count,
             requestedTall: descriptor.size
         )
         let pixels = width.multipliedReportingOverflow(by: height)
@@ -254,7 +243,6 @@ public final class GModMetalCoreTextRasterizer:
             context.translateBy(x: 0, y: CGFloat(height))
             context.scaleBy(x: 1, y: -1)
 
-            let ascent = CTFontGetAscent(font)
             for (index, line) in coreTextLines.enumerated() {
                 // The explicit transform gives this raw bitmap context a
                 // top-left, y-down user space. Core Text's baseline still has
@@ -264,7 +252,7 @@ public final class GModMetalCoreTextRasterizer:
                 let lineTop = CGFloat(index * max(1, descriptor.size))
                 context.textPosition = CGPoint(
                     x: 0,
-                    y: CGFloat(height) - lineTop - ascent
+                    y: CGFloat(height) - lineTop - layout.ascents[index]
                 )
                 CTLineDraw(line, context)
             }

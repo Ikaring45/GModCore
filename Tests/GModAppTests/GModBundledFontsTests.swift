@@ -3,9 +3,46 @@ import XCTest
 import GModEngine
 import GModGameAssets
 import GModLua
+import GModMetal
 @testable import GModApp
 
 final class GModBundledFontsTests: XCTestCase {
+    func testJapaneseFallbackMeasurementMatchesVisibleRasterAtDermaSizes() throws {
+        let factory = GModAppRuntimeFactory()
+        let client = factory.makeRuntime(realm: .client, logger: { _ in })
+        defer { _ = client.close() }
+        let surface = try XCTUnwrap(client.surfaceCommandState)
+        let measurer = GModCoreTextMeasurer()
+        for size in [13, 18, 24] {
+            try client.execute(
+                "surface.CreateFont('JapaneseProbe', {font='Tahoma',size=\(size),weight=500,extended=true})",
+                sourceName: "=(Japanese fallback font)"
+            )
+            let font = try XCTUnwrap(surface.fontDescriptor(named: "JapaneseProbe"))
+            for text in ["日本語の表示", "設定 / Sandbox 123", "がぎぐげご・パピプペポ", "日本語\nコンソール"] {
+                let measurement = measurer.measure(LuaString(text), using: font)
+                let bitmap = try XCTUnwrap(
+                    factory.surfaceTextRasterizer.rasterizeSurfaceText(text, font: font)
+                )
+                XCTAssertEqual(bitmap.width, measurement.width, text)
+                XCTAssertEqual(bitmap.height, measurement.height, text)
+                XCTAssertEqual(bitmap.height, size * (text.contains("\n") ? 2 : 1))
+                let bytes = bitmap.premultipliedRGBA8
+                for band in 0..<(bitmap.height / size) {
+                    let start = band * size * bitmap.width * 4
+                    let end = start + size * bitmap.width * 4
+                    let visibleRows = (0..<size).filter { row in
+                        let rowStart = start + row * bitmap.width * 4
+                        return stride(from: rowStart + 3, to: rowStart + bitmap.width * 4, by: 4)
+                            .contains { bytes[$0] > 0 }
+                    }
+                    XCTAssertGreaterThan(visibleRows.count, size / 3, text)
+                    XCTAssertTrue(stride(from: start + 3, to: end, by: 4).contains { bytes[$0] > 0 })
+                }
+            }
+        }
+    }
+
     func testRuntimeFactoryReadsTheSessionMapPakForMetalMaterials() throws {
         let factory = GModAppRuntimeFactory()
 

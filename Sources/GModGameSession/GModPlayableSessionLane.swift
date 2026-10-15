@@ -897,15 +897,45 @@ public actor GModPlayableSessionLane {
         )
     }
 
-    public func insertClientVGUIText(
-        _ text: String,
-        expectedGeneration: UInt64? = nil
+    /// Keyboard edits use the same ownership epochs as touch. A delayed IME
+    /// commit must never edit a different field or a reopened Q/C menu.
+    public func editClientVGUIText(
+        _ edit: GModPlayableClientTextEdit,
+        focusedPanelIdentifier: Int,
+        expectedGeneration: UInt64,
+        expectedPointerEpoch: UInt64,
+        expectedInputEpoch: UInt64
     ) throws -> Int? {
         dedicatedExecutor.preconditionIsCurrentWorker()
         guard let session else {
             throw GModPlayableSessionLaneError.notStarted
         }
         try validate(expectedGeneration: expectedGeneration)
+        try validate(expectedPointerEpoch: expectedPointerEpoch)
+        try validate(expectedInputEpoch: expectedInputEpoch)
+        guard try session.insertClientVGUIText("") == focusedPanelIdentifier else {
+            return nil
+        }
+        switch edit {
+        case let .insert(text): return try session.insertClientVGUIText(text)
+        case .deleteBackward: return try session.deleteClientVGUITextBackward()
+        case .submit: return try session.submitClientVGUITextEntry()
+        }
+    }
+
+    public func insertClientVGUIText(
+        _ text: String,
+        expectedGeneration: UInt64? = nil,
+        expectedPointerEpoch: UInt64? = nil,
+        expectedInputEpoch: UInt64? = nil
+    ) throws -> Int? {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else {
+            throw GModPlayableSessionLaneError.notStarted
+        }
+        try validate(expectedGeneration: expectedGeneration)
+        try validate(expectedPointerEpoch: expectedPointerEpoch)
+        try validate(expectedInputEpoch: expectedInputEpoch)
         return try session.insertClientVGUIText(text)
     }
 

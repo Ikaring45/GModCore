@@ -30,6 +30,64 @@ private final class LaneShutdownCleanupRecorder: @unchecked Sendable {
 }
 
 final class GModPlayableSessionLaneTests: XCTestCase {
+    func testJapaneseClientTextEditsUseFocusAndInputEpochs() async throws {
+        let lane = GModPlayableSessionLane()
+        let started = try await lane.start(configuration: .init(map: .construct))
+        let opened = try await lane.setSpawnMenuOpen(
+            true, expectedGeneration: started.generation
+        )
+        try await lane.execute(
+            """
+            JAPANESE_ENTRY = vgui.Create("DTextEntry")
+            JAPANESE_ENTRY:SetSize(240, 32)
+            JAPANESE_ENTRY:SetAllowNonAsciiCharacters(true)
+            JAPANESE_ENTRY:SetText("")
+            JAPANESE_ENTRY:MakePopup()
+            JAPANESE_ENTRY:RequestFocus()
+            JAPANESE_CHANGES = 0
+            JAPANESE_SUBMITS = 0
+            function JAPANESE_ENTRY:OnTextChanged() JAPANESE_CHANGES = JAPANESE_CHANGES + 1 end
+            function JAPANESE_ENTRY:OnEnter() JAPANESE_SUBMITS = JAPANESE_SUBMITS + 1 end
+            """,
+            realm: .client, expectedGeneration: started.generation
+        )
+        let currentFocus = try await lane.insertClientVGUIText(
+            "", expectedGeneration: started.generation
+        )
+        let focus = try XCTUnwrap(currentFocus)
+        for edit in [GModPlayableClientTextEdit.insert("日本語😀"), .deleteBackward, .submit] {
+            let edited = try await lane.editClientVGUIText(
+                edit, focusedPanelIdentifier: focus,
+                expectedGeneration: started.generation,
+                expectedPointerEpoch: opened.pointerEpoch,
+                expectedInputEpoch: opened.inputEpoch
+            )
+            XCTAssertEqual(edited, focus)
+        }
+        try await lane.execute(
+            "assert(JAPANESE_ENTRY:GetText() == '日本語'); assert(JAPANESE_CHANGES == 2); assert(JAPANESE_SUBMITS == 1)",
+            realm: .client, expectedGeneration: started.generation
+        )
+        let rejectedFocus = try await lane.editClientVGUIText(
+            .insert("誤配送"), focusedPanelIdentifier: focus + 100_000,
+            expectedGeneration: started.generation,
+            expectedPointerEpoch: opened.pointerEpoch,
+            expectedInputEpoch: opened.inputEpoch
+        )
+        XCTAssertNil(rejectedFocus)
+        _ = try await lane.setSpawnMenuOpen(false, expectedGeneration: started.generation)
+        do {
+            _ = try await lane.editClientVGUIText(
+                .insert("遅延入力"), focusedPanelIdentifier: focus,
+                expectedGeneration: started.generation,
+                expectedPointerEpoch: opened.pointerEpoch,
+                expectedInputEpoch: opened.inputEpoch
+            )
+            XCTFail("retired menu accepted a delayed IME commit")
+        } catch is GModPlayableSessionLaneError {}
+        _ = try await lane.close()
+    }
+
     func testDroppedLaneClosesFinalizersOnWorkerAfterThrowAndCancellation()
         async throws
     {

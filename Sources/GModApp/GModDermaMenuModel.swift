@@ -7,6 +7,7 @@ import SwiftUI
 
 private struct GModDermaMenuPointerOutput: Sendable {
     let wantsTextInput: Bool
+    let focusedTextEntry: Int?
     let actions: [GMLuaMenuAction]
 }
 
@@ -113,7 +114,7 @@ private actor GModDermaMenuSessionLane {
             viewportWidth: viewport.width,
             viewportHeight: viewport.height
         )
-        let wantsTextInput = try session.insertText("") != nil
+        let focusedTextEntry = try session.insertText("")
         if sample.timestamp.isFinite {
             if let prior = lastAdvanceTimestamp {
                 let delta = min(0.25, max(0, sample.timestamp - prior))
@@ -122,7 +123,8 @@ private actor GModDermaMenuSessionLane {
             lastAdvanceTimestamp = sample.timestamp
         }
         return GModDermaMenuPointerOutput(
-            wantsTextInput: wantsTextInput,
+            wantsTextInput: focusedTextEntry != nil,
+            focusedTextEntry: focusedTextEntry,
             actions: session.drainActions()
         )
     }
@@ -164,6 +166,7 @@ final class GModDermaMenuModel: ObservableObject {
     @Published private(set) var surfaceScene: GModMetalSurfaceScene?
     @Published private(set) var failure: String?
     @Published private(set) var wantsTextInput = false
+    @Published private(set) var focusedTextEntry: Int?
 
     private let runtimeFactory: GModAppRuntimeFactory
     private let permissionStore: GModPermissionStore
@@ -469,6 +472,7 @@ final class GModDermaMenuModel: ObservableObject {
                 )
                 guard generation == sessionGeneration else { return }
                 wantsTextInput = output.wantsTextInput
+                focusedTextEntry = output.focusedTextEntry
                 if !output.actions.isEmpty { onActions(output.actions) }
                 requestFrame()
             } catch {
@@ -655,6 +659,7 @@ struct GModDermaMenuSurface: View {
 
                 GModDermaMenuTextInputBridge(
                     wantsFocus: model.wantsTextInput,
+                    focusIdentifier: model.focusedTextEntry,
                     onText: { text in
                         model.insertText(text) { actions in
                             if !actions.isEmpty {
@@ -688,13 +693,14 @@ struct GModDermaMenuSurface: View {
 import UIKit
 
 @MainActor
-private struct GModDermaMenuTextInputBridge: UIViewRepresentable {
+struct GModDermaMenuTextInputBridge: UIViewRepresentable {
     let wantsFocus: Bool
+    let focusIdentifier: Int?
     let onText: (String) -> Void
     let onDeleteBackward: () -> Void
 
     func makeUIView(context: Context) -> GModDermaMenuKeyInputView {
-        let view = GModDermaMenuKeyInputView()
+        let view = GModDermaMenuKeyInputView(frame: .zero, textContainer: nil)
         view.onText = onText
         view.onDeleteBackward = onDeleteBackward
         return view
@@ -703,9 +709,13 @@ private struct GModDermaMenuTextInputBridge: UIViewRepresentable {
     func updateUIView(_ uiView: GModDermaMenuKeyInputView, context: Context) {
         uiView.onText = onText
         uiView.onDeleteBackward = onDeleteBackward
+        uiView.updateFocus(wantsFocus: wantsFocus, identifier: focusIdentifier)
         if wantsFocus {
             if !uiView.isFirstResponder {
-                DispatchQueue.main.async { _ = uiView.becomeFirstResponder() }
+                DispatchQueue.main.async { [weak uiView] in
+                    guard let uiView, uiView.wantsKeyboardFocus else { return }
+                    _ = uiView.becomeFirstResponder()
+                }
             }
         } else if uiView.isFirstResponder {
             uiView.resignFirstResponder()
@@ -714,25 +724,91 @@ private struct GModDermaMenuTextInputBridge: UIViewRepresentable {
 }
 
 @MainActor
-private final class GModDermaMenuKeyInputView: UIView, UIKeyInput {
+final class GModDermaMenuKeyInputView: UITextView, UITextViewDelegate {
     var onText: ((String) -> Void)?
     var onDeleteBackward: (() -> Void)?
+    private(set) var wantsKeyboardFocus = false
+    private var focusIdentifier: Int?
+    private var editingNativeBuffer = false
 
-    override var canBecomeFirstResponder: Bool { true }
-    var hasText: Bool { false }
-
-    func insertText(_ text: String) {
-        onText?(text)
+    override init(frame: CGRect, textContainer: NSTextContainer?) {
+        super.init(frame: frame, textContainer: textContainer)
+        delegate = self
+        backgroundColor = .clear
+        textColor = .clear
+        tintColor = .clear
+        autocorrectionType = .no
+        autocapitalizationType = .none
+        spellCheckingType = .no
+        smartQuotesType = .no
+        smartDashesType = .no
+        smartInsertDeleteType = .no
+        isScrollEnabled = false
+        textContainerInset = .zero
     }
 
-    func deleteBackward() {
-        onDeleteBackward?()
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    func updateFocus(wantsFocus: Bool, identifier: Int?) {
+        wantsKeyboardFocus = wantsFocus
+        if !wantsFocus || identifier != focusIdentifier {
+            editingNativeBuffer = true
+            super.unmarkText()
+            text = ""
+            editingNativeBuffer = false
+        }
+        focusIdentifier = identifier
+    }
+
+    override func setMarkedText(_ markedText: String?, selectedRange: NSRange) {
+        editingNativeBuffer = true
+        super.setMarkedText(markedText, selectedRange: selectedRange)
+        editingNativeBuffer = false
+    }
+
+    override func unmarkText() {
+        editingNativeBuffer = true
+        super.unmarkText()
+        editingNativeBuffer = false
+        flushCommittedText()
+    }
+
+    override func insertText(_ text: String) {
+        editingNativeBuffer = true
+        super.insertText(text)
+        editingNativeBuffer = false
+        flushCommittedText()
+    }
+
+    override func deleteBackward() {
+        if markedTextRange != nil || hasText {
+            editingNativeBuffer = true
+            super.deleteBackward()
+            editingNativeBuffer = false
+        } else if wantsKeyboardFocus {
+            onDeleteBackward?()
+        }
+    }
+
+    func textViewDidChange(_ textView: UITextView) {
+        flushCommittedText()
+    }
+
+    private func flushCommittedText() {
+        guard !editingNativeBuffer, wantsKeyboardFocus,
+              markedTextRange == nil, !text.isEmpty else { return }
+        let committed = text ?? ""
+        editingNativeBuffer = true
+        text = ""
+        editingNativeBuffer = false
+        onText?(committed)
     }
 }
 #else
 @MainActor
-private struct GModDermaMenuTextInputBridge: View {
+struct GModDermaMenuTextInputBridge: View {
     let wantsFocus: Bool
+    let focusIdentifier: Int?
     let onText: (String) -> Void
     let onDeleteBackward: () -> Void
 

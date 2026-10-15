@@ -496,7 +496,7 @@ jobs:
             COPY_PHASE_STRIP=NO \
             SWIFT_STRICT_CONCURRENCY=complete
 
-      - name: Prove stock Q persistence and embedded noclip recovery
+      - name: Prove Japanese VGUI, IME, stock Q and noclip recovery
         env:
           TEST_SCHEME: ${{ steps.package.outputs.test_scheme }}
           SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
@@ -510,7 +510,11 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/gmod-package-simulator" \
             -resultBundlePath "$RUNNER_TEMP/GModCore-Q-Persistence-NoClip.xcresult" \
             -only-testing:GModAppTests/GModGameForegroundSurfacePublicationPolicyTests \
+            -only-testing:GModAppTests/GModBundledFontsTests \
+            -only-testing:GModAppTests/GModJapaneseTextInputTests \
+            -only-testing:GModAppTests/GModMenuLocalizationTests \
             -only-testing:GModAppTests/GModMetalSurfaceSceneTests/testStockQFirstVisiblePublicationRequiresResolvedGwenScene \
+            -only-testing:GModEngineTests/GModPlayableSessionLaneTests/testJapaneseClientTextEditsUseFocusAndInputEpochs \
             -only-testing:GModEngineTests/GModPlayableSessionLaneTests/testSpawnMenuRemainsTexturedAcrossPassiveHostFrames \
             -only-testing:GModEngineTests/GModPlayableNoClipIntegrationTests/testEnabledNoClipLeavesAnEmbeddedWorldWithoutStoppingTheSession \
             -only-testing:GModEngineTests/GModPlayableNoClipIntegrationTests/testEmbeddedWalkKeepsFIFOAliveForNoClipRecovery \
