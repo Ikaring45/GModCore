@@ -13,12 +13,11 @@ Swift UI.
 
 ## Current milestone
 
-0.1.60 keeps the resolved stock Q Surface scene visible across passive host
-refreshes and lets noclip move back out of BSP terrain after starting inside a
-solid. Foreground captures that contain no renderer-visible Derma content no
-longer erase the last complete Q/C frame, while ordinary walking retains its
-strict embedded-world failure contract. The detailed validation boundary is
-recorded in `RELEASE_NOTES_0.1.60.md`.
+0.1.61 adds native Japanese IME input to original MENU and CLIENT Q/C TextEntry
+panels, stable mixed Japanese/Latin font rendering and bounded text measurement
+caching. Embedded walking now rejects the movement without stopping the session
+FIFO, allowing noclip recovery. Stock Q persistence remains intact. The detailed
+validation boundary is recorded in `RELEASE_NOTES_0.1.61.md`.
 
 The pure-Swift `GModLua` runtime now runs the Lua 5.1 official basic test corpus
 through `final OK !!!` and all cleanup collections. The passing Windows run
