@@ -201,6 +201,7 @@ public final class LuaState {
     var randomState: UInt64 = 0x4D595DF4D0F33173
     let mainDebugHookState = LuaDebugHookState()
     private let output: (String) -> Void
+    private let hexadecimalStringEscapes: Bool
     private static let maxMetatableChainDepth = 100
     // Lua 5.1 accepts ordinary non-tail recursion beyond 200 Lua frames
     // (the official calls.lua suite exercises deep(200)). Keep an explicit
@@ -227,9 +228,11 @@ public final class LuaState {
     public init(
         output: @escaping (String) -> Void = { print($0) },
         fileLoader: ((String) throws -> String)? = nil,
-        virtualFileSystem: LuaVirtualFileSystem? = nil
+        virtualFileSystem: LuaVirtualFileSystem? = nil,
+        hexadecimalStringEscapes: Bool = false
     ) {
         self.output = output
+        self.hexadecimalStringEscapes = hexadecimalStringEscapes
         self.fileLoader = fileLoader
         self.virtualFileSystem = virtualFileSystem
         self.threadEnvironmentTable = globalTable
@@ -446,7 +449,10 @@ public final class LuaState {
     }
 
     func parseRawSourceChunk(_ source: String) throws -> LuaChunk {
-        let tokens = try LuaLexer(source: source).tokenize()
+        let tokens = try LuaLexer(
+            source: source,
+            hexadecimalStringEscapes: hexadecimalStringEscapes
+        ).tokenize()
         return try LuaParser(tokens: tokens).parse()
     }
 

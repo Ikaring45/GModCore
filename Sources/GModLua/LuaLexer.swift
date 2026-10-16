@@ -48,11 +48,13 @@ struct LuaToken {
 
 final class LuaLexer {
     private let characters: [Character]
+    private let hexadecimalStringEscapes: Bool
     private var index = 0
     private var line = 1
     private var column = 1
 
-    init(source: String) {
+    init(source: String, hexadecimalStringEscapes: Bool = false) {
+        self.hexadecimalStringEscapes = hexadecimalStringEscapes
         // Lua treats CR, LF, CRLF, and LFCR as a single line ending and
         // normalizes line breaks captured by strings to LF.
         let normalized = source
@@ -342,6 +344,15 @@ final class LuaLexer {
             guard !isAtEnd else { break }
             let escaped = advance()
             switch escaped {
+            case "x" where hexadecimalStringEscapes:
+                guard let high = peek(), high.isHexDigit,
+                      let low = peek(1), low.isHexDigit,
+                      let byte = UInt8(String(high) + String(low), radix: 16) else {
+                    throw lexerError(startLine, startColumn, "hexadecimal digit expected in string escape")
+                }
+                _ = advance()
+                _ = advance()
+                bytes.append(byte)
             case "a": bytes.append(7)
             case "b": bytes.append(8)
             case "f": bytes.append(12)

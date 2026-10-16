@@ -2,6 +2,22 @@ import XCTest
 import GModLua
 
 final class LuaStateHostCallTests: XCTestCase {
+    func testHexadecimalStringEscapesAreOptInAndRemainBytes() throws {
+        let lua51 = LuaState(output: { _ in })
+        defer { _ = lua51.close() }
+        try lua51.execute(#"assert("\x41" == "x41")"#)
+        let glua = LuaState(output: { _ in }, hexadecimalStringEscapes: true)
+        defer { _ = glua.close() }
+        try glua.execute(#"""
+            assert("\x41\x00\xff" == string.char(65, 0, 255))
+            assert("\xE6\x97\xA5" == "日")
+            local f = assert(loadstring('return "\\x41"'))
+            assert(f() == "A")
+            """#)
+        XCTAssertThrowsError(try glua.execute(#"return "\xG0""#))
+        XCTAssertThrowsError(try glua.execute(#"return "\x1""#))
+    }
+
     func testNumberPrintableDoesNotTrapAtInt64UpperBoundary() {
         let boundary = LuaValue.number(9_223_372_036_854_775_808.0).printable
         XCTAssertFalse(boundary.isEmpty)
