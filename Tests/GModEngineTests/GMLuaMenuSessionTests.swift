@@ -3,6 +3,44 @@ import GModEngine
 import GModGameAssets
 
 final class GMLuaMenuSessionTests: XCTestCase {
+    func testOriginalProblemTabsRouteLuaErrorsPermissionsAndSettings() throws {
+        var messages: [String] = []
+        let files = try GMLuaHostDirectoryFileSystem(
+            rootURL: GModGameAssets.clientContentRootURL(), writable: false
+        )
+        let session = GMLuaMenuSession(fileSystem: files, logger: { messages.append($0) })
+        defer { _ = session.close() }
+        _ = try session.start()
+        try session.updateProblems(["Runtime diagnostic 日本語"])
+        try session.updateLuaErrors([
+            GMLuaMenuLuaError(realm: "client", message: "Original Lua error 日本語")
+        ])
+        try session.updatePermissions(GMLuaPermissionSnapshot(
+            temporary: ["local://garrys-pad": ["connect"]], permanent: [:]
+        ))
+        try session.present(.problems)
+        var frame = try session.renderFrame(viewportWidth: 1_024, viewportHeight: 768)
+        for tab in ["problems.problems", "problems.lua_errors", "permissions.title"] {
+            let point = try XCTUnwrap(frame.commands.compactMap { command -> GMLuaCursorPosition? in
+                guard case let .text(value, position, _, _, _) = command,
+                      value.utf8String == tab || value.utf8String == "#" + tab else { return nil }
+                return position
+            }.first, "missing original tab \(tab): \(texts(in: frame)); logs: \(messages)")
+            try tap(x: point.x + 8, y: point.y + 5, in: session)
+            _ = try session.advance(by: 0.2)
+            frame = try session.renderFrame(viewportWidth: 1_024, viewportHeight: 768)
+            if tab == "problems.lua_errors" {
+                XCTAssertTrue(texts(in: frame).contains { $0.contains("Original Lua error") })
+            } else if tab == "permissions.title" {
+                XCTAssertTrue(texts(in: frame).contains { $0.contains("local://garrys-pad") })
+            }
+        }
+        try session.present(.settings)
+        frame = try session.renderFrame(viewportWidth: 1_024, viewportHeight: 768)
+        XCTAssertTrue(texts(in: frame).contains("Settings"))
+        XCTAssertFalse(messages.contains { $0.contains("failed:") }, messages.joined(separator: "\n"))
+    }
+
     func testDermaUtilitiesRenderHostStateAndRouteSettingsProblemsAndConsole()
         throws
     {
@@ -10,17 +48,19 @@ final class GMLuaMenuSessionTests: XCTestCase {
             rootURL: GModGameAssets.clientContentRootURL(),
             writable: false
         )
+        var messages: [String] = []
         let session = GMLuaMenuSession(
             fileSystem: files,
             initialViewport: GMLuaViewportSize(width: 1_024, height: 768),
-            logger: { _ in }
+            logger: { messages.append($0) }
         )
         defer { _ = session.close() }
 
         let report = try session.start()
         XCTAssertEqual(report.loadedPaths.first, "lua/includes/init.lua")
         XCTAssertEqual(report.loadedPaths.last, "lua/skins/default.lua")
-        XCTAssertGreaterThanOrEqual(report.rootPanelCount, 3)
+        XCTAssertGreaterThanOrEqual(report.rootPanelCount, 2)
+        XCTAssertTrue(report.loadedPaths.contains("lua/menu/problems/problems_pnl.lua"))
 
         var frame = try session.renderFrame(
             viewportWidth: 1_024,
@@ -81,6 +121,9 @@ final class GMLuaMenuSessionTests: XCTestCase {
         try session.present(.problems)
         XCTAssertNil(try session.insertText(""))
         XCTAssertNil(try session.submitFocusedTextEntry())
+        frame = try session.renderFrame(viewportWidth: 1_024, viewportHeight: 768)
+        XCTAssertFalse(frame.commands.isEmpty)
+        XCTAssertFalse(messages.contains { $0.contains("failed:") }, messages.joined(separator: "\n"))
     }
 
     func testMenuSessionIsSingleUseAndBoundsHostRetainedTextAndActions() throws {

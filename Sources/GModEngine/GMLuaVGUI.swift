@@ -2003,7 +2003,8 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         surface: GMLuaSurfaceCommandState,
         viewportWidth: Int,
         viewportHeight: Int,
-        scope: GMLuaVGUIRenderScope = .all
+        scope: GMLuaVGUIRenderScope = .all,
+        onCallbackFailure: ((Int, String, Error) -> Void)? = nil
     ) throws -> GMLuaSurfaceFrameSnapshot {
         // Native VGUI resolves Dock against the implicit world panel before
         // Lua PerformLayout. A second resolution after Lua layout captures any
@@ -2035,7 +2036,10 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         // while SetTerm/NewAnimation work is active; executing that live Lua
         // callback is what makes DNotify expiry, AlphaTo and LerpPositions
         // real state transitions instead of inert compatibility methods.
-        try dispatchVisiblePanelFrameCallbacks(scope: scope)
+        try dispatchVisiblePanelFrameCallbacks(
+            scope: scope,
+            onCallbackFailure: onCallbackFailure
+        )
         let tree = renderTree(
             viewportWidth: viewportWidth,
             viewportHeight: viewportHeight,
@@ -2056,11 +2060,17 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
 
         func paint(_ panel: GMLuaPanelRenderSnapshot) throws {
             let paintResult = try withinPanelContext(panel, clip: panel.paintClipRect) {
-                try callPanelMethodReturningValues(
-                    identifier: panel.identifier,
-                    name: "Paint",
-                    arguments: [.number(panel.frame.width), .number(panel.frame.height)]
-                )
+                do {
+                    return try callPanelMethodReturningValues(
+                        identifier: panel.identifier,
+                        name: "Paint",
+                        arguments: [.number(panel.frame.width), .number(panel.frame.height)]
+                    )
+                } catch {
+                    guard let onCallbackFailure else { throw error }
+                    onCallbackFailure(panel.identifier, "Paint", error)
+                    return nil
+                }
             }
             let suppressesDefaultPaint: Bool
             if let first = paintResult?.first, case .boolean(true) = first {
@@ -2081,11 +2091,17 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
             }
             for child in byParent[panel.identifier] ?? [] { try paint(child) }
             _ = try withinPanelContext(panel, clip: panel.paintClipRect) {
-                try callPanelMethod(
-                    identifier: panel.identifier,
-                    name: "PaintOver",
-                    arguments: [.number(panel.frame.width), .number(panel.frame.height)]
-                )
+                do {
+                    return try callPanelMethod(
+                        identifier: panel.identifier,
+                        name: "PaintOver",
+                        arguments: [.number(panel.frame.width), .number(panel.frame.height)]
+                    )
+                } catch {
+                    guard let onCallbackFailure else { throw error }
+                    onCallbackFailure(panel.identifier, "PaintOver", error)
+                    return false
+                }
             }
         }
         switch scope {
@@ -2104,7 +2120,8 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     /// retains Panel:Remove's deferred-storage interval until the next frame's
     /// existing deletion pass.
     private func dispatchVisiblePanelFrameCallbacks(
-        scope: GMLuaVGUIRenderScope
+        scope: GMLuaVGUIRenderScope,
+        onCallbackFailure: ((Int, String, Error) -> Void)?
     ) throws {
         lock.lock()
         let descriptors = livePanelDescriptorsLocked(scope: scope)
@@ -2141,11 +2158,14 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         lock.unlock()
 
         for identifier in identifiers {
-            _ = try callPanelMethod(
-                identifier: identifier,
-                name: "AnimationThink"
-            )
-            _ = try callPanelMethod(identifier: identifier, name: "Think")
+            for name in ["AnimationThink", "Think"] {
+                do {
+                    _ = try callPanelMethod(identifier: identifier, name: name)
+                } catch {
+                    guard let onCallbackFailure else { throw error }
+                    onCallbackFailure(identifier, name, error)
+                }
+            }
         }
     }
 
@@ -3749,7 +3769,9 @@ public enum GMLuaVGUI {
             ("RIGHT", GMLuaPanelDock.right.rawValue),
             ("BOTTOM", GMLuaPanelDock.bottom.rawValue),
             ("FILL", GMLuaPanelDock.fill.rawValue),
-            ("MOUSE_LEFT", 107), ("MOUSE_RIGHT", 108), ("MOUSE_MIDDLE", 109)
+            ("MOUSE_LEFT", 107), ("MOUSE_RIGHT", 108), ("MOUSE_MIDDLE", 109),
+            // Public Facepunch KEY enum; this is a button code, not IN_*.
+            ("KEY_ESCAPE", 70), ("KEY_ENTER", 64), ("KEY_SPACE", 65)
         ] {
             state.setGlobal(name, value: .number(Double(value)))
         }

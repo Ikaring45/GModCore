@@ -16,6 +16,7 @@ public enum GMLuaMenuAction: Sendable, Equatable {
     case setTouchLookSensitivity(Double)
     case executeConsoleLine(String)
     case closeUtility
+    case revokePermission(String, String)
     case disconnect
     case quit
 }
@@ -27,6 +28,16 @@ public enum GMLuaMenuUtility: String, Sendable, Equatable {
     case settings
     case problems
     case console
+}
+
+public struct GMLuaMenuLuaError: Sendable, Equatable {
+    public let realm: String
+    public let message: String
+
+    public init(realm: String, message: String) {
+        self.realm = String(realm.prefix(16)).lowercased()
+        self.message = String(message.prefix(1_024))
+    }
 }
 
 /// Immutable values read by MENU Lua from the app stores that actually own
@@ -112,6 +123,32 @@ private final class GMLuaMenuHostState: @unchecked Sendable {
     private var problemText = "No current problems."
     private var consoleText = "Console ready."
     private var settings = GMLuaMenuSettingsSnapshot()
+    private var permissionSnapshot = GMLuaPermissionSnapshot(temporary: [:], permanent: [:])
+    private var luaErrors: [GMLuaMenuLuaError] = []
+
+    func replaceLuaErrors(_ errors: [GMLuaMenuLuaError]) {
+        lock.lock()
+        luaErrors = Array(errors.suffix(64))
+        lock.unlock()
+    }
+
+    func currentLuaErrors() -> [GMLuaMenuLuaError] {
+        lock.lock()
+        defer { lock.unlock() }
+        return luaErrors
+    }
+
+    func replacePermissions(_ snapshot: GMLuaPermissionSnapshot) {
+        lock.lock()
+        permissionSnapshot = snapshot
+        lock.unlock()
+    }
+
+    func currentPermissions() -> GMLuaPermissionSnapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return permissionSnapshot
+    }
 
     func append(_ action: GMLuaMenuAction) throws {
         lock.lock()
@@ -249,6 +286,13 @@ public final class GMLuaMenuSession: @unchecked Sendable {
         "lua/vgui/dscrollpanel.lua",
         "lua/vgui/dtextentry.lua",
         "lua/vgui/dframe.lua",
+        "lua/vgui/dimage.lua",
+        "lua/vgui/dimagebutton.lua",
+        "lua/vgui/ddragbase.lua",
+        "lua/vgui/dhorizontalscroller.lua",
+        "lua/vgui/dpropertysheet.lua",
+        "lua/vgui/dcheckbox.lua",
+        "lua/menu/problems/problems_pnl.lua",
         "lua/skins/default.lua",
     ]
 
@@ -354,6 +398,24 @@ public final class GMLuaMenuSession: @unchecked Sendable {
         )
     }
 
+    public func updatePermissions(_ snapshot: GMLuaPermissionSnapshot) throws {
+        try requireActive()
+        hostState.replacePermissions(snapshot)
+        try runtime.execute(
+            "if IsValid(g_Permissions) then g_Permissions:DoPermissions() end",
+            sourceName: "=(MENU permission snapshot)"
+        )
+    }
+
+    public func updateLuaErrors(_ errors: [GMLuaMenuLuaError]) throws {
+        try requireActive()
+        hostState.replaceLuaErrors(errors)
+        try runtime.execute(
+            "if GARRYSPAD_REFRESH_PROBLEMS then GARRYSPAD_REFRESH_PROBLEMS() end",
+            sourceName: "=(MENU Lua error snapshot)"
+        )
+    }
+
     public func present(_ utility: GMLuaMenuUtility) throws {
         try requireActive()
         let source: String
@@ -395,14 +457,7 @@ public final class GMLuaMenuSession: @unchecked Sendable {
     ) throws -> GMLuaSurfaceFrameSnapshot {
         try requireActive()
         _ = runtime.updateViewport(width: viewportWidth, height: viewportHeight)
-        guard let registry = runtime.vguiRegistry else {
-            throw GMLuaMenuSessionError.missingRuntimeSurface("VGUI registry")
-        }
-        guard let surface = runtime.surfaceCommandState else {
-            throw GMLuaMenuSessionError.missingRuntimeSurface("Surface command state")
-        }
-        return try registry.renderFrame(
-            surface: surface,
+        return try runtime.renderVGUIFrame(
             viewportWidth: viewportWidth,
             viewportHeight: viewportHeight
         )
@@ -483,6 +538,8 @@ public final class GMLuaMenuSession: @unchecked Sendable {
     private func installHostBoundary() throws {
         let state = runtime.state
         let hostState = self.hostState
+        let hasLocalSession = permissionSessionTransport != nil
+        state.register("IsInGame") { _ in [.boolean(hasLocalSession)] }
         if let permissionsHost {
             let runtime = self.runtime
             try GMLuaPermissions.install(
@@ -599,6 +656,10 @@ public final class GMLuaMenuSession: @unchecked Sendable {
                 try hostState.append(.executeConsoleLine(line))
             case "close_utility":
                 try hostState.append(.closeUtility)
+            case "revoke_permission":
+                let permission = try Self.requiredString(arguments, index: 1, function: name)
+                let server = try Self.requiredString(arguments, index: 2, function: name)
+                try hostState.append(.revokePermission(permission, server))
             case "disconnect":
                 try hostState.append(.disconnect)
             case "quit":
@@ -610,6 +671,31 @@ public final class GMLuaMenuSession: @unchecked Sendable {
         }
         state.register("__garryspad_menu_problem_text") { _ in
             [.string(LuaString(hostState.currentProblemText()))]
+        }
+        state.register("__garryspad_menu_lua_errors") { _ in
+            let result = LuaTable()
+            for (index, error) in hostState.currentLuaErrors().enumerated() {
+                let record = LuaTable()
+                try state.setRawTableValue(.string(LuaString(error.realm)), for: .string("realm"), in: record)
+                try state.setRawTableValue(.string(LuaString(error.message)), for: .string("text"), in: record)
+                try state.setRawTableValue(.table(record), for: .number(Double(index + 1)), in: result)
+            }
+            return [.table(result)]
+        }
+        state.register("__garryspad_menu_permissions") { _ in
+            let snapshot = hostState.currentPermissions()
+            let root = LuaTable()
+            for (name, groups) in [("temporary", snapshot.temporary), ("permanent", snapshot.permanent)] {
+                let group = LuaTable()
+                for server in groups.keys.sorted() {
+                    try state.setRawTableValue(
+                        .string(LuaString((groups[server] ?? []).sorted().joined(separator: ","))),
+                        for: .string(LuaString(server)), in: group
+                    )
+                }
+                try state.setRawTableValue(.table(group), for: .string(LuaString(name)), in: root)
+            }
+            return [.table(root)]
         }
         state.register("__garryspad_menu_console_text") { _ in
             [.string(LuaString(hostState.currentConsoleText()))]
@@ -695,6 +781,13 @@ public final class GMLuaMenuSession: @unchecked Sendable {
     }
 
     private static let menuSource = #"""
+        -- PermissionViewer reads immutable host snapshots on the MENU lane.
+        -- Mutations return to the native store through the existing action FIFO.
+        permissions = permissions or {}
+        permissions.GetAll = __garryspad_menu_permissions
+        permissions.Revoke = function(permission, server)
+            __garryspad_menu_action("revoke_permission", permission, server)
+        end
         local function menuButton(parent, text, x, y, width, callback)
             local button = assert(vgui.Create("DButton", parent))
             button:SetText(text)
@@ -793,44 +886,44 @@ public final class GMLuaMenuSession: @unchecked Sendable {
             __garryspad_menu_action("close_utility")
         end
 
-        local problems = assert(vgui.Create("DFrame"))
-        GARRYSPAD_PROBLEMS = problems
-        problems:SetTitle("Problems")
-        problems:SetSize(620, 420)
-        problems:Center()
-        problems:SetSizable(true)
-        problems:SetDeleteOnClose(false)
-        problems:SetVisible(false)
-        local problemScroll = assert(vgui.Create("DScrollPanel", problems))
-        local problemText = assert(vgui.Create("DLabel"))
-        problemScroll:AddItem(problemText)
-        problemText:SetWrap(true)
-        problemText:SetAutoStretchVertical(false)
+        local problems
         local function refreshProblems()
+            if not IsValid(problems) then return end
+            problems.ProblemsList:Clear()
+            problems.ProblemPanels = {}
+            problems.LuaErrorList:Clear()
+            problems.ErrorPanels = {}
+            for id, err in ipairs(__garryspad_menu_lua_errors()) do
+                err.title = "Other"
+                err.addonid = ""
+                err.type = "runtime"
+                err.count = 1
+                problems:ReceivedError(tostring(id), err)
+            end
             local text = __garryspad_menu_problem_text()
-            if problemText:GetText() ~= text then problemText:SetText(text) end
+            if text ~= "No current problems." then
+                -- Use the shipped GenericProblem/markup renderer, not one
+                -- replacement label containing the entire diagnostics feed.
+                problems:ReceivedProblem("runtime", {
+                    text = text, type = "runtime", severity = 1
+                })
+            end
             problems:InvalidateLayout()
         end
         GARRYSPAD_REFRESH_PROBLEMS = refreshProblems
-        refreshProblems()
-        local problemBack = menuButton(problems, "Back", 430, 358, 150, function()
-            problems:Close()
-        end)
-        local problemFrameLayout = problems.PerformLayout
-        problems.PerformLayout = function(self, w, h)
-            problemFrameLayout(self, w, h)
-            local contentWide = math.max(120, w - 40)
-            local contentTall = math.max(70, h - 116)
-            problemScroll:SetPos(20, 48)
-            problemScroll:SetSize(contentWide, contentTall)
-            problemText:SetWide(math.max(80, contentWide - 18))
-            problemText:SizeToContentsY()
-            problemScroll:InvalidateLayout()
-            problemBack:SetPos(math.max(20, w - 170), math.max(48, h - 58))
+        function ClearProblem(id)
+            if not IsValid(problems) then return end
+            local panel = problems.ProblemPanels[id]
+            if IsValid(panel) then panel:Remove() end
+            problems.ProblemPanels[id] = nil
+            problems:InvalidateLayout()
         end
-        problems:InvalidateLayout()
-        problems.OnClose = function()
-            __garryspad_menu_action("close_utility")
+        function ClearLuaErrorGroup(id)
+            if not IsValid(problems) then return end
+            local panel = problems.ErrorPanels[id]
+            if IsValid(panel) then panel:Remove() end
+            problems.ErrorPanels[id] = nil
+            problems:InvalidateLayout()
         end
 
         local console = assert(vgui.Create("DFrame"))
@@ -890,7 +983,7 @@ public final class GMLuaMenuSession: @unchecked Sendable {
 
         function GARRYSPAD_OPEN_UTILITY(name)
             options:SetVisible(false)
-            problems:SetVisible(false)
+            if IsValid(problems) then problems:SetVisible(false) end
             console:SetVisible(false)
 
             if name == "settings" then
@@ -899,10 +992,28 @@ public final class GMLuaMenuSession: @unchecked Sendable {
                 options:SetVisible(true)
                 options:MakePopup()
             elseif name == "problems" then
+                if IsValid(problems) then
+                    problems.OnRemove = nil
+                    problems:Remove()
+                end
+                problems = assert(vgui.Create("ProblemsPanel"))
+                GARRYSPAD_PROBLEMS = problems
+                local function disableUnsupportedStrictMode(panel)
+                    if panel.m_strConVar == "lua_strict" then
+                        panel:SetConVar(nil)
+                        panel:SetEnabled(false)
+                        panel:SetTooltip("Strict Lua mode is not available in this runtime.")
+                    end
+                    for _, child in ipairs(panel:GetChildren()) do
+                        disableUnsupportedStrictMode(child)
+                    end
+                end
+                disableUnsupportedStrictMode(problems)
+                problems.OnRemove = function()
+                    __garryspad_menu_action("close_utility")
+                end
                 refreshProblems()
-                problems:Center()
-                problems:SetVisible(true)
-                problems:MakePopup()
+                problems.Tabs:SwitchToName("#problems.problems")
             elseif name == "console" then
                 refreshConsole()
                 console:Center()

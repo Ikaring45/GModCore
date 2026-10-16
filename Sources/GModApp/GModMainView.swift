@@ -995,8 +995,12 @@ public struct GModMainView: View {
                 .onChange(of: game.permissionSessionTransportIdentity) { _ in
                     reactivateVisibleDermaUtility()
                 }
+                .onChange(of: permissions.collection) { _ in
+                    dermaMenu.replacePermissions()
+                }
                 .onChange(of: currentProblemSnapshot) { _ in
                     dermaMenu.replaceProblems(dermaProblemLines)
+                    dermaMenu.replaceLuaErrors(dermaLuaErrors)
                 }
                 .onChange(of: console.lines) { _ in
                     dermaMenu.replaceConsoleLines(dermaConsoleLines)
@@ -1206,6 +1210,12 @@ public struct GModMainView: View {
         console.visibleLines.map(\.text)
     }
 
+    private var dermaLuaErrors: [GMLuaMenuLuaError] {
+        currentProblemSnapshot.luaErrors.suffix(64).map {
+            GMLuaMenuLuaError(realm: $0.realm, message: $0.message)
+        }
+    }
+
     private func activateDermaMenu() {
         dermaMenu.activate(
             mountGeneration: content.activeMountGeneration,
@@ -1213,6 +1223,7 @@ public struct GModMainView: View {
             problemLines: dermaProblemLines,
             consoleLines: dermaConsoleLines,
             settings: dermaMenuSettings,
+            luaErrors: dermaLuaErrors,
             permissionSessionTransport: game.permissionSessionTransport
         )
     }
@@ -1290,6 +1301,20 @@ public struct GModMainView: View {
             case .closeUtility:
                 activeHomeUtility = nil
                 dermaMenu.dismissUtility()
+
+            case let .revokePermission(permission, server):
+                do {
+                    _ = try permissions.revoke(permission, for: server)
+                    dermaMenu.replacePermissions()
+                } catch {
+                    diagnostics.record(
+                        kind: .compatibility,
+                        severity: .error,
+                        title: "#garryspad.problem.menu",
+                        detail: String(describing: error),
+                        source: "MENU permissions.Revoke"
+                    )
+                }
 
             case .disconnect:
                 handlePresentationEvent(.homeMenuAction(.disconnect))

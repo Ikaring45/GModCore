@@ -60,6 +60,7 @@ public final class GMLuaRuntime {
         SourceCanonicalCameraCaptureRequestState?
     public private(set) var systemTimeSource: (any GMLuaSystemTimeSource)?
     private let logger: (String) -> Void
+    private var reportedVGUIFrameFailures: [String] = []
     private let fileLoader: ((String) throws -> String)?
     private let virtualFileSystem: LuaVirtualFileSystem?
     private var includedFileStorage: [String] = []
@@ -151,7 +152,8 @@ public final class GMLuaRuntime {
         self.state = LuaState(
             output: { message in logger("[\(realm.rawValue)][Lua] \(message)") },
             fileLoader: fileLoader,
-            virtualFileSystem: virtualFileSystem
+            virtualFileSystem: virtualFileSystem,
+            hexadecimalStringEscapes: true
         )
         installGLuaBootstrapSurface(
             typeSystemInstaller: typeSystemInstaller,
@@ -214,6 +216,36 @@ public final class GMLuaRuntime {
     @discardableResult
     public func updateViewport(width: Int, height: Int) -> Bool {
         screenMetrics?.updateViewport(width: width, height: height) ?? false
+    }
+
+    /// A broken HUD/Hint callback must not prevent unrelated stock Q/C or
+    /// MENU panels from painting. Keep errors visible in the normal log, but
+    /// deduplicate repeated frame failures so they cannot flood Problems.
+    public func renderVGUIFrame(
+        viewportWidth: Int,
+        viewportHeight: Int,
+        scope: GMLuaVGUIRenderScope = .all
+    ) throws -> GMLuaSurfaceFrameSnapshot {
+        guard let registry = vguiRegistry, let surface = surfaceCommandState else {
+            throw LuaError.runtime("VGUI render surface is unavailable")
+        }
+        return try registry.renderFrame(
+            surface: surface,
+            viewportWidth: viewportWidth,
+            viewportHeight: viewportHeight,
+            scope: scope,
+            onCallbackFailure: { [self] identifier, callback, error in
+                let detail = String(Self.describe(error).prefix(2_048))
+                let message = "[\(realm.rawValue)][VGUI] panel \(identifier) " +
+                    "\(callback) failed: \(detail)"
+                guard !reportedVGUIFrameFailures.contains(message) else { return }
+                // Once saturated, stop repeating diagnostics rather than
+                // rotating a failing tree through the log every frame.
+                guard reportedVGUIFrameFailures.count < 64 else { return }
+                reportedVGUIFrameFailures.append(message)
+                logger(message)
+            }
+        )
     }
 
     private func installGLuaBootstrapSurface(

@@ -1521,6 +1521,29 @@ public enum GMLuaSurface {
             },
             debugName: "surface.DrawTexturedRectUV"
         )
+        let drawTexturedRectRotated = LuaNativeFunctionBox(
+            { [commandState] arguments in
+                let values = try finiteNumbers(arguments, count: 5, function: "DrawTexturedRectRotated")
+                let angle = values[4].truncatingRemainder(dividingBy: 360)
+                // Exact axis-aligned cases used by the original Problems
+                // group arrows. Never silently approximate arbitrary angles.
+                guard angle == 0 || abs(angle) == 180 else {
+                    throw LuaError.runtime("surface.DrawTexturedRectRotated: non-axis-aligned geometry is not supported yet")
+                }
+                let flipped = abs(angle) == 180
+                try commandState.appendTexturedRectangle(
+                    x: values[0] - values[2] / 2,
+                    y: values[1] - values[3] / 2,
+                    width: values[2], height: values[3],
+                    uv: GMLuaPanelRect(
+                        x: flipped ? 1 : 0, y: flipped ? 1 : 0,
+                        width: flipped ? -1 : 1, height: flipped ? -1 : 1
+                    )
+                )
+                return []
+            },
+            debugName: "surface.DrawTexturedRectRotated"
+        )
         let setMaterial = LuaNativeFunctionBox(
             { [commandState] arguments in
                 guard let first = arguments.first,
@@ -1548,6 +1571,7 @@ public enum GMLuaSurface {
             ("SetTextPos", setTextPos),
             ("DrawText", drawText), ("DrawTexturedRect", drawTexturedRect),
             ("DrawTexturedRectUV", drawTexturedRectUV), ("SetMaterial", setMaterial),
+            ("DrawTexturedRectRotated", drawTexturedRectRotated),
             ("DisableClipping", disableClipping)
         ] {
             try state.setRawTableValue(

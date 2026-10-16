@@ -1726,21 +1726,14 @@ public final class GModPlayableSession {
         scope: GMLuaVGUIRenderScope = .all
     ) throws -> GMLuaSurfaceFrameSnapshot {
         try ensureOpen()
-        let registry = try clientVGUIRegistry()
-        guard let surface = clientRuntime.surfaceCommandState else {
-            throw GModPlayableSessionError.missingRuntimeSurface(
-                .client,
-                "surface command state"
-            )
-        }
+        _ = try clientVGUIRegistry()
         guard let viewport = clientRuntime.screenMetrics?.viewport else {
             throw GModPlayableSessionError.missingRuntimeSurface(
                 .client,
                 "screen metrics"
             )
         }
-        return try registry.renderFrame(
-            surface: surface,
+        return try clientRuntime.renderVGUIFrame(
             viewportWidth: viewport.width,
             viewportHeight: viewport.height,
             scope: scope

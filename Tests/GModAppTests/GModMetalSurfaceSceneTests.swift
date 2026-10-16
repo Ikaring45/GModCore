@@ -748,6 +748,32 @@ final class GModMetalSurfaceSceneTests: XCTestCase {
     }
 
 #if canImport(CoreText) && canImport(GModApp)
+    func testRetinaStockQAndContextResolveVisibleContent() throws {
+        let factory = GModAppRuntimeFactory()
+        let session = try factory.makePlayableSession(logger: { _, _ in })
+        defer { _ = try? session.close() }
+        _ = try session.updateViewport(width: 2_752, height: 2_064)
+        try session.setSpawnMenuOpen(true)
+        for menu in [GModGameClientMenu.spawn, .context] {
+            if menu == .context {
+                try session.setSpawnMenuOpen(false)
+                try session.setContextMenuOpen(true)
+            }
+            let scene = try GModMetalSurfaceScene(
+                snapshot: session.renderClientVGUIFrame(),
+                textureResolver: factory.surfaceTextureResolver,
+                textRasterizer: factory.surfaceTextRasterizer
+            )
+            XCTAssertTrue(GModGameForegroundSurfacePublicationPolicy.admitsResolvedForegroundScene(
+                activeMenu: menu,
+                texturedRectangleCount: scene.diagnostics.texturedRectangleCount,
+                textCount: scene.diagnostics.textCount,
+                maximumAlphaWeightedViewportCoverage: scene.visibilityMetrics
+                    .maximumResolvedContentAlphaWeightedViewportCoverageUpperBound
+            ), "\(menu) must publish actual resolver-backed pixels")
+        }
+    }
+
     func testStockQFirstVisiblePublicationRequiresResolvedGwenScene() throws {
         let factory = GModAppRuntimeFactory()
         let session = try factory.makePlayableSession(

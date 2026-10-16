@@ -5,6 +5,49 @@ import GModGameAssets
 import GModLua
 
 final class GMLuaVGUIRegistryTests: XCTestCase {
+    func testBrokenHintCallbacksDoNotBlankIndependentMenuAndAreLoggedOnce() throws {
+        var messages: [String] = []
+        let runtime = GMLuaRuntime(
+            realm: .client,
+            logger: { messages.append($0) },
+            bootstrapMode: .strict
+        )
+        defer { _ = runtime.close() }
+        try runtime.execute(
+            """
+            local hint = vgui.Create("Panel")
+            hint:SetSize(100, 100)
+            hint.Think = function() error("broken hint Think") end
+            hint.Paint = function() error("broken hint Paint") end
+            hint.PaintOver = function() error("broken hint PaintOver") end
+            local menu = vgui.Create("Panel")
+            menu:SetPos(200, 100)
+            menu:SetSize(400, 300)
+            menu.Paint = function(self, w, h)
+                surface.SetDrawColor(255, 255, 255, 255)
+                surface.DrawRect(0, 0, w, h)
+            end
+            """,
+            sourceName: "=(broken Hint next to foreground VGUI)"
+        )
+        for _ in 0..<3 {
+            let frame = try runtime.renderVGUIFrame(
+                viewportWidth: 1_024, viewportHeight: 768
+            )
+            XCTAssertFalse(frame.commands.isEmpty)
+        }
+        XCTAssertEqual(messages.filter { $0.contains("broken hint Think") }.count, 1)
+        XCTAssertEqual(messages.filter { $0.contains(" Paint failed:") }.count, 1)
+        XCTAssertEqual(messages.filter { $0.contains("broken hint PaintOver") }.count, 1)
+        // Strict callers still receive the failure; containment is an explicit
+        // runtime presentation boundary, not a no-op replacement Lua API.
+        let registry = try XCTUnwrap(runtime.vguiRegistry)
+        XCTAssertThrowsError(try registry.renderFrame(
+            surface: XCTUnwrap(runtime.surfaceCommandState),
+            viewportWidth: 1_024, viewportHeight: 768
+        ))
+    }
+
     func testStockDFrameTouchDragAndBottomRightResizeAreImmediateAndReleaseCapture() throws {
         let fileSystem = try GMLuaHostDirectoryFileSystem(
             rootURL: GModGameAssets.clientContentRootURL(),

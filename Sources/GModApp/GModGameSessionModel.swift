@@ -28,7 +28,10 @@ private struct GModForegroundSurfaceBuildRequest: Sendable {
 /// visible. Keep the host frame lane paused until one real resolver-backed
 /// scene has completed, then coalesce later animation replacements.
 enum GModGameForegroundSurfacePublicationPolicy {
-    static let minimumAlphaWeightedViewportCoverage = 0.01
+    // A resolved glyph or Gwen slice need not cover one percent of the
+    // viewport. Context menus and Retina-sized viewports legitimately contain
+    // only small commands; coverage is a visibility check, not a size quota.
+    static let minimumAlphaWeightedViewportCoverage = 0.0
 
     static func requiresResolvedPublicationBeforeReturning(
         activeMenu: GModGameClientMenu?,

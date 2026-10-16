@@ -76,6 +76,14 @@ private actor GModDermaMenuSessionLane {
             .updateSettings(settings)
     }
 
+    func updatePermissions(_ snapshot: GMLuaPermissionSnapshot, expectedGeneration: UInt64) throws {
+        try requiredSession(expectedGeneration: expectedGeneration).updatePermissions(snapshot)
+    }
+
+    func updateLuaErrors(_ errors: [GMLuaMenuLuaError], expectedGeneration: UInt64) throws {
+        try requiredSession(expectedGeneration: expectedGeneration).updateLuaErrors(errors)
+    }
+
     func present(
         _ utility: GMLuaMenuUtility,
         expectedGeneration: UInt64
@@ -94,7 +102,13 @@ private actor GModDermaMenuSessionLane {
         viewport: GMLuaViewportSize,
         expectedGeneration: UInt64
     ) throws -> GMLuaSurfaceFrameSnapshot {
-        try requiredSession(expectedGeneration: expectedGeneration).renderFrame(
+        let session = try requiredSession(expectedGeneration: expectedGeneration)
+        let now = ProcessInfo.processInfo.systemUptime
+        if let prior = lastAdvanceTimestamp {
+            _ = try session.advance(by: min(0.25, max(0, now - prior)))
+        }
+        lastAdvanceTimestamp = now
+        return try session.renderFrame(
             viewportWidth: viewport.width,
             viewportHeight: viewport.height
         )
@@ -115,13 +129,6 @@ private actor GModDermaMenuSessionLane {
             viewportHeight: viewport.height
         )
         let focusedTextEntry = try session.insertText("")
-        if sample.timestamp.isFinite {
-            if let prior = lastAdvanceTimestamp {
-                let delta = min(0.25, max(0, sample.timestamp - prior))
-                if delta > 0 { _ = try session.advance(by: delta) }
-            }
-            lastAdvanceTimestamp = sample.timestamp
-        }
         return GModDermaMenuPointerOutput(
             wantsTextInput: focusedTextEntry != nil,
             focusedTextEntry: focusedTextEntry,
@@ -204,6 +211,7 @@ final class GModDermaMenuModel: ObservableObject {
         problemLines: [String],
         consoleLines: [String],
         settings: GMLuaMenuSettingsSnapshot,
+        luaErrors: [GMLuaMenuLuaError] = [],
         permissionSessionTransport: GMLuaPermissionSessionTransport?
     ) {
         let configuration = GMLuaLanguageConfiguration(phrases: phrases)
@@ -247,6 +255,11 @@ final class GModDermaMenuModel: ObservableObject {
                     logger: { _ in }
                 )
                 _ = try replacement.start()
+                try replacement.updatePermissions(GMLuaPermissionSnapshot(
+                    temporary: permissionStore.collection.temporary,
+                    permanent: permissionStore.collection.permanent
+                ))
+                try replacement.updateLuaErrors(luaErrors)
                 let lane = sessionLane
                 let generation = sessionGeneration
                 let task = Task {
@@ -268,6 +281,7 @@ final class GModDermaMenuModel: ObservableObject {
             }
         }
         guard hasSession else { return }
+        replaceLuaErrors(luaErrors)
         let boundedProblems = Self.boundedProblemLines(problemLines)
         let boundedConsole = Self.boundedConsoleLines(consoleLines)
         self.problemLines = boundedProblems
@@ -299,6 +313,50 @@ final class GModDermaMenuModel: ObservableObject {
 
     func deactivate() {
         wantsTextInput = false
+    }
+
+    func replacePermissions() {
+        guard hasSession else { return }
+        let snapshot = GMLuaPermissionSnapshot(
+            temporary: permissionStore.collection.temporary,
+            permanent: permissionStore.collection.permanent
+        )
+        let generation = sessionGeneration
+        let installation = installationTask
+        let previous = mutationTask
+        mutationTask = Task { [weak self] in
+            await previous?.value
+            await installation?.value
+            guard let self, generation == sessionGeneration else { return }
+            do {
+                try await sessionLane.updatePermissions(snapshot, expectedGeneration: generation)
+                guard generation == sessionGeneration else { return }
+                requestFrame()
+            } catch {
+                guard generation == sessionGeneration else { return }
+                fail(error)
+            }
+        }
+    }
+
+    func replaceLuaErrors(_ errors: [GMLuaMenuLuaError]) {
+        guard hasSession else { return }
+        let generation = sessionGeneration
+        let previous = mutationTask
+        let installation = installationTask
+        mutationTask = Task { [weak self] in
+            await previous?.value
+            await installation?.value
+            guard let self, generation == sessionGeneration else { return }
+            do {
+                try await sessionLane.updateLuaErrors(errors, expectedGeneration: generation)
+                guard generation == sessionGeneration else { return }
+                requestFrame()
+            } catch {
+                guard generation == sessionGeneration else { return }
+                fail(error)
+            }
+        }
     }
 
     func updateViewport(width: Double, height: Double) {
@@ -545,6 +603,13 @@ final class GModDermaMenuModel: ObservableObject {
         buildNextFrameIfNeeded()
     }
 
+    func advancePresentationFrame() {
+        // No queued passive backlog: a slow Lua/texture frame must finish
+        // before the next idle animation capture can be requested.
+        guard hasSession, presentedUtility != nil, !buildInFlight else { return }
+        requestFrame()
+    }
+
     private func buildNextFrameIfNeeded() {
         guard pendingFrame, !buildInFlight, hasSession else { return }
         pendingFrame = false
@@ -555,10 +620,12 @@ final class GModDermaMenuModel: ObservableObject {
         let activeViewport = viewport
         let installation = installationTask
         let textureResolver = runtimeFactory.surfaceTextureResolver
+        let mutation = mutationTask
         let textRasterizer = runtimeFactory.surfaceTextRasterizer
         Task { [weak self] in
             guard let self else { return }
             await installation?.value
+            await mutation?.value
             let snapshot: GMLuaSurfaceFrameSnapshot
             do {
                 snapshot = try await sessionLane.renderFrame(
@@ -600,22 +667,42 @@ final class GModDermaMenuModel: ObservableObject {
         wantsTextInput = false
     }
 
-    private static func boundedProblemLines(_ lines: [String]) -> [String] {
-        Array(lines.prefix(256)).map { line in
-            boundedUTF8Prefix(line, maximumByteCount: 1_024)
+    nonisolated static func boundedProblemLines(_ lines: [String]) -> [String] {
+        var result: [String] = []
+        var remainingBytes = 64 * 1_024
+        for line in lines.prefix(256) {
+            let separatorBytes = result.isEmpty ? 0 : 1
+            guard remainingBytes > separatorBytes else { break }
+            let bounded = boundedUTF8Prefix(
+                line,
+                maximumByteCount: min(1_024, remainingBytes - separatorBytes)
+            )
+            result.append(bounded)
+            remainingBytes -= bounded.utf8.count + separatorBytes
         }
+        return result
     }
 
-    private static func boundedConsoleLines(_ lines: [String]) -> [String] {
-        Array(lines.suffix(512)).map { line in
-            boundedUTF8Prefix(line, maximumByteCount: 2 * 1_024)
+    nonisolated static func boundedConsoleLines(_ lines: [String]) -> [String] {
+        var result: [String] = []
+        var remainingBytes = 128 * 1_024
+        for line in lines.suffix(512).reversed() {
+            let separatorBytes = result.isEmpty ? 0 : 1
+            guard remainingBytes > separatorBytes else { break }
+            let bounded = boundedUTF8Prefix(
+                line,
+                maximumByteCount: min(2 * 1_024, remainingBytes - separatorBytes)
+            )
+            result.append(bounded)
+            remainingBytes -= bounded.utf8.count + separatorBytes
         }
+        return Array(result.reversed())
     }
 
     /// Keeps retained MENU text inside its byte budget without cutting a
     /// decoded Unicode scalar in half. The host boundary therefore never
     /// manufactures a replacement glyph (or additional UTF-8 bytes).
-    private static func boundedUTF8Prefix(
+    nonisolated private static func boundedUTF8Prefix(
         _ value: String,
         maximumByteCount: Int
     ) -> String {
@@ -688,6 +775,15 @@ struct GModDermaMenuSurface: View {
                     width: Double(size.width),
                     height: Double(size.height)
                 )
+            }
+            .task {
+                // Derma cross-fades and timers must advance without another
+                // touch. Stop with the utility view, and keep this capture
+                // cadence separate from Metal's display refresh rate.
+                while !Task.isCancelled {
+                    model.advancePresentationFrame()
+                    try? await Task.sleep(nanoseconds: 33_333_333)
+                }
             }
         }
         .accessibilityIdentifier("garryspad.derma-menu")

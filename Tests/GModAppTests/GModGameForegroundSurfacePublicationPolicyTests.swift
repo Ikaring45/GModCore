@@ -33,14 +33,14 @@ final class GModGameForegroundSurfacePublicationPolicyTests: XCTestCase {
                     maximumAlphaWeightedViewportCoverage: 0.5
                 )
         )
-        XCTAssertFalse(
+        XCTAssertTrue(
             GModGameForegroundSurfacePublicationPolicy
                 .hasResolvedForegroundContent(
                     texturedRectangleCount: 1,
                     textCount: 0,
                     maximumAlphaWeightedViewportCoverage: 0.001
                 ),
-            "resolver-free Q strips must not satisfy first publication"
+            "a resolved small Gwen slice is still renderer-visible"
         )
         XCTAssertTrue(
             GModGameForegroundSurfacePublicationPolicy
@@ -81,7 +81,7 @@ final class GModGameForegroundSurfacePublicationPolicyTests: XCTestCase {
                 ),
             "a later transparent/solid-only capture must not erase visible Q"
         )
-        XCTAssertFalse(
+        XCTAssertTrue(
             GModGameForegroundSurfacePublicationPolicy
                 .admitsResolvedForegroundScene(
                     activeMenu: .spawn,

@@ -679,6 +679,52 @@ final class GModPlayableSessionLaneTests: XCTestCase {
         _ = try await lane.close()
     }
 
+    func testRetinaViewportCanSwitchStockQAndCAfterHintCallbacks() async throws {
+        let lane = GModPlayableSessionLane()
+        let initial = try await lane.start(configuration: GModPlayableSessionConfiguration(map: .construct))
+        _ = try await lane.runHostFrame(
+            fixedTickCount: 1, renderClientFrame: true,
+            viewport: GMLuaViewportSize(width: 2_752, height: 2_064),
+            expectedGeneration: initial.generation,
+            expectedInputEpoch: initial.inputEpoch
+        )
+        try await lane.execute(
+            "notification.AddLegacy('Hint 日本語', NOTIFY_HINT, 5)",
+            realm: .client, expectedGeneration: initial.generation
+        )
+        let q = try await lane.transitionClientMenu(
+            from: nil, to: .spawn,
+            expectedGeneration: initial.generation,
+            expectedPointerEpoch: initial.pointerEpoch,
+            expectedInputEpoch: initial.inputEpoch
+        )
+        XCTAssertNil(q.lifecycleFailure)
+        var frame = try await lane.renderClientVGUIFrame(expectedGeneration: initial.generation)
+        XCTAssertFalse(frame.commands.isEmpty)
+        let c = try await lane.transitionClientMenu(
+            from: .spawn, to: .context,
+            expectedGeneration: initial.generation,
+            expectedPointerEpoch: q.pointerEpoch,
+            expectedInputEpoch: q.inputEpoch
+        )
+        XCTAssertNil(c.lifecycleFailure)
+        frame = try await lane.renderClientVGUIFrame(expectedGeneration: initial.generation)
+        XCTAssertFalse(frame.commands.isEmpty)
+        let reopened = try await lane.transitionClientMenu(
+            from: .context, to: .spawn,
+            expectedGeneration: initial.generation,
+            expectedPointerEpoch: c.pointerEpoch,
+            expectedInputEpoch: c.inputEpoch
+        )
+        XCTAssertNil(reopened.lifecycleFailure)
+        frame = try await lane.renderClientVGUIFrame(expectedGeneration: initial.generation)
+        XCTAssertTrue(frame.commands.contains {
+            if case .texturedRectangle = $0 { return true }
+            return false
+        })
+        _ = try await lane.close()
+    }
+
     func testAtomicMenuTransitionRestoresPriorWhenTargetHookThrows() async throws {
         let lane = GModPlayableSessionLane()
         let snapshot = try await lane.start(
