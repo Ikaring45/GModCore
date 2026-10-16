@@ -5,6 +5,32 @@ import GModGameAssets
 import GModLua
 
 final class GMLuaVGUIRegistryTests: XCTestCase {
+    func testStockGroupArrowRotationPreservesCenterAndFlipsUVWithoutApproximation() throws {
+        let runtime = GMLuaRuntime(realm: .client, logger: { _ in }, bootstrapMode: .strict)
+        defer { _ = runtime.close() }
+        try runtime.execute("""
+            arrow = vgui.Create("Panel")
+            arrow:SetPos(100, 50)
+            arrow:SetSize(200, 100)
+            arrow.Paint = function()
+                surface.SetTexture(surface.GetTextureID("gui/point"))
+                surface.DrawTexturedRectRotated(40, 20, 20, 12, 180)
+            end
+            """)
+        let frame = try runtime.renderVGUIFrame(viewportWidth: 1_024, viewportHeight: 768)
+        guard case let .texturedRectangle(rect, uv, _, _, _)? = frame.commands.first else {
+            return XCTFail("missing original arrow draw")
+        }
+        XCTAssertEqual(rect, GMLuaPanelRect(x: 130, y: 64, width: 20, height: 12))
+        XCTAssertEqual(uv, GMLuaPanelRect(x: 1, y: 1, width: -1, height: -1))
+        try runtime.execute("arrow.Paint = function() surface.DrawTexturedRectRotated(40, 20, 20, 12, 45) end")
+        let registry = try XCTUnwrap(runtime.vguiRegistry)
+        XCTAssertThrowsError(try registry.renderFrame(
+            surface: XCTUnwrap(runtime.surfaceCommandState),
+            viewportWidth: 1_024, viewportHeight: 768
+        ))
+    }
+
     func testBrokenHintCallbacksDoNotBlankIndependentMenuAndAreLoggedOnce() throws {
         var messages: [String] = []
         let runtime = GMLuaRuntime(

@@ -86,10 +86,12 @@ private actor GModDermaMenuSessionLane {
 
     func present(
         _ utility: GMLuaMenuUtility,
+        viewport: GMLuaViewportSize,
         expectedGeneration: UInt64
     ) throws {
-        try requiredSession(expectedGeneration: expectedGeneration)
-            .present(utility)
+        let session = try requiredSession(expectedGeneration: expectedGeneration)
+        _ = try session.updateViewport(width: viewport.width, height: viewport.height)
+        try session.present(utility)
     }
 
     func dismissUtility(expectedGeneration: UInt64) throws {
@@ -246,13 +248,26 @@ final class GModDermaMenuModel: ObservableObject {
                     rootURL: GModGameAssets.clientContentRootURL(),
                     writable: false
                 )
+                let diagnosticGeneration = sessionGeneration
                 let replacement = runtimeFactory.makeMenuSession(
                     fileSystem: files,
                     initialViewport: viewport,
                     languageConfiguration: configuration,
                     permissionsHost: permissionStore.makeLuaPermissionsHost(),
                     permissionSessionTransport: permissionSessionTransport,
-                    logger: { _ in }
+                    logger: { [weak self] line in
+                        guard line.contains("[VGUI]"), line.contains("failed:") else { return }
+                        Task { @MainActor [weak self] in
+                            guard let self, sessionGeneration == diagnosticGeneration else { return }
+                            GModAppDiagnosticsStore.shared.record(
+                                kind: .luaError,
+                                severity: .error,
+                                title: "#garryspad.problem.menu",
+                                detail: line,
+                                source: "MENU VGUI"
+                            )
+                        }
+                    }
                 )
                 _ = try replacement.start()
                 try replacement.updatePermissions(GMLuaPermissionSnapshot(
@@ -459,6 +474,7 @@ final class GModDermaMenuModel: ObservableObject {
         failure = nil
         presentedUtility = utility
         let generation = sessionGeneration
+        let activeViewport = viewport
         let installation = installationTask
         let previousMutation = mutationTask
         let task = Task { [weak self] in
@@ -468,6 +484,7 @@ final class GModDermaMenuModel: ObservableObject {
             do {
                 try await sessionLane.present(
                     utility,
+                    viewport: activeViewport,
                     expectedGeneration: generation
                 )
                 guard generation == sessionGeneration else { return }

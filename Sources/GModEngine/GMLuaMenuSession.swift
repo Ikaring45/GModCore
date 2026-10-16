@@ -311,6 +311,7 @@ public final class GMLuaMenuSession: @unchecked Sendable {
         languageConfiguration: GMLuaLanguageConfiguration = .empty,
         permissionsHost: GMLuaPermissionsHost? = nil,
         permissionSessionTransport: GMLuaPermissionSessionTransport? = nil,
+        systemTimeSource: any GMLuaSystemTimeSource = GMLuaMonotonicSystemTimeSource.process,
         logger: @escaping (String) -> Void
     ) {
         self.permissionsHost = permissionsHost
@@ -322,6 +323,7 @@ public final class GMLuaMenuSession: @unchecked Sendable {
             bootstrapMode: .strict,
             initialViewport: initialViewport,
             textMeasurer: textMeasurer,
+            systemTimeSource: systemTimeSource,
             languageConfiguration: languageConfiguration
         )
         runtime.resourceRegistry?.setMaterialPixelResolver(
@@ -456,11 +458,24 @@ public final class GMLuaMenuSession: @unchecked Sendable {
         viewportHeight: Int
     ) throws -> GMLuaSurfaceFrameSnapshot {
         try requireActive()
-        _ = runtime.updateViewport(width: viewportWidth, height: viewportHeight)
+        _ = try updateViewport(width: viewportWidth, height: viewportHeight)
         return try runtime.renderVGUIFrame(
             viewportWidth: viewportWidth,
             viewportHeight: viewportHeight
         )
+    }
+
+    @discardableResult
+    public func updateViewport(width: Int, height: Int) throws -> Bool {
+        try requireActive()
+        let changed = runtime.updateViewport(width: width, height: height)
+        if changed {
+            try runtime.execute(
+                "if GARRYSPAD_VIEWPORT_CHANGED then GARRYSPAD_VIEWPORT_CHANGED() end",
+                sourceName: "=(MENU viewport changed)"
+            )
+        }
+        return changed
     }
 
     public func dispatchPointerEvent(
@@ -472,7 +487,7 @@ public final class GMLuaMenuSession: @unchecked Sendable {
         viewportHeight: Int
     ) throws -> GMLuaPointerDispatchResult {
         try requireActive()
-        _ = runtime.updateViewport(width: viewportWidth, height: viewportHeight)
+        _ = try updateViewport(width: viewportWidth, height: viewportHeight)
         guard let registry = runtime.vguiRegistry else {
             throw GMLuaMenuSessionError.missingRuntimeSurface("VGUI registry")
         }
@@ -1022,6 +1037,18 @@ public final class GMLuaMenuSession: @unchecked Sendable {
                 consoleEntry:RequestFocus()
             elseif name ~= nil then
                 error("unknown Garry's PAD utility " .. tostring(name), 2)
+            end
+        end
+
+        function GARRYSPAD_VIEWPORT_CHANGED()
+            options:Center()
+            console:Center()
+            if IsValid(problems) then
+                problems:SetSize(ScrW(), ScrH())
+                local frame = problems.Tabs:GetParent()
+                frame:SetSize(ScrW() * 0.75, ScrH() * 0.75)
+                frame:Center()
+                problems:InvalidateLayout()
             end
         end
     """#

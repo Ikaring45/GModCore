@@ -518,6 +518,7 @@ jobs:
             -only-testing:GModAppTests/GModMetalSurfaceSceneTests/testRetinaStockQAndContextResolveVisibleContent \
             -only-testing:GModEngineTests/GMLuaMenuSessionTests \
             -only-testing:GModEngineTests/GMLuaVGUIRegistryTests/testBrokenHintCallbacksDoNotBlankIndependentMenuAndAreLoggedOnce \
+            -only-testing:GModEngineTests/GMLuaVGUIRegistryTests/testStockGroupArrowRotationPreservesCenterAndFlipsUVWithoutApproximation \
             -only-testing:GModEngineTests/LuaStateHostCallTests/testHexadecimalStringEscapesAreOptInAndRemainBytes \
             -only-testing:GModEngineTests/GModPlayableSessionLaneTests/testRetinaViewportCanSwitchStockQAndCAfterHintCallbacks \
             -only-testing:GModEngineTests/GModPlayableSessionLaneTests/testJapaneseClientTextEditsUseFocusAndInputEpochs \

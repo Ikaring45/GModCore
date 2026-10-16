@@ -12,6 +12,10 @@
 - MENU frame capture waits for queued mutations. Visible utilities have a
   coalesced 30 Hz animation capture pump, stopped with the view, rather than
   requiring another touch to complete a Derma tab cross-fade.
+- MENU viewport changes resize the original Problems root and its inner frame
+  before capture/hit testing. A window created at 1280x720 could otherwise keep
+  its right-hand permission-revoke button beyond a later 1024px viewport.
+  Opening utilities also synchronizes screen metrics before original Init runs.
 - Problem and console text are bounded by both per-line and combined MENU
   budgets. Large logs no longer reject the shared Settings/Problems/Console
   synchronization before the requested window can open.
@@ -21,6 +25,8 @@
 - Runtime presentation contains individual Think/AnimationThink/Paint/PaintOver
   errors, reports the first 64 unique callback failures, and continues unrelated
   panels. Direct registry calls remain strict; layout errors still propagate.
+  Contained MENU failures are forwarded to the App diagnostics store rather
+  than discarded by its MENU logger.
 - Added opt-in hexadecimal string escapes to the Lua lexer/state and enabled
   them for GMod realms. The stock UTF-8 charpattern now has the intended bytes,
   fixing markup wrapping. Plain LuaState retains Lua 5.1 unknown-escape behavior.
@@ -39,9 +45,10 @@
 
 ## Validation
 
-- Windows Swift: 63 related tests passed, including original Problems tab
+- Windows Swift: 64 related tests passed, including original Problems tab
   touches, separate Lua errors, actual permission snapshots, returning to
-  Settings, Q/C switching at 2752x2064 after a Hint, callback containment and
+  Settings, permission-revoke button clicks after a viewport change,
+  Q/C switching at 2752x2064 after a Hint, callback containment and
   unchanged plain LuaState escape behavior.
 - Local syntax parsing passed for the three edited App Swift files. This is
   not Apple typechecking or a physical-device result.

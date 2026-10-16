@@ -2,13 +2,29 @@ import XCTest
 import GModEngine
 import GModGameAssets
 
+private final class MenuTestClock: GMLuaSystemTimeSource, @unchecked Sendable {
+    private let lock = NSLock()
+    private var time = 0.0
+    func currentSystemTime() -> Double {
+        lock.lock()
+        defer { lock.unlock() }
+        return time
+    }
+    func advance() {
+        lock.lock()
+        time += 0.25
+        lock.unlock()
+    }
+}
+
 final class GMLuaMenuSessionTests: XCTestCase {
     func testOriginalProblemTabsRouteLuaErrorsPermissionsAndSettings() throws {
         var messages: [String] = []
         let files = try GMLuaHostDirectoryFileSystem(
             rootURL: GModGameAssets.clientContentRootURL(), writable: false
         )
-        let session = GMLuaMenuSession(fileSystem: files, logger: { messages.append($0) })
+        let clock = MenuTestClock()
+        let session = GMLuaMenuSession(fileSystem: files, systemTimeSource: clock, logger: { messages.append($0) })
         defer { _ = session.close() }
         _ = try session.start()
         try session.updateProblems(["Runtime diagnostic 日本語"])
@@ -27,6 +43,7 @@ final class GMLuaMenuSessionTests: XCTestCase {
                 return position
             }.first, "missing original tab \(tab): \(texts(in: frame)); logs: \(messages)")
             try tap(x: point.x + 8, y: point.y + 5, in: session)
+            clock.advance()
             _ = try session.advance(by: 0.2)
             frame = try session.renderFrame(viewportWidth: 1_024, viewportHeight: 768)
             if tab == "problems.lua_errors" {
@@ -35,6 +52,14 @@ final class GMLuaMenuSessionTests: XCTestCase {
                 XCTAssertTrue(texts(in: frame).contains { $0.contains("local://garrys-pad") })
             }
         }
+        let revoke = try XCTUnwrap(frame.commands.compactMap { command -> GMLuaPanelRect? in
+            guard case let .texturedRectangle(rect, _, name, _, _) = command,
+                  name.utf8String.contains("icon16/cross") else { return nil }
+            return rect
+        }.first, "missing revoke texture: \(frame.commands)")
+        try tap(x: revoke.x + revoke.width / 2, y: revoke.y + revoke.height / 2, in: session)
+        XCTAssertTrue(session.drainActions().contains(.revokePermission("connect", "local://garrys-pad")))
+        try session.updatePermissions(GMLuaPermissionSnapshot(temporary: [:], permanent: [:]))
         try session.present(.settings)
         frame = try session.renderFrame(viewportWidth: 1_024, viewportHeight: 768)
         XCTAssertTrue(texts(in: frame).contains("Settings"))
