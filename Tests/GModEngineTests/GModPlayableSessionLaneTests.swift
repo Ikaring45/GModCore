@@ -2,6 +2,24 @@ import XCTest
 @testable import GModEngine
 @testable import GModGameSession
 
+private final class LaneVGUIFailureRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String] = []
+
+    func record(_ message: String) {
+        guard message.contains("[VGUI]"), message.contains("failed:") else { return }
+        lock.lock()
+        if storage.count < 64 { storage.append(message) }
+        lock.unlock()
+    }
+
+    var failures: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+}
+
 private final class LaneShutdownCleanupRecorder: @unchecked Sendable {
     private let condition = NSCondition()
     private var storage: [
@@ -681,7 +699,11 @@ final class GModPlayableSessionLaneTests: XCTestCase {
 
     func testRetinaViewportCanSwitchStockQAndCAfterHintCallbacks() async throws {
         let lane = GModPlayableSessionLane()
-        let initial = try await lane.start(configuration: GModPlayableSessionConfiguration(map: .construct))
+        let diagnostics = LaneVGUIFailureRecorder()
+        let initial = try await lane.start(
+            configuration: GModPlayableSessionConfiguration(map: .construct),
+            logger: { _, message in diagnostics.record(message) }
+        )
         _ = try await lane.runHostFrame(
             fixedTickCount: 1, renderClientFrame: true,
             viewport: GMLuaViewportSize(width: 2_752, height: 2_064),
@@ -722,6 +744,7 @@ final class GModPlayableSessionLaneTests: XCTestCase {
             if case .texturedRectangle = $0 { return true }
             return false
         })
+        XCTAssertTrue(diagnostics.failures.isEmpty, diagnostics.failures.joined(separator: "\n"))
         _ = try await lane.close()
     }
 

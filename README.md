@@ -13,11 +13,12 @@ Swift UI.
 
 ## Current milestone
 
-0.1.61 adds native Japanese IME input to original MENU and CLIENT Q/C TextEntry
-panels, stable mixed Japanese/Latin font rendering and bounded text measurement
-caching. Embedded walking now rejects the movement without stopping the session
-FIFO, allowing noclip recovery. Stock Q persistence remains intact. The detailed
-validation boundary is recorded in `RELEASE_NOTES_0.1.61.md`.
+0.1.62 restores the original tabbed Problems VGUI, fixes stock UTF-8 markup
+wrapping, and keeps independent Q/C panels rendering when a Hint callback fails.
+MENU windows track viewport changes, advance tab animations without another
+touch, and bound retained diagnostics so large logs do not prevent Settings
+from opening. Native Japanese IME and embedded-walk recovery remain included.
+The validation boundary is recorded in `RELEASE_NOTES_0.1.62.md`.
 
 The pure-Swift `GModLua` runtime now runs the Lua 5.1 official basic test corpus
 through `final OK !!!` and all cleanup collections. The passing Windows run

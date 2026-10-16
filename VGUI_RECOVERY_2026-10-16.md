@@ -53,8 +53,12 @@
 - Local syntax parsing passed for the three edited App Swift files. This is
   not Apple typechecking or a physical-device result.
 - Dedicated Apple CI now includes the new MENU, Retina Q/C resolution,
-  text-budget and hexadecimal-escape regressions. Its result must be recorded
-  separately before claiming Apple validation for these changes.
+  text-budget and hexadecimal-escape regressions. Run `38895311875`, production
+  source `86ce1b2`, passed its dedicated gate at 2026-10-16 11:58:55 UTC, after
+  strict ARM64 package/app builds, Metal smoke, Simulator launch and accessibility
+  smoke. Full XCTest and physical-device checks are separate, not reported PASS.
+- A strengthened Windows Retina Q/C test also passed with no contained VGUI
+  failures, rather than accepting a scene that only survives callback errors.
 
 Contract references: [KEY enum](https://wiki.facepunch.com/gmod/Enums/KEY),
 [centered rotated rectangle](https://wiki.facepunch.com/gmod/surface.DrawTexturedRectRotated).
