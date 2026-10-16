@@ -13,12 +13,11 @@ Swift UI.
 
 ## Current milestone
 
-0.1.62 restores the original tabbed Problems VGUI, fixes stock UTF-8 markup
-wrapping, and keeps independent Q/C panels rendering when a Hint callback fails.
-MENU windows track viewport changes, advance tab animations without another
-touch, and bound retained diagnostics so large logs do not prevent Settings
-from opening. Native Japanese IME and embedded-walk recovery remain included.
-The validation boundary is recorded in `RELEASE_NOTES_0.1.62.md`.
+0.1.63 moves MENU Lua startup, rendering and cleanup to a dedicated large-stack
+worker, reduces Q/C dependent-layout queue overhead, and fixes overlapping
+slider labels by resolving FILL docking after edge controls. Original Problems
+tabs, UTF-8 markup, Japanese IME and embedded-walk recovery remain included.
+The validation boundary is recorded in `RELEASE_NOTES_0.1.63.md`.
 
 The pure-Swift `GModLua` runtime now runs the Lua 5.1 official basic test corpus
 through `final OK !!!` and all cleanup collections. The passing Windows run
