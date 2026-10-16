@@ -5,6 +5,25 @@ import GModGameAssets
 import GModLua
 
 final class GMLuaVGUIRegistryTests: XCTestCase {
+    func testDeferredOnRemoveCascadesToOwnerExactlyOnceBeforePainting() throws {
+        let state = LuaState(output: { _ in })
+        let types = try GMLuaTypeSystem.install(into: state, utilityLayer: .bundledFallback)
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: types)
+        try state.execute("""
+            ROOT = vgui.Create("Panel")
+            CHILD = vgui.Create("Panel", ROOT)
+            REMOVALS = 0
+            ROOT.OnRemove = function() REMOVALS = REMOVALS + 1 end
+            CHILD.OnRemove = function() REMOVALS = REMOVALS + 1; ROOT:Remove() end
+            CHILD:Remove()
+            assert(REMOVALS == 0)
+            """)
+        _ = try registry.performPendingLayouts()
+        try state.execute("assert(REMOVALS == 2 and not IsValid(ROOT) and not IsValid(CHILD))")
+        _ = try registry.performPendingLayouts()
+        try state.execute("assert(REMOVALS == 2)")
+    }
+
     func testFillBeforeLabelUsesRemainingSliderSpaceWithoutOverlappingText() throws {
         let state = LuaState(output: { _ in })
         let types = try GMLuaTypeSystem.install(into: state, utilityLayer: .bundledFallback)

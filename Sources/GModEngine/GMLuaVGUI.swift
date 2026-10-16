@@ -2810,15 +2810,35 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         }
     }
 
-    private func finalizeMarkedPanelRemovals() {
-        lock.lock()
-        let markedIdentifiers = panels.compactMap { identifier, value in
-            panelDescriptor(from: value)?.isMarkedForDeletion == true ? identifier : nil
-        }.sorted()
-        lock.unlock()
-
-        for identifier in markedIdentifiers {
-            destroy(identifier: identifier)
+    private func finalizeMarkedPanelRemovals() throws {
+        var notified: Set<Int> = []
+        // OnRemove may mark an owner for deletion (stock ProblemsFrame does
+        // exactly this). Drain those removals before painting the next frame.
+        while true {
+            guard notified.count < 16_384 else {
+                throw LuaError.runtime("VGUI OnRemove cascade exceeded 16384 panels")
+            }
+            lock.lock()
+            let identifier = panels.compactMap { identifier, value in
+                panelDescriptor(from: value)?.isMarkedForDeletion == true ? identifier : nil
+            }.min()
+            let callbacks = identifier.map { root in
+                descendantIdentifiers(of: root).compactMap { id -> (Int, LuaValue, LuaTable)? in
+                    guard let value = panels[id], let panel = panelDescriptor(from: value) else { return nil }
+                    return (id, value, panel.instanceTable)
+                }
+            } ?? []
+            lock.unlock()
+            guard let identifier else { return }
+            defer { destroy(identifier: identifier) }
+            for (id, value, table) in callbacks where notified.insert(id).inserted {
+                let callback = try state.call(semanticIndex, arguments: [.table(table), .string("OnRemove")]).first ?? .nilValue
+                switch callback {
+                case .luaFunction, .nativeFunction:
+                    _ = try callVGUIFunction(callback, arguments: [value])
+                default: break
+                }
+            }
         }
     }
 
@@ -3266,7 +3286,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         scope: GMLuaVGUIRenderScope,
         maxLayouts: Int = .max
     ) throws -> Int {
-        finalizeMarkedPanelRemovals()
+        try finalizeMarkedPanelRemovals()
         guard maxLayouts > 0 else { return 0 }
 
         lock.lock()

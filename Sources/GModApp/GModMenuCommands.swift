@@ -35,6 +35,10 @@ enum GModHomeMenuCommandParser {
                     return .openOptions
                 case "openproblemspanel", "openproblemsdialog":
                     return .openProblems
+                case "disconnect":
+                    return .disconnect
+                case "resumegame":
+                    return .hideGameUI
                 default:
                     break
                 }

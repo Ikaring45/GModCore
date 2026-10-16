@@ -111,6 +111,10 @@ actor GModDermaMenuSessionLane {
         lastAdvanceTimestamp = nil
     }
 
+    func drainActions(expectedGeneration: UInt64) throws -> [GMLuaMenuAction] {
+        try requiredSession(expectedGeneration: expectedGeneration).drainActions()
+    }
+
     func renderFrame(
         viewport: GMLuaViewportSize,
         expectedGeneration: UInt64
@@ -191,6 +195,9 @@ final class GModDermaMenuModel: ObservableObject {
     @Published private(set) var failure: String?
     @Published private(set) var wantsTextInput = false
     @Published private(set) var focusedTextEntry: Int?
+    @Published private(set) var deferredActions: [GMLuaMenuAction] = []
+
+    func consumeDeferredActions() { deferredActions = [] }
 
     private let runtimeFactory: GModAppRuntimeFactory
     private let permissionStore: GModPermissionStore
@@ -244,6 +251,7 @@ final class GModDermaMenuModel: ObservableObject {
             surfaceScene = nil
             failure = nil
             wantsTextInput = false
+            deferredActions = []
             pendingFrame = false
             buildInFlight = false
             frameRevision &+= 1
@@ -659,11 +667,13 @@ final class GModDermaMenuModel: ObservableObject {
             await installation?.value
             await mutation?.value
             let snapshot: GMLuaSurfaceFrameSnapshot
+            let actions: [GMLuaMenuAction]
             do {
                 snapshot = try await sessionLane.renderFrame(
                     viewport: activeViewport,
                     expectedGeneration: generation
                 )
+                actions = try await sessionLane.drainActions(expectedGeneration: generation)
             } catch {
                 guard generation == sessionGeneration,
                       frameRevision == revision else { return }
@@ -683,6 +693,7 @@ final class GModDermaMenuModel: ObservableObject {
             guard generation == sessionGeneration,
                   frameRevision == revision else { return }
             self.buildInFlight = false
+            if !actions.isEmpty { self.deferredActions = actions }
             switch result {
             case let .success(scene):
                 self.surfaceScene = scene
@@ -767,9 +778,9 @@ struct GModDermaMenuSurface: View {
                 GModMetalView(
                     stats: $rendererStats,
                     surfaceScene: model.surfaceScene,
-                    preferredFramesPerSecond: preferredFramesPerSecond
+                    preferredFramesPerSecond: preferredFramesPerSecond,
+                    transparentBackground: true
                 )
-                .background(Color.black)
 
                 GModTouchInputBridge { sample in
                     model.submitPointer(sample) { actions in
@@ -801,6 +812,11 @@ struct GModDermaMenuSurface: View {
                     width: Double(geometry.size.width),
                     height: Double(geometry.size.height)
                 )
+            }
+            .onReceive(model.$deferredActions) { actions in
+                guard !actions.isEmpty else { return }
+                model.consumeDeferredActions()
+                onActions(actions)
             }
             .onChange(of: geometry.size) { size in
                 model.updateViewport(

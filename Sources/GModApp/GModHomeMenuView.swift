@@ -211,6 +211,8 @@ struct GModHomeMenuView: UIViewRepresentable {
         private var languageSnapshot: GModMenuLanguageSnapshot
         private let audioController: GModMenuAudioController
         private weak var backgroundContainer: GModHomeMenuContainerView?
+        private var backgroundTimer: Timer?
+        private var lastBackgroundPath: String?
 
         init(
             pack: GarrysPADContentPack,
@@ -279,6 +281,7 @@ struct GModHomeMenuView: UIViewRepresentable {
         func updateIsInGame(_ replacement: Bool, in webView: WKWebView?) {
             guard replacement != isInGame else { return }
             isInGame = replacement
+            refreshBackgroundPresentation()
             webView?.evaluateJavaScript("""
             window.__garrysPadIsInGame=\(replacement ? "true" : "false");
             if(typeof SetInGame==='function') SetInGame(window.__garrysPadIsInGame);
@@ -298,8 +301,7 @@ struct GModHomeMenuView: UIViewRepresentable {
         func updateBackgroundEnabled(_ enabled: Bool) {
             guard enabled != menuBackgroundsEnabled else { return }
             menuBackgroundsEnabled = enabled
-            let data = enabled ? preferredBackgroundData() : nil
-            backgroundContainer?.setBackgroundImage(data.flatMap(UIImage.init(data:)))
+            refreshBackgroundPresentation()
         }
 
         func updateProblemStatus(
@@ -332,12 +334,33 @@ struct GModHomeMenuView: UIViewRepresentable {
 
         fileprivate func installBackground(into container: GModHomeMenuContainerView) {
             backgroundContainer = container
-            let data = menuBackgroundsEnabled ? preferredBackgroundData() : nil
-            container.setBackgroundImage(data.flatMap(UIImage.init(data:)))
+            refreshBackgroundPresentation()
         }
 
         func stopBackgroundAnimation() {
+            backgroundTimer?.invalidate()
+            backgroundTimer = nil
             backgroundContainer?.stopBackgroundAnimation()
+        }
+
+        private func refreshBackgroundPresentation() {
+            stopBackgroundAnimation()
+            backgroundContainer?.setInGame(isInGame)
+            guard !isInGame, menuBackgroundsEnabled else {
+                backgroundContainer?.setBackgroundImage(nil)
+                return
+            }
+            showNextBackground()
+            // background.lua changes the active image every 30 seconds and
+            // fades the outgoing image over one second. Never run in-game.
+            backgroundTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.showNextBackground() }
+            }
+        }
+
+        private func showNextBackground() {
+            guard !isInGame, menuBackgroundsEnabled else { return }
+            backgroundContainer?.setBackgroundImage(preferredBackgroundData().flatMap(UIImage.init(data:)))
         }
 
         /// GMod's mainmenu.lua searches the active gamemode's backgrounds first,
@@ -370,6 +393,7 @@ struct GModHomeMenuView: UIViewRepresentable {
                 let start = seed % candidates.count
                 for offset in 0..<candidates.count {
                     let path = candidates[(start + offset) % candidates.count]
+                    if candidates.count > 1, path == lastBackgroundPath { continue }
                     guard let entry = try? pack.entry(for: path),
                           entry.compressionMethod == 0,
                           let data = try? pack.data(
@@ -379,6 +403,7 @@ struct GModHomeMenuView: UIViewRepresentable {
                           UIImage(data: data) != nil else {
                         continue
                     }
+                    lastBackgroundPath = path
                     return data
                 }
             }
@@ -906,8 +931,15 @@ private final class GModHomeMenuContainerView: UIView {
     }
 
     func setBackgroundImage(_ image: UIImage?) {
-        backgroundImageView.image = image
         stopBackgroundAnimation()
+        if backgroundImageView.image != nil, image != nil {
+            UIView.transition(with: backgroundImageView, duration: 1,
+                              options: [.transitionCrossDissolve, .allowUserInteraction]) {
+                self.backgroundImageView.image = image
+            }
+        } else {
+            backgroundImageView.image = image
+        }
         guard image != nil else { return }
 
         backgroundImageView.transform = .identity
@@ -925,6 +957,20 @@ private final class GModHomeMenuContainerView: UIView {
     func stopBackgroundAnimation() {
         backgroundImageView.layer.removeAllAnimations()
         backgroundImageView.transform = .identity
+    }
+
+    func setInGame(_ isInGame: Bool) {
+        // Source suppresses photographic backgrounds while IsInGame(),
+        // leaving the frozen world visible behind GameUI.
+        backgroundColor = isInGame ? .clear : .black
+        isOpaque = !isInGame
+        backgroundImageView.isHidden = isInGame
+        gradientLayer.colors = isInGame
+            ? [UIColor.black.withAlphaComponent(0.35).cgColor,
+               UIColor.black.withAlphaComponent(0.35).cgColor]
+            : [UIColor.black.withAlphaComponent(0.74).cgColor,
+               UIColor.black.withAlphaComponent(0.34).cgColor, UIColor.clear.cgColor]
+        gradientLayer.locations = isInGame ? [0, 1] : [0, 0.42, 1]
     }
 }
 

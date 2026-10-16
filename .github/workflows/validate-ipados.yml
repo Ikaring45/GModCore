@@ -512,12 +512,15 @@ jobs:
             -only-testing:GModAppTests/GModGameForegroundSurfacePublicationPolicyTests \
             -only-testing:GModAppTests/GModDermaMenuBudgetTests \
             -only-testing:GModAppTests/GModDermaMenuSessionLaneTests \
+            -only-testing:GModAppTests/GModGameDisconnectTests \
             -only-testing:GModAppTests/GModBundledFontsTests \
             -only-testing:GModAppTests/GModJapaneseTextInputTests \
             -only-testing:GModAppTests/GModMenuLocalizationTests \
             -only-testing:GModAppTests/GModMetalSurfaceSceneTests/testStockQFirstVisiblePublicationRequiresResolvedGwenScene \
             -only-testing:GModAppTests/GModMetalSurfaceSceneTests/testRetinaStockQAndContextResolveVisibleContent \
             -only-testing:GModEngineTests/GMLuaMenuSessionTests \
+            -only-testing:GModEngineTests/SourceVGUIResourceTests \
+            -only-testing:GModEngineTests/GMLuaVGUIRegistryTests/testDeferredOnRemoveCascadesToOwnerExactlyOnceBeforePainting \
             -only-testing:GModEngineTests/GModMenuSessionThreadTests \
             -only-testing:GModEngineTests/GMLuaVGUILayoutWorklistTests \
             -only-testing:GModEngineTests/GMLuaVGUIRegistryTests/testFillBeforeLabelUsesRemainingSliderSpaceWithoutOverlappingText \

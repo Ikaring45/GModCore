@@ -21,6 +21,17 @@ final class GModDermaMenuSessionLaneTests: XCTestCase {
             let frame = try await lane.renderFrame(viewport: viewport, expectedGeneration: 1)
             XCTAssertFalse(frame.commands.isEmpty)
         }
+        try await lane.present(.problems, viewport: viewport, expectedGeneration: 1)
+        _ = try await lane.renderFrame(viewport: viewport, expectedGeneration: 1)
+        for phase: GMLuaPointerPhase in [.began, .ended] {
+            _ = try await lane.submitPointer(.init(
+                x: 4, y: 4, viewWidth: 1_024, viewHeight: 768,
+                phase: phase, timestamp: 1
+            ), viewport: viewport, expectedGeneration: 1)
+        }
+        _ = try await lane.renderFrame(viewport: viewport, expectedGeneration: 1)
+        let actions = try await lane.drainActions(expectedGeneration: 1)
+        XCTAssertEqual(actions, [.closeUtility])
         await lane.removeSession(generation: 2)
     }
 }

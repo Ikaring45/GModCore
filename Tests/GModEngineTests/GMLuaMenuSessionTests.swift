@@ -18,6 +18,25 @@ private final class MenuTestClock: GMLuaSystemTimeSource, @unchecked Sendable {
 }
 
 final class GMLuaMenuSessionTests: XCTestCase {
+    func testClosingOriginalProblemsReturnsDeferredCloseActionAndCanReopenSettings() throws {
+        let files = try GMLuaHostDirectoryFileSystem(
+            rootURL: GModGameAssets.clientContentRootURL(), writable: false
+        )
+        let session = GMLuaMenuSession(fileSystem: files, logger: { _ in })
+        defer { _ = session.close() }
+        _ = try session.start()
+        try session.present(.problems)
+        _ = try session.renderFrame(viewportWidth: 1_024, viewportHeight: 768)
+        try tap(x: 4, y: 4, in: session)
+        _ = try session.renderFrame(viewportWidth: 1_024, viewportHeight: 768)
+        XCTAssertEqual(session.drainActions(), [.closeUtility])
+        _ = try session.renderFrame(viewportWidth: 1_024, viewportHeight: 768)
+        XCTAssertTrue(session.drainActions().isEmpty)
+        try session.present(.settings)
+        let frame = try session.renderFrame(viewportWidth: 1_024, viewportHeight: 768)
+        XCTAssertTrue(texts(in: frame).contains("Settings"))
+    }
+
     func testOriginalProblemTabsRouteLuaErrorsPermissionsAndSettings() throws {
         var messages: [String] = []
         let files = try GMLuaHostDirectoryFileSystem(

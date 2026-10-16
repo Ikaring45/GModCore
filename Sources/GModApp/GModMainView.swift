@@ -677,6 +677,9 @@ public struct GModMainView: View {
             .padding(chromePolicy.showsDeveloperChrome ? 14 : 0)
 
             contentOverlay
+                // Hidden Home must never remain a full-screen hit-test layer
+                // above the real Q/C/pause controls.
+                .allowsHitTesting(presentation.showsHomeMenu)
 
             if game.isStarting {
                 loadingOverlay
@@ -1813,7 +1816,11 @@ public struct GModMainView: View {
         case .clear:
             break
         case let .commandLine(line):
-            game.executeActiveConsoleCommandLine(line)
+            if line.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "disconnect" {
+                handlePresentationEvent(.homeMenuAction(.disconnect))
+            } else {
+                game.executeActiveConsoleCommandLine(line)
+            }
         case let .luaSource(source):
             game.executeActiveServer(source)
         }

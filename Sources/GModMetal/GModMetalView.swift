@@ -72,6 +72,7 @@ public struct GModMetalView:
         GModMetalFirstPersonViewModelScene?
     private let surfaceScene: GModMetalSurfaceScene?
     private let preferredFramesPerSecond: Int
+    private let transparentBackground: Bool
     private let onFrame: @Sendable (GModMetalFrameRequest) -> Void
     private let onWorldFrameEvent: @Sendable (GModMetalWorldFrameEvent) -> Void
     private let onWorldFramePresented: @Sendable (String) -> Void
@@ -84,6 +85,7 @@ public struct GModMetalView:
             GModMetalFirstPersonViewModelScene? = nil,
         surfaceScene: GModMetalSurfaceScene? = nil,
         preferredFramesPerSecond: Int = 120,
+        transparentBackground: Bool = false,
         onFrame: @escaping @Sendable (GModMetalFrameRequest) -> Void = { _ in },
         onWorldFrameEvent: @escaping @Sendable (GModMetalWorldFrameEvent) -> Void =
             { _ in },
@@ -95,6 +97,7 @@ public struct GModMetalView:
         self.firstPersonViewModelScene = firstPersonViewModelScene
         self.surfaceScene = surfaceScene
         self.preferredFramesPerSecond = preferredFramesPerSecond <= 60 ? 60 : 120
+        self.transparentBackground = transparentBackground
         self.onFrame = onFrame
         self.onWorldFrameEvent = onWorldFrameEvent
         self.onWorldFramePresented = onWorldFramePresented
@@ -165,6 +168,12 @@ public struct GModMetalView:
                 blue: 0.030,
                 alpha: 1
             )
+        if transparentBackground {
+            view.isOpaque = false
+            view.backgroundColor = .clear
+            view.layer.isOpaque = false
+            view.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        }
 
         // iPadOS may cap the realized cadence to the display/device limit;
         // this is the user's real 60/120 host request, not a claimed FPS.
@@ -193,6 +202,12 @@ public struct GModMetalView:
         context: Context
     ) {
         let requestedFrameRate = preferredFramesPerSecond <= 60 ? 60 : 120
+        uiView.isOpaque = !transparentBackground
+        uiView.layer.isOpaque = !transparentBackground
+        uiView.backgroundColor = transparentBackground ? .clear : .black
+        uiView.clearColor = transparentBackground
+            ? MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+            : MTLClearColor(red: 0.015, green: 0.020, blue: 0.030, alpha: 1)
         if uiView.preferredFramesPerSecond != requestedFrameRate {
             uiView.preferredFramesPerSecond = requestedFrameRate
         }

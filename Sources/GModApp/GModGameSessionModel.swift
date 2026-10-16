@@ -662,6 +662,7 @@ final class GModGameSessionModel: ObservableObject {
 
         Task { [weak self] in
             guard let self else { return }
+            guard requestedGeneration == sessionGeneration, isStarting, !isDisconnecting else { return }
             do {
                 let snapshot = try await lane.start(
                     configuration: GModPlayableSessionConfiguration(
@@ -1186,8 +1187,10 @@ final class GModGameSessionModel: ObservableObject {
     /// state. A new map is not admitted until teardown completes, preventing a
     /// delayed close from destroying the replacement session.
     func disconnect() {
-        guard !isStarting, !isDisconnecting else { return }
+        guard !isDisconnecting else { return }
         isDisconnecting = true
+        isStarting = false
+        startFailure = nil
         audioController.stop(bus: .gameplay)
         sessionGeneration &+= 1
         let requestedGeneration = sessionGeneration
