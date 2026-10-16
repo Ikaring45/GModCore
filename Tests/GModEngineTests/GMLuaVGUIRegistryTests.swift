@@ -5,6 +5,32 @@ import GModGameAssets
 import GModLua
 
 final class GMLuaVGUIRegistryTests: XCTestCase {
+    func testFillBeforeLabelUsesRemainingSliderSpaceWithoutOverlappingText() throws {
+        let state = LuaState(output: { _ in })
+        let types = try GMLuaTypeSystem.install(into: state, utilityLayer: .bundledFallback)
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: types)
+        try state.execute("""
+            ROOT = vgui.Create("Panel")
+            ROOT:SetSize(240, 32)
+            VALUE = vgui.Create("Panel", ROOT)
+            VALUE:SetWide(45)
+            VALUE:Dock(RIGHT)
+            SLIDER = vgui.Create("Panel", ROOT)
+            SLIDER:Dock(FILL)
+            LABEL = vgui.Create("Label", ROOT)
+            LABEL:SetText("Damage")
+            LABEL:SetWide(100)
+            LABEL:Dock(LEFT)
+            """)
+        let children = registry.renderTree(viewportWidth: 240, viewportHeight: 32)
+            .filter { $0.parentIdentifier != nil }
+            .sorted { $0.identifier < $1.identifier }
+        XCTAssertEqual(children.count, 3)
+        XCTAssertEqual(children[0].frame, GMLuaPanelRect(x: 195, y: 0, width: 45, height: 32))
+        XCTAssertEqual(children[1].frame, GMLuaPanelRect(x: 100, y: 0, width: 95, height: 32))
+        XCTAssertEqual(children[2].frame, GMLuaPanelRect(x: 0, y: 0, width: 100, height: 32))
+    }
+
     func testStockGroupArrowRotationPreservesCenterAndFlipsUVWithoutApproximation() throws {
         let runtime = GMLuaRuntime(realm: .client, logger: { _ in }, bootstrapMode: .strict)
         defer { _ = runtime.close() }
@@ -2101,9 +2127,9 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
         let body = try XCTUnwrap(tree.first(where: {
             $0.requestedClassName == "Panel" && $0.parentIdentifier == tree.first?.identifier
         }))
-        // BODY has the lower ZPos, so it is docked first and fills the original
-        // padded area before HEADER consumes space for later docked siblings.
-        XCTAssertEqual(body.frame, GMLuaPanelRect(x: 20, y: 30, width: 750, height: 1000))
+        // FILL reserves space for HEADER even with lower paint ZPos. Edge
+        // docking order must not cause BODY to overlap the header's text.
+        XCTAssertEqual(body.frame, GMLuaPanelRect(x: 20, y: 108, width: 750, height: 922))
         let overflow = try XCTUnwrap(tree.first(where: { $0.parentIdentifier == body.identifier }))
         XCTAssertEqual(overflow.clipRect, body.clipRect)
         XCTAssertFalse(registry.hasPlatformViewBacking)

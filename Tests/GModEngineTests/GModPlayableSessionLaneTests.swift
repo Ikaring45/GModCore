@@ -744,6 +744,19 @@ final class GModPlayableSessionLaneTests: XCTestCase {
             if case .texturedRectangle = $0 { return true }
             return false
         })
+        try await lane.execute("""
+            NUM_LAYOUT_REGRESSION = vgui.Create("DNumSlider")
+            NUM_LAYOUT_REGRESSION:SetSize(240, 32)
+            NUM_LAYOUT_REGRESSION:SetText("Damage")
+            NUM_LAYOUT_REGRESSION:MakePopup()
+            """, realm: .client, expectedGeneration: initial.generation)
+        _ = try await lane.renderClientVGUIFrame(expectedGeneration: initial.generation)
+        try await lane.execute("""
+            local p = NUM_LAYOUT_REGRESSION
+            assert(p.Slider:GetX() >= p.Label:GetX() + p.Label:GetWide(), "slider overlaps label")
+            assert(p.Slider:GetX() + p.Slider:GetWide() <= p.TextArea:GetX(), "slider overlaps value")
+            p:Remove()
+            """, realm: .client, expectedGeneration: initial.generation)
         XCTAssertTrue(diagnostics.failures.isEmpty, diagnostics.failures.joined(separator: "\n"))
         _ = try await lane.close()
     }

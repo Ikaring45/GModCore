@@ -2,10 +2,11 @@ import Combine
 import Foundation
 import GModEngine
 import GModGameAssets
+import GModGameSession
 import GModMetal
 import SwiftUI
 
-private struct GModDermaMenuPointerOutput: Sendable {
+struct GModDermaMenuPointerOutput: Sendable {
     let wantsTextInput: Bool
     let focusedTextEntry: Int?
     let actions: [GMLuaMenuAction]
@@ -15,30 +16,40 @@ private struct GModDermaMenuPointerOutput: Sendable {
 /// snapshot construction and stock panel callbacks can walk the full VGUI
 /// tree, so running them inline from a touch callback made UIKit wait before it
 /// could deliver the next sample.
-private actor GModDermaMenuSessionLane {
+actor GModDermaMenuSessionLane {
+    private nonisolated let dedicatedThread = GModMenuSessionThread()
+    nonisolated var unownedExecutor: UnownedSerialExecutor {
+        dedicatedThread.unownedExecutor
+    }
     private var session: GMLuaMenuSession?
     private var generation: UInt64 = 0
     private var lastAdvanceTimestamp: TimeInterval?
 
-    deinit {
-        _ = session?.close()
-    }
-
-    func replace(with replacement: GMLuaMenuSession, generation: UInt64) {
+    func replace(with replacement: GMLuaMenuSession, generation: UInt64) throws {
+        dedicatedThread.preconditionIsCurrentWorker()
         guard generation >= self.generation else {
             _ = replacement.close()
             return
         }
+        do {
+            _ = try replacement.start()
+        } catch {
+            _ = replacement.close()
+            throw error
+        }
         _ = session?.close()
         session = replacement
+        dedicatedThread.retainForShutdown(replacement)
         self.generation = generation
         lastAdvanceTimestamp = nil
     }
 
     func removeSession(generation: UInt64) {
+        dedicatedThread.preconditionIsCurrentWorker()
         guard generation >= self.generation else { return }
         _ = session?.close()
         session = nil
+        dedicatedThread.clearShutdownCleanup()
         self.generation = generation
         lastAdvanceTimestamp = nil
     }
@@ -162,6 +173,7 @@ private actor GModDermaMenuSessionLane {
     private func requiredSession(
         expectedGeneration: UInt64
     ) throws -> GMLuaMenuSession {
+        dedicatedThread.preconditionIsCurrentWorker()
         guard expectedGeneration == generation, let session else {
             throw GMLuaMenuSessionError.notStarted
         }
@@ -269,19 +281,22 @@ final class GModDermaMenuModel: ObservableObject {
                         }
                     }
                 )
-                _ = try replacement.start()
-                try replacement.updatePermissions(GMLuaPermissionSnapshot(
+                let permissionSnapshot = GMLuaPermissionSnapshot(
                     temporary: permissionStore.collection.temporary,
                     permanent: permissionStore.collection.permanent
-                ))
-                try replacement.updateLuaErrors(luaErrors)
+                )
                 let lane = sessionLane
                 let generation = sessionGeneration
-                let task = Task {
-                    await lane.replace(
-                        with: replacement,
-                        generation: generation
-                    )
+                let task = Task { [weak self] in
+                    do {
+                        try await lane.replace(with: replacement, generation: generation)
+                        try await lane.updatePermissions(permissionSnapshot, expectedGeneration: generation)
+                        try await lane.updateLuaErrors(luaErrors, expectedGeneration: generation)
+                    } catch {
+                        guard let self, generation == sessionGeneration else { return }
+                        hasSession = false
+                        fail(error)
+                    }
                 }
                 installationTask = task
                 hasSession = true

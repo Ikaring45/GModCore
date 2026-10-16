@@ -62,3 +62,24 @@
 
 Contract references: [KEY enum](https://wiki.facepunch.com/gmod/Enums/KEY),
 [centered rotated rectangle](https://wiki.facepunch.com/gmod/surface.DrawTexturedRectRotated).
+
+## Follow-up: device Problems crash, Q/C cost and slider text overlap
+
+- MENU startup, callbacks and teardown now use a stable dedicated 16 MiB-stack
+  actor worker, matching the recursive interpreter's existing gameplay lane.
+  Startup no longer runs original Derma Lua on MainActor. Fallback cleanup also
+  closes Lua on its owner worker. Without the device crash report, stack
+  exhaustion remains a suspected cause, not a confirmed crash diagnosis.
+- Dependent layout selection for full Q/C frames uses a bounded heap index
+  instead of allocating/filtering the entire pending set for every callback.
+  Smallest panel-ID ordering, reinvalidation and scoped rendering are retained;
+  Think, animations and input are not disabled to hide the rendering cost.
+- FILL docking now uses the remaining area after edge siblings. Stock
+  DNumSlider creates its slider before its label; the old one-pass docking put
+  the slider under Damage/Delay text. Paint Z order is unchanged, and edge
+  sibling order remains unchanged. See the creation-order example in
+  [Panel:Dock](https://wiki.facepunch.com/gmod/Panel:Dock).
+- Regressions cover the real App MENU actor path, stable worker startup/render/
+  teardown, worklist equivalence to Set minimum, and stock DNumSlider geometry
+  following Q/C/Hint transitions. Physical iPad frame time and crash recovery
+  remain separate from portable tests and Apple CI.

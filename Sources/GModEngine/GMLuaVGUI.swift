@@ -421,7 +421,7 @@ private struct GMLuaPendingPanelSizeChange {
     let height: Double
 }
 
-/// One ordering contract shared by drawing, hit testing and docking.
+/// Sibling ordering shared by drawing, hit testing and edge docking.
 /// `SetDrawOnTop` remains a separate paint-only final pass.
 private func panelComesBefore(
     _ first: GMLuaPanelValue,
@@ -495,7 +495,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     private var logicalPointerPosition: (x: Double, y: Double)?
     private var latestDrawOnTopOrder: UInt64 = 0
     private var pendingDockSizeChanges: [Int: GMLuaPendingPanelSizeChange] = [:]
-    private var pendingDependentLayoutIdentifiers: Set<Int> = []
+    private var pendingDependentLayoutIdentifiers = GMLuaVGUILayoutWorklist()
     private var missingMethodDiagnosticsStorage: [GMLuaVGUIMissingMethodDiagnostic] = []
     private var pendingMissingMemberLookups: [GMLuaPendingMissingMemberLookup] = []
 
@@ -1392,22 +1392,28 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
                 width: max(0, parent.width - parent.dockPadding.left - parent.dockPadding.right),
                 height: max(0, parent.height - parent.dockPadding.top - parent.dockPadding.bottom)
             )
-            for child in childrenForDocking(of: parent.identifier) {
+            applySiblings(childrenForDocking(of: parent.identifier), into: &available)
+        }
+
+        func applySiblings(_ siblings: [GMLuaPanelValue], into available: inout GMLuaPanelRect) {
+            // FILL uses the space left by edge-docked siblings, even when
+            // created first (stock DNumSlider creates FILL before its label).
+            // Preserve Z/sibling order within each pass and for painting.
+            // https://wiki.facepunch.com/gmod/Panel:Dock (second example)
+            for child in siblings where child.dock != .fill {
+                dock(child, into: &available)
+                applyChildDocking(to: child)
+            }
+            for child in siblings where child.dock == .fill {
                 dock(child, into: &available)
                 applyChildDocking(to: child)
             }
         }
 
         var worldPanelAvailable = viewport
-        for root in childrenForDocking(of: nil) {
-            dock(root, into: &worldPanelAvailable)
-            applyChildDocking(to: root)
-        }
+        applySiblings(childrenForDocking(of: nil), into: &worldPanelAvailable)
         var overlayPanelAvailable = viewport
-        for root in childrenForDocking(of: Self.overlayPanelIdentifier) {
-            dock(root, into: &overlayPanelAvailable)
-            applyChildDocking(to: root)
-        }
+        applySiblings(childrenForDocking(of: Self.overlayPanelIdentifier), into: &overlayPanelAvailable)
 
         // IPanel docking ultimately uses SetSize. Coalesce the completed dock
         // graph before queuing Lua callbacks so every OnSizeChanged observer
@@ -3300,10 +3306,18 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
             let identifier: Int?
             let diagnostic: String?
             lock.lock()
-            let scopedPending = pendingDependentLayoutIdentifiers.filter {
-                panelIdentifierLocked($0, isIn: scope)
+            let next: Int?
+            if case .all = scope {
+                next = pendingDependentLayoutIdentifiers.minimum()
+            } else {
+                next = pendingDependentLayoutIdentifiers.filter {
+                    panelIdentifierLocked($0, isIn: scope)
+                }.min()
             }
-            if performed >= maxLayouts, !scopedPending.isEmpty {
+            if performed >= maxLayouts, next != nil {
+                let scopedPending = pendingDependentLayoutIdentifiers.filter {
+                    panelIdentifierLocked($0, isIn: scope)
+                }
                 diagnostic = scopedPending.sorted().prefix(8).map { pending in
                     let className = panels[pending]
                         .flatMap { panelDescriptor(from: $0) }?.requestedClassName ?? "<removed>"
@@ -3312,7 +3326,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
                 identifier = nil
             } else {
                 diagnostic = nil
-                identifier = scopedPending.min()
+                identifier = next
                 if let identifier {
                     pendingDependentLayoutIdentifiers.remove(identifier)
                 }

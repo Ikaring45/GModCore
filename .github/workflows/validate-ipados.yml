@@ -511,12 +511,16 @@ jobs:
             -resultBundlePath "$RUNNER_TEMP/GModCore-Q-Persistence-NoClip.xcresult" \
             -only-testing:GModAppTests/GModGameForegroundSurfacePublicationPolicyTests \
             -only-testing:GModAppTests/GModDermaMenuBudgetTests \
+            -only-testing:GModAppTests/GModDermaMenuSessionLaneTests \
             -only-testing:GModAppTests/GModBundledFontsTests \
             -only-testing:GModAppTests/GModJapaneseTextInputTests \
             -only-testing:GModAppTests/GModMenuLocalizationTests \
             -only-testing:GModAppTests/GModMetalSurfaceSceneTests/testStockQFirstVisiblePublicationRequiresResolvedGwenScene \
             -only-testing:GModAppTests/GModMetalSurfaceSceneTests/testRetinaStockQAndContextResolveVisibleContent \
             -only-testing:GModEngineTests/GMLuaMenuSessionTests \
+            -only-testing:GModEngineTests/GModMenuSessionThreadTests \
+            -only-testing:GModEngineTests/GMLuaVGUILayoutWorklistTests \
+            -only-testing:GModEngineTests/GMLuaVGUIRegistryTests/testFillBeforeLabelUsesRemainingSliderSpaceWithoutOverlappingText \
             -only-testing:GModEngineTests/GMLuaVGUIRegistryTests/testBrokenHintCallbacksDoNotBlankIndependentMenuAndAreLoggedOnce \
             -only-testing:GModEngineTests/GMLuaVGUIRegistryTests/testStockGroupArrowRotationPreservesCenterAndFlipsUVWithoutApproximation \
             -only-testing:GModEngineTests/LuaStateHostCallTests/testHexadecimalStringEscapesAreOptInAndRemainBytes \

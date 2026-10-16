@@ -119,7 +119,7 @@ final class GModPlayableSessionDedicatedExecutor: SerialExecutor,
     private let state: WorkerState
     private let worker: Thread
 
-    init() {
+    init(name: String = "GMod playable session") {
         let state = WorkerState()
         self.state = state
         worker = Thread {
@@ -140,7 +140,7 @@ final class GModPlayableSessionDedicatedExecutor: SerialExecutor,
                 #endif
             }
         }
-        worker.name = "GMod playable session"
+        worker.name = name
         worker.stackSize = Self.stackSize
         worker.qualityOfService = .userInitiated
         worker.start()
