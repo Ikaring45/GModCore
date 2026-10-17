@@ -41,14 +41,18 @@ final class GModMetalFirstPersonViewModelSceneTests: XCTestCase {
             GModMetalFirstPersonViewModelRenderContract
                 .substitutesMissingSourceMaterials
         )
-        XCTAssertEqual(
+        let initialMultiplier = try XCTUnwrap(
             GModMetalFirstPersonViewModelRenderContract
                 .playerWeaponColorMultiplier(
                     weaponColor: scene.weaponColor,
                     sourceFixedTime: 0
-                ),
-            SIMD3<Float>(0.45, 2.7, 3.15)
+                )
         )
+        // SIMD floating-point arithmetic can round differently on ARM64.
+        // Keep the same per-component tolerance as the peak checks below.
+        XCTAssertEqual(initialMultiplier.x, 0.45, accuracy: 0.000_001)
+        XCTAssertEqual(initialMultiplier.y, 2.7, accuracy: 0.000_001)
+        XCTAssertEqual(initialMultiplier.z, 3.15, accuracy: 0.000_001)
         let peak = try XCTUnwrap(
             GModMetalFirstPersonViewModelRenderContract
                 .playerWeaponColorMultiplier(
