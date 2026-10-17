@@ -500,6 +500,7 @@ public final class GModPlayableSession {
         SourceCanonicalRopePhysicsCommandQueue
     private var nextCommandNumber: Int32 = 1
     private var closedStorage = false
+    private let lifecycleLogger: @Sendable (GMLuaRealm, String) -> Void
     public private(set) var latestClientPhysgunDisplay =
         SourceCanonicalPhysgunClientDisplaySnapshot.empty
 
@@ -703,7 +704,13 @@ public final class GModPlayableSession {
                 .attestedPropPhysicsManifestRequiresContentPack
         }
 
-        progress(.init(stage: .readingBSP))
+        lifecycleLogger = logger
+        logger(.server, "[Session] Starting local server: map=\(configuration.map.rawValue) gamemode=\(trimmedGamemode) maxplayers=\(configuration.maxPlayers)")
+        let reportProgress: GModPlayableSessionLoadingProgressHandler = { update in
+            logger(.server, "[Loading] \(update.stage.taskIdentifier)")
+            progress(update)
+        }
+        reportProgress(.init(stage: .readingBSP))
         let mapAllocationPolicy = GModMapAllocationPolicy.iPadValidated
         let bspData: Data
         let loadedStudioModelRepository: GModStudioModelRepository?
@@ -805,7 +812,7 @@ public final class GModPlayableSession {
         var bspHasher = GModContentSHA256()
         bspHasher.update(bspData)
         let bspSHA256 = bspHasher.hexadecimalDigest()
-        progress(.init(stage: .parsingWorld))
+        reportProgress(.init(stage: .parsingWorld))
         let loadedBSP = try SourceBSP(data: bspData)
         let loadedMapPakFileSystem = try SourceBSPPakFileSystem(bsp: loadedBSP)
         let loadedContentPackGameFileSystem = try loadedContentPackAssetSource.map {
@@ -840,12 +847,12 @@ public final class GModPlayableSession {
         } else {
             loadedPhysicsMaterialCatalog = nil
         }
-        progress(.init(stage: .buildingWorldGeometry))
+        reportProgress(.init(stage: .buildingWorldGeometry))
         let loadedWorldMesh = try GModWorldRenderMesh.build(
             from: loadedBSP,
             allocationPolicy: mapAllocationPolicy
         )
-        progress(.init(stage: .preparingCollision))
+        reportProgress(.init(stage: .preparingCollision))
         let loadedStaticWorldPhysicsAsset = try
             SourceBSPStaticPhysicsBridge.build(
                 bsp: loadedBSP,
@@ -884,7 +891,7 @@ public final class GModPlayableSession {
             world: clientWorldTraceProvider,
             dynamic: clientDynamicTraceSource
         )
-        progress(.init(stage: .startingServerLua))
+        reportProgress(.init(stage: .startingServerLua))
         let systemTime = GMLuaMonotonicSystemTimeSource()
         let session = GMLuaSharedSession()
         let serverFiles = try Self.makeMountedContentFileSystem(
@@ -1261,11 +1268,12 @@ public final class GModPlayableSession {
                 into: server,
                 host: sourceAdapter
             )
-            progress(.init(stage: .loadingServerSandbox))
+            reportProgress(.init(stage: .loadingServerSandbox))
             let serverStartup = try GMLuaStartupOrchestrator(
                 runtime: server,
                 fileSystem: serverFiles
             ).start(targetGamemodeNamed: trimmedGamemode)
+            Self.logStartupReport(serverStartup, logger: logger)
             // Stock Sandbox owns the public reload hook and calls this Player
             // method. Replace its bundled body exactly once after gamemode
             // startup; later addon overrides must remain addon-owned instead
@@ -1335,14 +1343,14 @@ public final class GModPlayableSession {
                     playerIdentity: sourcePlayer.identity
                 ).hostDisposition
             }
-            progress(.init(stage: .startingClientLua))
+            reportProgress(.init(stage: .startingClientLua))
 
             try client.loadFile("lua/includes/init.lua")
             try SourceCanonicalPhysgunWeaponDefinition.install(into: client)
             try SourceCanonicalWeaponCombatBridge
                 .installPlayerFlashlightMethods(into: client)
             try SourceCanonicalPlayerHandsGLuaBridge.install(into: client)
-            progress(.init(stage: .loadingClientSandbox))
+            reportProgress(.init(stage: .loadingClientSandbox))
             var playerConnectionDeliveries = 0
             let clientStartup = try GMLuaStartupOrchestrator(
                 runtime: client,
@@ -1356,6 +1364,7 @@ public final class GModPlayableSession {
                         authoritativeSnapshots:
                             sourceAdapter.canonicalEntitySnapshots
                     )
+                    logger(.client, "[Session] Connected to local server: userID=\(configuration.playerUserID) map=\(configuration.map.rawValue)")
                     // The newly enqueued full snapshot already contains the
                     // active world and Player. Their construction journal is
                     // discarded only after enqueue succeeds, preventing both
@@ -1372,11 +1381,12 @@ public final class GModPlayableSession {
                     )
                 }
             ).start(targetGamemodeNamed: trimmedGamemode)
+            Self.logStartupReport(clientStartup, logger: logger)
             let delivered = playerConnectionDeliveries + (try Self.drain(
                 session,
                 maximumDeliveries: 10_000
             ))
-            progress(.init(stage: .preparingMaterials))
+            reportProgress(.init(stage: .preparingMaterials))
 
             self.configuration = configuration
             serverRuntime = server
@@ -1440,7 +1450,9 @@ public final class GModPlayableSession {
                 }
                 return (self.playerWalkState.viewAngles, self.clientWorldHorizontalFieldOfViewDegrees)
             }
+            logger(.server, "[Session] Lua session ready; initial FIFO deliveries=\(delivered). Renderer readiness is reported separately.")
         } catch {
+            logger(.server, "[Session][ERROR] Startup failed: \(error)")
             if session.connectedClientCount > 0 {
                 try? session.disconnect(client: client)
             }
@@ -1456,6 +1468,18 @@ public final class GModPlayableSession {
     }
 
     public var isClosed: Bool { closedStorage }
+
+    private static func logStartupReport(
+        _ report: GMLuaStartupReport,
+        logger: @Sendable (GMLuaRealm, String) -> Void
+    ) {
+        for stage in report.stages {
+            logger(report.realm, "[Startup] \(stage.stage.rawValue): \(stage.outcome.rawValue); \(stage.detail)")
+            for path in stage.directPaths {
+                logger(report.realm, "[Startup][File] \(path)")
+            }
+        }
+    }
 
     /// Projects replicated CLIENT props and dropped Weapon world models into
     /// immutable renderer-neutral resources and instances. An inventory-owned
@@ -1884,9 +1908,11 @@ public final class GModPlayableSession {
                 serverFinalizerErrors: []
             )
         }
+        lifecycleLogger(.client, "[Session] Disconnecting from local server")
         if sharedSession.connectedClientCount > 0 {
             try sharedSession.disconnect(client: clientRuntime)
         }
+        lifecycleLogger(.client, "[Session] Transport disconnected; releasing world and model resources")
         _ = try dynamicEntityRenderSceneProjector?.reset()
         _ = try firstPersonViewModelSceneProjector?.reset()
         studioRenderableModelCache?.removeAll()
@@ -1895,6 +1921,7 @@ public final class GModPlayableSession {
         let clientReport = clientRuntime.close()
         let serverReport = serverRuntime.close()
         closedStorage = true
+        lifecycleLogger(.server, "[Session] Local server stopped; CLIENT finalizer errors=\(clientReport.errorMessages.count) SERVER finalizer errors=\(serverReport.errorMessages.count)")
         return GModPlayableSessionCloseReport(
             clientFinalizerErrors: clientReport.errorMessages,
             serverFinalizerErrors: serverReport.errorMessages

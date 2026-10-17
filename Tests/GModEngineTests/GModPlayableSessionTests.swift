@@ -1,4 +1,5 @@
 import XCTest
+import Foundation
 import GModEngine
 import GModGameAssets
 @testable import GModGameSession
@@ -23,7 +24,38 @@ private struct UnsupportedContentsPlayableWalkProvider:
     }
 }
 
+private final class SessionLogCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String] = []
+    func append(_ message: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        storage.append(message)
+    }
+    var lines: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+}
+
 final class GModPlayableSessionTests: XCTestCase {
+    func testLifecycleLogsDescribeRealStartupAndIdempotentDisconnect() throws {
+        let logs = SessionLogCapture()
+        let session = try GModPlayableSession(
+            configuration: .init(map: .construct), logger: { _, message in logs.append(message) })
+        XCTAssertTrue(logs.lines.contains { $0.contains("Starting local server") })
+        XCTAssertTrue(logs.lines.contains { $0.contains("[Loading] read-bsp") })
+        XCTAssertTrue(logs.lines.contains { $0.contains("[Startup] initialize: completed") })
+        XCTAssertTrue(logs.lines.contains { $0.contains("[Startup][File]") })
+        XCTAssertTrue(logs.lines.contains { $0.contains("Connected to local server") })
+        XCTAssertTrue(logs.lines.contains { $0.contains("Lua session ready") })
+        _ = try session.close()
+        let count = logs.lines.count
+        _ = try session.close()
+        XCTAssertEqual(logs.lines.count, count)
+        XCTAssertEqual(logs.lines.filter { $0.contains("Local server stopped") }.count, 1)
+    }
     func testWorldFieldOfViewRejectsInvalidConVarValues() {
         XCTAssertEqual(
             GModPlayableWorldFieldOfView.resolvedHorizontalDegrees("100"),
