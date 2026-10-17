@@ -13,9 +13,9 @@ final class GarrysPADContentPackTests: XCTestCase {
         let source = try GModContentPackAssetSource(pack: pack)
         let mdl = try XCTUnwrap(source.data(for: "models/props_junk/wood_crate001a.mdl"))
         let phy = try XCTUnwrap(source.data(for: "models/props_junk/wood_crate001a.phy"))
-        let model = try SourceStudioModel(data: mdl)
+        let model = try SourceStudioFileIdentity(data: mdl)
         let envelope = try SourcePHYCollisionDecoder.decodeEnvelope(phy,
-            expectedSourceModelChecksum: model.header.checksum,
+            expectedSourceModelChecksum: model.checksum,
             budget: .init(maximumFileBytes: 16_777_216, maximumSolids: 64,
                 maximumBytesPerSolid: 8_388_608, maximumTotalSolidBytes: 16_777_216,
                 maximumKeyValuesBytes: 1_048_576))
@@ -29,7 +29,7 @@ final class GarrysPADContentPackTests: XCTestCase {
         XCTAssertFalse(collision.ledges.isEmpty)
         XCTAssertEqual(collision.verification, .unattested,
             "Structural decoding is not independent physics attestation")
-        print("[Owned prop] wood_crate001a: MDL=\(mdl.count) PHY=\(phy.count) ledges=\(collision.ledges.count)")
+        print("[Owned prop] wood_crate001a: version=\(model.version) MDL=\(mdl.count) PHY=\(phy.count) ledges=\(collision.ledges.count)")
     }
 
     func testStudioAssetReaderPreservesMissingOversizeAndPathIDBoundaries() throws {

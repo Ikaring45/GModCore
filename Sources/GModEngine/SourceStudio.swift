@@ -1,5 +1,33 @@
 import Foundation
 
+/// Common MDL identity prefix only; this is not a renderable model decoder.
+/// v44 layout evidence: Crowbar SourceMdlFile44.ReadMdlHeader00, fixed commit
+/// 0d46f3b6a694b74453db407c72c12a9685d8eb1d. v48: Valve studiohdr_t.
+/// Independently implemented field reads; no upstream implementation copied.
+public struct SourceStudioFileIdentity: Equatable, Sendable {
+    public let version: Int32
+    public let checksum: Int32
+    public let name: String
+    public let byteCount: Int
+
+    public init(data: Data, expectedChecksum: Int32? = nil) throws {
+        let reader = SourceStudioReader(data: data)
+        guard data.count >= 80 else { throw SourceStudioError.truncatedHeader(required: 80, actual: data.count) }
+        let magic = try reader.uint32(at: 0, field: "studio identity magic")
+        guard magic == SourceStudioModel.magic else { throw SourceStudioError.invalidMagic(magic) }
+        version = try reader.int32(at: 4, field: "studio identity version")
+        guard version == 44 || version == 48 else { throw SourceStudioError.unsupportedVersion(version) }
+        checksum = try reader.int32(at: 8, field: "studio identity checksum")
+        if let expectedChecksum, expectedChecksum != checksum {
+            throw SourceStudioError.checksumMismatch(expected: expectedChecksum, actual: checksum)
+        }
+        name = try reader.fixedCString(at: 12, byteCount: 64, field: "studio identity name", headerName: true)
+        let length = try reader.int32(at: 76, field: "studio identity length")
+        guard length == Int32(exactly: data.count) else { throw SourceStudioError.invalidLength(declared: length, actual: data.count) }
+        byteCount = data.count
+    }
+}
+
 /// Structural errors reported while reading a Source 1 `.mdl` studio header.
 ///
 /// This parser is intentionally fail-closed. Source's on-disk structures use

@@ -25,3 +25,24 @@ Do not add 44 to the supported set without format/layout evidence.
 
 No game assets were committed or published. No Windows GMod/Oracle was launched.
 Physical iPad loading, model rendering and prop/physgun acceptance remain open.
+
+## v44 identity boundary follow-up
+
+Added SourceStudioFileIdentity for the bounded 80-byte identity prefix of v44
+and v48 (magic, version, checksum, name and exact file length). It is deliberately
+separate from SourceStudioModel: v44 is not added to renderable versions. This
+lets real PHY checks proceed without falsely decoding v44 bones/sequences as v48.
+
+Format evidence, read as definitions only, independent implementation:
+- Crowbar SourceMdlFile44.ReadMdlHeader00 at commit
+  0d46f3b6a694b74453db407c72c12a9685d8eb1d:
+  https://github.com/ZeqMacaw/Crowbar/blob/0d46f3b6a694b74453db407c72c12a9685d8eb1d/Crowbar/Core/GameModel/SourceModel44/SourceMdlFile44.vb
+- Valve v48 studiohdr_t at c8f4c6351162fbff83bfa5a428d45d1e6eed3824:
+  https://github.com/ValveSoftware/source-sdk-2013/blob/c8f4c6351162fbff83bfa5a428d45d1e6eed3824/src/public/studio.h
+
+Observed result on the supplied repaired ZIP: wood_crate001a MDL version 44,
+MDL 1,604 bytes, PHY 1,208 bytes, one structurally decoded collision ledge.
+Real-asset identity/PHY checksum/shape test and identity-validation regression
+both passed on Windows. The collision remains explicitly unattested. No
+production model-validation/attestation requirement was weakened, and the full
+renderable-model decoder still supports only v48.
