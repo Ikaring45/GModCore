@@ -3,6 +3,15 @@ import XCTest
 @testable import GModEngine
 
 final class GMLuaSystemTimeTests: XCTestCase {
+    func testRealTimeIsStableWithinFrameAndIndependentOfCurTime() throws {
+        let source = SequenceSystemTimeSource([12.5, 13.25])
+        let runtime = GMLuaRuntime(realm: .client, logger: { _ in }, systemTimeSource: source)
+        defer { _ = runtime.close() }
+        try runtime.updateRealTimeSnapshot()
+        try runtime.execute("assert(RealTime() == 12.5 and RealTime() == 12.5 and CurTime() == 0)")
+        try runtime.updateRealTimeSnapshot()
+        try runtime.execute("assert(RealTime() == 13.25 and CurTime() == 0)")
+    }
     func testSysTimeSamplesInjectedHighResolutionSourceOnEveryCall() throws {
         let source = SequenceSystemTimeSource([12.5, 12.500_001, 13.25])
         for realm in [GMLuaRealm.server, .client, .menu] {

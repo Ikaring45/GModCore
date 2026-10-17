@@ -64,6 +64,16 @@ public final class GMLuaRuntime {
     public internal(set) var cameraCaptureRequests:
         SourceCanonicalCameraCaptureRequestState?
     public private(set) var systemTimeSource: (any GMLuaSystemTimeSource)?
+    private var realTimeSnapshot: Double = 0
+
+    /// Unscaled uptime, sampled at realm Think/frame boundaries rather than
+    /// on every Lua call (SysTime remains the high-resolution live clock).
+    func updateRealTimeSnapshot() throws {
+        guard let value = systemTimeSource?.currentSystemTime(), value.isFinite, value >= 0 else {
+            throw LuaError.runtime("RealTime host source returned an invalid uptime")
+        }
+        realTimeSnapshot = value
+    }
     private let logger: (String) -> Void
     private var reportedVGUIFrameFailures: [String] = []
     private let fileLoader: ((String) throws -> String)?
@@ -234,6 +244,7 @@ public final class GMLuaRuntime {
         guard let registry = vguiRegistry, let surface = surfaceCommandState else {
             throw LuaError.runtime("VGUI render surface is unavailable")
         }
+        try updateRealTimeSnapshot()
         return try registry.renderFrame(
             surface: surface,
             viewportWidth: viewportWidth,
@@ -283,6 +294,10 @@ public final class GMLuaRuntime {
             into: state,
             source: systemTimeSource
         )
+        state.register("RealTime") { [weak self] _ in
+            guard let self else { throw LuaError.runtime("RealTime runtime is closed") }
+            return [.number(self.realTimeSnapshot)]
+        }
 
         do {
             // Install only GMod's native type/metatable ABI here. The real

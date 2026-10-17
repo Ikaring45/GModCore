@@ -5,6 +5,24 @@ import GModGameAssets
 import GModLua
 
 final class GMLuaVGUIRegistryTests: XCTestCase {
+    func testCursorPosUsesLiveNestedPanelOriginDuringPointerCallback() throws {
+        let state = LuaState(output: { _ in })
+        let types = try GMLuaTypeSystem.install(into: state, utilityLayer: .bundledFallback)
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: types)
+        try state.execute("""
+            ROOT = vgui.Create('Panel'); ROOT:SetPos(20, 30); ROOT:SetSize(200, 150)
+            CHILD = vgui.Create('Panel', ROOT); CHILD:SetPos(15, 10); CHILD:SetSize(100, 80)
+            CHILD.OnMousePressed = function(self)
+                local x,y = self:CursorPos()
+                assert(x == 5 and y == 6)
+                CURSOR_SEEN = true
+            end
+            """)
+        _ = try registry.dispatchPointerEvent(x: 40, y: 46, phase: .began, timestamp: 1,
+            viewportWidth: 320, viewportHeight: 240)
+        try state.execute("assert(CURSOR_SEEN)")
+    }
+
     func testDeepSubtreeRemovalNotifiesOnceAndPreservesReparentedChild() throws {
         let state = LuaState(output: { _ in })
         let types = try GMLuaTypeSystem.install(into: state, utilityLayer: .bundledFallback)

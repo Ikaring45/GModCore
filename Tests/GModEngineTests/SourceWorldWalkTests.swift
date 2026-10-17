@@ -199,6 +199,22 @@ private struct StepUpThrowingProvider: SourceWorldWalkCollisionProvider {
 }
 
 final class SourceWorldWalkTests: XCTestCase {
+    func testCenteredHullEndpointRoundingDoesNotInvalidateRealTrace() {
+        let solver = makeSolver(world: floorWorld(), maximumSpeed: 200)
+        var roundingDifferences = 0
+        for index in 0..<4096 {
+            let start = SourceVector3(0, 0, 16350 + Float(index) * 0.01)
+            let ray = SourceRay(start: start, end: start + SourceVector3(0, 0, 1.1111),
+                mins: SourceVector3(-16, -16, 0), maxs: SourceVector3(16, 16, 72))
+            let centered = ray.start + ray.delta * Float(0.37) + ray.startOffset
+            let reassociated = ray.actualStart + ray.delta * Float(0.37)
+            if abs(centered.z - reassociated.z) > 0.0001 { roundingDifferences += 1 }
+            XCTAssertTrue(solver.traceEndPositionMatches(centered, ray: ray, fraction: 0.37))
+            XCTAssertFalse(solver.traceEndPositionMatches(centered + SourceVector3(1, 0, 0), ray: ray, fraction: 0.37))
+        }
+        XCTAssertGreaterThan(roundingDifferences, 0, "fixture must exercise the old false-rejection path")
+    }
+
     private let worldHandle = SourceBaseHandle(entryIndex: 0, serialNumber: 0)
 
     func testRecoverableClassificationIncludesOnlyExplicitUnsupportedErrors() {

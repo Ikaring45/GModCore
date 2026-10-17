@@ -4115,6 +4115,12 @@ public enum GMLuaVGUI {
                 let origin = try registry.screenOrigin(identifier: panel.identifier)
                 return [.number(x - origin.x), .number(y - origin.y)]
             }),
+            ("CursorPos", { arguments in
+                let panel = try requiredPanel(arguments, "CursorPos")
+                let pointer = registry.logicalPointerCoordinates()
+                let origin = try registry.screenOrigin(identifier: panel.identifier)
+                return [.number(pointer.x - origin.x), .number(pointer.y - origin.y)]
+            }),
             ("SetSize", { arguments in
                 let panel = try requiredPanel(arguments, "SetSize")
                 try registry.setPanelSize(

@@ -1366,7 +1366,7 @@ public struct SourceWorldWalkSolver: Sendable {
             includingLengthSquared: true,
             field: "trace result delta"
         )
-        guard nearlyEqual(trace.endPosition, expectedEnd) else {
+        guard traceEndPositionMatches(trace.endPosition, ray: ray, fraction: trace.fraction) else {
             throw SourceWorldWalkError.inconsistentTrace("HitPos")
         }
 
@@ -1801,6 +1801,15 @@ public struct SourceWorldWalkSolver: Sendable {
         abs(lhs.x - rhs.x) <= tolerance &&
             abs(lhs.y - rhs.y) <= tolerance &&
             abs(lhs.z - rhs.z) <= tolerance
+    }
+
+    /// Hull traces retain centered Ray_t arithmetic. Reassociating its offset
+    /// before the sweep can differ by a Float ULP at map-scale coordinates.
+    /// Accept only these two actual provider equations, not a larger arbitrary
+    /// coordinate tolerance that could hide a genuinely inconsistent trace.
+    func traceEndPositionMatches(_ position: SourceVector3, ray: SourceRay, fraction: Float) -> Bool {
+        nearlyEqual(position, ray.actualStart + ray.delta * fraction) ||
+            nearlyEqual(position, ray.start + ray.delta * fraction + ray.startOffset)
     }
 
     private struct MovementDiagnostics {

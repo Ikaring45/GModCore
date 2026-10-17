@@ -2454,6 +2454,7 @@ public final class GMLuaSourceRuntimeAdapter: @unchecked Sendable {
             return
         }
         do {
+            if runtime.realm == .server { try runtime.updateRealTimeSnapshot() }
             for failure in try scheduler.advance(to: targetTime) {
                 failures.append(
                     GMLuaSourceTimerFailure(
