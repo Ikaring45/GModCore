@@ -402,17 +402,13 @@ public final class GMLuaVPKArchive: @unchecked Sendable {
         count: Int
     ) throws -> Data {
         guard count >= 0 else { throw GMLuaVPKError.truncatedData(path) }
-        do {
-            let result = try source.readImpl(path, offset, count)
-            guard result.count == count else {
-                throw GMLuaVPKError.truncatedData(path)
-            }
-            return result
-        } catch let error as GMLuaVPKError {
-            throw error
-        } catch {
+        // The backing can reject compressed ZIP entries or report an I/O error.
+        // Neither means the VPK itself is truncated; preserve that diagnosis.
+        let result = try source.readImpl(path, offset, count)
+        guard result.count == count else {
             throw GMLuaVPKError.truncatedData(path)
         }
+        return result
     }
 
     private static func readExactly(

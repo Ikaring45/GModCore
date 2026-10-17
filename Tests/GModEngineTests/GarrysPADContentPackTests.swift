@@ -5,12 +5,33 @@ import GModGameAssets
 import GModGameSession
 
 final class GarrysPADContentPackTests: XCTestCase {
+    func testCompressedNestedVPKPreservesBackingCompressionError() throws {
+        let fixture = try makeTemporaryZIP(entries: [
+            ("garrysmod/maps/gm_construct.bsp", Data("construct".utf8), 0),
+            ("garrysmod/maps/gm_flatgrass.bsp", Data("flatgrass".utf8), 0),
+            ("garrysmod/html/img/bg.jpg", Data([1, 2, 3]), 0),
+            ("garrysmod/garrysmod_dir.vpk", Data(repeating: 0, count: 28), 8),
+        ])
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        let pack = try GarrysPADContentPack(url: fixture)
+        XCTAssertThrowsError(try GModContentPackAssetSource(pack: pack)) { error in
+            XCTAssertEqual(error as? GarrysPADContentPackError,
+                .unsupportedCompression(path: "garrysmod/garrysmod_dir.vpk", method: 8))
+        }
+    }
+
     func testConfiguredRealPackDecodesCrateModelAndCollision() throws {
         guard let path = ProcessInfo.processInfo.environment["GMOD_CONTENT_PACK_DIAGNOSTIC_PATH"], !path.isEmpty else {
             throw XCTSkip("GMOD_CONTENT_PACK_DIAGNOSTIC_PATH is not configured")
         }
         let pack = try GarrysPADContentPack(url: URL(fileURLWithPath: path))
         let source = try GModContentPackAssetSource(pack: pack)
+        for archive in source.archives {
+            if let candidate = try archive.data(for: "models/props_junk/wood_crate001a.mdl") {
+                let identity = try SourceStudioFileIdentity(data: candidate)
+                print("[Owned prop mount] \(archive.directoryFileURL.path): v\(identity.version) bytes=\(candidate.count) checksum=\(identity.checksum)")
+            }
+        }
         let mdl = try XCTUnwrap(source.data(for: "models/props_junk/wood_crate001a.mdl"))
         let phy = try XCTUnwrap(source.data(for: "models/props_junk/wood_crate001a.phy"))
         let model = try SourceStudioFileIdentity(data: mdl)
