@@ -4,6 +4,45 @@ import GModEngine
 import GModLua
 
 final class GMLuaResourceHandleTests: XCTestCase {
+    func testCreateMaterialRetainsIdentityAndResolvedPixelsForDImage() throws {
+        let state = LuaState(output: { _ in })
+        let types = try GMLuaTypeSystem.install(into: state, utilityLayer: .bundledFallback)
+        let registry = try GMLuaResources.install(into: state, typeSystem: types, realm: .client)
+        registry.setMaterialPixelResolver(SyntheticMaterialPixelResolver())
+        try state.execute("""
+            local source = Material('synthetic/atlas.png', 'vertexlitgeneric smooth')
+            local tex = source:GetString('$basetexture')
+            local mat = CreateMaterial('atlas_DImage', 'UnlitGeneric', {
+                ['$basetexture'] = tex, ['$vertexcolor'] = 1, ['$vertexalpha'] = 1
+            })
+            assert(mat:GetName() == 'atlas_DImage')
+            assert(mat:GetShader() == 'UnlitGeneric')
+            assert(mat:Width() == 3 and mat:Height() == 2)
+            assert(mat:GetTexture('$basetexture'):GetName() == tex)
+            assert(mat:GetString('$basetexture') == tex)
+            assert(Material('!atlas_DImage') == mat)
+            assert(CreateMaterial('atlas_DImage', 'UnlitGeneric', {}) == mat)
+            assert(not pcall(CreateMaterial, 'unsupported', 'patch', {}))
+            collectgarbage('collect')
+            assert(Material('!atlas_DImage'):GetShader() == 'UnlitGeneric')
+            """, sourceName: "=(DImage generated material regression)")
+        XCTAssertEqual(registry.materialDescriptor(path: "atlas_DImage")?.surfaceTexturePath, "synthetic/atlas.png")
+        let surface = try GMLuaSurface.install(into: state)
+        let vgui = try GMLuaVGUI.install(into: state, typeSystem: types, surfaceCommandState: surface)
+        try state.execute("""
+            local panel = vgui.Create('Panel')
+            panel:SetSize(32, 32)
+            function panel:Paint()
+                surface.SetMaterial(Material('!atlas_DImage'))
+                surface.DrawTexturedRect(0, 0, 32, 32)
+            end
+            """)
+        let frame = try vgui.renderFrame(surface: surface, viewportWidth: 1024, viewportHeight: 768)
+        guard case let .texturedRectangle(_, _, texture, _, _) = frame.commands.first else {
+            return XCTFail("generated material did not reach surface capture")
+        }
+        XCTAssertEqual(texture, "synthetic/atlas.png")
+    }
     func testPNGPixelResolverBacksMaterialAndBaseTextureWithoutFallbackColors() throws {
         let state = LuaState(output: { _ in })
         let typeSystem = try GMLuaTypeSystem.install(

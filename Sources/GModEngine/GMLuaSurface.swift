@@ -1551,7 +1551,7 @@ public enum GMLuaSurface {
                         as? GMLuaMaterialDescriptor else {
                     throw LuaError.runtime("bad argument #1 to 'SetMaterial' (IMaterial expected)")
                 }
-                try commandState.selectTexture(named: descriptor.path)
+                try commandState.selectTexture(named: descriptor.surfaceTexturePath ?? descriptor.path)
                 return []
             },
             debugName: "surface.SetMaterial"

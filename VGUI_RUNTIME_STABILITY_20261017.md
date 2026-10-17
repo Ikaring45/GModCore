@@ -26,3 +26,21 @@ GC reference list (only WorldPanel was included). Rooting the overlay userdata
 and its instance table makes the four-collection/notification/render regression
 pass on Windows. Physical iPad confirmation remains outstanding. CreateMaterial
 and the reported c_arms empty-geometry rejection are still separate open issues.
+
+## DImage CreateMaterial slice (unreleased)
+
+CreateMaterial now supports the stock DImage conversion: UnlitGeneric with an
+already resolved base texture and enabled vertexcolor/vertexalpha. Generated
+name identity, Material("!name"), shader/string queries, source import settings,
+dimensions and Surface bitmap selection are connected. All nine resource-handle
+tests pass on Windows, including a generated-material panel Paint capture.
+Unsupported shaders,
+proxies, other parameters and unresolved source textures explicitly fail; this
+is not a complete runtime VMT/shader implementation. The original DImage Lua is
+unchanged. Reference: https://wiki.facepunch.com/gmod/Global.CreateMaterial
+
+The c_arms path is authored directly by stock weapon_fists as its ViewModel,
+with UseHands enabled. It is not a mistyped replacement for c_arms_citizen.
+Its empty-resource rejection remains open: determine whether the loaded resource
+is animation-only and how it should interact with the separate hands-rendering
+integration. No substitute geometry was added.

@@ -140,6 +140,11 @@ public final class GMLuaMaterialDescriptor: @unchecked Sendable {
         self.path = path
         self.encodedParameters = encodedParameters
     }
+    fileprivate var generatedShader: LuaString?
+    fileprivate var generatedStrings: [String: LuaString] = [:]
+    /// Surface consumes decoded pixels, not a second VMT lookup by generated name.
+    public fileprivate(set) var surfaceTexturePath: LuaString?
+    fileprivate var surfaceTextureParameters: LuaString?
 }
 
 public enum GMLuaTextureDescriptorKind: Sendable, Equatable {
@@ -336,6 +341,13 @@ public final class GMLuaResourceRegistry: @unchecked Sendable {
     }
 
     fileprivate func material(path: LuaString, parameters: LuaString?) throws -> LuaValue {
+        if path.utf8String.hasPrefix("!") {
+            let generatedKey = GMLuaMaterialKey(path: LuaString(String(path.utf8String.dropFirst())), encodedParameters: nil)
+            lock.lock()
+            let generated = materialValues[generatedKey]
+            lock.unlock()
+            if let generated, Self.materialDescriptor(from: generated)?.generatedShader != nil { return generated }
+        }
         let key = GMLuaMaterialKey(path: path, encodedParameters: parameters)
         lock.lock()
         defer { lock.unlock() }
@@ -345,6 +357,39 @@ public final class GMLuaResourceRegistry: @unchecked Sendable {
         let descriptor = GMLuaMaterialDescriptor(path: path, encodedParameters: parameters)
         let value = try typeSystem.makeObject(metaName: "IMaterial", payload: descriptor)
         materialValues[key] = value
+        return value
+    }
+
+    fileprivate func createUnlitMaterial(name: LuaString, shader: LuaString, strings: [String: LuaString]) throws -> LuaValue {
+        let key = GMLuaMaterialKey(path: name, encodedParameters: nil)
+        lock.lock()
+        let existing = materialValues[key]
+        let candidates = materialValues.values.compactMap(Self.materialDescriptor).sorted { $0.path < $1.path }
+        lock.unlock()
+        if let existing { return existing }
+        guard shader.utf8String.caseInsensitiveCompare("UnlitGeneric") == .orderedSame,
+              let textureName = strings["$basetexture"],
+              strings.keys.allSatisfy({ ["$basetexture", "$vertexcolor", "$vertexalpha"].contains($0) }),
+              ["$vertexcolor", "$vertexalpha"].allSatisfy({ strings[$0].map { Double($0.utf8String) == 1 } ?? true }) else {
+            throw LuaError.runtime("CreateMaterial currently supports UnlitGeneric base-texture materials with enabled vertex color/alpha only")
+        }
+        var source: GMLuaMaterialDescriptor?
+        for candidate in candidates where candidate.generatedShader == nil {
+            if let texture = try baseTexture(for: candidate),
+               Self.textureDescriptor(from: texture)?.name == textureName {
+                source = candidate
+                break
+            }
+        }
+        guard let source else {
+            throw LuaError.runtime("CreateMaterial base texture requires an already resolved source material")
+        }
+        let value = try material(path: name, parameters: nil)
+        guard let descriptor = Self.materialDescriptor(from: value) else { throw LuaError.runtime("CreateMaterial registry failure") }
+        descriptor.generatedShader = shader
+        descriptor.generatedStrings = strings
+        descriptor.surfaceTexturePath = source.path
+        descriptor.surfaceTextureParameters = source.encodedParameters
         return value
     }
 
@@ -365,6 +410,11 @@ public final class GMLuaResourceRegistry: @unchecked Sendable {
     }
 
     fileprivate func baseTexture(for material: GMLuaMaterialDescriptor) throws -> LuaValue? {
+        if let source = material.surfaceTexturePath {
+            let value = try self.material(path: source, parameters: material.surfaceTextureParameters)
+            guard let original = Self.materialDescriptor(from: value) else { return nil }
+            return try baseTexture(for: original)
+        }
         let key = GMLuaMaterialKey(
             path: material.path,
             encodedParameters: material.encodedParameters
@@ -496,9 +546,11 @@ public final class GMLuaResourceRegistry: @unchecked Sendable {
         lock.lock()
         let resolver = materialPixelResolver
         lock.unlock()
+        let generated = materialDescriptor(path: path)
+        let sourcePath = generated?.surfaceTexturePath ?? path
         return try resolver?.dimensions(
-            materialPath: path,
-            encodedParameters: encodedParameters
+            materialPath: sourcePath,
+            encodedParameters: generated?.surfaceTexturePath != nil ? generated?.surfaceTextureParameters : encodedParameters
         )
     }
 
@@ -511,15 +563,18 @@ public final class GMLuaResourceRegistry: @unchecked Sendable {
         lock.lock()
         let resolver = materialPixelResolver
         lock.unlock()
+        let generated = materialDescriptor(path: path)
+        let sourcePath = generated?.surfaceTexturePath ?? path
         return try resolver?.pixel(
-            materialPath: path,
-            encodedParameters: encodedParameters,
+            materialPath: sourcePath,
+            encodedParameters: generated?.surfaceTexturePath != nil ? generated?.surfaceTextureParameters : encodedParameters,
             x: x,
             y: y
         )
     }
 
     fileprivate func shaderName(for material: GMLuaMaterialDescriptor) throws -> LuaString {
+        if let shader = material.generatedShader { return shader }
         if let metadata = try metadata(
             path: material.path,
             encodedParameters: material.encodedParameters
@@ -548,6 +603,9 @@ public final class GMLuaResourceRegistry: @unchecked Sendable {
     fileprivate func materialIsError(
         _ material: GMLuaMaterialDescriptor
     ) throws -> Bool? {
+        if material.generatedShader != nil {
+            return try dimensions(path: material.path, encodedParameters: nil).map { _ in false }
+        }
         if let metadata = try metadata(
             path: material.path,
             encodedParameters: material.encodedParameters
@@ -754,6 +812,7 @@ public enum GMLuaResources {
                 throw LuaError.runtime("bad self to 'IMaterial:GetString'")
             }
             let parameter = try requiredString(arguments, index: 1, functionName: "IMaterial:GetString")
+            if descriptor.generatedShader != nil { return descriptor.generatedStrings[parameter.utf8String.lowercased()].map { [.string($0)] } ?? [] }
             // This registry currently retains only the authored base-texture
             // string, not arbitrary VMT scalar parameters. Do not invent them.
             guard asciiCaseInsensitiveEqual(parameter, "$basetexture") else {
@@ -949,6 +1008,24 @@ public enum GMLuaResources {
             gcReferences: { [weak registry] in registry?.references ?? [] }
         )
         state.setGlobal("Material", value: .nativeFunction(materialFunction))
+        let createMaterial = LuaNativeFunctionBox({ [registry, unowned state] arguments in
+            let name = try requiredString(arguments, index: 0, functionName: "CreateMaterial")
+            let shader = try requiredString(arguments, index: 1, functionName: "CreateMaterial")
+            guard arguments.count > 2, case let .table(data) = arguments[2] else {
+                throw LuaError.runtime("CreateMaterial requires a parameter table")
+            }
+            var strings: [String: LuaString] = [:]
+            for (key, value) in try state.rawTablePairs(in: data) {
+                guard case let .string(key) = key else { throw LuaError.runtime("CreateMaterial requires string parameter keys") }
+                switch value {
+                case let .string(text): strings[key.utf8String.lowercased()] = text
+                case .number: strings[key.utf8String.lowercased()] = LuaString(value.printable)
+                default: throw LuaError.runtime("CreateMaterial parameter type is not supported")
+                }
+            }
+            return [try registry.createUnlitMaterial(name: name, shader: shader, strings: strings)]
+        }, debugName: "CreateMaterial", gcReferences: { [weak registry] in registry?.references ?? [] })
+        state.setGlobal("CreateMaterial", value: .nativeFunction(createMaterial))
 
         let utilTable: LuaTable
         if case let .table(existing) = state.getGlobal("util") {
