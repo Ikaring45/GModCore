@@ -1307,11 +1307,18 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         scope: GMLuaVGUIRenderScope = .all
     ) throws {
         lock.lock()
-        let scopedIdentifiers = Set(
-            livePanelDescriptorsLocked(scope: scope).keys
-        )
+        guard !pendingDockSizeChanges.isEmpty else {
+            lock.unlock()
+            return
+        }
+        // Only changed controls need scope checks. Constructing the entire
+        // descriptor tree here made even an idle frame walk every Q/C panel.
         let changes = pendingDockSizeChanges
-            .filter { scopedIdentifiers.contains($0.key) }
+            .filter { identifier, _ in
+                guard let value = panels[identifier],
+                      GMLuaTypeSystem.typedObject(from: value)?.isValid == true else { return false }
+                return panelIdentifierLocked(identifier, isIn: scope)
+            }
             .sorted { $0.key < $1.key }
         for (identifier, _) in changes {
             pendingDockSizeChanges.removeValue(forKey: identifier)
@@ -1346,6 +1353,9 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         descriptors: [Int: GMLuaPanelValue],
         viewport: GMLuaPanelRect
     ) {
+        // Absolute-positioned VGUI trees need no docking workspace at all.
+        // Do not allocate bounds snapshots and parent buckets for that case.
+        guard descriptors.values.contains(where: { $0.dock != .none && $0.isVisible }) else { return }
         let originalBounds = Dictionary(uniqueKeysWithValues: descriptors.map {
             ($0.key, (
                 x: $0.value.x,
@@ -1603,7 +1613,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
                 )
             }
         }
-        guard placeDrawOnTopLast else { return result }
+        guard placeDrawOnTopLast, result.contains(where: \.drawOnTop) else { return result }
         let normal = result.filter { !$0.drawOnTop }
         let onTop = result.enumerated()
             .filter { $0.element.drawOnTop }
