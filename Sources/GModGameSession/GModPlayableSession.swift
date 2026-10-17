@@ -1718,6 +1718,7 @@ public final class GModPlayableSession {
             manipulationInput: movementInput.physgunManipulation
         )
         let serverReport = try sourceAdapter.runServerFixedTick()
+        try advanceCanonicalWeaponAnimations()
         let physicsInputs = try sourceAdapter.prepareCanonicalPropPhysicsStep()
         let propPhysics = try propPhysicsCoordinator.step(
             inputs: physicsInputs,

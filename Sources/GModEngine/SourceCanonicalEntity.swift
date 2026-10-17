@@ -568,6 +568,11 @@ public struct SourceCanonicalWeaponRuntimeState: Equatable, Sendable {
     /// Zero is the real unavailable-duration result while no decoded Studio
     /// sequence metadata is mounted. It is not promoted to a guessed duration.
     public var animationSequenceDuration: Float
+    public var animationCycle: Float
+    public var animationCycleRate: Float
+    public var animationFrameCount: Int32
+    public var animationSequenceLoops: Bool
+    public var animationLastAdvanceTime: Float?
 
     public init(
         clip1: Int32 = 0,
@@ -579,7 +584,12 @@ public struct SourceCanonicalWeaponRuntimeState: Equatable, Sendable {
         animationSequence: Int32 = -1,
         animationSequenceName: String = "",
         animationPlaybackRate: Float = 1,
-        animationSequenceDuration: Float = 0
+        animationSequenceDuration: Float = 0,
+        animationCycle: Float = 0,
+        animationCycleRate: Float = 0,
+        animationFrameCount: Int32 = 0,
+        animationSequenceLoops: Bool = false,
+        animationLastAdvanceTime: Float? = nil
     ) {
         self.clip1 = clip1
         self.clip2 = clip2
@@ -591,6 +601,11 @@ public struct SourceCanonicalWeaponRuntimeState: Equatable, Sendable {
         self.animationSequenceName = animationSequenceName
         self.animationPlaybackRate = animationPlaybackRate
         self.animationSequenceDuration = animationSequenceDuration
+        self.animationCycle = animationCycle
+        self.animationCycleRate = animationCycleRate
+        self.animationFrameCount = animationFrameCount
+        self.animationSequenceLoops = animationSequenceLoops
+        self.animationLastAdvanceTime = animationLastAdvanceTime
     }
 }
 
@@ -1886,7 +1901,13 @@ public final class SourceCanonicalEntityStore {
               weaponRuntime.animationPlaybackRate.isFinite,
               weaponRuntime.animationPlaybackRate >= 0,
               weaponRuntime.animationSequenceDuration.isFinite,
-              weaponRuntime.animationSequenceDuration >= 0 else {
+              weaponRuntime.animationSequenceDuration >= 0,
+              weaponRuntime.animationCycle.isFinite,
+              (0...1).contains(weaponRuntime.animationCycle),
+              weaponRuntime.animationCycleRate.isFinite,
+              weaponRuntime.animationCycleRate >= 0,
+              weaponRuntime.animationFrameCount >= 0,
+              weaponRuntime.animationLastAdvanceTime.map({ $0.isFinite && $0 >= 0 }) ?? true else {
             throw SourceCanonicalEntityError.invalidWeaponRuntime("animation")
         }
         guard state.combat.maximumHealth >= 0,

@@ -132,3 +132,30 @@ zero FPS and unsupported multi-blend), SERVER Lua lookup/selection followed by
 CLIENT FIFO reads with no direct mirror, and original weapon_base reload.
 CLIENT mutation rejection and resolver cleanup after close are also asserted.
 Apple, Oracle and physical-device behavior remain unverified for this change.
+
+## Canonical fixed-tick ViewModel cycle (unreleased)
+
+Decoded sequence metadata now carries frame count, looping and the authored
+single-blend cycle rate. Weapon runtime snapshots retain cycle and the last
+simulation-time advance. Named sequence selection resets the cycle; playback
+rate changes preserve progress up to the exact mutation boundary.
+
+After SERVER Think and before FIFO draining, the session advances only active
+canonical weapons. CLIENT GetCycle and the first-person frame consume these
+replicated values rather than advancing another authoritative clock. The value
+clock validates time/state transactionally, caps elapsed time at 0.2 seconds,
+defers intervals <= 0.001, wraps looping cycles and clamps non-looping ends.
+Unknown sequence timing remains stationary rather than using a guessed speed.
+
+The packet retains fractional cycle and decoded frame count; it does not round
+to an integer frame and claim Source interpolation. Fractional pose sampling,
+activity selection via SendWeaponAnim, animation events, and the live additional
+Metal hands draw remain outstanding.
+Reference: Valve baseanimating.cpp StudioFrameAdvance/StudioFrameAdvanceInternal.
+https://github.com/ValveSoftware/source-sdk-2013/blob/master/src/game/server/baseanimating.cpp
+
+Validation: six Windows tests pass: pure clock wrap/end/pause/interval guards,
+live session GetCycle and replicated frame metadata, pause/resume/restart,
+existing active Toolgun projection, and original weapon_base reload. Apple,
+Oracle and actual iPad output remain unverified. No interpolated animated-draw
+success is claimed.

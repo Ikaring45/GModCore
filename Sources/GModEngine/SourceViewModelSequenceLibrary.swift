@@ -9,11 +9,18 @@ public struct SourceViewModelSequenceMetadata: Sendable, Equatable {
     public let index: Int32
     public let name: String
     public let duration: Float
+    public let frameCount: Int32
+    public let loops: Bool
+    public let cycleRate: Float
 
-    public init(index: Int32, name: String, duration: Float) {
+    public init(index: Int32, name: String, duration: Float, frameCount: Int32 = 0,
+                loops: Bool = false, cycleRate: Float? = nil) {
         self.index = index
         self.name = name
         self.duration = duration
+        self.frameCount = frameCount
+        self.loops = loops
+        self.cycleRate = cycleRate ?? (duration > 0 ? 1 / duration : 0)
     }
 }
 
@@ -54,6 +61,8 @@ public struct SourceViewModelSequenceLibrary: Sendable {
         let cyclesPerSecond = animation.frameCount == 1 ? 0 : animation.framesPerSecond / Float(animation.frameCount - 1)
         let duration: Float = cyclesPerSecond == 0 ? 0 : 1 / cyclesPerSecond
         guard duration.isFinite else { throw SourceViewModelSequenceError.invalidTiming(sequence: index) }
-        return SourceViewModelSequenceMetadata(index: Int32(index), name: sequence.label, duration: duration)
+        return SourceViewModelSequenceMetadata(index: Int32(index), name: sequence.label,
+            duration: duration, frameCount: Int32(animation.frameCount),
+            loops: sequence.flags & 1 != 0, cycleRate: cyclesPerSecond)
     }
 }

@@ -863,9 +863,13 @@ public enum SourceCanonicalWeaponCombatBridge {
                 metadata = try resolver(model, .index(sequence))
             }
             if let metadata {
-                guard metadata.index == sequence, metadata.duration.isFinite, metadata.duration >= 0 else {
+                guard metadata.index == sequence, metadata.duration.isFinite, metadata.duration >= 0,
+                      metadata.cycleRate.isFinite, metadata.cycleRate >= 0, metadata.frameCount >= 0 else {
                     throw LuaError.runtime("Entity:SendViewModelMatchingSequence received inconsistent asset metadata")
                 }
+            }
+            guard let now = runtime?.timerScheduler?.currentTime else {
+                throw LuaError.runtime("Entity:SendViewModelMatchingSequence requires the simulation clock")
             }
             _ = try requiredHost("Entity:SendViewModelMatchingSequence")
                 .updateCanonicalEntity(weapon.identity) {
@@ -873,6 +877,11 @@ public enum SourceCanonicalWeaponCombatBridge {
                     $0.weaponRuntime.animationSequenceName =
                         metadata?.name ?? viewModel.lastLookupName
                     $0.weaponRuntime.animationSequenceDuration = metadata?.duration ?? 0
+                    $0.weaponRuntime.animationCycle = 0
+                    $0.weaponRuntime.animationCycleRate = metadata?.cycleRate ?? 0
+                    $0.weaponRuntime.animationFrameCount = metadata?.frameCount ?? 0
+                    $0.weaponRuntime.animationSequenceLoops = metadata?.loops ?? false
+                    $0.weaponRuntime.animationLastAdvanceTime = Float(now)
                 }
             return []
         }
@@ -887,6 +896,11 @@ public enum SourceCanonicalWeaponCombatBridge {
             )
             return [.number(Double(weapon.weaponRuntime.animationSequence))]
         }
+        try setMethod("Entity:GetCycle", on: entityMetatable) { arguments in
+            let viewModel = try viewModelPayload(arguments.first, function: "Entity:GetCycle")
+            let weapon = try activeWeapon(for: viewModel.player, function: "Entity:GetCycle")
+            return [.number(Double(weapon.weaponRuntime.animationCycle))]
+        }
         try setMethod("Entity:GetPlaybackRate", on: entityMetatable) { arguments in
             let viewModel = try viewModelPayload(
                 arguments.first,
@@ -900,7 +914,7 @@ public enum SourceCanonicalWeaponCombatBridge {
                 weapon.weaponRuntime.animationPlaybackRate
             ))]
         }
-        try setMethod("Entity:SetPlaybackRate", on: entityMetatable) { arguments in
+        try setMethod("Entity:SetPlaybackRate", on: entityMetatable) { [weak runtime] arguments in
             let viewModel = try viewModelPayload(
                 arguments.first,
                 function: "Entity:SetPlaybackRate"
@@ -919,9 +933,15 @@ public enum SourceCanonicalWeaponCombatBridge {
                 for: viewModel.player,
                 function: "Entity:SetPlaybackRate"
             )
+            guard let now = runtime?.timerScheduler?.currentTime else {
+                throw LuaError.runtime("Entity:SetPlaybackRate requires the simulation clock")
+            }
+            var updated = try weapon.weaponRuntime.advancingAnimation(to: Float(now))
+            updated.animationPlaybackRate = rate
+            updated.animationLastAdvanceTime = Float(now)
             _ = try requiredHost("Entity:SetPlaybackRate")
                 .updateCanonicalEntity(weapon.identity) {
-                    $0.weaponRuntime.animationPlaybackRate = rate
+                    $0.weaponRuntime = updated
                 }
             return []
         }

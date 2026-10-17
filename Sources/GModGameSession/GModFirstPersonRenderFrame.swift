@@ -8,6 +8,9 @@ public struct GModFirstPersonRenderFrame: Sendable, Equatable {
     public let cursor: SourceEntityReplicationCursor
     public let activeWeapon: SourceCanonicalEntityIdentity?
     public let definition: GMLuaScriptedWeaponRenderDefinition?
+    /// Exact replicated sequence/cycle/rate metadata, not a rounded renderer
+    /// frame number or an independently extrapolated CLIENT animation state.
+    public let animation: SourceCanonicalWeaponRuntimeState?
     public let viewModel: GModFirstPersonViewModelSceneSnapshot?
     public let hands: GModFirstPersonHandsSceneSnapshot?
     public var handsEnabled: Bool { definition?.useHands == true && definition?.viewModel != nil }
@@ -34,6 +37,6 @@ extension GModPlayableSession {
         let hands = definition?.useHands == true && definition?.viewModel != nil
             ? try clientFirstPersonHandsScene(ifChangedFrom: nil) : nil
         return GModFirstPersonRenderFrame(cursor: cursor, activeWeapon: weapon?.identity,
-            definition: definition, viewModel: viewModel, hands: hands)
+            definition: definition, animation: weapon?.weaponRuntime, viewModel: viewModel, hands: hands)
     }
 }

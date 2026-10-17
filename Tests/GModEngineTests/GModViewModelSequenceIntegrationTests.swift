@@ -10,10 +10,17 @@ final class GModViewModelSequenceIntegrationTests: XCTestCase {
             guard model.path == "models/weapons/c_sequence_probe.mdl" else { return nil }
             switch query {
             case .name("draw"), .index(3):
-                return .init(index: 3, name: "draw", duration: 0.75)
+                return .init(index: 3, name: "draw", duration: 0.75, frameCount: 31)
             default: return nil
             }
         }
+        // This synthetic SWEP is registered in both realms, like a shipped
+        // shared weapon file. SERVER dynamic registration is not a Lua-file
+        // transport and must not silently install CLIENT definitions.
+        try session.clientRuntime.execute("""
+            weapons.Register({ Base = 'weapon_base', ViewModel = 'models/weapons/c_sequence_probe.mdl',
+                WorldModel = '', ViewModelFOV = 62 }, 'weapon_sequence_probe')
+            """)
         try session.serverRuntime.execute("""
             weapons.Register({ Base = 'weapon_base', ViewModel = 'models/weapons/c_sequence_probe.mdl',
                 WorldModel = '', ViewModelFOV = 62 }, 'weapon_sequence_probe')
@@ -40,7 +47,23 @@ final class GModViewModelSequenceIntegrationTests: XCTestCase {
             assert(vm:GetSequence() == 3)
             assert(vm:SequenceDuration() == 0.75)
             assert(not pcall(vm.SendViewModelMatchingSequence, vm, 3))
+            assert(vm:GetCycle() > 0 and vm:GetCycle() < 1)
             """)
+        let beforePause = try XCTUnwrap(session.clientFirstPersonRenderFrame()?.animation)
+        XCTAssertEqual(beforePause.animationFrameCount, 31)
+        try session.serverRuntime.execute("Player(1):GetViewModel():SetPlaybackRate(0)")
+        _ = try session.runFixedTick()
+        _ = try session.runFixedTick()
+        let paused = try XCTUnwrap(session.clientFirstPersonRenderFrame()?.animation)
+        XCTAssertEqual(paused.animationCycle, beforePause.animationCycle)
+        try session.serverRuntime.execute("Player(1):GetViewModel():SetPlaybackRate(2)")
+        _ = try session.runFixedTick()
+        let resumed = try XCTUnwrap(session.clientFirstPersonRenderFrame()?.animation)
+        XCTAssertGreaterThan(resumed.animationCycle, paused.animationCycle)
+        try session.serverRuntime.execute("Player(1):GetViewModel():SendViewModelMatchingSequence(3)")
+        _ = try session.runFixedTick()
+        let restarted = try XCTUnwrap(session.clientFirstPersonRenderFrame()?.animation)
+        XCTAssertLessThan(restarted.animationCycle, resumed.animationCycle)
         _ = try session.close()
         XCTAssertNil(session.serverRuntime.viewModelSequenceResolver)
         XCTAssertNil(session.clientRuntime.viewModelSequenceResolver)
