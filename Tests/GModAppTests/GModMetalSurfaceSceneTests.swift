@@ -899,6 +899,14 @@ final class GModMetalSurfaceSceneTests: XCTestCase {
             ),
             "normalizing glyph rows must not reverse multiline label order"
         )
+        let reverseMultiline = try XCTUnwrap(
+            rasterizer.rasterizeSurfaceText("I\nMMMM", font: descriptor)
+        )
+        XCTAssertGreaterThan(
+            alphaSum(in: reverseMultiline, rows: descriptor.size..<(descriptor.size * 2)),
+            alphaSum(in: reverseMultiline, rows: 0..<descriptor.size),
+            "the heavier line must follow its input position, not bitmap normalization order"
+        )
 
         let japanese = try XCTUnwrap(
             rasterizer.rasterizeSurfaceText("武器", font: descriptor)

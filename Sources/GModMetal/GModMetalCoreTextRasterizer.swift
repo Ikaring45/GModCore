@@ -240,15 +240,12 @@ public final class GModMetalCoreTextRasterizer:
             context.setShouldAntialias(descriptor.antialias)
             context.setFillColor(red: 1, green: 1, blue: 1, alpha: 1)
             context.textMatrix = .identity
-            context.translateBy(x: 0, y: CGFloat(height))
-            context.scaleBy(x: 1, y: -1)
 
             for (index, line) in coreTextLines.enumerated() {
-                // The explicit transform gives this raw bitmap context a
-                // top-left, y-down user space. Core Text's baseline still has
-                // to be expressed from the opposite edge: using `ascent` as a
-                // top-down baseline maps almost the entire glyph above the
-                // bitmap after the CTM flip and leaves only a clipped strip.
+                // Draw in the raw bitmap context's unflipped Quartz space.
+                // Baselines are measured up from the bottom; convert rows to
+                // Surface's top-left convention exactly once below. Flipping
+                // the CTM as well reverses glyphs and multiline band order.
                 let lineTop = CGFloat(index * max(1, descriptor.size))
                 context.textPosition = CGPoint(
                     x: 0,
@@ -262,11 +259,8 @@ public final class GModMetalCoreTextRasterizer:
             throw GModMetalCoreTextRasterizerError.contextCreationFailed
         }
 
-        // Quartz exposes this raw bitmap bottom-row first after CoreText draws
-        // through the flipped CTM. That reverses both each glyph and the order
-        // of multiline bands when Metal samples it as a top-left-origin
-        // Surface texture. Normalize the complete bitmap once so both axes of
-        // that vertical reversal are corrected together.
+        // Normalize native Quartz bitmap rows once for Metal's top-left
+        // Surface texture convention. Do not also invert the drawing CTM.
         Self.flipRowsToTopLeft(
             in: &bytes,
             width: width,

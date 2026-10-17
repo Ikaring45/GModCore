@@ -77,6 +77,17 @@ alone restores the C++ GameUI dialogs: https://wiki.facepunch.com/gmod/Panel
   Full-suite success is explicitly NOT claimed; UI failures remain follow-up work.
 # Native resource field continuation (2026-10-17)
 
+## CoreText orientation continuation
+
+The rasterizer used both an inverted drawing CTM and a bitmap-row reversal.
+It now draws in native Quartz coordinates (baseline = height - lineTop - ascent)
+and converts rows once at the immutable Metal boundary. The existing failing
+asymmetric-L / multiline / Japanese glyph test is now in the dedicated Apple
+gate, with a reverse-multiline assertion as well. Windows parsing is not a
+CoreText pixel test; Apple results and physical iPad appearance remain pending.
+Matrix composition reference:
+https://developer.apple.com/documentation/coregraphics/cgcontextsettextmatrix
+
 ## Q/C continuation
 
 - Failed first foreground publication now closes the invisible menu through

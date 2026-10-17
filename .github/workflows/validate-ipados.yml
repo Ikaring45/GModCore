@@ -518,6 +518,7 @@ jobs:
             -only-testing:GModAppTests/GModMenuLocalizationTests \
             -only-testing:GModAppTests/GModMetalSurfaceSceneTests/testStockQFirstVisiblePublicationRequiresResolvedGwenScene \
             -only-testing:GModAppTests/GModMetalSurfaceSceneTests/testRetinaStockQAndContextResolveVisibleContent \
+            -only-testing:GModAppTests/GModMetalSurfaceSceneTests/testCoreTextRasterizerUsesRegisteredBundledFaceOffRenderThread \
             -only-testing:GModEngineTests/GMLuaMenuSessionTests \
             -only-testing:GModEngineTests/SourceVGUIResourceTests \
             -only-testing:GModEngineTests/GMLuaVGUIResourceInstanceTests \
