@@ -22,6 +22,7 @@ actor GModDermaMenuSessionLane {
         dedicatedThread.unownedExecutor
     }
     private var session: GMLuaMenuSession?
+    private var resourceInstance: GMLuaVGUIResourceInstance?
     private var generation: UInt64 = 0
     private var lastAdvanceTimestamp: TimeInterval?
 
@@ -38,6 +39,7 @@ actor GModDermaMenuSessionLane {
             throw error
         }
         _ = session?.close()
+        resourceInstance = nil
         session = replacement
         dedicatedThread.retainForShutdown(replacement)
         self.generation = generation
@@ -48,6 +50,7 @@ actor GModDermaMenuSessionLane {
         dedicatedThread.preconditionIsCurrentWorker()
         guard generation >= self.generation else { return }
         _ = session?.close()
+        resourceInstance = nil
         session = nil
         dedicatedThread.clearShutdownCleanup()
         self.generation = generation
@@ -106,9 +109,25 @@ actor GModDermaMenuSessionLane {
     }
 
     func dismissUtility(expectedGeneration: UInt64) throws {
+        try resourceInstance?.remove()
+        resourceInstance = nil
         try requiredSession(expectedGeneration: expectedGeneration)
             .dismissUtility()
         lastAdvanceTimestamp = nil
+    }
+
+    func loadLoadingResource(_ resource: SourceVGUIResource, expectedGeneration: UInt64) throws -> [GMLuaVGUIResourceInstance.UnappliedField] {
+        let session = try requiredSession(expectedGeneration: expectedGeneration)
+        try resourceInstance?.remove()
+        resourceInstance = try session.loadLoadingResource(resource)
+        return resourceInstance?.unappliedFields ?? []
+    }
+
+    func updateLoadingResource(status: String, fraction: Double, expectedGeneration: UInt64) throws {
+        _ = try requiredSession(expectedGeneration: expectedGeneration)
+        guard let resourceInstance else { return }
+        try resourceInstance.setText(status, control: "InfoLabel")
+        try resourceInstance.setProgress(fraction, control: "Progress")
     }
 
     func drainActions(expectedGeneration: UInt64) throws -> [GMLuaMenuAction] {
@@ -125,6 +144,7 @@ actor GModDermaMenuSessionLane {
             _ = try session.advance(by: min(0.25, max(0, now - prior)))
         }
         lastAdvanceTimestamp = now
+        try resourceInstance?.layout(viewportWidth: viewport.width, viewportHeight: viewport.height)
         return try session.renderFrame(
             viewportWidth: viewport.width,
             viewportHeight: viewport.height
@@ -196,6 +216,7 @@ final class GModDermaMenuModel: ObservableObject {
     @Published private(set) var wantsTextInput = false
     @Published private(set) var focusedTextEntry: Int?
     @Published private(set) var deferredActions: [GMLuaMenuAction] = []
+    @Published private(set) var resourcePresented = false
 
     func consumeDeferredActions() { deferredActions = [] }
 
@@ -252,6 +273,7 @@ final class GModDermaMenuModel: ObservableObject {
             failure = nil
             wantsTextInput = false
             deferredActions = []
+            resourcePresented = false
             pendingFrame = false
             buildInFlight = false
             frameRevision &+= 1
@@ -520,7 +542,53 @@ final class GModDermaMenuModel: ObservableObject {
         mutationTask = task
     }
 
+    func presentLoadingResource(_ resource: SourceVGUIResource) {
+        guard hasSession, !resourcePresented else { return }
+        resourcePresented = true
+        let generation = sessionGeneration
+        let installation = installationTask
+        let previous = mutationTask
+        mutationTask = Task { [weak self] in
+            await installation?.value
+            await previous?.value
+            guard let self else { return }
+            do {
+                let fields = try await sessionLane.loadLoadingResource(resource, expectedGeneration: generation)
+                guard generation == sessionGeneration else { return }
+                if !fields.isEmpty {
+                    GModAppDiagnosticsStore.shared.record(kind: .compatibility, severity: .warning,
+                        title: "GameUI resource has unapplied fields",
+                        detail: fields.map { "\($0.control).\($0.key)" }.joined(separator: ", "), source: resource.name)
+                }
+                requestFrame()
+            } catch {
+                guard generation == sessionGeneration else { return }
+                resourcePresented = false
+                fail(error)
+            }
+        }
+    }
+
+    func updateLoadingResource(status: String, fraction: Double) {
+        guard hasSession, resourcePresented else { return }
+        let generation = sessionGeneration
+        let previous = mutationTask
+        mutationTask = Task { [weak self] in
+            await previous?.value
+            guard let self else { return }
+            do {
+                try await sessionLane.updateLoadingResource(status: status, fraction: fraction, expectedGeneration: generation)
+                guard generation == sessionGeneration else { return }
+                requestFrame()
+            } catch {
+                guard generation == sessionGeneration else { return }
+                fail(error)
+            }
+        }
+    }
+
     func dismissUtility() {
+        resourcePresented = false
         presentedUtility = nil
         wantsTextInput = false
         guard hasSession else { return }
@@ -646,7 +714,7 @@ final class GModDermaMenuModel: ObservableObject {
     func advancePresentationFrame() {
         // No queued passive backlog: a slow Lua/texture frame must finish
         // before the next idle animation capture can be requested.
-        guard hasSession, presentedUtility != nil, !buildInFlight else { return }
+        guard hasSession, presentedUtility != nil || resourcePresented, !buildInFlight else { return }
         requestFrame()
     }
 

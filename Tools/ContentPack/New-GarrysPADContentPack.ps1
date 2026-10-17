@@ -210,6 +210,28 @@ function New-PackSelection {
     # audited Lua/VGUI startup closure. Keep this transfer-sized profile free
     # of VPK families until direct VPK mounting/audio is connected.
     if ($SelectedProfile -eq 'Playground') {
+        # Native GameUI resources and real photographic slideshow inputs are
+        # required even by the thin Playgrounds profile. Do not transfer VPKs
+        # or redistribute these user-owned files in the Swift package.
+        foreach ($root in @(
+            @{ Source = $garrysmod; Logical = 'garrysmod' },
+            @{ Source = $sourceengine; Logical = 'sourceengine' },
+            @{ Source = $platform; Logical = 'platform' }
+        )) {
+            $resourceRoot = Join-Path $root.Source 'resource'
+            if (Test-Path -LiteralPath $resourceRoot -PathType Container) {
+                foreach ($resourceFile in Get-ChildItem -LiteralPath $resourceRoot -Recurse -File -Filter '*.res') {
+                    $relativeResource = $resourceFile.FullName.Substring($resourceRoot.Length + 1).Replace('\', '/')
+                    Add-PackFile -Selection $selection -SourcePath $resourceFile.FullName `
+                        -LogicalPath "$($root.Logical)/resource/$relativeResource"
+                }
+            }
+        }
+        foreach ($backgroundDirectory in @('backgrounds', 'gamemodes/sandbox/backgrounds')) {
+            Add-PackDirectory -Selection $selection `
+                -SourceRoot (Join-Path $garrysmod $backgroundDirectory) `
+                -LogicalRoot "garrysmod/$backgroundDirectory"
+        }
         return $selection
     }
 

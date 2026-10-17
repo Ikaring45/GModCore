@@ -520,6 +520,7 @@ jobs:
             -only-testing:GModAppTests/GModMetalSurfaceSceneTests/testRetinaStockQAndContextResolveVisibleContent \
             -only-testing:GModEngineTests/GMLuaMenuSessionTests \
             -only-testing:GModEngineTests/SourceVGUIResourceTests \
+            -only-testing:GModEngineTests/GMLuaVGUIResourceInstanceTests \
             -only-testing:GModEngineTests/GMLuaVGUIRegistryTests/testDeferredOnRemoveCascadesToOwnerExactlyOnceBeforePainting \
             -only-testing:GModEngineTests/GModMenuSessionThreadTests \
             -only-testing:GModEngineTests/GMLuaVGUILayoutWorklistTests \

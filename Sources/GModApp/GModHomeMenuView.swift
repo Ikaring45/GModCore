@@ -990,6 +990,7 @@ struct GModStockLoadingView: UIViewRepresentable {
     let status: String
     let task: String
     let progress: GModPlayableSessionLoadingProgress
+    var nativeProgressVisible: Bool = false
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -1057,6 +1058,7 @@ struct GModStockLoadingView: UIViewRepresentable {
             progress: progress,
             in: webView
         )
+        context.coordinator.updateNativeProgressVisibility(nativeProgressVisible, in: webView)
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate {
@@ -1067,6 +1069,21 @@ struct GModStockLoadingView: UIViewRepresentable {
         private var status: String
         private var task: String
         private var progress: GModPlayableSessionLoadingProgress
+        private var nativeProgressVisible = false
+
+        func updateNativeProgressVisibility(_ visible: Bool, in webView: WKWebView) {
+            nativeProgressVisible = visible
+            applyNativeProgressVisibility(in: webView)
+        }
+
+        private func applyNativeProgressVisibility(in webView: WKWebView) {
+            webView.evaluateJavaScript("""
+                ['garryspad-real-progress','spambox'].forEach(function(id){
+                  var node=document.getElementById(id);
+                  if(node) node.style.display=\(nativeProgressVisible ? "'none'" : "''");
+                });
+                """)
+        }
 
         init(
             pack: GarrysPADContentPack,
@@ -1125,6 +1142,7 @@ struct GModStockLoadingView: UIViewRepresentable {
                 task: task,
                 progress: progress
             ))
+            applyNativeProgressVisibility(in: webView)
         }
 
         private static func script(

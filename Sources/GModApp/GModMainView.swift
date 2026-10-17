@@ -128,6 +128,7 @@ public struct GModMainView: View {
     @StateObject private var game: GModGameSessionModel
     @StateObject private var content: GModPlaygroundContentModel
     @StateObject private var dermaMenu: GModDermaMenuModel
+    @StateObject private var loadingDerma: GModDermaMenuModel
     @StateObject private var developerDiagnostics:
         GModDeveloperDiagnosticsSettingsStore
     @StateObject private var localizationSelection:
@@ -273,6 +274,9 @@ public struct GModMainView: View {
                 permissionStore: permissionStore
             )
         )
+        _loadingDerma = StateObject(wrappedValue: GModDermaMenuModel(
+            runtimeFactory: factory, permissionStore: permissionStore
+        ))
         _developerDiagnostics = StateObject(
             wrappedValue: GModDeveloperDiagnosticsSettingsStore.shared
         )
@@ -793,7 +797,8 @@ public struct GModMainView: View {
                     gameModeTitle: localizedSandboxTitle,
                     status: localizedLoadingTask,
                     task: localizedLoadingTask,
-                    progress: game.loadingProgress
+                    progress: game.loadingProgress,
+                    nativeProgressVisible: loadingDerma.resourcePresented && loadingDerma.surfaceScene != nil
                 )
                 .ignoresSafeArea()
                 .transition(.opacity)
@@ -856,11 +861,55 @@ public struct GModMainView: View {
                 .transition(.opacity)
             }
 
+            if loadingDerma.resourcePresented {
+                GModDermaMenuSurface(model: loadingDerma,
+                    preferredFramesPerSecond: inputVideoSettings.preferredFramesPerSecond,
+                    onActions: { actions in
+                        if actions.contains(.disconnect) {
+                            handlePresentationEvent(.homeMenuAction(.disconnect))
+                        }
+                    })
+            }
+
             if let failure = game.startFailure {
                 startFailureRecoveryOverlay(failure)
             }
         }
         .accessibilityIdentifier("garryspad.loading")
+        .onAppear { activateLoadingResource() }
+        .onChange(of: game.loadingProgress.percentComplete) { _ in updateLoadingResource() }
+        .onChange(of: localizedLoadingTask) { _ in updateLoadingResource() }
+        .onDisappear {
+            loadingDerma.dismissUtility()
+            loadingDerma.deactivate()
+        }
+    }
+
+    private func activateLoadingResource() {
+        guard case let .ready(pack, _, _) = content.state else { return }
+        do {
+            let data: Data
+            if let mounted = try content.assetSource?.data(for: "resource/LoadingDialogGMod.res", maximumByteCount: 1_024 * 1_024) {
+                data = mounted
+            } else {
+                data = try pack.data(for: "garrysmod/resource/LoadingDialogGMod.res", maximumByteCount: 1_024 * 1_024)
+            }
+            let resource = try SourceVGUIResource(source: String(decoding: data, as: UTF8.self))
+            loadingDerma.activate(mountGeneration: content.activeMountGeneration,
+                phrases: localizationSelection.snapshot.phrases, problemLines: [], consoleLines: [],
+                settings: dermaMenuSettings, permissionSessionTransport: nil)
+            loadingDerma.presentLoadingResource(resource)
+            updateLoadingResource()
+        } catch {
+            diagnostics.record(kind: .compatibility, severity: .warning,
+                title: "Native loading resource unavailable",
+                detail: GMLuaRuntime.describe(error), source: "resource/LoadingDialogGMod.res")
+        }
+    }
+
+    private func updateLoadingResource() {
+        loadingDerma.updateLoadingResource(status: localizedLoadingTask,
+                                           fraction: game.loadingProgress.fractionCompleted)
     }
 
     private func startFailureRecoveryOverlay(

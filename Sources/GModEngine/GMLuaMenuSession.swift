@@ -281,6 +281,7 @@ public final class GMLuaMenuSession: @unchecked Sendable {
         "lua/vgui/dpanel.lua",
         "lua/vgui/dlabel.lua",
         "lua/vgui/dbutton.lua",
+        "lua/vgui/dprogress.lua",
         "lua/vgui/dscrollbargrip.lua",
         "lua/vgui/dvscrollbar.lua",
         "lua/vgui/dscrollpanel.lua",
@@ -430,6 +431,27 @@ public final class GMLuaMenuSession: @unchecked Sendable {
             source = "GARRYSPAD_OPEN_UTILITY('console')"
         }
         try runtime.execute(source, sourceName: "=(Garry's PAD utility open)")
+    }
+
+    /// Native GameUI resource adapter, separate from the legacy GLua API.
+    /// The host must inspect unappliedFields before claiming dialog parity.
+    public func loadResource(
+        _ resource: SourceVGUIResource, rootControlName: String? = nil,
+        onCommand: @escaping (String) throws -> Void
+    ) throws -> GMLuaVGUIResourceInstance {
+        try requireActive()
+        return try GMLuaVGUIResourceInstance(runtime: runtime, resource: resource,
+                                            rootControlName: rootControlName, onCommand: onCommand)
+    }
+
+    public func loadLoadingResource(_ resource: SourceVGUIResource) throws -> GMLuaVGUIResourceInstance {
+        let hostState = self.hostState
+        return try loadResource(resource, rootControlName: "LoadingDialog") { command in
+            guard command.lowercased() == "cancel" else {
+                throw GMLuaMenuSessionError.invalidAction("unsupported loading resource command: \(command)")
+            }
+            try hostState.append(.disconnect)
+        }
     }
 
     public func dismissUtility() throws {

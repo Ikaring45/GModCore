@@ -1,0 +1,169 @@
+import Foundation
+import GModLua
+
+/// Host-owned native resource adapter. Invoke on the runtime's owning lane.
+/// This does not replace the deprecated GLua LoadControlsFromString method.
+public final class GMLuaVGUIResourceInstance {
+    private final class Roots: @unchecked Sendable {
+        let values: [LuaValue]
+        init(_ values: [LuaValue]) { self.values = values }
+    }
+    public struct UnappliedField: Equatable, Sendable {
+        public let control: String
+        public let key: String
+    }
+
+    public enum ResourceError: Error, Equatable {
+        case unresolvedDirectives
+        case unresolvedConditional(String)
+        case unsupportedControl(String)
+        case missingRoot(String)
+        case missingControl(String)
+        case invalidField(control: String, key: String)
+    }
+
+    public private(set) var unappliedFields: [UnappliedField] = []
+    private let runtime: GMLuaRuntime
+    private let index: LuaValue
+    private let roots: Roots
+    private var panels: [String: LuaValue] = [:]
+    private var resource: SourceVGUIResource
+    private let rootControlName: String?
+
+    private static let classes = [
+        "frame": "DFrame", "panel": "DPanel", "editablepanel": "EditablePanel",
+        "label": "DLabel", "button": "DButton", "checkbutton": "DCheckBox",
+        "textentry": "DTextEntry", "progressbar": "DProgress", "imagepanel": "DImage"
+    ]
+
+    init(runtime: GMLuaRuntime, resource: SourceVGUIResource,
+         rootControlName: String?, onCommand: @escaping (String) throws -> Void) throws {
+        self.runtime = runtime
+        self.resource = resource
+        self.rootControlName = rootControlName
+        index = try runtime.executeReturningValues("return function(p,k) return p[k] end").first ?? .nilValue
+        roots = Roots([index])
+        runtime.state.registerGarbageCollectionRootProvider { [weak roots] in roots?.values ?? [] }
+        guard resource.directives.isEmpty else { throw ResourceError.unresolvedDirectives }
+        if let rootControlName, !resource.controls.contains(where: { $0.fieldName == rootControlName }) {
+            throw ResourceError.missingRoot(rootControlName)
+        }
+        // Validate factories before constructing anything. Unknown native C++
+        // controls must never become dummy panels or fictitious cvar widgets.
+        var fieldNames: Set<String> = []
+        for control in resource.controls {
+            guard fieldNames.insert(control.fieldName).inserted else {
+                throw ResourceError.invalidField(control: control.name, key: "duplicate fieldName")
+            }
+            guard control.conditional == nil, control.entries.allSatisfy({ $0.conditional == nil }) else {
+                throw ResourceError.unresolvedConditional(control.name)
+            }
+            guard let name = control.controlName, Self.classes[name.lowercased()] != nil else {
+                throw ResourceError.unsupportedControl(control.controlName ?? control.name)
+            }
+        }
+        var ordered = resource.controls
+        if let rootControlName, let offset = ordered.firstIndex(where: { $0.fieldName == rootControlName }) {
+            ordered.insert(ordered.remove(at: offset), at: 0)
+        }
+        let create = try runtime.executeReturningValues("return vgui.Create").first ?? .nilValue
+        do {
+            for control in ordered {
+                let parent = control.fieldName == rootControlName ? LuaValue.nilValue
+                    : rootControlName.flatMap { panels[$0] } ?? .nilValue
+                let hidesTitle = control.controlName?.lowercased() == "frame" && control.value("settitlebarvisible") == "0"
+                let panel = try runtime.state.call(create, arguments: [
+                    .string(LuaString(hidesTitle ? "DPanel" : Self.classes[control.controlName!.lowercased()]!)),
+                    parent, .string(LuaString(control.fieldName))
+                ]).first ?? .nilValue
+                panels[control.fieldName] = panel
+                for (key, method) in [("labelText", "SetText"), ("title", "SetTitle"), ("font", "SetFont")] {
+                    if key == "title", hidesTitle { continue }
+                    if let text = control.value(key) {
+                        _ = try call(control.fieldName, method, [.string(LuaString(text))])
+                    }
+                }
+                if let alignment = control.value("textAlignment") {
+                    let positions = ["northwest": 7, "north": 8, "northeast": 9,
+                                     "west": 4, "center": 5, "east": 6,
+                                     "southwest": 1, "south": 2, "southeast": 3]
+                    guard let position = positions[alignment.lowercased()] else {
+                        throw ResourceError.invalidField(control: control.name, key: "textAlignment")
+                    }
+                    _ = try call(control.fieldName, "SetContentAlignment", [.number(Double(position))])
+                }
+                for (key, method) in [("visible", "SetVisible"), ("enabled", "SetEnabled")] {
+                    if let value = control.value(key) {
+                        guard value == "0" || value == "1" else {
+                            throw ResourceError.invalidField(control: control.name, key: key)
+                        }
+                        _ = try call(control.fieldName, method, [.boolean(value == "1")])
+                    }
+                }
+                if let text = control.value("command") {
+                    guard control.controlName?.lowercased() == "button" else {
+                        throw ResourceError.invalidField(control: control.name, key: "command")
+                    }
+                    let callback = LuaValue.nativeFunction(LuaNativeFunctionBox({ _ in
+                        try onCommand(text)
+                        return []
+                    }, debugName: "resource command: \(text)"))
+                    // Userdata sidecars are assigned through the same semantic
+                    // path as original Lua DButton.DoClick overrides.
+                    let setter = try runtime.executeReturningValues("return function(p,k,v) p[k]=v end").first ?? .nilValue
+                    _ = try runtime.state.call(setter, arguments: [panel, .string("DoClick"), callback])
+                }
+                let applied: Set<String> = ["controlname", "fieldname", "xpos", "ypos", "wide", "tall",
+                    "labeltext", "title", "font", "visible", "enabled", "command", "textalignment"]
+                unappliedFields += control.entries.filter { !applied.contains($0.key.lowercased()) }
+                    .filter { !(hidesTitle && $0.key.lowercased() == "settitlebarvisible") }
+                    .map { UnappliedField(control: control.fieldName, key: $0.key) }
+            }
+        } catch {
+            try? remove()
+            throw error
+        }
+    }
+
+    public func layout(viewportWidth: Int, viewportHeight: Int) throws {
+        let screen = GMLuaPanelRect(x: 0, y: 0, width: Double(viewportWidth), height: Double(viewportHeight))
+        var parent = screen
+        if let root = resource.controls.first(where: { $0.fieldName == rootControlName }) {
+            let frame = try root.frame(parent: screen, screen: screen)
+            try applyFrame(frame, to: root.fieldName)
+            parent = GMLuaPanelRect(x: 0, y: 0, width: frame.width, height: frame.height)
+        }
+        for control in resource.controls where control.fieldName != rootControlName {
+            try applyFrame(control.frame(parent: parent, screen: screen), to: control.fieldName)
+        }
+    }
+
+    public func setText(_ text: String, control: String) throws {
+        _ = try call(control, "SetText", [.string(LuaString(text))])
+    }
+
+    public func setProgress(_ fraction: Double, control: String) throws {
+        guard fraction.isFinite, (0...1).contains(fraction),
+              resource.controls.contains(where: { $0.fieldName == control && $0.controlName?.lowercased() == "progressbar" }) else {
+            throw ResourceError.invalidField(control: control, key: "progress")
+        }
+        _ = try call(control, "SetFraction", [.number(fraction)])
+    }
+
+    public func remove() throws {
+        for name in panels.keys.sorted() { _ = try call(name, "Remove", []) }
+        panels.removeAll()
+    }
+
+    private func applyFrame(_ frame: GMLuaPanelRect, to control: String) throws {
+        _ = try call(control, "SetPos", [.number(frame.x), .number(frame.y)])
+        _ = try call(control, "SetSize", [.number(frame.width), .number(frame.height)])
+    }
+
+    @discardableResult
+    private func call(_ control: String, _ method: String, _ args: [LuaValue]) throws -> [LuaValue] {
+        guard let panel = panels[control] else { throw ResourceError.missingControl(control) }
+        let function = try runtime.state.call(index, arguments: [panel, .string(LuaString(method))]).first ?? .nilValue
+        return try runtime.state.call(function, arguments: [panel] + args)
+    }
+}
