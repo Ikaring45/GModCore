@@ -87,7 +87,29 @@ final class GModPlayableFirstPersonViewModelIntegrationTests:
         )
         XCTAssertNil(unchanged)
 
+        let frameCandidate = try await lane.clientFirstPersonRenderFrame(expectedGeneration: started.generation)
+        let frame = try XCTUnwrap(frameCandidate)
+        XCTAssertEqual(frame.activeWeapon, projection.weaponIdentity)
+        XCTAssertEqual(frame.definition?.className, "gmod_tool")
+        XCTAssertEqual(frame.viewModel?.projection?.weaponIdentity, frame.activeWeapon)
+        XCTAssertEqual(frame.handsEnabled, frame.definition?.useHands == true)
+
+        try await lane.execute("weapons.GetStored('gmod_tool').UseHands = false", realm: .client,
+            sourceName: "=(disable hands fixture)", expectedGeneration: started.generation)
+        let disabled = try await lane.clientFirstPersonRenderFrame(expectedGeneration: started.generation)
+        XCTAssertEqual(disabled?.handsEnabled, false)
+        XCTAssertNil(disabled?.hands)
+        try await lane.execute("weapons.GetStored('gmod_tool').UseHands = true", realm: .client,
+            sourceName: "=(enable hands fixture)", expectedGeneration: started.generation)
+        let enabled = try await lane.clientFirstPersonRenderFrame(expectedGeneration: started.generation)
+        XCTAssertEqual(enabled?.handsEnabled, true)
+        XCTAssertEqual(enabled?.activeWeapon, frame.activeWeapon)
+
         _ = try await lane.close(expectedGeneration: started.generation)
+        do {
+            _ = try await lane.clientFirstPersonRenderFrame(expectedGeneration: started.generation)
+            XCTFail("closed lane published a first-person frame")
+        } catch { }
     }
 }
 

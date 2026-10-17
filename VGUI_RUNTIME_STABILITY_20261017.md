@@ -55,3 +55,16 @@ on the next drawable weapon. Partially malformed geometry is not admitted;
 Metal's existing validation remains unchanged. Six portable ViewModel projection
 tests pass, including visible -> empty -> visible transitions. App/Metal and
 physical-iPad verification remain outstanding.
+
+## First-person composite handoff (unreleased)
+
+SWEP render definitions now retain inherited UseHands with Lua truthiness.
+The session/lane exposes a single CLIENT first-person frame containing the
+replication cursor, full-handle active weapon, SWEP definition, viewmodel and
+conditionally enabled hands publication. Disabled hands produce nil even if
+their canonical entity remains alive. Closed/stale lanes cannot publish frames.
+This is renderer handoff data, not finished App/Metal hands rendering: bone
+merge, weapon animation pose and the actual additional draw remain unconnected.
+Four Windows tests pass, including active-weapon identity, live UseHands off/on
+and refusing a frame after lane close. No App/Metal or physical-device pass is
+claimed by these tests.

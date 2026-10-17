@@ -9,17 +9,20 @@ public struct GMLuaScriptedWeaponRenderDefinition: Sendable, Equatable {
     public let viewModel: SourceEntityModelReference?
     public let worldModel: SourceEntityModelReference?
     public let viewModelFieldOfViewDegrees: Float
+    public let useHands: Bool
 
     public init(
         className: String,
         viewModel: SourceEntityModelReference?,
         worldModel: SourceEntityModelReference?,
-        viewModelFieldOfViewDegrees: Float
+        viewModelFieldOfViewDegrees: Float,
+        useHands: Bool = false
     ) {
         self.className = className
         self.viewModel = viewModel
         self.worldModel = worldModel
         self.viewModelFieldOfViewDegrees = viewModelFieldOfViewDegrees
+        self.useHands = useHands
     }
 }
 
@@ -147,7 +150,8 @@ extension GMLuaRuntime {
             className: className,
             viewModel: viewModel,
             worldModel: worldModel,
-            viewModelFieldOfViewDegrees: Float(rawFOV)
+            viewModelFieldOfViewDegrees: Float(rawFOV),
+            useHands: try state.rawTableValue(for: .string("UseHands"), in: table).isTruthy
         )
     }
 

@@ -43,6 +43,7 @@ final class GMLuaScriptedWeaponRenderDefinitionTests: XCTestCase {
             function weapons.Get(name)
                 return {
                     ViewModel = "models/weapons/c_arms.mdl",
+                    UseHands = true,
                     WorldModel = "",
                     ViewModelFOV = 54
                 }
@@ -59,6 +60,7 @@ final class GMLuaScriptedWeaponRenderDefinitionTests: XCTestCase {
         )
         XCTAssertNil(definition.worldModel)
         XCTAssertEqual(definition.viewModelFieldOfViewDegrees, 54)
+        XCTAssertTrue(definition.useHands)
     }
 
     func testRejectsMissingOrInvalidViewModelFOV() throws {
