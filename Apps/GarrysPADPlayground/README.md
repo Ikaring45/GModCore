@@ -8,7 +8,8 @@ one local ZIP and is never committed to GitHub.
 
 1. In Swift Playgrounds, create a new **App** named `GarrysPAD`.
 2. Add the Swift package `https://github.com/Ikaring45/GModCore` and enable its
-   `GModApp` product.
+   `GModApp` product. Select release `0.1.66`; see the root README for known
+   device issues and the release's validation boundary.
 3. Replace the generated `ContentView.swift` with the file beside this README.
 4. Keep `GarrysPAD_Content_Playable.zip` in **Files** or **iCloud Drive**. Do
    not add the multi-gigabyte ZIP to the App Playground's Resources.
@@ -23,8 +24,10 @@ reads that BSP directly from the ZIP, resolves its VMT/VTF materials from the
 nested VPKs, and starts the paired Sandbox SERVER/CLIENT session. Home UI
 sounds also come from the nested GMod VPK. The on-screen left joystick moves,
 the right pad looks, **JUMP** jumps, **Q** opens the live Sandbox Spawnmenu,
-**C** opens the context-menu lifecycle, and Pause retains the current map and
-view for Resume Game.
+**C** requests the context-menu lifecycle, and Pause retains the current map
+and view for Resume Game. These are the intended controls, not a claim of
+stable device behavior: Q/C delay/reopening, glyph orientation, sound replay
+and other outstanding issues are listed in the [root README](../../README.md).
 
 If the ZIP is missing, invalid, duplicated, or lacks either stock BSP, startup
 stays on a diagnostic screen instead of silently falling back to unrelated

@@ -22,7 +22,8 @@ unsafe archive paths are rejected.
 ## Create the recommended pack
 
 For quick transfer testing, the smaller profile contains the original GMod
-HTML home artwork and the two stock map payloads:
+HTML home artwork, loose resource files/backgrounds and the two stock map
+payloads, but not the VPK families required for normal textures and UI audio:
 
 ```powershell
 pwsh -NoProfile -File .\Tools\ContentPack\New-GarrysPADContentPack.ps1 `
