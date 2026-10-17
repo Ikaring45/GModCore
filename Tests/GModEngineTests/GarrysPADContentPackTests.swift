@@ -5,6 +5,33 @@ import GModGameAssets
 import GModGameSession
 
 final class GarrysPADContentPackTests: XCTestCase {
+    func testConfiguredRealPackDecodesCrateModelAndCollision() throws {
+        guard let path = ProcessInfo.processInfo.environment["GMOD_CONTENT_PACK_DIAGNOSTIC_PATH"], !path.isEmpty else {
+            throw XCTSkip("GMOD_CONTENT_PACK_DIAGNOSTIC_PATH is not configured")
+        }
+        let pack = try GarrysPADContentPack(url: URL(fileURLWithPath: path))
+        let source = try GModContentPackAssetSource(pack: pack)
+        let mdl = try XCTUnwrap(source.data(for: "models/props_junk/wood_crate001a.mdl"))
+        let phy = try XCTUnwrap(source.data(for: "models/props_junk/wood_crate001a.phy"))
+        let model = try SourceStudioModel(data: mdl)
+        let envelope = try SourcePHYCollisionDecoder.decodeEnvelope(phy,
+            expectedSourceModelChecksum: model.header.checksum,
+            budget: .init(maximumFileBytes: 16_777_216, maximumSolids: 64,
+                maximumBytesPerSolid: 8_388_608, maximumTotalSolidBytes: 16_777_216,
+                maximumKeyValuesBytes: 1_048_576))
+        let outcome = SourceVPhysicsCollisionDecoder.decodeSolidZero(in: phy, envelope: envelope,
+            budget: .init(maximumSourceDataBytes: 16_777_216, maximumPayloadBytes: 8_388_608,
+                maximumTreeNodes: 65_536, maximumTreeDepth: 128, maximumLedges: 8192,
+                maximumTriangles: 262_144, maximumPoints: 262_144))
+        guard case let .decoded(collision) = outcome else {
+            return XCTFail("Owned crate collision did not decode: \(outcome)")
+        }
+        XCTAssertFalse(collision.ledges.isEmpty)
+        XCTAssertEqual(collision.verification, .unattested,
+            "Structural decoding is not independent physics attestation")
+        print("[Owned prop] wood_crate001a: MDL=\(mdl.count) PHY=\(phy.count) ledges=\(collision.ledges.count)")
+    }
+
     func testStudioAssetReaderPreservesMissingOversizeAndPathIDBoundaries() throws {
         let modelBytes = Data(repeating: 0x53, count: 16)
         let fixture = try makeTemporaryZIP(entries: [
