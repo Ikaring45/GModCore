@@ -3,6 +3,33 @@ import GModEngine
 import GModGameAssets
 
 final class GMLuaVGUIResourceInstanceTests: XCTestCase {
+    func testResourceAppliesLabelInsetsAndPaintFlags() throws {
+        let files = try GMLuaHostDirectoryFileSystem(rootURL: GModGameAssets.clientContentRootURL(), writable: false)
+        let session = GMLuaMenuSession(fileSystem: files, logger: { _ in })
+        defer { _ = session.close() }
+        _ = try session.start()
+        let resource = try SourceVGUIResource(source: """
+            "test.res" {
+                "Plain" { "ControlName" "Label" "labelText" "Plain" "xpos" "10" "ypos" "20" "wide" "200" "tall" "40" "textAlignment" "west" }
+                "Inset" { "ControlName" "Label" "labelText" "Inset" "xpos" "10" "ypos" "20" "wide" "200" "tall" "40" "textAlignment" "west" "textinsetx" "6" "textinsety" "3" "wrap" "0" "paintbackground" "0" "paintborder" "0" }
+            }
+            """)
+        let instance = try session.loadResource(resource) { _ in }
+        try instance.layout(viewportWidth: 640, viewportHeight: 480)
+        XCTAssertTrue(instance.unappliedFields.isEmpty)
+        let frame = try session.renderFrame(viewportWidth: 640, viewportHeight: 480)
+        var positions: [String: (Double, Double)] = [:]
+        for command in frame.commands {
+            if case let .text(value, position, _, _, _) = command {
+                positions[value.utf8String] = (position.x, position.y)
+            }
+        }
+        let plain = try XCTUnwrap(positions["Plain"])
+        let inset = try XCTUnwrap(positions["Inset"])
+        XCTAssertEqual(inset.0 - plain.0, 6, accuracy: 0.001)
+        XCTAssertEqual(inset.1 - plain.1, 3, accuracy: 0.001)
+    }
+
     func testInstalledLoadingResourceCancelUsesRealSessionActionWhenExplicitlySupplied() throws {
         guard let path = ProcessInfo.processInfo.environment["GMOD_LOADING_RESOURCE_TEST_PATH"] else {
             throw XCTSkip("No user-owned installed resource supplied")

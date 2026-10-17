@@ -92,13 +92,32 @@ public final class GMLuaVGUIResourceInstance {
                     }
                     _ = try call(control.fieldName, "SetContentAlignment", [.number(Double(position))])
                 }
-                for (key, method) in [("visible", "SetVisible"), ("enabled", "SetEnabled")] {
+                var applied: Set<String> = ["controlname", "fieldname", "xpos", "ypos", "wide", "tall",
+                    "labeltext", "title", "font", "visible", "enabled", "command", "textalignment"]
+                var booleanFields = [("visible", "SetVisible"), ("enabled", "SetEnabled"),
+                    ("paintbackground", "SetPaintBackgroundEnabled"), ("paintborder", "SetPaintBorderEnabled")]
+                if control.controlName?.lowercased() == "frame", !hidesTitle {
+                    booleanFields += [("sizable", "SetSizable"), ("draggable", "SetDraggable")]
+                }
+                if control.controlName?.lowercased() == "label" {
+                    booleanFields.append(("wrap", "SetWrap"))
+                }
+                for (key, method) in booleanFields {
                     if let value = control.value(key) {
                         guard value == "0" || value == "1" else {
                             throw ResourceError.invalidField(control: control.name, key: key)
                         }
                         _ = try call(control.fieldName, method, [.boolean(value == "1")])
+                        applied.insert(key)
                     }
+                }
+                if control.value("textinsetx") != nil || control.value("textinsety") != nil {
+                    guard let x = Double(control.value("textinsetx") ?? "0"), x.isFinite,
+                          let y = Double(control.value("textinsety") ?? "0"), y.isFinite else {
+                        throw ResourceError.invalidField(control: control.name, key: "textinset")
+                    }
+                    _ = try call(control.fieldName, "SetTextInset", [.number(x), .number(y)])
+                    applied.formUnion(["textinsetx", "textinsety"])
                 }
                 if let text = control.value("command") {
                     guard control.controlName?.lowercased() == "button" else {
@@ -113,8 +132,6 @@ public final class GMLuaVGUIResourceInstance {
                     let setter = try runtime.executeReturningValues("return function(p,k,v) p[k]=v end").first ?? .nilValue
                     _ = try runtime.state.call(setter, arguments: [panel, .string("DoClick"), callback])
                 }
-                let applied: Set<String> = ["controlname", "fieldname", "xpos", "ypos", "wide", "tall",
-                    "labeltext", "title", "font", "visible", "enabled", "command", "textalignment"]
                 unappliedFields += control.entries.filter { !applied.contains($0.key.lowercased()) }
                     .filter { !(hidesTitle && $0.key.lowercased() == "settitlebarvisible") }
                     .map { UnappliedField(control: control.fieldName, key: $0.key) }

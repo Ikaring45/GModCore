@@ -75,3 +75,14 @@ alone restores the C++ GameUI dialogs: https://wiki.facepunch.com/gmod/Panel
   for source 8bfe144. Its complete suite failed (16 failures), including CoreText
   orientation, stock-menu scroll visibility and unrelated model/terrain cases.
   Full-suite success is explicitly NOT claimed; UI failures remain follow-up work.
+# Native resource field continuation (2026-10-17)
+
+The resource adapter now applies textinsetx/textinsety, Label wrap,
+paintbackground/paintborder and titled Frame sizable/draggable through real
+Derma methods. Invalid boolean/non-finite inset values fail explicitly;
+unsupported fields remain in unappliedFields. A render-command regression
+checks the actual six-pixel horizontal and three-pixel vertical text offset.
+Windows focused resource tests: three passed, one installed-asset test skipped
+when its explicit asset environment variable was not supplied. This does not
+establish physical iPad behavior or complete OptionsSub resource compatibility.
+
