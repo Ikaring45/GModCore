@@ -148,6 +148,7 @@ enum GModDynamicEntitySceneBuildCompletion: Equatable, Sendable {
 
 private struct GModFirstPersonViewModelSceneBuildRequest: Sendable {
     let snapshot: GModFirstPersonViewModelSceneSnapshot
+    let renderInput: GModFirstPersonViewModelRenderInput
     let applicationGeneration: UInt64
     let laneGeneration: UInt64
     let buildEpoch: UInt64
@@ -488,6 +489,9 @@ final class GModGameSessionModel: ObservableObject {
     private var dynamicEntitySceneBuildEpoch: UInt64 = 0
     private var dynamicEntitySceneBuildRevision: UInt64 = 0
     private var lastFirstPersonViewModelSourceRevision: UInt64?
+    private var lastFirstPersonViewModelAnimationState: SourceCanonicalWeaponRuntimeState?
+    private var lastFirstPersonViewModelBuildFailure: String?
+    private var lastFirstPersonViewModelEmptyModel: SourceEntityModelReference?
     private var pendingFirstPersonViewModelSceneBuild:
         GModFirstPersonViewModelSceneBuildRequest?
     private var firstPersonViewModelSceneBuildTask: Task<Void, Never>?
@@ -2014,16 +2018,20 @@ final class GModGameSessionModel: ObservableObject {
         laneGeneration: UInt64
     ) async {
         do {
-            let snapshot = try await lane.clientFirstPersonViewModelScene(
-                ifChangedFrom: lastFirstPersonViewModelSourceRevision,
+            let renderInput = try await lane.clientFirstPersonViewModelRenderInput(
                 expectedGeneration: laneGeneration
             )
             guard sessionGeneration == applicationGeneration,
                   self.laneGeneration == laneGeneration,
                   isReady,
-                  let snapshot else { return }
+                  let renderInput, let snapshot = renderInput.frame.viewModel else { return }
+            guard snapshot.revision != lastFirstPersonViewModelSourceRevision ||
+                  renderInput.frame.animation != lastFirstPersonViewModelAnimationState else { return }
+            lastFirstPersonViewModelSourceRevision = snapshot.revision
+            lastFirstPersonViewModelAnimationState = renderInput.frame.animation
             scheduleFirstPersonViewModelSceneBuild(
                 snapshot: snapshot,
+                renderInput: renderInput,
                 applicationGeneration: applicationGeneration,
                 laneGeneration: laneGeneration
             )
@@ -2031,15 +2039,17 @@ final class GModGameSessionModel: ObservableObject {
             guard sessionGeneration == applicationGeneration,
                   self.laneGeneration == laneGeneration,
                   isReady else { return }
-            appendLog(
-                "[CLIENT][VIEWMODEL] projection unavailable: " +
-                    GMLuaRuntime.describe(error)
-            )
+            let failure = GMLuaRuntime.describe(error)
+            let changed = lastFirstPersonViewModelBuildFailure != failure
+            invalidateFirstPersonViewModelScene()
+            lastFirstPersonViewModelBuildFailure = failure
+            if changed { appendLog("[CLIENT][VIEWMODEL] projection unavailable: \(failure)") }
         }
     }
 
     private func scheduleFirstPersonViewModelSceneBuild(
         snapshot: GModFirstPersonViewModelSceneSnapshot,
+        renderInput: GModFirstPersonViewModelRenderInput,
         applicationGeneration: UInt64,
         laneGeneration: UInt64
     ) {
@@ -2047,6 +2057,7 @@ final class GModGameSessionModel: ObservableObject {
         pendingFirstPersonViewModelSceneBuild =
             GModFirstPersonViewModelSceneBuildRequest(
                 snapshot: snapshot,
+                renderInput: renderInput,
                 applicationGeneration: applicationGeneration,
                 laneGeneration: laneGeneration,
                 buildEpoch: firstPersonViewModelSceneBuildEpoch,
@@ -2064,12 +2075,14 @@ final class GModGameSessionModel: ObservableObject {
             let builder = firstPersonViewModelSceneBuilder
             let result = await Task.detached(priority: .userInitiated) {
                 do {
+                    let animation = try request.renderInput.resolveAnimation()
                     return GModFirstPersonViewModelSceneBuildResult(
                         scene: try builder.build(
                             from: request.snapshot,
                             applicationGeneration:
                                 request.applicationGeneration,
-                            laneGeneration: request.laneGeneration
+                            laneGeneration: request.laneGeneration,
+                            animatedPublication: .init(revision: request.requestRevision, resource: animation)
                         ),
                         failure: nil
                     )
@@ -2081,22 +2094,34 @@ final class GModGameSessionModel: ObservableObject {
                 }
             }.value
             guard request.buildEpoch == firstPersonViewModelSceneBuildEpoch,
-                  request.requestRevision ==
-                    firstPersonViewModelSceneBuildRevision,
                   request.applicationGeneration == sessionGeneration,
                   request.laneGeneration == laneGeneration,
                   isReady else { continue }
+            // Render jobs are serial and pending work is coalesced. Permit an
+            // older cycle of the same weapon to publish, preventing starvation
+            // when skinning exceeds a tick; never revive a changed weapon/model.
+            if let newer = pendingFirstPersonViewModelSceneBuild,
+               !request.renderInput.hasSameAnimationTarget(as: newer.renderInput) {
+                continue
+            }
             lastFirstPersonViewModelSourceRevision = request.snapshot.revision
             if case let .unavailableEmptyGeometry(model) = request.snapshot.status {
-                appendLog("[CLIENT][VIEWMODEL] No drawable geometry in \(model.path); previous weapon mesh cleared. Separate hands rendering is not connected yet.")
+                if lastFirstPersonViewModelEmptyModel != model {
+                    appendLog("[CLIENT][VIEWMODEL] No drawable geometry in \(model.path); previous weapon mesh cleared. Separate hands rendering is not connected yet.")
+                    lastFirstPersonViewModelEmptyModel = model
+                }
+            } else {
+                lastFirstPersonViewModelEmptyModel = nil
             }
             if let failure = result.failure {
-                appendLog(
-                    "[CLIENT][VIEWMODEL] Metal scene rejected: \(failure)"
-                )
+                if lastFirstPersonViewModelBuildFailure != failure {
+                    appendLog("[CLIENT][VIEWMODEL] Metal scene rejected: \(failure)")
+                    lastFirstPersonViewModelBuildFailure = failure
+                }
                 firstPersonViewModelSceneBuilder.reset()
                 firstPersonViewModelScene = nil
             } else {
+                lastFirstPersonViewModelBuildFailure = nil
                 firstPersonViewModelScene = result.scene
             }
         }
@@ -2108,6 +2133,9 @@ final class GModGameSessionModel: ObservableObject {
         firstPersonViewModelSceneBuildRevision &+= 1
         pendingFirstPersonViewModelSceneBuild = nil
         lastFirstPersonViewModelSourceRevision = nil
+        lastFirstPersonViewModelAnimationState = nil
+        lastFirstPersonViewModelBuildFailure = nil
+        lastFirstPersonViewModelEmptyModel = nil
         firstPersonViewModelSceneBuilder.reset()
         firstPersonViewModelScene = nil
     }

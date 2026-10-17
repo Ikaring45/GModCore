@@ -485,6 +485,9 @@ public final class GModPlayableSession {
     private let worldWalkSolver: SourceWorldWalkSolver
     private let playerIdentity: SourceCanonicalEntityIdentity
     private let studioRenderableModelCache: GModStudioRenderableModelCache?
+    // Session-lane ownership; immutable render inputs may retain the thread-safe
+    // cache during a detached render job, but never the session or Lua runtime.
+    var firstPersonAnimatedModelCache: GModStudioAnimatedRenderableModelCache?
     private let dynamicEntityRenderSceneProjector:
         GModDynamicEntityRenderSceneProjector?
     private let firstPersonViewModelSceneProjector:
@@ -1922,6 +1925,8 @@ public final class GModPlayableSession {
         _ = try dynamicEntityRenderSceneProjector?.reset()
         _ = try firstPersonViewModelSceneProjector?.reset()
         studioRenderableModelCache?.removeAll()
+        firstPersonAnimatedModelCache?.removeAll()
+        firstPersonAnimatedModelCache = nil
         studioModelRepository?.removeAllCachedAssets()
         try sourceAdapter.close()
         let clientReport = clientRuntime.close()

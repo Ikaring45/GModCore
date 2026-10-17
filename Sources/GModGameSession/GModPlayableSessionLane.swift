@@ -579,6 +579,15 @@ public actor GModPlayableSessionLane {
         return try session.clientFirstPersonRenderFrame()
     }
 
+    public func clientFirstPersonViewModelRenderInput(
+        expectedGeneration: UInt64? = nil
+    ) throws -> GModFirstPersonViewModelRenderInput? {
+        dedicatedExecutor.preconditionIsCurrentWorker()
+        guard let session else { throw GModPlayableSessionLaneError.notStarted }
+        try validate(expectedGeneration: expectedGeneration)
+        return try session.clientFirstPersonViewModelRenderInput()
+    }
+
     /// Executes the stock SERVER drop path on the lane that owns Lua and the
     /// canonical entity list. Replication remains queued for the next ordinary
     /// host-frame drain.

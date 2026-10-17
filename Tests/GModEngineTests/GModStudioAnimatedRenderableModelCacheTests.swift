@@ -6,6 +6,61 @@ import XCTest
 final class GModStudioAnimatedRenderableModelCacheTests: XCTestCase {
     private let checksum: Int32 = 0x1357_2468
 
+    func testFirstPersonRenderInputResolvesCycleOffLaneAndRejectsStaleWeapon() async throws {
+        let repository = GModStudioModelRepository(reader: AnimatedStudioMemoryReader(files: fixture()), budget: assetBudget())
+        let bindCache = try GModStudioRenderableModelCache(repository: repository, compilePolicy: compilePolicy())
+        let model = SourceEntityModelReference(Paths.mdl)
+        guard case let .resolved(bind) = bindCache.resolve(model: model, bodyValue: 0, skinFamilyIndex: 1) else {
+            return XCTFail("validated bind-pose fixture did not resolve")
+        }
+        let cache = try GModStudioAnimatedRenderableModelCache(repository: repository, compilePolicy: compilePolicy())
+        let player = SourceCanonicalEntityIdentity(handle: .init(entryIndex: 1, serialNumber: 1))
+        let weapon = SourceCanonicalEntityIdentity(handle: .init(entryIndex: 2, serialNumber: 1))
+        let cursor = SourceEntityReplicationCursor(connectionGeneration: .init(rawValue: 1), sequence: 1)
+        let definition = GMLuaScriptedWeaponRenderDefinition(className: "weapon_test", viewModel: model,
+            worldModel: nil, viewModelFieldOfViewDegrees: 54)
+        let projection = GModFirstPersonViewModelProjection(playerIdentity: player,
+            weaponIdentity: weapon, weaponClassName: definition.className, sourceWeaponRevision: 1,
+            viewModel: model, worldModel: nil, viewModelFieldOfViewDegrees: 54,
+            weaponColor: SourceVector3(1, 1, 1), resource: bind)
+        var state = SourceCanonicalWeaponRuntimeState()
+        state.animationSequence = 0
+        state.animationFrameCount = 10
+        state.animationCycle = 0.5
+        func input(_ state: SourceCanonicalWeaponRuntimeState,
+                   active: SourceCanonicalEntityIdentity = weapon,
+                   resolver: (any GModStudioAnimatedRenderableModelResolving)? = cache,
+                   visible: Bool = true) -> GModFirstPersonViewModelRenderInput {
+            .init(frame: .init(cursor: cursor, activeWeapon: active, definition: definition,
+                animation: state, viewModel: .init(revision: 1, sourceProjectionCursor: cursor,
+                    projection: visible ? projection : nil, status: visible ? .available : .unavailableReset),
+                hands: nil), resolver: resolver)
+        }
+        let captured = input(state)
+        var newer = state
+        newer.animationCycle = 0.6
+        XCTAssertTrue(captured.hasSameAnimationTarget(as: input(newer)))
+        XCTAssertFalse(captured.hasSameAnimationTarget(as: input(state,
+            active: .init(handle: .init(entryIndex: 2, serialNumber: 2)))))
+        XCTAssertFalse(captured.hasSameAnimationTarget(as: input(state, visible: false)))
+        newer.animationSequence = 1
+        XCTAssertFalse(captured.hasSameAnimationTarget(as: input(newer)))
+        let candidate = try await Task.detached { try captured.resolveAnimation() }.value
+        let resource = try XCTUnwrap(candidate)
+        XCTAssertEqual(resource.id.frame, 4)
+        XCTAssertEqual(resource.id.fraction.value, 0.5)
+        XCTAssertEqual(resource.id.normalizedModelPath, Paths.mdl)
+        XCTAssertEqual(resource.model.vertices.map(\.position), [SourceVector3(8, 0, 0), SourceVector3(6, 0, 0), SourceVector3(7, 0, 0)])
+        XCTAssertThrowsError(try input(state, active: .init(handle: .init(entryIndex: 2, serialNumber: 2))).resolveAnimation())
+        XCTAssertThrowsError(try input(state, resolver: nil).resolveAnimation())
+        XCTAssertNil(try input(state, visible: false).resolveAnimation())
+        state.animationSequence = 99
+        XCTAssertThrowsError(try input(state).resolveAnimation())
+        state.animationSequence = -1
+        XCTAssertNil(try input(state, resolver: nil).resolveAnimation())
+        XCTAssertEqual(cache.cachedPreparedEntryCount, 1)
+    }
+
     func testSubframeIdentitySurvivesPreparedCacheResolution() throws {
         let cache = try productionCache()
         var values: [GModStudioAnimatedRenderableModelResource] = []

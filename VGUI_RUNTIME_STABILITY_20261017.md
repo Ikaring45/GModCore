@@ -266,3 +266,33 @@ combined position/rotation pointer tables, hierarchy and weighted geometry.
 The weighted rotation test also checks normal/tangent rotation, handedness and
 unchanged indices/material ranges. Malformed rotation RLE remains a typed
 failure. Apple/Oracle/physical iPad behavior is not established by these tests.
+
+## First-person animated render worker connection (unreleased)
+
+The App's normal viewmodel refresh now captures one immutable CLIENT first-person
+frame through the dedicated session lane. It passes that frame and a session-local,
+thread-safe Studio animation resolver to the existing detached render worker.
+The worker resolves the replicated cycle's sequence/frame/fraction and submits
+the animated resource to the existing Metal scene builder publication channel.
+Lua/entity state is not read from the render worker, and CPU skinning/asset decode
+does not run on the movement/GLua lane. Decoded preparation is reused; skinned
+vertex frames are not accumulated in the cache.
+
+Pending render work is coalesced, with only one detached job active. A completed
+older cycle may publish while a newer cycle of the same weapon/model/sequence
+waits, avoiding perpetual cancellation when rendering is slower than fixed ticks.
+Changed full handles, resources, sequences, session generations and build epochs
+reject stale results. Decode/animation errors remain diagnosed failures, not
+silently successful bind-pose animations, and identical build errors are logged
+once until their state changes. Disconnect releases the session-owned cache.
+
+Separate bone-merged hands, activity-driven sequence selection, animations using
+external blocks/sections and actual iPad animation output still require work.
+
+Validation: eight Windows cache/render-input/sequence integration tests passed.
+They resolve a validated synthetic MDL/VVD/VTX asset on a detached task using
+the captured replicated cycle, preserve subframe identity, reject stale full
+handles/missing repository/invalid sequence, and distinguish coalescible cycle
+updates from target switches. The live session input matches the atomic CLIENT
+weapon/animation observation. App source syntax parsing passed; Apple type-check,
+Metal submission and physical output remain unverified for this connection.
