@@ -965,6 +965,11 @@ public final class GModPlayableSession {
         )
 
         var adapter: GMLuaSourceRuntimeAdapter?
+        if let repository = loadedStudioModelRepository {
+            let resolver = GModViewModelSequenceResolver(repository: repository)
+            server.viewModelSequenceResolver = { model, query in try resolver.resolve(model: model, query: query) }
+            client.viewModelSequenceResolver = { model, query in try resolver.resolve(model: model, query: query) }
+        }
         do {
             server.consoleCommandDispatcher?.connectHost { invocation in
                 guard invocation.command.caseInsensitiveCompare("mp_friendlyfire")

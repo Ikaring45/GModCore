@@ -32,6 +32,11 @@ public final class GMLuaRuntime {
     public private(set) var engineConVarCatalog: GMLuaEngineConVarCatalog?
     public private(set) var surfaceCommandState: GMLuaSurfaceCommandState?
     public private(set) var resourceRegistry: GMLuaResourceRegistry?
+    /// Read only on the runtime's serialized owner lane. The embedding supplies
+    /// decoded asset metadata; absence preserves the invalid-sequence result.
+    public var viewModelSequenceResolver: (@Sendable (
+        SourceEntityModelReference, SourceViewModelSequenceQuery
+    ) throws -> SourceViewModelSequenceMetadata?)?
     public private(set) var gamemodeLoader: GMLuaGamemodeLoader?
     public private(set) var presetStore: GMLuaPresetStore?
     public private(set) var timerScheduler: GMLuaTimerScheduler?

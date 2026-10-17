@@ -108,3 +108,27 @@ These fixture results do not prove c_arms asset parity or physical iPad output.
 Live sequence/cycle selection, session requests and the additional Metal draw
 remain outstanding. Apple CI for the preceding 695b49d was observed running;
 no Apple pass is claimed for this change.
+
+## Asset-backed ViewModel sequence lookup (unreleased)
+
+LookupSequence no longer unconditionally returns -1: the session installs a
+bounded decoded-MDL sequence resolver for SERVER and CLIENT. Exact name/index
+lookups return the authored index and single-blend duration; multi-blend timing
+remains explicitly unsupported rather than selecting a guessed pose parameter.
+Missing assets/sequences return the invalid result (-1, 0).
+
+SendViewModelMatchingSequence records the decoded sequence name and duration in
+the canonical Weapon runtime snapshot and therefore uses the existing SERVER
+journal/FIFO. CLIENT ViewModel read methods now resolve full handles against
+CLIENT snapshots rather than the absent SERVER mutation host. Mutations remain
+SERVER-only. Successful runtime close releases the sequence resolver/cache.
+
+This does not yet select SendWeaponAnim activities, advance cycle/start time,
+or submit live bone-merged hands to Metal. Those remain completion requirements.
+Reference: https://wiki.facepunch.com/gmod/Entity:LookupSequence
+
+Validation: three Windows tests pass: decoded MDL name/index/timing (including
+zero FPS and unsupported multi-blend), SERVER Lua lookup/selection followed by
+CLIENT FIFO reads with no direct mirror, and original weapon_base reload.
+CLIENT mutation rejection and resolver cleanup after close are also asserted.
+Apple, Oracle and physical-device behavior remain unverified for this change.

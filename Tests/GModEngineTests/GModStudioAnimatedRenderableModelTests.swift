@@ -7,6 +7,29 @@ final class GModStudioAnimatedRenderableModelTests: XCTestCase {
     private let checksum: Int32 = 0x2468_1357
     private let modelName = "models/codex/skinning_golden.mdl"
 
+    func testSequenceMetadataUsesDecodedNameIndexAndFrameRate() throws {
+        let animation = try SourceStudioAnimationDecoder.decode(mdlData: makeAnimationMDL())
+        let library = SourceViewModelSequenceLibrary(model: animation)
+        let name = animation.sequences[0].label
+        let metadata = try XCTUnwrap(library.resolve(.name(name.uppercased())))
+        XCTAssertEqual(metadata.index, 0)
+        XCTAssertEqual(metadata.name, name)
+        XCTAssertEqual(metadata.duration, 29.0 / 30.0, accuracy: 0.00001)
+        XCTAssertEqual(try library.resolve(.index(0)), metadata)
+        XCTAssertNil(try library.resolve(.name("not_in_asset")))
+        XCTAssertNil(try library.resolve(.index(-1)))
+        XCTAssertNil(try library.resolve(.index(999)))
+        var staticData = bytes(of: makeAnimationMDL())
+        putFloat(0, at: Offsets.animation + 8, into: &staticData)
+        let staticLibrary = SourceViewModelSequenceLibrary(model: try SourceStudioAnimationDecoder.decode(mdlData: Data(staticData)))
+        XCTAssertEqual(try staticLibrary.resolve(.index(0))?.duration, 0)
+        var blendedData = bytes(of: makeAnimationMDL())
+        putInt32(2, at: Offsets.sequence + 56, into: &blendedData)
+        putInt32(2, at: Offsets.sequence + 68, into: &blendedData)
+        let blendedLibrary = SourceViewModelSequenceLibrary(model: try SourceStudioAnimationDecoder.decode(mdlData: Data(blendedData)))
+        XCTAssertThrowsError(try blendedLibrary.resolve(.index(0)))
+    }
+
     func testPreparedFollowingUsesSkeletalParentWithoutGeometryAndDistinctPoseIdentity() throws {
         var data = bytes(of: makeAnimationMDL())
         putInt32(1, at: Offsets.rootBone + 160, into: &data)

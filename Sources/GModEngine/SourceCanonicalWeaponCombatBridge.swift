@@ -442,11 +442,16 @@ public enum SourceCanonicalWeaponCombatBridge {
             for player: SourceCanonicalEntityIdentity,
             function: String
         ) throws -> SourceCanonicalEntitySnapshot {
-            guard let host = hostBox.value,
-                  let playerSnapshot = host.canonicalSnapshot(for: player),
+            func realmSnapshot(_ identity: SourceCanonicalEntityIdentity) -> SourceCanonicalEntitySnapshot? {
+                if realm == .server { return hostBox.value?.canonicalSnapshot(for: identity) }
+                guard let snapshot = registryBox.value?.canonicalSnapshot(at: identity.entryIndex),
+                      snapshot.identity == identity else { return nil }
+                return snapshot
+            }
+            guard let playerSnapshot = realmSnapshot(player),
                   let weaponIdentity = playerSnapshot.weaponInventory
                     .activeWeapon,
-                  let weapon = host.canonicalSnapshot(for: weaponIdentity),
+                  let weapon = realmSnapshot(weaponIdentity),
                   weapon.kind == .weapon else {
                 throw LuaError.runtime(
                     "\(function) Player has no live canonical active Weapon"
@@ -808,7 +813,7 @@ public enum SourceCanonicalWeaponCombatBridge {
             )]
         }
 
-        try setMethod("Entity:LookupSequence", on: entityMetatable) { arguments in
+        try setMethod("Entity:LookupSequence", on: entityMetatable) { [weak runtime] arguments in
             let viewModel = try viewModelPayload(
                 arguments.first,
                 function: "Entity:LookupSequence"
@@ -824,15 +829,21 @@ public enum SourceCanonicalWeaponCombatBridge {
                 )
             }
             viewModel.lastLookupName = name
-            // A missing decoded ViewModel reports Source's invalid sequence;
-            // the requested name is retained only to bind the following
-            // SendViewModelMatchingSequence transaction.
-            return [.number(-1)]
+            let weapon = try activeWeapon(for: viewModel.player, function: "Entity:LookupSequence")
+            if let runtime, let resolver = runtime.viewModelSequenceResolver,
+               let model = try runtime.scriptedWeaponRenderDefinition(className: weapon.className).viewModel,
+               let metadata = try resolver(model, .name(name)) {
+                guard metadata.index >= 0, metadata.duration.isFinite, metadata.duration >= 0 else {
+                    throw LuaError.runtime("Entity:LookupSequence received invalid asset metadata")
+                }
+                return [.number(Double(metadata.index)), .number(Double(metadata.duration))]
+            }
+            return [.number(-1), .number(0)]
         }
         try setMethod(
             "Entity:SendViewModelMatchingSequence",
             on: entityMetatable
-        ) { arguments in
+        ) { [weak runtime] arguments in
             let viewModel = try viewModelPayload(
                 arguments.first,
                 function: "Entity:SendViewModelMatchingSequence"
@@ -846,11 +857,22 @@ public enum SourceCanonicalWeaponCombatBridge {
                 for: viewModel.player,
                 function: "Entity:SendViewModelMatchingSequence"
             )
+            var metadata: SourceViewModelSequenceMetadata?
+            if let runtime, let resolver = runtime.viewModelSequenceResolver,
+               let model = try runtime.scriptedWeaponRenderDefinition(className: weapon.className).viewModel {
+                metadata = try resolver(model, .index(sequence))
+            }
+            if let metadata {
+                guard metadata.index == sequence, metadata.duration.isFinite, metadata.duration >= 0 else {
+                    throw LuaError.runtime("Entity:SendViewModelMatchingSequence received inconsistent asset metadata")
+                }
+            }
             _ = try requiredHost("Entity:SendViewModelMatchingSequence")
                 .updateCanonicalEntity(weapon.identity) {
                     $0.weaponRuntime.animationSequence = sequence
                     $0.weaponRuntime.animationSequenceName =
-                        viewModel.lastLookupName
+                        metadata?.name ?? viewModel.lastLookupName
+                    $0.weaponRuntime.animationSequenceDuration = metadata?.duration ?? 0
                 }
             return []
         }

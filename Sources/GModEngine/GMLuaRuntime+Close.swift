@@ -31,10 +31,14 @@ public extension GMLuaRuntime {
             }
             return netTransport.withExclusiveLifecycleBoundary {
                 netTransport.detachEndpoint(netEndpoint)
-                return state.close()
+                let report = state.close()
+                viewModelSequenceResolver = nil
+                return report
             }
         }
-        return state.close()
+        let report = state.close()
+        viewModelSequenceResolver = nil
+        return report
     }
 
     var isClosed: Bool { state.isClosed }
