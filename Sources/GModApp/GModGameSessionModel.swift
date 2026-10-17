@@ -618,6 +618,7 @@ final class GModGameSessionModel: ObservableObject {
     func start(
         map: GModBundledMap,
         contentPackURL: URL? = nil,
+        attestedPropPhysicsManifestURL: URL? = nil,
         languageCode: String = "en",
         languagePhrases: [String: String] = [:]
     ) {
@@ -673,6 +674,7 @@ final class GModGameSessionModel: ObservableObject {
                     configuration: GModPlayableSessionConfiguration(
                         map: map,
                         contentPackURL: contentPackURL,
+                        attestedPropPhysicsManifestURL: attestedPropPhysicsManifestURL,
                         languageCode: languageCode,
                         languagePhrases: languagePhrases
                     ),

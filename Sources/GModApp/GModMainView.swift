@@ -123,6 +123,7 @@ private enum GModPendingContentManagementAction: Equatable, Sendable {
 
 @MainActor
 public struct GModMainView: View {
+    private let attestedPropPhysicsManifestURL: URL?
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var console: GModConsoleModel
     @StateObject private var game: GModGameSessionModel
@@ -240,7 +241,11 @@ public struct GModMainView: View {
         )
     }
 
-    public init() {
+    /// Supply an independently verified physics manifest for the mounted
+    /// content pack. MDL/PHY digests and physical records are checked by the
+    /// session loader; missing data is never replaced with guessed bodies.
+    public init(attestedPropPhysicsManifestURL: URL? = nil) {
+        self.attestedPropPhysicsManifestURL = attestedPropPhysicsManifestURL
         let factory = GModAppRuntimeFactory()
         let contentSettingsStore = GModContentSettingsStore.shared
         let audioSettingsStore = GModMenuAudioSettingsStore.shared
@@ -1404,6 +1409,7 @@ public struct GModMainView: View {
                 game.start(
                     map: map,
                     contentPackURL: contentPackURL ?? activeContentPackURL,
+                    attestedPropPhysicsManifestURL: attestedPropPhysicsManifestURL,
                     languageCode: localizationSelection.snapshot.code,
                     languagePhrases: localizationSelection.snapshot.phrases
                 )
@@ -1727,6 +1733,7 @@ public struct GModMainView: View {
                 game.start(
                     map: .construct,
                     contentPackURL: activeContentPackURL,
+                    attestedPropPhysicsManifestURL: attestedPropPhysicsManifestURL,
                     languageCode: localizationSelection.snapshot.code,
                     languagePhrases: localizationSelection.snapshot.phrases
                 )
@@ -1738,6 +1745,7 @@ public struct GModMainView: View {
                 game.start(
                     map: .flatgrass,
                     contentPackURL: activeContentPackURL,
+                    attestedPropPhysicsManifestURL: attestedPropPhysicsManifestURL,
                     languageCode: localizationSelection.snapshot.code,
                     languagePhrases: localizationSelection.snapshot.phrases
                 )
