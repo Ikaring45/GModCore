@@ -13,6 +13,19 @@ enum GModHomeMenuAction: Equatable, Sendable {
 
 enum GModHomeMenuCommandParser {
     static func parse(_ source: String) -> GModHomeMenuAction? {
+        // HTML menus can call the engine GameUI entry point directly, rather
+        // than forwarding it through the gamemenucommand console command.
+        if let arguments = callArguments(function: "RunGameUICommand", in: source),
+           arguments.count == 1 {
+            switch arguments[0].lowercased() {
+            case "openoptionsdialog": return .openOptions
+            case "openproblemspanel", "openproblemsdialog": return .openProblems
+            case "resumegame": return .hideGameUI
+            case "disconnect": return .disconnect
+            case "quit": return .quit
+            default: break
+            }
+        }
         if let arguments = callArguments(
             function: "RunConsoleCommand",
             in: source

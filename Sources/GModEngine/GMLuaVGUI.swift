@@ -470,6 +470,14 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     private var directChildrenIndexRebuilds: UInt64 = 0
     private var directChildrenCandidatesVisited: UInt64 = 0
     private var directChildrenIndexUpdates: UInt64 = 0
+    private var pendingPanelRemovalIdentifiers = GMLuaVGUILayoutWorklist()
+    private var removalCandidatesVisited: UInt64 = 0
+
+    var deferredRemovalCandidatesVisited: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return removalCandidatesVisited
+    }
 
     var hierarchyLookupStatistics: (rebuilds: UInt64, candidates: UInt64, updates: UInt64) {
         lock.lock()
@@ -2769,6 +2777,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
             return
         }
         descriptor.isMarkedForDeletion = true
+        pendingPanelRemovalIdentifiers.insert(identifier)
         value = storedValue
 
         let affectedIdentifiers = Set(descendantIdentifiers(of: identifier))
@@ -2824,6 +2833,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
             }
         }
         for removedIdentifier in removedIdentifiers {
+            pendingPanelRemovalIdentifiers.remove(removedIdentifier)
             pendingDockSizeChanges.removeValue(forKey: removedIdentifier)
         }
         if let hoveredPanelIdentifier,
@@ -2866,9 +2876,8 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
                 throw LuaError.runtime("VGUI OnRemove cascade exceeded 16384 panels")
             }
             lock.lock()
-            let identifier = panels.compactMap { identifier, value in
-                panelDescriptor(from: value)?.isMarkedForDeletion == true ? identifier : nil
-            }.min()
+            let identifier = pendingPanelRemovalIdentifiers.minimum()
+            if identifier != nil { removalCandidatesVisited &+= 1 }
             let callbacks = identifier.map { root in
                 descendantIdentifiers(of: root).compactMap { id -> (Int, LuaValue, LuaTable)? in
                     guard let value = panels[id], let panel = panelDescriptor(from: value) else { return nil }

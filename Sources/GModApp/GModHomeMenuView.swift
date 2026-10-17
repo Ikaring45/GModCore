@@ -548,6 +548,10 @@ struct GModHomeMenuView: UIViewRepresentable {
                 handleMenuAction(parsed, in: message.webView)
             } else if command.contains("UpdateServerSettings") {
                 message.webView?.evaluateJavaScript(Self.serverSettingsScript)
+            } else {
+                // Do not silently swallow an engine menu entry point. This
+                // output is also visible in the Playgrounds console.
+                print("[GarrysPAD][MENU] Unhandled menu Lua command: \(command.prefix(1_024))")
             }
         }
 

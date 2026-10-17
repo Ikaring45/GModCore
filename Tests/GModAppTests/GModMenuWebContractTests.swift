@@ -60,6 +60,16 @@ final class GModMenuWebContractTests: XCTestCase {
 
     func testStockMenuCommandsAreParsedWithoutSubstringMapHeuristics() {
         XCTAssertEqual(
+            GModHomeMenuCommandParser.parse("RunGameUICommand(\"OpenOptionsDialog\")"),
+            .openOptions
+        )
+        XCTAssertEqual(
+            GModHomeMenuCommandParser.parse("RunGameUICommand('Disconnect')"),
+            .disconnect
+        )
+        XCTAssertNil(GModHomeMenuCommandParser.parse("print('RunGameUICommand(\"OpenOptionsDialog\")')"))
+        XCTAssertNil(GModHomeMenuCommandParser.parse("RunGameUICommand('unknown')"))
+        XCTAssertEqual(
             GModHomeMenuCommandParser.parse(
                 "RunConsoleCommand(\"map\", \"gm_construct\")"
             ),

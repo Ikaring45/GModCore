@@ -16,6 +16,7 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
             assert(#ROOT:GetChildren() == 0)
             """)
         let before = registry.hierarchyLookupStatistics
+        let removalsBefore = registry.deferredRemovalCandidatesVisited
         try state.execute("""
             for i = 1, 64 do
                 local notice = vgui.Create('Panel', GetOverlayPanel())
@@ -31,6 +32,10 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
         let after = registry.hierarchyLookupStatistics
         XCTAssertEqual(after.rebuilds, before.rebuilds)
         XCTAssertEqual(after.updates - before.updates, 64 * 6)
+        XCTAssertEqual(registry.deferredRemovalCandidatesVisited - removalsBefore, 64)
+        for _ in 0..<8 { _ = try registry.performPendingLayouts() }
+        XCTAssertEqual(registry.deferredRemovalCandidatesVisited - removalsBefore, 64,
+            "idle frames must not revisit unrelated panels as removal candidates")
     }
 
     func testChildLookupUsesTopologyIndexAndPreservesLiveOrder() throws {
