@@ -400,6 +400,8 @@ HUD filtering, GC, touch and notifications retained their tested behavior.
 Physical iPad timings remain unmeasured.
 # Options entry point follow-up
 
+- Native resource CheckButton now creates the stock DCheckBoxLabel, retaining its caption instead of only the bare DCheckBox. Authored `selected` accepts 0/1 and calls SetChecked; the host can read actual user changes through isChecked. Regression verifies caption rendering, selected=true, pointer toggle to false, and rejection of invalid selection. Windows resource suite: 4 passed, 1 installed-resource test skipped (asset not supplied). This does not supply missing Options resources or bind arbitrary cvars.
+
 - Subtree deletion now snapshots parent edges once per traversal, preserving the previous dictionary sibling order for OnRemove while removing the per-descendant whole-registry scan. Traversal cost changes from O(panel count times subtree size) to O(panel count plus subtree size). A 128-level regression verifies exactly-once callbacks and survival of a reparented child. Focused registry/notification/MENU tests: 70 passed on Windows; no device latency claim.
 
 - The HTML command parser accepted `gamemenucommand OpenOptionsDialog` but silently ignored the direct engine entry point `RunGameUICommand("OpenOptionsDialog")`. Route this entry point to the existing layered MENU utility; also route its disconnect/resume/problems/quit commands. Unknown commands now appear in the Playgrounds console instead of disappearing silently.

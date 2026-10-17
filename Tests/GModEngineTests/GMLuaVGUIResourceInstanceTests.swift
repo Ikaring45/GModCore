@@ -3,6 +3,36 @@ import GModEngine
 import GModGameAssets
 
 final class GMLuaVGUIResourceInstanceTests: XCTestCase {
+    func testResourceCheckButtonRetainsCaptionAndAuthoredSelection() throws {
+        let files = try GMLuaHostDirectoryFileSystem(rootURL: GModGameAssets.clientContentRootURL(), writable: false)
+        let session = GMLuaMenuSession(fileSystem: files, logger: { _ in })
+        defer { _ = session.close() }
+        _ = try session.start()
+        let resource = try SourceVGUIResource(source: """
+            "settings.res" {
+                "Toggle" { "ControlName" "CheckButton" "labelText" "Invert mouse" "selected" "1" "xpos" "30" "ypos" "40" "wide" "220" "tall" "24" }
+            }
+            """)
+        let instance = try session.loadResource(resource) { _ in }
+        try instance.layout(viewportWidth: 640, viewportHeight: 480)
+        XCTAssertTrue(instance.unappliedFields.isEmpty)
+        XCTAssertTrue(try instance.isChecked(control: "Toggle"))
+        let frame = try session.renderFrame(viewportWidth: 640, viewportHeight: 480)
+        XCTAssertTrue(frame.commands.contains {
+            if case let .text(value, _, _, _, _) = $0 { return value.utf8String == "Invert mouse" }
+            return false
+        })
+        for phase: GMLuaPointerPhase in [.began, .ended] {
+            _ = try session.dispatchPointerEvent(x: 36, y: 52, phase: phase, timestamp: 1,
+                viewportWidth: 640, viewportHeight: 480)
+        }
+        XCTAssertFalse(try instance.isChecked(control: "Toggle"))
+        let invalid = try SourceVGUIResource(source: """
+            "settings.res" { "Toggle" { "ControlName" "CheckButton" "selected" "yes" } }
+            """)
+        XCTAssertThrowsError(try session.loadResource(invalid) { _ in })
+    }
+
     func testResourceAppliesLabelInsetsAndPaintFlags() throws {
         let files = try GMLuaHostDirectoryFileSystem(rootURL: GModGameAssets.clientContentRootURL(), writable: false)
         let session = GMLuaMenuSession(fileSystem: files, logger: { _ in })

@@ -32,7 +32,7 @@ public final class GMLuaVGUIResourceInstance {
 
     private static let classes = [
         "frame": "DFrame", "panel": "DPanel", "editablepanel": "EditablePanel",
-        "label": "DLabel", "button": "DButton", "checkbutton": "DCheckBox",
+        "label": "DLabel", "button": "DButton", "checkbutton": "DCheckBoxLabel",
         "textentry": "DTextEntry", "progressbar": "DProgress", "imagepanel": "DImage"
     ]
 
@@ -116,6 +116,14 @@ public final class GMLuaVGUIResourceInstance {
                 }
                 var applied: Set<String> = ["controlname", "fieldname", "xpos", "ypos", "wide", "tall",
                     "labeltext", "title", "font", "visible", "enabled", "command", "textalignment"]
+                if control.controlName?.lowercased() == "checkbutton",
+                   let selected = control.value("selected") {
+                    guard selected == "0" || selected == "1" else {
+                        throw ResourceError.invalidField(control: control.name, key: "selected")
+                    }
+                    _ = try call(control.fieldName, "SetChecked", [.boolean(selected == "1")])
+                    applied.insert("selected")
+                }
                 var booleanFields = [("visible", "SetVisible"), ("enabled", "SetEnabled"),
                     ("paintbackground", "SetPaintBackgroundEnabled"), ("paintborder", "SetPaintBorderEnabled")]
                 if control.controlName?.lowercased() == "frame", !hidesTitle {
@@ -179,6 +187,17 @@ public final class GMLuaVGUIResourceInstance {
 
     public func setText(_ text: String, control: String) throws {
         _ = try call(control, "SetText", [.string(LuaString(text))])
+    }
+
+    /// Reads the live control, including user changes, rather than the .res
+    /// default. Persisting this value remains the owning settings host's job.
+    public func isChecked(control: String) throws -> Bool {
+        guard resource.controls.contains(where: {
+            $0.fieldName == control && $0.controlName?.lowercased() == "checkbutton"
+        }), case let .boolean(value) = try call(control, "GetChecked", []).first else {
+            throw ResourceError.invalidField(control: control, key: "selected")
+        }
+        return value
     }
 
     public func setProgress(_ fraction: Double, control: String) throws {
