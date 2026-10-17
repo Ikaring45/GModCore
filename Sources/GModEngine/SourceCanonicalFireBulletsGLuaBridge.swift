@@ -39,7 +39,7 @@ private struct SourceCanonicalBulletRequest {
 /// Source's `CUniformRandomStream` public layout. One stream is freshly seeded
 /// for every pellet, matching `CBaseEntity::FireBullets`; it is never shared
 /// with Lua's unrelated `math.random` state.
-private struct SourceCanonicalUniformRandomStream {
+struct SourceCanonicalUniformRandomStream: Sendable {
     private static let tableCount = 32
     private static let modulus: Int64 = 2_147_483_647
     private static let multiplier: Int64 = 16_807
@@ -59,6 +59,17 @@ private struct SourceCanonicalUniformRandomStream {
     mutating func randomFloat(minimum: Float, maximum: Float) -> Float {
         let unit = Float(generate()) / Float(Self.modulus)
         return minimum + (maximum - minimum) * unit
+    }
+
+    /// Inclusive nonnegative integer range with rejection rather than biased
+    /// float scaling. Used by authoritative activity selection, not Lua RNG.
+    mutating func randomInt(maximum: Int32) -> Int32 {
+        guard maximum > 0 else { return 0 }
+        let span = Int64(maximum) + 1
+        let maximumAccepted = Int64(Int32.max) - ((Int64(Int32.max) + 1) % span)
+        var value: Int64
+        repeat { value = generate() } while value > maximumAccepted
+        return Int32(value % span)
     }
 
     private mutating func generate() -> Int64 {

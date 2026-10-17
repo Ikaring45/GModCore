@@ -296,3 +296,36 @@ handles/missing repository/invalid sequence, and distinguish coalescible cycle
 updates from target switches. The live session input matches the atomic CLIENT
 weapon/animation observation. App source syntax parsing passed; Apple type-check,
 Metal submission and physical output remain unverified for this connection.
+
+## Activity-driven ViewModel selection (unreleased)
+
+Decoded sequence descriptors now retain activity names and signed authored
+weights. The metadata library supports weighted activity selection, preserves
+the current matching negative-weight sequence, applies Source's zero-weight
+tuple rule, and rejects weight overflow or invalid random tickets. Activity
+names are used rather than assuming an MDL's compiled enum index matches GLua.
+
+When an asset metadata resolver is installed, SERVER SendWeaponAnim maps the
+currently exposed GLua ACT constant to its name, resolves an authored sequence,
+resets the canonical cycle/start time and retains real timing/frame metadata.
+Those values follow the existing CLIENT snapshot and render-worker connection.
+Unavailable activities return false without mutating animation state. Existing
+event-only behavior remains when no metadata resolver is installed; it is not
+evidence of drawable animation. CLIENT prediction remains explicitly rejected.
+
+Weighted draws use a reproducible session metadata-resolver stream, isolated
+from per-pellet and Lua random state. The default seed is host policy; exact
+Windows global RNG consumption, all/custom ACT registrations and prediction
+shared-random parity are not asserted. Selection mechanics are grounded in
+Valve Source SDK 2013 animation.cpp SelectWeightedSequence and studio.cpp's
+activity-to-sequence tuple initialization (independent implementation).
+https://github.com/ValveSoftware/source-sdk-2013/blob/c8f4c6351162fbff83bfa5a428d45d1e6eed3824/src/game/shared/animation.cpp
+
+Validation: 36 focused Windows tests passed across sequence selection, RLE pose,
+animated geometry/cache and original Base PrimaryAttack. Coverage includes exact
+weight-ticket boundaries, negative current weights without RNG consumption,
+zero/overflow weights, unavailable activities, repeatable bounded random draws,
+SERVER SendWeaponAnim resetting real sequence timing and CLIENT FIFO cycle
+observation. Original clip consumption, bullet trace/damage/event replication
+also passed after the integer RNG addition; its existing float path is unchanged.
+Apple, real-model activity playback and physical iPad results remain unverified.

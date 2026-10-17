@@ -307,6 +307,8 @@ public struct SourceStudioAnimationDescriptor: Equatable, Sendable {
 public struct SourceStudioAnimationSequenceDescriptor: Equatable, Sendable {
     public let index: Int
     public let label: String
+    public let activityName: String
+    public let activityWeight: Int32
     public let flags: Int32
     public let groupSizeX: Int
     public let groupSizeY: Int
@@ -1138,6 +1140,8 @@ public enum SourceStudioAnimationDecoder {
         return SourceStudioAnimationSequenceDescriptor(
             index: index,
             label: source.label,
+            activityName: source.activityName,
+            activityWeight: source.activityWeight,
             flags: source.flags,
             groupSizeX: Int(groupX),
             groupSizeY: Int(groupY),

@@ -3,6 +3,74 @@ import XCTest
 @testable import GModEngine
 
 final class SourceStudioAnimationTests: XCTestCase {
+    func testActivitySelectionUsesAuthoredWeightsAndRetainsNegativeCurrentSequence() throws {
+        let library = SourceViewModelSequenceLibrary(model: try SourceStudioAnimationDecoder.decode(
+            mdlData: makeActivityAnimation(weights: [1, 3])))
+        for ticket: Int32 in 0..<4 {
+            let selected = try library.resolve(.activity(name: "act_idle", currentSequence: -1), randomInt: { maximum in
+                XCTAssertEqual(maximum, 3)
+                return ticket
+            })
+            XCTAssertEqual(selected?.index, ticket == 0 ? 0 : 1)
+        }
+        XCTAssertNil(try library.resolve(.activity(name: "ACT_NOT_AUTHORED", currentSequence: -1)))
+        XCTAssertThrowsError(try library.resolve(.activity(name: "ACT_IDLE", currentSequence: -1)))
+        XCTAssertThrowsError(try library.resolve(.activity(name: "ACT_IDLE", currentSequence: -1), randomInt: { _ in 4 }))
+        let negative = SourceViewModelSequenceLibrary(model: try SourceStudioAnimationDecoder.decode(
+            mdlData: makeActivityAnimation(weights: [1, -3])))
+        let retained = try negative.resolve(.activity(name: "ACT_IDLE", currentSequence: 1), randomInt: { _ in
+            XCTFail("negative current weight must not consume a random draw")
+            return 0
+        })
+        XCTAssertEqual(retained?.index, 1)
+        let zero = SourceViewModelSequenceLibrary(model: try SourceStudioAnimationDecoder.decode(
+            mdlData: makeActivityAnimation(weights: [0, 0])))
+        XCTAssertEqual(try zero.resolve(.activity(name: "ACT_IDLE", currentSequence: -1), randomInt: { maximum in
+            XCTAssertEqual(maximum, 0)
+            return 0
+        })?.index, 0)
+        let overflow = SourceViewModelSequenceLibrary(model: try SourceStudioAnimationDecoder.decode(
+            mdlData: makeActivityAnimation(weights: [.min, 1])))
+        XCTAssertThrowsError(try overflow.resolve(.activity(name: "ACT_IDLE", currentSequence: -1), randomInt: { _ in 0 }))
+    }
+
+    func testActivityRandomStreamIsRepeatableAndRangeBounded() {
+        var first = SourceViewModelActivityRandomStream(seed: 123)
+        var replay = SourceViewModelActivityRandomStream(seed: 123)
+        var outcomes = Set<Int32>()
+        for _ in 0..<128 {
+            let value = first.next(maximum: 3)
+            XCTAssertEqual(value, replay.next(maximum: 3))
+            XCTAssertTrue((0...3).contains(value))
+            outcomes.insert(value)
+        }
+        XCTAssertEqual(outcomes, Set([0, 1, 2, 3]))
+        XCTAssertEqual(first.next(maximum: 0), 0)
+    }
+
+    private func makeActivityAnimation(weights: [Int32]) -> Data {
+        var data = bytes(of: makeAnimationModel())
+        let source = Array(data[940..<1_152])
+        if data.count % 4 != 0 { data.append(contentsOf: repeatElement(0, count: 4 - data.count % 4)) }
+        let table = data.count
+        for (index, weight) in weights.enumerated() {
+            let base = table + index * 212
+            data.append(contentsOf: source)
+            putInt32(Int32(-base), at: base, into: &data)
+            for field in [4, 8, 60] {
+                let raw = UInt32(source[field]) | UInt32(source[field + 1]) << 8 |
+                    UInt32(source[field + 2]) << 16 | UInt32(source[field + 3]) << 24
+                let target = 940 + Int(Int32(bitPattern: raw))
+                putInt32(Int32(target - base), at: base + field, into: &data)
+            }
+            putInt32(weight, at: base + 20, into: &data)
+        }
+        putInt32(Int32(weights.count), at: 188, into: &data)
+        putInt32(Int32(table), at: 192, into: &data)
+        putInt32(Int32(data.count), at: 76, into: &data)
+        return Data(data)
+    }
+
     func testRLERotationUsesRadianBaseAndQuaternionSubframeBlend() throws {
         let model = try SourceStudioAnimationDecoder.decode(mdlData: makeRotationAnimation())
         let pose = try model.pose(animationIndex: 0, frame: 0, fraction: .init(0.5))

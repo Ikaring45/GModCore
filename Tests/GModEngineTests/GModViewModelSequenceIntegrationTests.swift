@@ -11,6 +11,8 @@ final class GModViewModelSequenceIntegrationTests: XCTestCase {
             switch query {
             case .name("draw"), .index(3):
                 return .init(index: 3, name: "draw", duration: 0.75, frameCount: 31)
+            case .activity(name: "ACT_VM_PRIMARYATTACK", currentSequence: _):
+                return .init(index: 3, name: "draw", duration: 0.75, frameCount: 31)
             default: return nil
             }
         }
@@ -68,10 +70,13 @@ final class GModViewModelSequenceIntegrationTests: XCTestCase {
         _ = try session.runFixedTick()
         let resumed = try XCTUnwrap(session.clientFirstPersonRenderFrame()?.animation)
         XCTAssertGreaterThan(resumed.animationCycle, paused.animationCycle)
-        try session.serverRuntime.execute("Player(1):GetViewModel():SendViewModelMatchingSequence(3)")
+        try session.serverRuntime.execute("assert(Player(1):GetActiveWeapon():SendWeaponAnim(ACT_VM_PRIMARYATTACK))")
         _ = try session.runFixedTick()
         let restarted = try XCTUnwrap(session.clientFirstPersonRenderFrame()?.animation)
         XCTAssertLessThan(restarted.animationCycle, resumed.animationCycle)
+        XCTAssertEqual(restarted.animationSequence, 3)
+        XCTAssertEqual(restarted.animationFrameCount, 31)
+        try session.serverRuntime.execute("assert(not Player(1):GetActiveWeapon():SendWeaponAnim(2147483647))")
         _ = try session.close()
         XCTAssertNil(session.serverRuntime.viewModelSequenceResolver)
         XCTAssertNil(session.clientRuntime.viewModelSequenceResolver)

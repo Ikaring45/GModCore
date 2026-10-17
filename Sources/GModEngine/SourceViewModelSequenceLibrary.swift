@@ -3,6 +3,7 @@ import Foundation
 public enum SourceViewModelSequenceQuery: Sendable, Equatable {
     case name(String)
     case index(Int32)
+    case activity(name: String, currentSequence: Int32)
 }
 
 public struct SourceViewModelSequenceMetadata: Sendable, Equatable {
@@ -27,6 +28,9 @@ public struct SourceViewModelSequenceMetadata: Sendable, Equatable {
 public enum SourceViewModelSequenceError: Error, Sendable, Equatable {
     case unsupportedBlend(sequence: Int)
     case invalidTiming(sequence: Int)
+    case invalidActivityWeights(String)
+    case randomStreamUnavailable(String)
+    case invalidRandomTicket(Int32)
 }
 
 /// Exact decoded single-blend sequence metadata. Pose-parameter interpolation
@@ -35,7 +39,8 @@ public struct SourceViewModelSequenceLibrary: Sendable {
     private let model: SourceStudioAnimationModel
     public init(model: SourceStudioAnimationModel) { self.model = model }
 
-    public func resolve(_ query: SourceViewModelSequenceQuery) throws -> SourceViewModelSequenceMetadata? {
+    public func resolve(_ query: SourceViewModelSequenceQuery,
+                        randomInt: ((Int32) -> Int32)? = nil) throws -> SourceViewModelSequenceMetadata? {
         let index: Int
         switch query {
         case let .index(value): index = Int(value)
@@ -44,6 +49,29 @@ public struct SourceViewModelSequenceLibrary: Sendable {
                 $0.label.caseInsensitiveCompare(name) == .orderedSame
             }) else { return nil }
             index = found
+        case let .activity(name, currentSequence):
+            let candidates = model.sequences.filter { $0.activityName.caseInsensitiveCompare(name) == .orderedSame }
+            guard !name.isEmpty, !candidates.isEmpty else { return nil }
+            if let current = candidates.first(where: { $0.index == Int(currentSequence) && $0.activityWeight < 0 }) {
+                index = current.index
+            } else {
+                let total = candidates.reduce(Int64(0)) { $0 + abs(Int64($1.activityWeight)) }
+                guard total <= Int64(Int32.max) else { throw SourceViewModelSequenceError.invalidActivityWeights(name) }
+                guard let randomInt else { throw SourceViewModelSequenceError.randomStreamUnavailable(name) }
+                let maximum = Int32(max(0, total - 1))
+                var ticket = randomInt(maximum)
+                guard ticket >= 0, ticket <= maximum else { throw SourceViewModelSequenceError.invalidRandomTicket(ticket) }
+                var selected = candidates[0].index
+                for candidate in candidates {
+                    // Source's tuple mapping treats a zero weight as one while
+                    // retaining the original absolute-weight total for its draw.
+                    let weight = max(1, abs(Int64(candidate.activityWeight)))
+                    selected = candidate.index
+                    if Int64(ticket) < weight { break }
+                    ticket -= Int32(weight)
+                }
+                index = selected
+            }
         }
         guard model.sequences.indices.contains(index) else { return nil }
         let sequence = model.sequences[index]

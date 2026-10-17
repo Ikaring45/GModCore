@@ -582,7 +582,7 @@ public final class SourceCanonicalToolActionBridge: @unchecked Sendable {
             return []
         }
 
-        try setMethod("Weapon:SendWeaponAnim", on: weaponMetatable) { arguments in
+        try setMethod("Weapon:SendWeaponAnim", on: weaponMetatable) { [weak runtime] arguments in
             let weapon = try snapshot(
                 arguments.first,
                 function: "Weapon:SendWeaponAnim",
@@ -597,6 +597,30 @@ public final class SourceCanonicalToolActionBridge: @unchecked Sendable {
                 throw LuaError.runtime(
                     "Weapon:SendWeaponAnim CLIENT prediction is not connected"
                 )
+            }
+            if let runtime, let resolver = runtime.viewModelSequenceResolver {
+                guard let activityName = GMLuaAnimationEnums.activityConstantsRequiredByBundledGamemodes
+                    .filter({ $0.value == Int(activity) }).map(\.key).sorted().first,
+                      let model = try runtime.scriptedWeaponRenderDefinition(className: weapon.className).viewModel,
+                      let metadata = try resolver(model, .activity(name: activityName,
+                          currentSequence: weapon.weaponRuntime.animationSequence)) else {
+                    return [.boolean(false)]
+                }
+                guard metadata.index >= 0, metadata.duration.isFinite, metadata.duration >= 0,
+                      metadata.cycleRate.isFinite, metadata.cycleRate >= 0, metadata.frameCount >= 0,
+                      let now = runtime.timerScheduler?.currentTime else {
+                    throw LuaError.runtime("Weapon:SendWeaponAnim received invalid asset timing or simulation clock")
+                }
+                _ = try requiredHost("Weapon:SendWeaponAnim").updateCanonicalEntity(weapon.identity) {
+                    $0.weaponRuntime.animationSequence = metadata.index
+                    $0.weaponRuntime.animationSequenceName = metadata.name
+                    $0.weaponRuntime.animationSequenceDuration = metadata.duration
+                    $0.weaponRuntime.animationCycle = 0
+                    $0.weaponRuntime.animationCycleRate = metadata.cycleRate
+                    $0.weaponRuntime.animationFrameCount = metadata.frameCount
+                    $0.weaponRuntime.animationSequenceLoops = metadata.loops
+                    $0.weaponRuntime.animationLastAdvanceTime = Float(now)
+                }
             }
             try endpoint.broadcastGameplayEvent(.weaponAnimation(
                 GMLuaWeaponAnimationEvent(

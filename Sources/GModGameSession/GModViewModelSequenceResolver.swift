@@ -9,6 +9,7 @@ final class GModViewModelSequenceResolver: @unchecked Sendable {
     private let lock = NSLock()
     private var libraries: [String: SourceViewModelSequenceLibrary] = [:]
     private var order: [String] = []
+    private var activityRandom = SourceViewModelActivityRandomStream()
     init(repository: GModStudioModelRepository) { self.repository = repository }
 
     func resolve(model: SourceEntityModelReference, query: SourceViewModelSequenceQuery)
@@ -17,7 +18,7 @@ final class GModViewModelSequenceResolver: @unchecked Sendable {
         lock.lock()
         let cached = libraries[key]
         lock.unlock()
-        if let cached { return try cached.resolve(query) }
+        if let cached { return try resolve(library: cached, query: query) }
         guard case let .loaded(asset) = repository.renderAsset(for: model) else { return nil }
         let library = SourceViewModelSequenceLibrary(model:
             try SourceStudioAnimationDecoder.decode(mdlData: asset.renderPayload.mdlData))
@@ -28,6 +29,13 @@ final class GModViewModelSequenceResolver: @unchecked Sendable {
             libraries[key] = library
         }
         lock.unlock()
-        return try library.resolve(query)
+        return try resolve(library: library, query: query)
+    }
+
+    private func resolve(library: SourceViewModelSequenceLibrary, query: SourceViewModelSequenceQuery)
+        throws -> SourceViewModelSequenceMetadata? {
+        lock.lock()
+        defer { lock.unlock() }
+        return try library.resolve(query, randomInt: { maximum in self.activityRandom.next(maximum: maximum) })
     }
 }
