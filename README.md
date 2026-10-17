@@ -6,20 +6,20 @@ Garry's Mod の Lua・Sandbox・Source アセットを iPad 上の Swift と Met
 
 ## 最新版
 
-正式パッケージ版: **[0.1.66](https://github.com/Ikaring45/GModCore/releases/tag/0.1.66)**
+正式パッケージ版: **[0.1.67](https://github.com/Ikaring45/GModCore/releases/tag/0.1.67)**
 
 - Lua の通常ログとエラーを Swift Playgrounds のコンソールへ出力
 - Q/C 操作中の描画要求をまとめ、処理中の描画が繰り返し破棄される経路を修正
 - ウィンドウ再表示・遅延入力への対策、分割ロードバーを含む
 
-正式版タグは配布の区切りであり、全機能の完成・実機検証済みという意味ではありません。[リリースノート](RELEASE_NOTES_0.1.66.md)と[CI](https://github.com/Ikaring45/GModCore/actions)に検証範囲を記載しています。署名済みアプリではなく Swift Package として配布します。
+正式版タグは配布の区切りであり、全機能の完成・実機検証済みという意味ではありません。[リリースノート](RELEASE_NOTES_0.1.67.md)と[CI](https://github.com/Ikaring45/GModCore/actions)に検証範囲を記載しています。署名済みアプリではなく Swift Package として配布します。
 
 ## iPad / Swift Playgrounds で起動する
 
 必要なものは、iPadOS 16 以降に対応する環境、Swift Playgrounds、自分が正規に所有する Garry's Mod の PC インストール、コンテンツ ZIP を置く空き容量です。
 
 1. Swift Playgrounds で新しい「App」を作成します。
-2. パッケージ https://github.com/Ikaring45/GModCore を追加し、GModApp 製品を有効にします。バージョンは 0.1.66 を選択します。
+2. パッケージ https://github.com/Ikaring45/GModCore を追加し、GModApp 製品を有効にします。バージョンは 0.1.67 を選択します。
 3. 生成された ContentView.swift を[薄いホスト用の ContentView](Apps/GarrysPADPlayground/ContentView.swift)へ置き換えます。ゲームの実装はパッケージ側にあります。
 4. 下記で作成した ZIP を「ファイル」または iCloud Drive に置きます。**解凍せず、App の Resources にも追加しません。**
 5. 実行し「Choose ZIP from Files」から ZIP を選択します。保存されたアクセス許可は次回起動にも使用します。

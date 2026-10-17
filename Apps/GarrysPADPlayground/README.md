@@ -8,7 +8,7 @@ one local ZIP and is never committed to GitHub.
 
 1. In Swift Playgrounds, create a new **App** named `GarrysPAD`.
 2. Add the Swift package `https://github.com/Ikaring45/GModCore` and enable its
-   `GModApp` product. Select release `0.1.66`; see the root README for known
+   `GModApp` product. Select release `0.1.67`; see the root README for known
    device issues and the release's validation boundary.
 3. Replace the generated `ContentView.swift` with the file beside this README.
 4. Keep `GarrysPAD_Content_Playable.zip` in **Files** or **iCloud Drive**. Do
