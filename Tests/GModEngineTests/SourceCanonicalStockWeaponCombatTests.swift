@@ -241,7 +241,22 @@ final class SourceCanonicalStockWeaponCombatTests: XCTestCase {
         _ = try tick(session)
         let medkitReload = try tick(session, buttons: [.reload])
         XCTAssertEqual(medkitReload.failures, [])
-        XCTAssertTrue(medkitReload.invocations.contains {
+        XCTAssertFalse(medkitReload.invocations.contains {
+            $0.className == "weapon_medkit" && $0.invocation == .reload
+        }, "healing cooldown must suppress reload dispatch")
+        var reloadWaitTicks = 0
+        while Float(session.serverRuntime.timerScheduler?.currentTime ?? 0) <= max(
+            (try activeWeapon(in: session)).weaponRuntime.nextPrimaryFire,
+            (try activeWeapon(in: session)).weaponRuntime.nextSecondaryFire
+        ) {
+            _ = try tick(session)
+            reloadWaitTicks += 1
+            XCTAssertLessThan(reloadWaitTicks, 200)
+            if reloadWaitTicks >= 200 { return XCTFail("medkit cooldown did not expire") }
+        }
+        let readyReload = try tick(session, buttons: [.reload])
+        XCTAssertEqual(readyReload.failures, [])
+        XCTAssertTrue(readyReload.invocations.contains {
             $0.className == "weapon_medkit" && $0.invocation == .reload
         })
 

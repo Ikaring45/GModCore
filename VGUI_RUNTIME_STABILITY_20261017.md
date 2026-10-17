@@ -400,6 +400,8 @@ HUD filtering, GC, touch and notifications retained their tested behavior.
 Physical iPad timings remain unmeasured.
 # Options entry point follow-up
 
+- Canonical lifecycle/combat CI follow-up: compare CLIENT motion with SERVER after the same movement tick, not with the pre-tick respawn snapshot (ground contact may change). Medkit regression now verifies reload is suppressed during healing cooldown and invoked after both fire deadlines expire. No production gate or canonical state logic was relaxed. Both focused Windows tests passed; Apple rerun remains required.
+
 - Follow-up CI audit (2026-10-18 JST): portable run 39025194669 succeeded. Apple run 39025194500 built device/simulator targets successfully but package XCTest failed; this is not an Apple test pass. Failures include ViewModel SIMD exact-float comparison, Construct sky texture resolution, platform-dependent allocation expectations, displacement LOD, canonical Player lifecycle motion snapshot and medkit reload invocation. ViewModel expected values now use the existing 1e-6 per-component tolerance, retaining non-nil validation. Remaining failures are unresolved and must not be hidden by this precision fix.
 
 - Resource layout is now applied on initial layout and viewport changes, not every captured frame. This avoids resetting live touch-dragged/resized frames to authored positions and repeated Lua geometry calls. All coordinates are resolved before applying any live geometry. Regression drags a resource frame by 40px, verifies five idle layouts preserve it, then verifies a viewport change reapplies resource coordinates. Windows resource tests: 5 passed, 1 installed-resource test skipped. Physical-device behavior remains unverified.

@@ -98,6 +98,9 @@ final class SourceCanonicalPlayerLifecycleTests: XCTestCase {
 
         _ = try session.runFixedTick(movementInput: .idle)
         clientPlayer = try clientCanonicalPlayer(in: session)
+        // Movement can establish ground contact during this tick. Compare the
+        // replicated snapshot with the authoritative state from that same tick.
+        player = try canonicalPlayer(in: session)
         XCTAssertEqual(clientPlayer.identity, player.identity)
         XCTAssertEqual(clientPlayer.combat, player.combat)
         XCTAssertEqual(clientPlayer.transform, player.transform)
