@@ -5,6 +5,34 @@ import GModGameAssets
 import GModLua
 
 final class GMLuaVGUIRegistryTests: XCTestCase {
+    func testWarmChildIndexSurvivesNoticeCreationReparentAndRemovalWithoutGlobalRebuild() throws {
+        let state = LuaState(output: { _ in })
+        let types = try GMLuaTypeSystem.install(into: state, utilityLayer: .bundledFallback)
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: types)
+        try state.execute("""
+            ROOT = vgui.Create('Panel')
+            OTHER = vgui.Create('Panel')
+            for i = 1, 512 do vgui.Create('Panel', OTHER) end
+            assert(#ROOT:GetChildren() == 0)
+            """)
+        let before = registry.hierarchyLookupStatistics
+        try state.execute("""
+            for i = 1, 64 do
+                local notice = vgui.Create('Panel', GetOverlayPanel())
+                notice:SetParent(ROOT)
+                assert(#ROOT:GetChildren() == 1 and ROOT:GetChildren()[1] == notice)
+                notice:SetParent(GetOverlayPanel())
+                assert(#ROOT:GetChildren() == 0)
+                notice:Remove()
+            end
+            """)
+        _ = try registry.performPendingLayouts()
+        try state.execute("assert(#ROOT:GetChildren() == 0 and #OTHER:GetChildren() == 512)")
+        let after = registry.hierarchyLookupStatistics
+        XCTAssertEqual(after.rebuilds, before.rebuilds)
+        XCTAssertEqual(after.updates - before.updates, 64 * 6)
+    }
+
     func testChildLookupUsesTopologyIndexAndPreservesLiveOrder() throws {
         let state = LuaState(output: { _ in })
         let types = try GMLuaTypeSystem.install(into: state, utilityLayer: .bundledFallback)
@@ -48,7 +76,8 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
             local w, h = ROOT:ChildrenSize()
             assert(w == 50 and h == 22)
             """)
-        XCTAssertEqual(registry.hierarchyLookupStatistics.rebuilds - after.rebuilds, 2)
+        XCTAssertEqual(registry.hierarchyLookupStatistics.rebuilds, after.rebuilds)
+        XCTAssertEqual(registry.hierarchyLookupStatistics.updates - after.updates, 4)
         try state.execute("""
             B:ParentToHUD()
             assert(#ROOT:GetChildren() == 1)

@@ -377,3 +377,24 @@ propagation over 512 descendants plus verification made 2,050 direct-child
 candidate visits (including a separate two-child root), no index rebuild, and
 left unrelated input state unchanged. These are bounded-work measurements,
 not physical-iPad latency results.
+
+## Incremental VGUI topology maintenance (unreleased)
+
+After its initial lazy construction, the direct-child index now updates only
+affected parent buckets on creation, SetParent, ParentToHUD and destruction.
+New monotonic IDs append without retaining a second sibling-array reference;
+reparented IDs are inserted in native ID order. Removed subtrees drop their
+buckets together, with only edges from surviving parents individually removed.
+Updates still occur before Lua callbacks observe the relationship. HUD/root
+flag-only changes retain dynamic filtering without rebuilding the index.
+
+This supersedes the earlier topology-invalidation policy: new notices no longer
+force a rebuild of the unrelated spawn-menu hierarchy. Other deletion/layout
+traversals are not claimed to be globally scan-free.
+
+Validation: 64 Windows VGUI/notification tests passed. A warm index survived
+64 notice create/reparent/reparent/remove cycles beside 512 unrelated panels
+with zero global rebuilds and 384 edge updates. Native child order, reentrant
+parent callback observations, live geometry, deferred deletion, recreation,
+HUD filtering, GC, touch and notifications retained their tested behavior.
+Physical iPad timings remain unmeasured.

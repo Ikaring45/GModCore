@@ -469,11 +469,12 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     private var directChildrenIndex: [Int?: [Int]]?
     private var directChildrenIndexRebuilds: UInt64 = 0
     private var directChildrenCandidatesVisited: UInt64 = 0
+    private var directChildrenIndexUpdates: UInt64 = 0
 
-    var hierarchyLookupStatistics: (rebuilds: UInt64, candidates: UInt64) {
+    var hierarchyLookupStatistics: (rebuilds: UInt64, candidates: UInt64, updates: UInt64) {
         lock.lock()
         defer { lock.unlock() }
-        return (directChildrenIndexRebuilds, directChildrenCandidatesVisited)
+        return (directChildrenIndexRebuilds, directChildrenCandidatesVisited, directChildrenIndexUpdates)
     }
     private var nextPanelIdentifier = 1
     private var semanticIndex: LuaValue = .nilValue
@@ -2725,7 +2726,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         let value = try typeSystem.makeObject(metaName: "Panel", payload: descriptor)
         lock.lock()
         panels[identifier] = value
-        directChildrenIndex = nil
+        insertIndexedChildLocked(identifier, parent: descriptor.parentIdentifier)
         lock.unlock()
 
         do {
@@ -2810,8 +2811,18 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         lock.lock()
         let identifiers = descendantIdentifiers(of: identifier)
         let removed = identifiers.compactMap { panels.removeValue(forKey: $0) }
-        directChildrenIndex = nil
         let removedIdentifiers = Set(identifiers)
+        if directChildrenIndex != nil {
+            for value in removed {
+                guard let panel = panelDescriptor(from: value) else { continue }
+                // Drop removed subtrees as whole buckets. Only edges entering
+                // from a surviving parent need per-child removal.
+                if panel.parentIdentifier.map({ !removedIdentifiers.contains($0) }) ?? true {
+                    removeIndexedChildLocked(panel.identifier, parent: panel.parentIdentifier)
+                }
+                directChildrenIndex?.removeValue(forKey: panel.identifier)
+            }
+        }
         for removedIdentifier in removedIdentifiers {
             pendingDockSizeChanges.removeValue(forKey: removedIdentifier)
         }
@@ -3043,7 +3054,10 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         }
         descriptor.parentIdentifier = parentIdentifier
         descriptor.isParentedToHUD = false
-        directChildrenIndex = nil
+        if previousParentIdentifier != parentIdentifier {
+            removeIndexedChildLocked(identifier, parent: previousParentIdentifier)
+            insertIndexedChildLocked(identifier, parent: parentIdentifier)
+        }
         descriptor.parentChangeDispatchDepth += 1
         lock.unlock()
 
@@ -3084,9 +3098,13 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
               GMLuaTypeSystem.typedObject(from: value)?.isValid == true else {
             throw LuaError.runtime("invalid Panel")
         }
+        let previousParentIdentifier = descriptor.parentIdentifier
         descriptor.parentIdentifier = nil
         descriptor.isParentedToHUD = true
-        directChildrenIndex = nil
+        if previousParentIdentifier != nil {
+            removeIndexedChildLocked(identifier, parent: previousParentIdentifier)
+            insertIndexedChildLocked(identifier, parent: nil)
+        }
     }
 
     fileprivate func children(of identifier: Int) -> [LuaValue] {
@@ -3125,8 +3143,8 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         return (width, height)
     }
 
-    /// Called under the registry lock. Rebuild once after topology mutations,
-    /// then visit only this parent's children on layout/Derma query hot paths.
+    /// Called under the registry lock. Build once on first use, then maintain
+    /// affected parent buckets incrementally before exposing native callbacks.
     private func directChildIdentifiersLocked(parent: Int?) -> [Int] {
         if directChildrenIndex == nil {
             var index: [Int?: [Int]] = [:]
@@ -3140,6 +3158,40 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         let identifiers = directChildrenIndex?[parent] ?? []
         directChildrenCandidatesVisited &+= UInt64(identifiers.count)
         return identifiers
+    }
+
+    private func insertIndexedChildLocked(_ identifier: Int, parent: Int?) {
+        guard directChildrenIndex != nil else { return }
+        // New IDs are monotonic. Keep bulk panel construction on the append
+        // path without retaining a second copy of the parent's COW array.
+        if let last = directChildrenIndex?[parent]?.last, identifier > last {
+            directChildrenIndex?[parent]?.append(identifier)
+            directChildrenIndexUpdates &+= 1
+            return
+        }
+        guard let children = directChildrenIndex?[parent] else {
+            directChildrenIndex?[parent] = [identifier]
+            directChildrenIndexUpdates &+= 1
+            return
+        }
+        var lower = 0
+        var upper = children.count
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2
+            if children[middle] < identifier { lower = middle + 1 } else { upper = middle }
+        }
+        guard lower == children.count || children[lower] != identifier else { return }
+        directChildrenIndex?[parent]?.insert(identifier, at: lower)
+        directChildrenIndexUpdates &+= 1
+    }
+
+    private func removeIndexedChildLocked(_ identifier: Int, parent: Int?) {
+        guard directChildrenIndex != nil else { return }
+        directChildrenIndex?[parent]?.removeAll { $0 == identifier }
+        if directChildrenIndex?[parent]?.isEmpty == true {
+            directChildrenIndex?.removeValue(forKey: parent)
+        }
+        directChildrenIndexUpdates &+= 1
     }
 
     fileprivate func noteSizeToChildrenDependency(
