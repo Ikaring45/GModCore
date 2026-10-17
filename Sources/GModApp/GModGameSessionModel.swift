@@ -2087,6 +2087,9 @@ final class GModGameSessionModel: ObservableObject {
                   request.laneGeneration == laneGeneration,
                   isReady else { continue }
             lastFirstPersonViewModelSourceRevision = request.snapshot.revision
+            if case let .unavailableEmptyGeometry(model) = request.snapshot.status {
+                appendLog("[CLIENT][VIEWMODEL] No drawable geometry in \(model.path); previous weapon mesh cleared. Separate hands rendering is not connected yet.")
+            }
             if let failure = result.failure {
                 appendLog(
                     "[CLIENT][VIEWMODEL] Metal scene rejected: \(failure)"

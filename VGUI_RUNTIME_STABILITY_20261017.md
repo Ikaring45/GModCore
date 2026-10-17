@@ -44,3 +44,14 @@ with UseHands enabled. It is not a mistyped replacement for c_arms_citizen.
 Its empty-resource rejection remains open: determine whether the loaded resource
 is animation-only and how it should interact with the separate hands-rendering
 integration. No substitute geometry was added.
+
+## Empty ViewModel publication (unreleased)
+
+A fully empty decoded ViewModel now publishes unavailableEmptyGeometry and a
+nil projection before Metal conversion. The App logs the authored model and
+the missing hands integration explicitly rather than treating it as a complete
+rendering fix. This clears a previously displayed weapon and permits recovery
+on the next drawable weapon. Partially malformed geometry is not admitted;
+Metal's existing validation remains unchanged. Six portable ViewModel projection
+tests pass, including visible -> empty -> visible transitions. App/Metal and
+physical-iPad verification remain outstanding.

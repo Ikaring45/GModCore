@@ -4,6 +4,28 @@ import GModEngine
 import XCTest
 
 final class GModFirstPersonViewModelSceneTests: XCTestCase {
+    func testEmptyAuthoredViewModelClearsPreviousProjectionAndCanRecover() throws {
+        let model = SourceEntityModelReference("models/weapons/c_arms.mdl")
+        let resolver = ViewModelResolverProbe(emptyModelPath: model.path)
+        let projector = GModFirstPersonViewModelSceneProjector(resolver: resolver)
+        let weapon = weaponSnapshot(index: 18, revision: 1)
+        let player = playerSnapshot(index: 1, activeWeapon: weapon)
+        _ = try projector.update(clientEntities: [player, weapon], localPlayerEntryIndex: 1,
+            cursor: cursor(sequence: 1), definitionResolver: { _ in self.definition() })
+        let previous = try XCTUnwrap(projector.snapshot(ifChangedFrom: nil))
+        XCTAssertNotNil(previous.projection)
+        _ = try projector.update(clientEntities: [player, weapon], localPlayerEntryIndex: 1,
+            cursor: cursor(sequence: 2), definitionResolver: { _ in
+                GMLuaScriptedWeaponRenderDefinition(className: weapon.className,
+                    viewModel: model, worldModel: nil, viewModelFieldOfViewDegrees: 54)
+            })
+        let empty = try XCTUnwrap(projector.snapshot(ifChangedFrom: previous.revision))
+        XCTAssertNil(empty.projection)
+        XCTAssertEqual(empty.status, .unavailableEmptyGeometry(model: model))
+        _ = try projector.update(clientEntities: [player, weapon], localPlayerEntryIndex: 1,
+            cursor: cursor(sequence: 3), definitionResolver: { _ in self.definition() })
+        XCTAssertNotNil(projector.snapshot(ifChangedFrom: empty.revision)?.projection)
+    }
     func testProjectsCanonicalActiveWeaponUsingExactSWEPViewModel() throws {
         let resolver = ViewModelResolverProbe()
         let projector = GModFirstPersonViewModelSceneProjector(
@@ -293,10 +315,12 @@ private final class ViewModelResolverProbe:
 
     private let lock = NSLock()
     private let failure: GModStudioRenderableModelResolutionFailure?
+    private let emptyModelPath: String?
     private var requestsStorage: [Request] = []
 
-    init(failure: GModStudioRenderableModelResolutionFailure? = nil) {
+    init(failure: GModStudioRenderableModelResolutionFailure? = nil, emptyModelPath: String? = nil) {
         self.failure = failure
+        self.emptyModelPath = emptyModelPath
     }
 
     var requests: [Request] {
@@ -333,7 +357,7 @@ private final class ViewModelResolverProbe:
                 lodIndex: 0,
                 bodyValue: bodyValue,
                 skinFamilyIndex: skinFamilyIndex,
-                vertices: [
+                vertices: normalized == emptyModelPath ? [] : [
                     GModDynamicModelVertex(
                         position: SourceVector3(0, 0, 0),
                         normal: SourceVector3(0, 0, 1),

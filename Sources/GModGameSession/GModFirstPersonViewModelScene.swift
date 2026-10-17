@@ -27,6 +27,9 @@ public enum GModFirstPersonViewModelProjectionStatus: Sendable, Equatable {
     case unavailableInvalidActiveWeapon(SourceCanonicalEntityIdentity)
     case unavailableDefinition(className: String, reason: String)
     case unavailableNoViewModel(className: String)
+    /// A decoded resource without any render geometry is not a GPU mesh.
+    /// Keep the authored model diagnostic; do not substitute another model.
+    case unavailableEmptyGeometry(model: SourceEntityModelReference)
     case unavailableStudio(
         model: SourceEntityModelReference,
         failure: GModStudioRenderableModelResolutionFailure
@@ -329,6 +332,14 @@ private extension GModFirstPersonViewModelSceneProjector {
                         expectedPath: expectedPath,
                         received: resource.id
                     )
+            }
+            if resource.model.vertices.isEmpty,
+               resource.model.indices.isEmpty,
+               resource.model.drawRanges.isEmpty {
+                return Candidate(
+                    projection: nil,
+                    status: .unavailableEmptyGeometry(model: viewModel)
+                )
             }
             return Candidate(
                 projection: GModFirstPersonViewModelProjection(
