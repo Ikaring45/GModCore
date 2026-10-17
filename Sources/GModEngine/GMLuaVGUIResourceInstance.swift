@@ -77,6 +77,28 @@ public final class GMLuaVGUIResourceInstance {
                     parent, .string(LuaString(control.fieldName))
                 ]).first ?? .nilValue
                 panels[control.fieldName] = panel
+                if control.controlName?.lowercased() == "progressbar" {
+                    // Native Source ProgressBar is segmented, unlike Derma's
+                    // continuous green DProgress skin. Independently implement
+                    // its eastward 4-gap/8-width/4-inset geometry; retain the
+                    // real fraction accessor and the installed GMod palette.
+                    // Full dynamic scheme/proportional scaling remains separate.
+                    let install = try runtime.executeReturningValues("""
+                        return function(p)
+                            p.Paint = function(self, w, h)
+                                surface.SetDrawColor(0, 0, 0, 128)
+                                surface.DrawRect(0, 0, w, h)
+                                surface.SetDrawColor(255, 255, 255, 255)
+                                local count = math.floor(math.floor(w / 12) * self:GetFraction())
+                                for i = 0, count - 1 do
+                                    surface.DrawRect(4 + i * 12, 4, 8, math.max(0, h - 8))
+                                end
+                                return true
+                            end
+                        end
+                        """).first ?? .nilValue
+                    _ = try runtime.state.call(install, arguments: [panel])
+                }
                 for (key, method) in [("labelText", "SetText"), ("title", "SetTitle"), ("font", "SetFont")] {
                     if key == "title", hidesTitle { continue }
                     if let text = control.value(key) {

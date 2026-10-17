@@ -243,9 +243,9 @@ public final class GModMetalCoreTextRasterizer:
 
             for (index, line) in coreTextLines.enumerated() {
                 // Draw in the raw bitmap context's unflipped Quartz space.
-                // Baselines are measured up from the bottom; convert rows to
-                // Surface's top-left convention exactly once below. Flipping
-                // the CTM as well reverses glyphs and multiline band order.
+                // Baselines are measured up from the bottom. CGContext's raw
+                // bitmap storage is already in the image row order consumed
+                // by the Surface upload; do not reverse those bytes again.
                 let lineTop = CGFloat(index * max(1, descriptor.size))
                 context.textPosition = CGPoint(
                     x: 0,
@@ -259,14 +259,6 @@ public final class GModMetalCoreTextRasterizer:
             throw GModMetalCoreTextRasterizerError.contextCreationFailed
         }
 
-        // Normalize native Quartz bitmap rows once for Metal's top-left
-        // Surface texture convention. Do not also invert the drawing CTM.
-        Self.flipRowsToTopLeft(
-            in: &bytes,
-            width: width,
-            height: height
-        )
-
         let bitmap = try GModMetalSurfaceBitmap(
             resourceIdentifier: "coretext:\(postScriptName):\(descriptor.size)",
             width: width,
@@ -275,29 +267,6 @@ public final class GModMetalCoreTextRasterizer:
         )
         storeCachedBitmap(bitmap, for: cacheKey)
         return bitmap
-    }
-
-    private static func flipRowsToTopLeft(
-        in bytes: inout Data,
-        width: Int,
-        height: Int
-    ) {
-        guard width > 0, height > 1 else { return }
-        let bytesPerRow = width * 4
-        bytes.withUnsafeMutableBytes { rawBytes in
-            let pixels = rawBytes.bindMemory(to: UInt8.self)
-            for topRow in 0..<(height / 2) {
-                let bottomRow = height - topRow - 1
-                let topOffset = topRow * bytesPerRow
-                let bottomOffset = bottomRow * bytesPerRow
-                for byteOffset in 0..<bytesPerRow {
-                    pixels.swapAt(
-                        topOffset + byteOffset,
-                        bottomOffset + byteOffset
-                    )
-                }
-            }
-        }
     }
 
     private func cachedBitmap(

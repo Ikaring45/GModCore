@@ -81,6 +81,10 @@ final class GMLuaVGUIResourceInstanceTests: XCTestCase {
             return false
         })
         XCTAssertTrue(instance.unappliedFields.contains { $0.control == "Progress" && $0.key == "autoResize" })
+        XCTAssertEqual(frame.commands.filter {
+            if case let .rectangle(rect, _, _) = $0 { return rect.width == 8 && rect.height == 12 }
+            return false
+        }.count, 6, "150px native ProgressBar at 50% draws six complete segments")
         for phase: GMLuaPointerPhase in [.began, .ended] {
             _ = try session.dispatchPointerEvent(x: 65, y: 135, phase: phase, timestamp: 1,
                                                  viewportWidth: 1_024, viewportHeight: 768)

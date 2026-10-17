@@ -134,6 +134,14 @@ actor GModDermaMenuSessionLane {
         try requiredSession(expectedGeneration: expectedGeneration).drainActions()
     }
 
+    func captureFrame(viewport: GMLuaViewportSize, expectedGeneration: UInt64) throws
+        -> (snapshot: GMLuaSurfaceFrameSnapshot, actions: [GMLuaMenuAction]) {
+        // One actor turn: a present/dismiss must not interleave between Paint
+        // (which can run OnRemove) and draining that frame's actions.
+        let snapshot = try renderFrame(viewport: viewport, expectedGeneration: expectedGeneration)
+        return (snapshot, try drainActions(expectedGeneration: expectedGeneration))
+    }
+
     func renderFrame(
         viewport: GMLuaViewportSize,
         expectedGeneration: UInt64
@@ -216,6 +224,7 @@ final class GModDermaMenuModel: ObservableObject {
     @Published private(set) var wantsTextInput = false
     @Published private(set) var focusedTextEntry: Int?
     @Published private(set) var deferredActions: [GMLuaMenuAction] = []
+    private var presentationRevision: UInt64 = 0
     @Published private(set) var resourcePresented = false
 
     func consumeDeferredActions() { deferredActions = [] }
@@ -516,6 +525,9 @@ final class GModDermaMenuModel: ObservableObject {
 
     func present(_ utility: GMLuaMenuUtility) {
         guard hasSession, utility != presentedUtility else { return }
+        presentationRevision &+= 1
+        deferredActions = []
+        surfaceScene = nil
         failure = nil
         presentedUtility = utility
         let generation = sessionGeneration
@@ -544,6 +556,8 @@ final class GModDermaMenuModel: ObservableObject {
 
     func presentLoadingResource(_ resource: SourceVGUIResource) {
         guard hasSession, !resourcePresented else { return }
+        presentationRevision &+= 1
+        deferredActions = []
         resourcePresented = true
         let generation = sessionGeneration
         let installation = installationTask
@@ -588,6 +602,9 @@ final class GModDermaMenuModel: ObservableObject {
     }
 
     func dismissUtility() {
+        presentationRevision &+= 1
+        deferredActions = []
+        surfaceScene = nil
         resourcePresented = false
         presentedUtility = nil
         wantsTextInput = false
@@ -724,6 +741,7 @@ final class GModDermaMenuModel: ObservableObject {
         buildInFlight = true
         frameRevision &+= 1
         let revision = frameRevision
+        let presentation = presentationRevision
         let generation = sessionGeneration
         let activeViewport = viewport
         let installation = installationTask
@@ -737,15 +755,20 @@ final class GModDermaMenuModel: ObservableObject {
             let snapshot: GMLuaSurfaceFrameSnapshot
             let actions: [GMLuaMenuAction]
             do {
-                snapshot = try await sessionLane.renderFrame(
+                let captured = try await sessionLane.captureFrame(
                     viewport: activeViewport,
                     expectedGeneration: generation
                 )
-                actions = try await sessionLane.drainActions(expectedGeneration: generation)
+                snapshot = captured.snapshot
+                actions = captured.actions
             } catch {
                 guard generation == sessionGeneration,
                       frameRevision == revision else { return }
                 buildInFlight = false
+                guard presentation == presentationRevision else {
+                    buildNextFrameIfNeeded()
+                    return
+                }
                 fail(error)
                 return
             }
@@ -761,7 +784,10 @@ final class GModDermaMenuModel: ObservableObject {
             guard generation == sessionGeneration,
                   frameRevision == revision else { return }
             self.buildInFlight = false
-            if !actions.isEmpty { self.deferredActions = actions }
+            guard presentation == presentationRevision else {
+                self.buildNextFrameIfNeeded()
+                return
+            }
             switch result {
             case let .success(scene):
                 self.surfaceScene = scene
@@ -769,6 +795,10 @@ final class GModDermaMenuModel: ObservableObject {
             case let .failure(error):
                 self.failure = GMLuaRuntime.describe(error)
             }
+            // Action observers can synchronously dismiss or open another
+            // utility. Publish pixels first, never overwrite that new owner
+            // with this frame after delivering its close action.
+            if !actions.isEmpty { self.deferredActions = actions }
             self.buildNextFrameIfNeeded()
         }
     }
