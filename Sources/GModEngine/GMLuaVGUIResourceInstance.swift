@@ -117,6 +117,11 @@ public final class GMLuaVGUIResourceInstance {
                 }
                 var applied: Set<String> = ["controlname", "fieldname", "xpos", "ypos", "wide", "tall",
                     "labeltext", "title", "font", "visible", "enabled", "command", "textalignment"]
+                if control.controlName?.lowercased() == "textentry",
+                   let text = control.value("text") {
+                    _ = try call(control.fieldName, "SetText", [.string(LuaString(text))])
+                    applied.insert("text")
+                }
                 if control.controlName?.lowercased() == "checkbutton",
                    let selected = control.value("selected") {
                     guard selected == "0" || selected == "1" else {
@@ -132,6 +137,9 @@ public final class GMLuaVGUIResourceInstance {
                 }
                 if control.controlName?.lowercased() == "label" {
                     booleanFields.append(("wrap", "SetWrap"))
+                }
+                if control.controlName?.lowercased() == "textentry" {
+                    booleanFields.append(("editable", "SetEditable"))
                 }
                 for (key, method) in booleanFields {
                     if let value = control.value(key) {
@@ -198,6 +206,15 @@ public final class GMLuaVGUIResourceInstance {
 
     public func setText(_ text: String, control: String) throws {
         _ = try call(control, "SetText", [.string(LuaString(text))])
+    }
+
+    public func text(control: String) throws -> String {
+        guard resource.controls.contains(where: {
+            $0.fieldName == control && $0.controlName?.lowercased() == "textentry"
+        }), case let .string(value) = try call(control, "GetText", []).first else {
+            throw ResourceError.invalidField(control: control, key: "text")
+        }
+        return value.utf8String
     }
 
     /// Reads the live control, including user changes, rather than the .res

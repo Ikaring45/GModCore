@@ -3,6 +3,37 @@ import GModEngine
 import GModGameAssets
 
 final class GMLuaVGUIResourceInstanceTests: XCTestCase {
+    func testResourceTextEntryUsesInitialTextAndLiveUserEdits() throws {
+        let files = try GMLuaHostDirectoryFileSystem(rootURL: GModGameAssets.clientContentRootURL(), writable: false)
+        let session = GMLuaMenuSession(fileSystem: files, logger: { _ in })
+        defer { _ = session.close() }
+        _ = try session.start()
+        let resource = try SourceVGUIResource(source: """
+            "settings.res" {
+                "Input" { "ControlName" "TextEntry" "text" "player" "editable" "1" "xpos" "20" "ypos" "20" "wide" "200" "tall" "30" }
+                "ReadOnly" { "ControlName" "TextEntry" "text" "fixed" "editable" "0" "xpos" "20" "ypos" "80" "wide" "200" "tall" "30" }
+            }
+            """)
+        let instance = try session.loadResource(resource) { _ in }
+        try instance.layout(viewportWidth: 640, viewportHeight: 480)
+        _ = try session.renderFrame(viewportWidth: 640, viewportHeight: 480)
+        XCTAssertTrue(instance.unappliedFields.isEmpty)
+        XCTAssertEqual(try instance.text(control: "Input"), "player")
+        for phase: GMLuaPointerPhase in [.began, .ended] {
+            _ = try session.dispatchPointerEvent(x: 180, y: 35, phase: phase, timestamp: 1,
+                viewportWidth: 640, viewportHeight: 480)
+        }
+        _ = try session.insertText("1")
+        XCTAssertEqual(try instance.text(control: "Input"), "1player",
+            "SetText initializes the native caret at zero")
+        for phase: GMLuaPointerPhase in [.began, .ended] {
+            _ = try session.dispatchPointerEvent(x: 180, y: 95, phase: phase, timestamp: 2,
+                viewportWidth: 640, viewportHeight: 480)
+        }
+        _ = try session.insertText("2")
+        XCTAssertEqual(try instance.text(control: "ReadOnly"), "fixed")
+    }
+
     func testResourceIdleLayoutPreservesTouchDraggedFrame() throws {
         let files = try GMLuaHostDirectoryFileSystem(rootURL: GModGameAssets.clientContentRootURL(), writable: false)
         let session = GMLuaMenuSession(fileSystem: files, logger: { _ in })
