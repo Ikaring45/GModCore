@@ -875,16 +875,20 @@ final class GModMetalSurfaceSceneTests: XCTestCase {
         let asymmetric = try XCTUnwrap(
             rasterizer.rasterizeSurfaceText("L", font: descriptor)
         )
+        let inkRows = alphaOccupiedRows(in: asymmetric)
+        let firstInkRow = try XCTUnwrap(inkRows.min())
+        let lastInkRow = try XCTUnwrap(inkRows.max())
+        let inkMidpoint = (firstInkRow + lastInkRow + 1) / 2
         XCTAssertGreaterThan(
             alphaSum(
                 in: asymmetric,
-                rows: (asymmetric.height / 2)..<asymmetric.height
+                rows: inkMidpoint..<(lastInkRow + 1)
             ),
             alphaSum(
                 in: asymmetric,
-                rows: 0..<(asymmetric.height / 2)
+                rows: firstInkRow..<inkMidpoint
             ),
-            "top-left Surface pixels must keep the L baseline below its stem"
+            "within the actual ink bounds, L's wider baseline must be below its stem (font padding is not ink)"
         )
 
         let multiline = try XCTUnwrap(

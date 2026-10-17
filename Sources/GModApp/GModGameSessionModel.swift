@@ -673,12 +673,15 @@ final class GModGameSessionModel: ObservableObject {
                         languagePhrases: languagePhrases
                     ),
                     logger: { [weak self] realm, message in
+                        // Emit on the Lua worker before the MainActor hop so
+                        // a stalled UI or teardown cannot discard crash clues.
+                        Swift.print("[GarrysPAD][\(realm.rawValue)] \(message)")
                         Task { @MainActor [weak self] in
                             guard let self,
                                   requestedGeneration == self.sessionGeneration else {
                                 return
                             }
-                            self.appendLog("[\(realm.rawValue)] \(message)")
+                            self.appendLog("[\(realm.rawValue)] \(message)", printsToPlaygrounds: false)
                         }
                     },
                     progress: { [weak self] progress in
@@ -1772,6 +1775,11 @@ final class GModGameSessionModel: ObservableObject {
                 ProcessInfo.processInfo.systemUptime
         }
         foregroundSurfaceBuildTask = nil
+        if surfaceRefreshTask == nil, surfaceRefreshQueue.pending != nil {
+            surfaceRefreshTask = Task(priority: .userInitiated) { [weak self] in
+                await self?.drainClientSurfaceRefreshes()
+            }
+        }
     }
 
     private func surfaceTokenIsCurrent(
@@ -2166,7 +2174,10 @@ final class GModGameSessionModel: ObservableObject {
             generation: generation,
             scope: scope
         ))
-        guard surfaceRefreshTask == nil else { return }
+        // Pointer callbacks stay responsive, but do not invalidate the scene
+        // currently resolving glyphs/textures. Retain only the latest capture
+        // request and resume it after the complete foreground scene publishes.
+        guard surfaceRefreshTask == nil, foregroundSurfaceBuildTask == nil else { return }
         let priority: TaskPriority = scope == .overlay
             ? .utility
             : .userInitiated
@@ -2177,7 +2188,8 @@ final class GModGameSessionModel: ObservableObject {
     }
 
     private func drainClientSurfaceRefreshes() async {
-        while let request = surfaceRefreshQueue.takeLatest() {
+        while foregroundSurfaceBuildTask == nil,
+              let request = surfaceRefreshQueue.takeLatest() {
             await refreshClientSurface(
                 request: request
             )
@@ -3124,7 +3136,8 @@ final class GModGameSessionModel: ObservableObject {
         }
     }
 
-    private func appendLog(_ value: String) {
+    private func appendLog(_ value: String, printsToPlaygrounds: Bool = true) {
+        if printsToPlaygrounds { Swift.print("[GarrysPAD] \(value)") }
         recentLogs.append(value)
         if recentLogs.count > 80 {
             recentLogs.removeFirst(recentLogs.count - 80)

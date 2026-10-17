@@ -77,6 +77,27 @@ alone restores the C++ GameUI dialogs: https://wiki.facepunch.com/gmod/Panel
   Full-suite success is explicitly NOT claimed; UI failures remain follow-up work.
 # Native resource field continuation (2026-10-17)
 
+## Console and foreground responsiveness continuation
+
+Runtime-factory Lua logs (including ordinary MENU print/Msg) and gameplay
+worker logs now print to stdout with GarrysPAD/realm prefixes. Gameplay logs
+are printed before hopping to MainActor, with duplicate stdout emission
+disabled when retaining the same line in the in-app console. Host-detected
+gameplay failures also print. This enables Swift Playgrounds console capture;
+it is not a persistent crash-file recorder.
+
+Pointer-driven foreground captures now wait behind an in-flight resolved build
+in a latest-only slot, rather than invalidating every active build while the
+finger moves. Pointer callbacks themselves remain on the original Lua path.
+Device latency improvement is not yet measured.
+
+Apple af0f9a8 failed the asymmetric-L test (1537 vs 1899). The test split the
+whole font-height bitmap, counting asymmetric blank font padding. It now
+compares upper/lower halves of occupied ink rows; inverted glyphs must still
+fail. Multiline/Japanese checks remain. No new Apple pass is claimed yet.
+Home sound replay, 3D skybox visibility, footsteps and Source walk feel remain
+open reports; existing code presence is not evidence of device parity.
+
 ## Physical-device regression follow-up
 
 Storage recovery continuation: local compilation resumed with about 59 GB free.

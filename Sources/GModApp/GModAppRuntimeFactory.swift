@@ -216,7 +216,10 @@ public final class GModAppRuntimeFactory: @unchecked Sendable {
     ) -> GMLuaRuntime {
         GMLuaRuntime(
             realm: realm,
-            logger: logger,
+            logger: { message in
+                Swift.print("[GarrysPAD] \(message)")
+                logger(message)
+            },
             bootstrapMode: bootstrapMode,
             initialViewport: initialViewport,
             textMeasurer: textMeasurer
@@ -242,7 +245,12 @@ public final class GModAppRuntimeFactory: @unchecked Sendable {
             languageConfiguration: languageConfiguration,
             permissionsHost: permissionsHost,
             permissionSessionTransport: permissionSessionTransport,
-            logger: logger
+            logger: { message in
+                // MENU's UI sink intentionally retains only selected errors.
+                // stdout must receive ordinary print/Msg and errors as well.
+                Swift.print("[GarrysPAD][MENU] \(message)")
+                logger(message)
+            }
         )
     }
 
