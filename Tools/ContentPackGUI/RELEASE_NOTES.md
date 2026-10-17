@@ -1,17 +1,19 @@
-# Garry's PAD ZIP Builder 1.0.0 — Windows
+# Garry's PAD Content Builder 1.1.0 — Windows
 
-Download `GarrysPAD-ZIP-Builder-1.0.0-Windows.zip`, extract the entire folder, and run `GarrysPAD-ZIP-Builder.exe`. Keep the Scripts folder beside the EXE.
+English-first redesign with a GMod-inspired charcoal palette, blue g badge,
+cleaner typography, spacious fields, a highlighted Build ZIP action and
+console-style logs. Dialogs, status messages and the bundled guide are English.
 
-Windows GUI for the existing owned-installation content pack workflow:
+Download the Windows ZIP, extract the whole folder and run
+`GarrysPAD-ZIP-Builder.exe`. Keep the Scripts folder beside it.
 
-- Installation folder and ZIP destination pickers.
-- Playable (recommended), Playground and CompleteBase profiles.
-- Read-only plan, ZIP creation, and separate SHA-256 payload verification.
-- Background worker process, live bounded logs, log export and explicit overwrite confirmation.
-- No administrator rights or additional .NET runtime installer required on Windows 10/11 with .NET Framework 4.8 and Windows PowerShell 5.1.
+Original content selection, plan, ZIP creation and SHA-256 verification scripts
+are unchanged. No game assets bundled. Use a legally owned installation and do
+not redistribute generated game archives.
 
-This is an unsigned executable. No game assets are included. Use a legally owned installation; do not redistribute the generated game-content ZIP.
+Windows 10/11, .NET Framework 4.8 and Windows PowerShell 5.1. Unsigned executable;
+no administrator rights required. No physics attestation generation.
 
-Validation: built with Windows .NET Framework compiler; GUI construction, argument quoting and packaged-script presence self-test passed. Missing-installation error handling was exercised under Windows PowerShell 5.1. Full multi-GB real-game packaging, visible GUI interaction and physical iPad import have not been validated in this run.
-
-This tool creates the content ZIP, not independently attested physics manifests. It does not make unfinished prop/physgun support complete.
+Validation: Windows build and GUI/argument/script self-test passed; rendered
+previews visually inspected. Full multi-GB packaging and physical iPad import
+have not been validated in this run.

@@ -1,23 +1,30 @@
-Garry's PAD ZIP Builder 1.0.0 (Windows x64)
+Garry's PAD Content Builder 1.1.0 | Windows x64
 
-ZIPをすべて展開し、GarrysPAD-ZIP-Builder.exeを起動してください。
-ScriptsフォルダーはEXEと同じ場所に置いてください。
-Windows 10/11、.NET Framework 4.8、Windows PowerShell 5.1向けです。
-管理者権限は不要です。未署名のためWindowsに警告される場合があります。
+Extract the entire ZIP and launch GarrysPAD-ZIP-Builder.exe.
+Keep the Scripts folder beside the executable.
+Requires Windows 10/11, .NET Framework 4.8 and Windows PowerShell 5.1.
+No administrator rights required. The executable is unsigned.
 
-1. SteamのGarrysModフォルダーを選択します（中にgarrysmodフォルダーがある場所）。
-2. ゲームインストール先以外に、保存するZIPを指定します。
-3. 通常はPlayableを選択します。数GBの空き容量が必要です。
-4. 事前確認 → ZIPを作成 → ZIPを検証、の順に実行します。
-5. ZIPを展開せずiPadに転送し、Garry's PADから選択してください。
+1. Select the Steam GarrysMod installation containing the garrysmod folder.
+2. Choose a ZIP destination outside the game installation.
+3. Choose Playable for normal use. Several GB of free space are needed.
+4. Run Preview plan, Build ZIP, then Verify ZIP.
+5. Transfer the ZIP to iPad without extracting it, then select it in Garry's PAD.
 
-ゲーム素材は同梱しません。自分が正規に所有するインストールを使用してください。
-作成したゲーム素材ZIPを再配布しないでください。
-addons、Workshop、設定、セーブ、個人データは既存の選別処理で除外します。
-このツールは物理の検証済みマニフェストを生成しません。
-prop/physgunの未完成機能を、ZIP作成だけで完成させるものではありません。
-処理中の終了を防止します。強制終了時は出力先の.partialファイルが残る場合があります。
-ログは最大約1MBです。「ログを保存」で保存できます。
+Playable: textures, models, sounds and standard content.
+Playground: smaller transfer-testing pack, not full gameplay content.
+CompleteBase: additional stock content shipped with the installation.
 
-検証範囲: コンパイルと非表示フォーム生成・引数処理のself-test。
-実ゲームからの数GB ZIP作成とiPad実機読込は別途確認が必要です。
+Only use a legally owned installation. No game assets are bundled.
+Do not redistribute generated game-content archives.
+Addons, Workshop, settings, saves and personal data are excluded by the
+existing content selection policy.
+
+Physics attestation manifests are not generated. Creating a ZIP does not
+complete unfinished prop/physgun support.
+Closing is blocked while a job runs. Force-quitting may leave a .partial file.
+The on-screen log is bounded to approximately 1 MB; use Save log to export it.
+
+Validation: Windows compilation, argument/script checks and form self-test;
+rendered English dark-theme preview checked for layout and readable controls.
+Full multi-GB owned-game packaging and physical iPad import remain unverified.
