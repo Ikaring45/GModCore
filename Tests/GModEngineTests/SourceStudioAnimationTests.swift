@@ -3,6 +3,50 @@ import XCTest
 @testable import GModEngine
 
 final class SourceStudioAnimationTests: XCTestCase {
+    func testRLEPositionRunsUseBoneScaleAndRepeatLastSample() throws {
+        let model = try SourceStudioAnimationDecoder.decode(mdlData: makePositionAnimation())
+        for (frame, expected) in [(0, Float(1)), (1, 6), (2, 6), (3, 6), (4, 11), (29, 11)] {
+            let pose = try model.pose(animationIndex: 0, frame: frame)
+            XCTAssertEqual(pose.bones[0].position.x, expected)
+            XCTAssertEqual(pose.bones[0].position.y, 0)
+            XCTAssertEqual(pose.bones[1].modelTransform.transformPoint(.zero).x, expected + 2)
+        }
+    }
+
+    func testRLEPositionRejectsMalformedAndTruncatedRuns() throws {
+        for header: [UInt8] in [[0, 4], [3, 2], [1, 0]] {
+            var data = bytes(of: makePositionAnimation())
+            let offset = 1_164 + Int(Int16(bitPattern: UInt16(data[1_164]) | UInt16(data[1_165]) << 8))
+            data[offset] = header[0]
+            data[offset + 1] = header[1]
+            let model = try SourceStudioAnimationDecoder.decode(mdlData: Data(data))
+            XCTAssertThrowsError(try model.pose(animationIndex: 0, frame: 0)) { error in
+                XCTAssertEqual(error as? SourceStudioAnimationError,
+                    .invalidValueRun(offset: offset, valid: Int(header[0]), total: Int(header[1])))
+            }
+        }
+        var truncated = bytes(of: makePositionAnimation())
+        truncated.removeLast()
+        putInt32(Int32(truncated.count), at: 76, into: &truncated)
+        let model = try SourceStudioAnimationDecoder.decode(mdlData: Data(truncated))
+        XCTAssertThrowsError(try model.pose(animationIndex: 0, frame: 4))
+    }
+
+    private func makePositionAnimation() -> Data {
+        var data = bytes(of: makeAnimationModel())
+        data[1_161] = 0x04
+        for index in 1_164..<1_170 { data[index] = 0 }
+        // Non-positive axis offsets are absent, relative to the pointer table.
+        putInt16(-1, at: 1_166, into: &data)
+        putFloat(0.5, at: 408 + 72, into: &data)
+        if data.count % 2 != 0 { data.append(0) }
+        let start = data.count
+        putInt16(Int16(start - 1_164), at: 1_164, into: &data)
+        data.append(contentsOf: [2, 4, 0, 0, 10, 0, 1, 26, 20, 0])
+        putInt32(Int32(data.count), at: 76, into: &data)
+        return Data(data)
+    }
+
     func testDecodesBoneBindPoseAnimationAndAuthoredSequenceTable() throws {
         let model = try SourceStudioAnimationDecoder.decode(mdlData: makeAnimationModel())
 
@@ -180,8 +224,8 @@ final class SourceStudioAnimationTests: XCTestCase {
             equals: .zeroFrameData(animation: 0, count: 1)
         )
         try assertPoseUnsupported(
-            mutating: { $0[1_161] = 0x04 },
-            equals: .compressedBoneValues(animation: 0, bone: 0, flags: 0x04)
+            mutating: { $0[1_161] = 0x08 },
+            equals: .compressedBoneValues(animation: 0, bone: 0, flags: 0x08)
         )
     }
 

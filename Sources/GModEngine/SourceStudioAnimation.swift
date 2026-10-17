@@ -28,6 +28,7 @@ public enum SourceStudioAnimationError: Error, Equatable, CustomStringConvertibl
     case invalidSequenceIndex(value: Int, sequenceCount: Int)
     case invalidBlendIndex(sequence: Int, value: Int, blendCount: Int)
     case invalidFrame(animation: Int, value: Int, frameCount: Int)
+    case invalidValueRun(offset: Int, valid: Int, total: Int)
     case invalidAnimationRecordFlags(animation: Int, bone: Int, flags: UInt8)
     case conflictingAnimationRecordFlags(animation: Int, bone: Int, flags: UInt8)
     case invalidAnimationRecordBone(
@@ -54,6 +55,8 @@ public enum SourceStudioAnimationError: Error, Equatable, CustomStringConvertibl
 
     public var description: String {
         switch self {
+        case let .invalidValueRun(offset, valid, total):
+            return "invalid animation value run at \(offset): valid=\(valid) total=\(total)"
         case let .invalidCount(field, value):
             return "negative \(field) count \(value)"
         case let .invalidShortCount(field, value):
@@ -196,15 +199,51 @@ public enum SourceStudioConstantRotationFormat: String, Equatable, Sendable, Cus
     public var description: String { rawValue }
 }
 
-/// One authored `mstudioanim_t` channel. Constant raw values are decoded; RLE
-/// value channels remain represented by their flags and fail explicitly if a
-/// caller asks for a pose.
+/// An immutable, shared-storage Source RLE axis; values are sampled on demand,
+/// never expanded into an unbounded frame-by-bone allocation.
+public struct SourceStudioAnimationValueStream: Equatable, Sendable {
+    fileprivate let bytes: [UInt8]
+    fileprivate let start: Int
+
+    fileprivate func sample(frame: Int) throws -> Float {
+        var cursor = start
+        var remaining = frame
+        // Every run advances by at least four bytes. Bounds therefore also
+        // bound traversal without rejecting legitimate long animations.
+        while true {
+            guard cursor >= 0, cursor <= bytes.count - 2 else {
+                throw SourceStudioAnimationError.outOfBounds(
+                    field: "animation value run", start: cursor, byteCount: 2, length: bytes.count)
+            }
+            let valid = Int(bytes[cursor])
+            let total = Int(bytes[cursor + 1])
+            guard valid > 0, total > 0, valid <= total else {
+                throw SourceStudioAnimationError.invalidValueRun(offset: cursor, valid: valid, total: total)
+            }
+            let size = (valid + 1) * 2
+            guard size <= bytes.count - cursor else {
+                throw SourceStudioAnimationError.outOfBounds(
+                    field: "animation value samples", start: cursor, byteCount: size, length: bytes.count)
+            }
+            if remaining < total {
+                let address = cursor + min(remaining + 1, valid) * 2
+                let raw = UInt16(bytes[address]) | (UInt16(bytes[address + 1]) << 8)
+                return Float(Int16(bitPattern: raw))
+            }
+            remaining -= total
+            cursor += size
+        }
+    }
+}
+
+/// One authored `mstudioanim_t` channel. Compressed rotations remain unsupported.
 public struct SourceStudioAnimationBoneChannel: Equatable, Sendable {
     public let boneIndex: Int
     public let flags: SourceStudioAnimationValueFlags
     public let constantPosition: SourceVector3?
     public let constantRotation: SourceStudioQuaternion?
     public let constantRotationFormat: SourceStudioConstantRotationFormat?
+    public let positionStreams: [SourceStudioAnimationValueStream?]
 }
 
 public struct SourceStudioAnimationDescriptor: Equatable, Sendable {
@@ -272,6 +311,7 @@ public struct SourceStudioAnimationBoneDescriptor: Equatable, Sendable {
     public let name: String
     public let parentIndex: Int?
     public let bindPosition: SourceVector3
+    public let positionScale: SourceVector3
     public let bindRotation: SourceStudioQuaternion
     public let bindLocalTransform: SourceStudioMatrix3x4
     public let bindModelTransform: SourceStudioMatrix3x4
@@ -361,7 +401,8 @@ public struct SourceStudioAnimationModel: Sendable {
     }
 
     /// Evaluates one exact integer frame. Constant RAWPOS/RAWROT/RAWROT2
-    /// channels are frame-invariant by definition. RLE channels and animation
+    /// channels are frame-invariant by definition. RLE positions use authored
+    /// bone scales. Compressed rotation channels and animation
     /// blocks that require interpolation or other runtime state fail with a
     /// typed `unsupported` error instead of being guessed.
     public func pose(
@@ -441,8 +482,7 @@ public struct SourceStudioAnimationModel: Sendable {
         var rotations = skeleton.bones.map(\.bindRotation)
 
         for channel in animation.boneChannels {
-            if channel.flags.contains(.animatedPosition) ||
-                channel.flags.contains(.animatedRotation) {
+            if channel.flags.contains(.animatedRotation) {
                 throw SourceStudioAnimationError.unsupported(
                     .compressedBoneValues(
                         animation: animationIndex,
@@ -460,6 +500,16 @@ public struct SourceStudioAnimationModel: Sendable {
 
             if let constantPosition = channel.constantPosition {
                 positions[channel.boneIndex] = constantPosition
+            } else if channel.flags.contains(.animatedPosition) {
+                let bone = skeleton.bones[channel.boneIndex]
+                let base = channel.flags.contains(.delta) ? SourceVector3.zero : bone.bindPosition
+                let x = try (channel.positionStreams[0]?.sample(frame: frame) ?? 0) * bone.positionScale.x + base.x
+                let y = try (channel.positionStreams[1]?.sample(frame: frame) ?? 0) * bone.positionScale.y + base.y
+                let z = try (channel.positionStreams[2]?.sample(frame: frame) ?? 0) * bone.positionScale.z + base.z
+                guard x.isFinite, y.isFinite, z.isFinite else {
+                    throw SourceStudioAnimationError.nonFiniteFloat(field: "sampled animation position", offset: channel.boneIndex)
+                }
+                positions[channel.boneIndex] = SourceVector3(x, y, z)
             } else if channel.flags.contains(.delta) {
                 positions[channel.boneIndex] = .zero
             }
@@ -587,6 +637,7 @@ public enum SourceStudioAnimationDecoder {
                 name: bone.name,
                 parentIndex: bone.parent >= 0 ? Int(bone.parent) : nil,
                 bindPosition: bone.position,
+                positionScale: bone.positionScale,
                 bindRotation: bone.quaternion,
                 bindLocalTransform: bone.quaternion.matrix(position: bone.position),
                 bindModelTransform: bindModelTransforms[index]
@@ -874,6 +925,7 @@ public enum SourceStudioAnimationDecoder {
             }
 
             var constantPosition: SourceVector3?
+            var positionStreams: [SourceStudioAnimationValueStream?] = []
             if flags.contains(.rawPosition) {
                 constantPosition = try reader.vector48(
                     at: cursor,
@@ -886,6 +938,15 @@ public enum SourceStudioAnimationDecoder {
                     byteCount: 6,
                     field: "\(recordField).animatedPositionOffsets"
                 )
+                for axis in 0..<3 {
+                    let relative = try reader.int16(at: cursor + axis * 2, field: "\(recordField).positionAxis")
+                    if relative > 0 {
+                        let address = try reader.relativeAddress(base: cursor, relativeOffset: Int32(relative), field: "\(recordField).positionAxis")
+                        positionStreams.append(SourceStudioAnimationValueStream(bytes: reader.bytes, start: address))
+                    } else {
+                        positionStreams.append(nil)
+                    }
+                }
                 cursor += 6
             }
 
@@ -901,7 +962,8 @@ public enum SourceStudioAnimationDecoder {
                     flags: flags,
                     constantPosition: constantPosition,
                     constantRotation: constantRotation,
-                    constantRotationFormat: rotationFormat
+                    constantRotationFormat: rotationFormat,
+                    positionStreams: positionStreams
                 )
             )
             previousBone = bone

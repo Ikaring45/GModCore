@@ -7,6 +7,33 @@ final class GModStudioAnimatedRenderableModelTests: XCTestCase {
     private let checksum: Int32 = 0x2468_1357
     private let modelName = "models/codex/skinning_golden.mdl"
 
+    func testRLEPositionDrivesWeightedGeometryAcrossFrames() throws {
+        var data = bytes(of: makeAnimationMDL())
+        data[Offsets.animationRecord + 1] = 0x04
+        let table = Offsets.animationRecord + 4
+        for index in table..<(table + 6) { data[index] = 0 }
+        putFloat(0.5, at: Offsets.childBone + 72, into: &data)
+        if data.count % 2 != 0 { data.append(0) }
+        putInt16(Int16(data.count - table), at: table, into: &data)
+        // Signed samples 0, -10, then repeat -10 to the end of the animation.
+        data.append(contentsOf: [2, 30, 0, 0, 246, 255])
+        putInt32(Int32(data.count), at: 76, into: &data)
+        let mdl = Data(data)
+        let studio = try SourceStudioModel(data: mdl)
+        let animation = try SourceStudioAnimationDecoder.decode(mdlData: mdl)
+        let renderable = makeRenderable(vertices: selectedVertices())
+        for (frame, expectedX) in [(0, Float(11)), (1, 6), (29, 6)] {
+            let snapshot = try GModStudioAnimatedRenderableModelCompiler.compile(
+                renderable: renderable, sourceMesh: makeSourceMesh(),
+                studioModel: studio, animationModel: animation,
+                sequenceIndex: 0, blendIndex: 0, frame: frame)
+            assertVector(snapshot.vertices[1].position, SourceVector3(expectedX, 0, 0))
+            assertVector(snapshot.vertices[1].normal, SourceVector3(1, 0, 0))
+            XCTAssertEqual(snapshot.indices, renderable.indices)
+            XCTAssertEqual(snapshot.drawRanges, renderable.drawRanges)
+        }
+    }
+
     func testSequenceMetadataUsesDecodedNameIndexAndFrameRate() throws {
         let animation = try SourceStudioAnimationDecoder.decode(mdlData: makeAnimationMDL())
         let library = SourceViewModelSequenceLibrary(model: animation)

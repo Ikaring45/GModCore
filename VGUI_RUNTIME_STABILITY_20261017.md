@@ -159,3 +159,25 @@ live session GetCycle and replicated frame metadata, pause/resume/restart,
 existing active Toolgun projection, and original weapon_base reload. Apple,
 Oracle and actual iPad output remain unverified. No interpolated animated-draw
 success is claimed.
+
+## Inline Studio RLE position channels (unreleased)
+
+ANIMPOS channels now retain shared immutable MDL storage and sample signed
+16-bit RLE values at exact integer frames. Axis pointers are signed offsets
+relative to the value-pointer table; non-positive offsets mean no axis data.
+Sampling repeats the last valid value within a run, advances between runs,
+and applies the decoded bone position scale and non-delta bind position.
+Invalid zero/oversized run headers, truncated samples and non-finite scaled
+positions fail explicitly. Storage is not expanded by frame count.
+
+This extends the existing pose evaluator used by animated mesh compilation;
+it does not yet supply fractional pose interpolation, compressed rotations,
+external animation blocks, sections, IK, or live Metal animation playback.
+Reference: Valve studio.h mstudioanim_valueptr_t and bone_setup.cpp
+ExtractAnimValue/CalcBonePosition (independent implementation).
+https://github.com/ValveSoftware/source-sdk-2013/blob/master/src/public/bone_setup.cpp
+
+Validation: 18 Windows animation and animated-renderable tests passed, including
+RLE run boundaries/repeats, signed negative samples, absent axes, malformed and
+truncated runs, and changed weighted vertices with preserved normals, indices
+and material draw ranges. Apple, Oracle and physical iPad output remain unverified.
