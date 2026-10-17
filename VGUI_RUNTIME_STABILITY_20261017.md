@@ -88,3 +88,23 @@ additional draw are still unconnected; IK and procedural bones are not added.
 Contract references (read for behavior; not source-code transplantation):
 - https://github.com/ValveSoftware/source-sdk-2013/blob/master/src/game/client/bone_merge_cache.cpp
 - https://github.com/ValveSoftware/source-sdk-2013/blob/master/src/public/bone_setup.cpp
+
+## Two-model animation resource and preparation cache (unreleased)
+
+Prepared assets can now snapshotFollowing another decoded Studio asset with
+explicit owner/followed sequence, blend and integer frame selections. Followed
+pose evaluation does not compile its vertices, so an animation-driving model
+with empty geometry can drive a drawable owner. The merged resource identity
+includes both complete appearance/frame identities and the bone mask; it is
+not interchangeable with an owner-only animated resource.
+
+The production animation cache resolves both preparations through its existing
+bounded repository path. It retains decoded assets, not an unbounded cache of
+merged frame vertices. Owner/followed asset failures remain distinguishable.
+Fifteen portable tests pass, covering empty followed geometry, actual skinned
+vertices, changing parent-frame identity, thirty-frame stable cache retention,
+invalid parent sequences/paths, and preservation of the owner's original pose.
+These fixture results do not prove c_arms asset parity or physical iPad output.
+Live sequence/cycle selection, session requests and the additional Metal draw
+remain outstanding. Apple CI for the preceding 695b49d was observed running;
+no Apple pass is claimed for this change.

@@ -7,6 +7,64 @@ final class GModStudioAnimatedRenderableModelTests: XCTestCase {
     private let checksum: Int32 = 0x2468_1357
     private let modelName = "models/codex/skinning_golden.mdl"
 
+    func testPreparedFollowingUsesSkeletalParentWithoutGeometryAndDistinctPoseIdentity() throws {
+        var data = bytes(of: makeAnimationMDL())
+        putInt32(1, at: Offsets.rootBone + 160, into: &data)
+        putInt32(1, at: Offsets.childBone + 160, into: &data)
+        let mdl = Data(data)
+        let studio = try SourceStudioModel(data: mdl)
+        let animation = try SourceStudioAnimationDecoder.decode(mdlData: mdl)
+        let renderable = makeRenderable(vertices: selectedVertices())
+        let owner = GModStudioPreparedAnimatedRenderableModel(normalizedModelPath: modelName,
+            renderable: renderable, weightedMesh: makeSourceMesh(), studioModel: studio,
+            animationModel: animation, retainedVertexCount: renderable.vertices.count * 2)
+        let empty = GModStudioRenderableModelSnapshot(checksum: renderable.checksum,
+            modelName: renderable.modelName, lodIndex: renderable.lodIndex,
+            bodyValue: renderable.bodyValue, skinFamilyIndex: renderable.skinFamilyIndex,
+            vertices: [], indices: [], drawRanges: [])
+        let followed = GModStudioPreparedAnimatedRenderableModel(normalizedModelPath: modelName,
+            renderable: empty, weightedMesh: makeSourceMesh(), studioModel: studio,
+            animationModel: animation, retainedVertexCount: 0)
+        let selection = GModStudioAnimationFrameSelection(sequenceIndex: 0, blendIndex: 0, frame: 12)
+        let first = try owner.snapshotFollowing(followed, ownerSelection: selection,
+            followedSelection: selection, boneMask: 1)
+        let reference = try owner.snapshot(selection: selection)
+        XCTAssertEqual(first.model.vertices, reference.vertices)
+        XCTAssertEqual(first.model.indices, reference.indices)
+        let next = try owner.snapshotFollowing(followed, ownerSelection: selection,
+            followedSelection: .init(sequenceIndex: 0, blendIndex: 0, frame: 13), boneMask: 1)
+        XCTAssertNotEqual(first.id, next.id)
+        XCTAssertEqual(first.id.owner, next.id.owner)
+        XCTAssertEqual(first.id.followed.frame, 12)
+        XCTAssertEqual(next.id.followed.frame, 13)
+        XCTAssertThrowsError(try owner.snapshotFollowing(followed, ownerSelection: selection,
+            followedSelection: .init(sequenceIndex: 100, blendIndex: 0, frame: 0), boneMask: 1))
+        XCTAssertEqual(try owner.snapshot(selection: selection), reference)
+        let cache = try GModStudioAnimatedRenderableModelCache(policy: .init(
+            maximumPreparedEntryCount: 2, maximumRetainedVertexCount: 64),
+            prepare: { _, _, _, _, _ in .prepared(owner) })
+        let request = GModStudioBoneMergeModelRequest(model: .init(modelName), bodyValue: owner.bodyValue,
+            skinFamilyIndex: owner.skinFamilyIndex, lodIndex: owner.lodIndex, selection: selection)
+        let cached = try cache.resolveFollowing(owner: request, followed: request, boneMask: 1)
+        XCTAssertEqual(cached.model, reference)
+        for frame in 0..<30 {
+            let parent = GModStudioBoneMergeModelRequest(model: .init(modelName), bodyValue: owner.bodyValue,
+                skinFamilyIndex: owner.skinFamilyIndex, lodIndex: owner.lodIndex,
+                selection: .init(sequenceIndex: 0, blendIndex: 0, frame: frame))
+            let value = try cache.resolveFollowing(owner: request, followed: parent, boneMask: 1)
+            XCTAssertEqual(value.id.followed.frame, frame)
+        }
+        XCTAssertEqual(cache.cachedPreparedEntryCount, 1)
+        XCTAssertEqual(cache.cachedRetainedVertexCount, owner.retainedVertexCount)
+        let invalid = GModStudioBoneMergeModelRequest(model: .init("../outside.mdl"), bodyValue: 0,
+            skinFamilyIndex: 0, selection: selection)
+        XCTAssertThrowsError(try cache.resolveFollowing(owner: request, followed: invalid, boneMask: 1)) { error in
+            guard case .followed = error as? GModStudioBoneMergedRenderableResolutionError else {
+                return XCTFail("followed-side failure lost: \(error)")
+            }
+        }
+    }
+
     func testBoneMergeDrivesActualWeightedVerticesBeforeRendererHandoff() throws {
         var data = bytes(of: makeAnimationMDL())
         putInt32(1, at: Offsets.childBone + 160, into: &data)

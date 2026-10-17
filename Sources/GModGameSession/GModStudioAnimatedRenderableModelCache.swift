@@ -600,6 +600,38 @@ public final class GModStudioAnimatedRenderableModelCache:
         }
     }
 
+    /// Reuses only immutable decoded assets. Merged vertex frames are freshly
+    /// produced because their identity depends on both models and both poses.
+    public func resolveFollowing(
+        owner: GModStudioBoneMergeModelRequest,
+        followed: GModStudioBoneMergeModelRequest,
+        boneMask: Int32
+    ) throws -> GModStudioBoneMergedRenderableModelResource {
+        func required(_ request: GModStudioBoneMergeModelRequest, isOwner: Bool)
+            throws -> GModStudioPreparedAnimatedRenderableModel {
+            func failure(_ error: GModStudioAnimatedRenderableModelResolutionFailure)
+                -> GModStudioBoneMergedRenderableResolutionError {
+                isOwner ? .owner(error) : .followed(error)
+            }
+            guard let path = GModStudioModelPath.cacheKey(request.model.path) else {
+                throw failure(.cache(.invalidModelPath(request.model.path)))
+            }
+            let preparation = preparedResolution(
+                key: Key(normalizedModelPath: path, lodIndex: request.lodIndex,
+                         bodyValue: request.bodyValue, skinFamilyIndex: request.skinFamilyIndex),
+                model: request.model, normalizedPath: path, bodyValue: request.bodyValue,
+                skinFamilyIndex: request.skinFamilyIndex, lodIndex: request.lodIndex)
+            switch preparation {
+            case let .prepared(value): return value
+            case let .failed(error): throw failure(error)
+            }
+        }
+        let ownerModel = try required(owner, isOwner: true)
+        let followedModel = try required(followed, isOwner: false)
+        return try ownerModel.snapshotFollowing(followedModel,
+            ownerSelection: owner.selection, followedSelection: followed.selection, boneMask: boneMask)
+    }
+
     public var cachedPreparedEntryCount: Int {
         lock.lock()
         defer { lock.unlock() }
