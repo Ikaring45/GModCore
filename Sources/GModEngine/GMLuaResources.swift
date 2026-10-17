@@ -749,6 +749,24 @@ public enum GMLuaResources {
             in: materialMetatable
         )
 
+        let materialGetString = LuaNativeFunctionBox({ [registry] arguments in
+            guard let descriptor = GMLuaResourceRegistry.materialDescriptor(from: arguments.first) else {
+                throw LuaError.runtime("bad self to 'IMaterial:GetString'")
+            }
+            let parameter = try requiredString(arguments, index: 1, functionName: "IMaterial:GetString")
+            // This registry currently retains only the authored base-texture
+            // string, not arbitrary VMT scalar parameters. Do not invent them.
+            guard asciiCaseInsensitiveEqual(parameter, "$basetexture") else {
+                throw LuaError.runtime("IMaterial:GetString parameter is not backed by retained VMT metadata")
+            }
+            guard let texture = try registry.baseTexture(for: descriptor),
+                  let textureDescriptor = GMLuaResourceRegistry.textureDescriptor(from: texture) else { return [] }
+            return [.string(textureDescriptor.name)]
+        }, debugName: "IMaterial:GetString",
+           gcReferences: { [weak registry] in registry?.references ?? [] })
+        try state.setRawTableValue(.nativeFunction(materialGetString),
+                                  for: .string("GetString"), in: materialMetatable)
+
         let materialSetTexture = LuaNativeFunctionBox(
             { [registry] arguments in
                 guard let descriptor = GMLuaResourceRegistry.materialDescriptor(

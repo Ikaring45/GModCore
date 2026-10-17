@@ -167,6 +167,9 @@ public enum SourceCanonicalEntityGLuaBridge {
         let state = runtime.state
         let hostBox = SourceCanonicalEntityLuaWeakHost(host)
         let nullValue = state.getGlobal("NULL")
+        // Native methods retain this exact NULL even if original Lua later
+        // replaces the global. Swift closure captures are not Lua GC edges.
+        state.registerGarbageCollectionRootProvider { [nullValue] in [nullValue] }
         let registryBox = SourceCanonicalEntityLuaWeakObject(registry)
         let typeSystemBox = SourceCanonicalEntityLuaWeakObject(typeSystem)
 

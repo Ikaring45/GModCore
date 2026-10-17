@@ -492,6 +492,31 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     private var touchSizingFrameIdentifier: Int?
     private var touchDraggingFrameIdentifier: Int?
     private var focusedPanelIdentifier: Int?
+    private var modalPanelIdentifier: Int?
+
+    fileprivate func activeModalPanel() -> Int? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let identifier = modalPanelIdentifier,
+              let value = panels[identifier],
+              let panel = panelDescriptor(from: value),
+              GMLuaTypeSystem.typedObject(from: value)?.isValid == true,
+              isVisibleInHierarchyLocked(panel) else {
+            modalPanelIdentifier = nil
+            return nil
+        }
+        return identifier
+    }
+
+    fileprivate func makeModal(identifier: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let value = panels[identifier], let panel = panelDescriptor(from: value),
+              panel.engineClassName == "EditablePanel", panel.isPopup,
+              isVisibleInHierarchyLocked(panel) else { return }
+        modalPanelIdentifier = identifier
+        focusedPanelIdentifier = identifier
+    }
     private var logicalPointerPosition: (x: Double, y: Double)?
     private var latestDrawOnTopOrder: UInt64 = 0
     private var pendingDockSizeChanges: [Int: GMLuaPendingPanelSizeChange] = [:]
@@ -1618,8 +1643,11 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
             scope: .all,
             placeDrawOnTopLast: false
         )
+        let modal = activeModalPanel()
         let hit = tree.reversed().first {
-            $0.mouseInputEnabled && $0.clipRect.contains(x: x, y: y)
+            $0.mouseInputEnabled && $0.clipRect.contains(x: x, y: y) &&
+                (modal == nil || $0.identifier == modal ||
+                    hasParent(identifier: $0.identifier, ancestorIdentifier: modal!))
         }
         let treeByIdentifier = Dictionary(
             uniqueKeysWithValues: tree.map { ($0.identifier, $0) }
@@ -3376,24 +3404,26 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
                 lock.lock()
                 let className = panels[identifier]
                     .flatMap { panelDescriptor(from: $0) }?.requestedClassName ?? "<removed>"
+                let geometry = panels[identifier].flatMap { panelDescriptor(from: $0) }
+                    .map { "\($0.width)x\($0.height)" } ?? "removed"
+                let children = panels.values.compactMap { value -> String? in
+                    guard let child = panelDescriptor(from: value), child.parentIdentifier == identifier else { return nil }
+                    return "\(child.requestedClassName)=\(child.width)x\(child.height)"
+                }.sorted().prefix(8).joined(separator: ",")
                 lock.unlock()
                 throw LuaError.runtime(
                     "VGUI dependent layout fixed-point recursion limit exceeded for " +
-                        "'\(className)' (panel \(identifier))"
+                        "'\(className)' (panel \(identifier), size=\(geometry), children=\(children))"
                 )
             }
             visits[identifier] = visitCount
 
             if try performLayout(identifier: identifier) {
                 performed += 1
-                lock.lock()
-                if let value = panels[identifier],
-                   let descriptor = panelDescriptor(from: value),
-                   descriptor.isLayoutInvalidated,
-                   GMLuaTypeSystem.typedObject(from: value)?.isValid == true {
-                    pendingDependentLayoutIdentifiers.insert(identifier)
-                }
-                lock.unlock()
+                // Only actual child-extent/docking dependencies enqueue this
+                // worklist. OnSizeChanged or scripted InvalidateLayout during
+                // PerformLayout is ordinary deferred work for the next frame,
+                // not permission to recursively run the same callback now.
             }
         }
     }
@@ -3804,6 +3834,9 @@ public enum GMLuaVGUI {
             ("BOTTOM", GMLuaPanelDock.bottom.rawValue),
             ("FILL", GMLuaPanelDock.fill.rawValue),
             ("MOUSE_LEFT", 107), ("MOUSE_RIGHT", 108), ("MOUSE_MIDDLE", 109),
+            // Source model-lighting BOX enum, used by stock DModelPanel.Init.
+            ("BOX_FRONT", 0), ("BOX_BACK", 1), ("BOX_RIGHT", 2),
+            ("BOX_LEFT", 3), ("BOX_TOP", 4), ("BOX_BOTTOM", 5),
             // Public Facepunch KEY enum; this is a button code, not IN_*.
             ("KEY_ESCAPE", 70), ("KEY_ENTER", 64), ("KEY_SPACE", 65)
         ] {
@@ -4603,6 +4636,13 @@ public enum GMLuaVGUI {
             }),
             ("IsPopup", { arguments in
                 [.boolean(try requiredPanel(arguments, "IsPopup").isPopup)]
+            }),
+            ("IsModal", { arguments in
+                [.boolean(registry.activeModalPanel() == (try requiredPanel(arguments, "IsModal").identifier))]
+            }),
+            ("DoModal", { arguments in
+                registry.makeModal(identifier: try requiredPanel(arguments, "DoModal").identifier)
+                return []
             }),
             ("MoveToBack", { arguments in
                 let panel = try requiredPanel(arguments, "MoveToBack")

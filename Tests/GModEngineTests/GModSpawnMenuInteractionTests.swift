@@ -3,6 +3,56 @@ import GModEngine
 @testable import GModGameSession
 
 final class GModSpawnMenuInteractionTests: XCTestCase {
+    func testStockRopeMaterialLayoutSettlesAtIPadViewport() throws {
+        let session = try GModPlayableSession(
+            configuration: GModPlayableSessionConfiguration(map: .construct), logger: { _, _ in })
+        defer { _ = try? session.close() }
+        _ = try session.updateViewport(width: 1_024, height: 768)
+        try session.setSpawnMenuOpen(true)
+        for _ in 0..<4 { _ = try session.runFixedTick() }
+        try session.clientRuntime.execute("spawnmenu.ActivateTool('rope', true)",
+            sourceName: "=(stock rope layout activation)")
+        for _ in 0..<4 { _ = try session.renderClientVGUIFrame() }
+    }
+
+    func testContextScreenRayUsesLiveViewAndUnitDirections() throws {
+        let session = try GModPlayableSession(
+            configuration: GModPlayableSessionConfiguration(map: .construct), logger: { _, _ in })
+        defer { _ = try? session.close() }
+        _ = try session.updateViewport(width: 1_024, height: 768)
+        try session.clientRuntime.execute("""
+            local center = gui.ScreenToVector(512, 384)
+            local angles = LocalPlayer():EyeAngles()
+            assert((center - angles:Forward()):Length() < 0.00001)
+            local right = gui.ScreenToVector(1024, 384)
+            local top = gui.ScreenToVector(512, 0)
+            assert(math.abs(right:Length() - 1) < 0.00001)
+            assert(right:Dot(angles:Right()) > 0)
+            assert(top:Dot(angles:Up()) > 0)
+            """, sourceName: "=(CLIENT context screen ray regression)")
+        try session.setContextMenuOpen(true)
+        _ = try session.renderClientVGUIFrame()
+        for phase: GMLuaPointerPhase in [.began, .ended] {
+            _ = try session.dispatchClientVGUIPointerEvent(x: 4, y: 4, phase: phase, timestamp: 1)
+        }
+    }
+
+    func testCanonicalNullReturnedByPlayerSurvivesGlobalReplacementAndGC() throws {
+        let session = try GModPlayableSession(
+            configuration: GModPlayableSessionConfiguration(map: .construct), logger: { _, _ in })
+        defer { _ = try? session.close() }
+        try session.clientRuntime.execute("""
+            NULL = nil
+            collectgarbage("collect")
+            local player = LocalPlayer()
+            assert(IsValid(player))
+            local vehicle = player:GetVehicle()
+            assert(not IsValid(vehicle))
+            local weapon = player:GetActiveWeapon()
+            assert(type(IsValid(weapon)) == "boolean")
+            """, sourceName: "=(captured canonical NULL GC regression)")
+    }
+
     func testImmediateQCFrameBeforeNextHostTick() throws {
         let session = try GModPlayableSession(
             configuration: GModPlayableSessionConfiguration(map: .construct), logger: { _, _ in })

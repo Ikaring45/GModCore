@@ -5,6 +5,27 @@ import GModGameAssets
 import GModLua
 
 final class GMLuaVGUIRegistryTests: XCTestCase {
+    func testModalStateRequiresPopupAndEndsWhenRemoved() throws {
+        let state = LuaState(output: { _ in })
+        let types = try GMLuaTypeSystem.install(into: state, utilityLayer: .bundledFallback)
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: types)
+        try state.execute("""
+            MODAL = vgui.Create("EditablePanel")
+            assert(not MODAL:IsModal())
+            MODAL:DoModal()
+            assert(not MODAL:IsModal())
+            MODAL:MakePopup()
+            MODAL:DoModal()
+            assert(MODAL:IsModal())
+            OTHER = vgui.Create("EditablePanel")
+            assert(not OTHER:IsModal())
+            MODAL:Remove()
+            assert(not OTHER:IsModal())
+            assert(BOX_FRONT == 0 and BOX_TOP == 4 and BOX_BOTTOM == 5)
+            """)
+        _ = try registry.performPendingLayouts()
+    }
+
     func testDeferredOnRemoveCascadesToOwnerExactlyOnceBeforePainting() throws {
         let state = LuaState(output: { _ in })
         let types = try GMLuaTypeSystem.install(into: state, utilityLayer: .bundledFallback)

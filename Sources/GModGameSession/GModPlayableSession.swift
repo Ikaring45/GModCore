@@ -1434,6 +1434,12 @@ public final class GModPlayableSession {
                 clientStartup: clientStartup,
                 deliveredMessages: delivered
             )
+            try client.installClientScreenRay { [weak self] in
+                guard let self, !self.isClosed else {
+                    throw LuaError.runtime("CLIENT screen ray has no active session")
+                }
+                return (self.playerWalkState.viewAngles, self.clientWorldHorizontalFieldOfViewDegrees)
+            }
         } catch {
             if session.connectedClientCount > 0 {
                 try? session.disconnect(client: client)
