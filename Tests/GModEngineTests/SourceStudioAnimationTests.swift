@@ -3,6 +3,35 @@ import XCTest
 @testable import GModEngine
 
 final class SourceStudioAnimationTests: XCTestCase {
+    func testRLESubframesInterpolateLocalPositionsAndRebuildHierarchy() throws {
+        let model = try SourceStudioAnimationDecoder.decode(mdlData: makePositionAnimation())
+        for (frame, fraction, expected) in [(0, Float(0.5), Float(3.5)), (1, 0.5, 6),
+                                             (3, 0.5, 8.5), (3, 0.001, 6)] {
+            let part = try SourceStudioAnimationFrameFraction(fraction)
+            let pose = try model.pose(animationIndex: 0, frame: frame, fraction: part)
+            XCTAssertEqual(pose.fraction, part)
+            XCTAssertEqual(pose.bones[0].position.x, expected)
+            XCTAssertEqual(pose.bones[1].modelTransform.position.x, expected + 2)
+        }
+        XCTAssertThrowsError(try model.pose(animationIndex: 0, frame: 29, fraction: .init(0.5)))
+        XCTAssertNoThrow(try model.pose(animationIndex: 0, frame: 29))
+        for value: Float in [-1, 1, .infinity, -.infinity, .nan] {
+            XCTAssertThrowsError(try SourceStudioAnimationFrameFraction(value))
+        }
+        XCTAssertEqual(try SourceStudioAnimationFrameFraction(-0.0).value.bitPattern, Float(0).bitPattern)
+    }
+
+    func testSubframeSingletonAxisUsesSourceConstantRunRule() throws {
+        var data = bytes(of: makePositionAnimation())
+        let offset = 1_164 + Int(Int16(bitPattern: UInt16(data[1_164]) | UInt16(data[1_165]) << 8))
+        data.removeSubrange(offset..<data.count)
+        data.append(contentsOf: [1, 1, 10, 0])
+        putInt32(Int32(data.count), at: 76, into: &data)
+        let model = try SourceStudioAnimationDecoder.decode(mdlData: Data(data))
+        let pose = try model.pose(animationIndex: 0, frame: 12, fraction: .init(0.5))
+        XCTAssertEqual(pose.bones[0].position.x, 6)
+    }
+
     func testRLEPositionRunsUseBoneScaleAndRepeatLastSample() throws {
         let model = try SourceStudioAnimationDecoder.decode(mdlData: makePositionAnimation())
         for (frame, expected) in [(0, Float(1)), (1, 6), (2, 6), (3, 6), (4, 11), (29, 11)] {

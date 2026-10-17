@@ -28,6 +28,8 @@ public enum SourceStudioAnimationError: Error, Equatable, CustomStringConvertibl
     case invalidSequenceIndex(value: Int, sequenceCount: Int)
     case invalidBlendIndex(sequence: Int, value: Int, blendCount: Int)
     case invalidFrame(animation: Int, value: Int, frameCount: Int)
+    case invalidFrameFraction(Float)
+    case fractionalFramePastEnd(animation: Int, frame: Int)
     case invalidValueRun(offset: Int, valid: Int, total: Int)
     case invalidAnimationRecordFlags(animation: Int, bone: Int, flags: UInt8)
     case conflictingAnimationRecordFlags(animation: Int, bone: Int, flags: UInt8)
@@ -55,6 +57,10 @@ public enum SourceStudioAnimationError: Error, Equatable, CustomStringConvertibl
 
     public var description: String {
         switch self {
+        case let .invalidFrameFraction(value):
+            return "invalid animation frame fraction \(value); expected finite 0..<1"
+        case let .fractionalFramePastEnd(animation, frame):
+            return "animation \(animation) cannot interpolate beyond final frame \(frame)"
         case let .invalidValueRun(offset, valid, total):
             return "invalid animation value run at \(offset): valid=\(valid) total=\(total)"
         case let .invalidCount(field, value):
@@ -205,6 +211,19 @@ public struct SourceStudioAnimationValueStream: Equatable, Sendable {
     fileprivate let bytes: [UInt8]
     fileprivate let start: Int
 
+    fileprivate func scaledSample(frame: Int, fraction: SourceStudioAnimationFrameFraction,
+                                  scale: Float) throws -> Float {
+        guard fraction.value > 0.001 else { return try sample(frame: frame) * scale }
+        // Source's paired-value extractor treats an initial 1/1 run as a
+        // constant axis, without reading a nonexistent next run.
+        if start >= 0, start < bytes.count - 1, bytes[start] == 1, bytes[start + 1] == 1 {
+            return try sample(frame: 0) * scale
+        }
+        let first = try sample(frame: frame) * scale
+        let next = try sample(frame: frame + 1) * scale
+        return first * (1 - fraction.value) + next * fraction.value
+    }
+
     fileprivate func sample(frame: Int) throws -> Float {
         var cursor = start
         var remaining = frame
@@ -351,9 +370,28 @@ public struct SourceStudioAnimationBonePose: Equatable, Sendable {
     public let modelTransform: SourceStudioMatrix3x4
 }
 
+/// Validated subframe identity shared by pose, render and cache boundaries.
+/// NaN/infinity and a second representation of zero cannot enter cache keys.
+public struct SourceStudioAnimationFrameFraction: Equatable, Hashable, Comparable, Sendable {
+    public let value: Float
+    public static let zero = Self(validated: 0)
+
+    private init(validated: Float) { value = validated }
+
+    public init(_ value: Float) throws {
+        guard value.isFinite, value >= 0, value < 1 else {
+            throw SourceStudioAnimationError.invalidFrameFraction(value)
+        }
+        self.value = value == 0 ? 0 : value
+    }
+
+    public static func < (lhs: Self, rhs: Self) -> Bool { lhs.value < rhs.value }
+}
+
 public struct SourceStudioAnimationPose: Equatable, Sendable {
     public let animationIndex: Int
     public let frame: Int
+    public let fraction: SourceStudioAnimationFrameFraction
     public let bones: [SourceStudioAnimationBonePose]
 
     public var localTransforms: [SourceStudioMatrix3x4] {
@@ -400,14 +438,15 @@ public struct SourceStudioAnimationModel: Sendable {
         return try sequences[sequenceIndex].animationIndex(blendIndex: blendIndex)
     }
 
-    /// Evaluates one exact integer frame. Constant RAWPOS/RAWROT/RAWROT2
+    /// Evaluates an integer frame plus a validated fraction. Constant RAWPOS/RAWROT/RAWROT2
     /// channels are frame-invariant by definition. RLE positions use authored
     /// bone scales. Compressed rotation channels and animation
-    /// blocks that require interpolation or other runtime state fail with a
+    /// blocks that require other runtime state fail with a
     /// typed `unsupported` error instead of being guessed.
     public func pose(
         animationIndex: Int,
         frame: Int,
+        fraction: SourceStudioAnimationFrameFraction = .zero,
         rootTransform: SourceStudioMatrix3x4 = .identity
     ) throws -> SourceStudioAnimationPose {
         guard animations.indices.contains(animationIndex) else {
@@ -423,6 +462,9 @@ public struct SourceStudioAnimationModel: Sendable {
                 value: frame,
                 frameCount: animation.frameCount
             )
+        }
+        guard frame < animation.frameCount - 1 || fraction == .zero else {
+            throw SourceStudioAnimationError.fractionalFramePastEnd(animation: animationIndex, frame: frame)
         }
 
         if animation.isDelta {
@@ -503,9 +545,9 @@ public struct SourceStudioAnimationModel: Sendable {
             } else if channel.flags.contains(.animatedPosition) {
                 let bone = skeleton.bones[channel.boneIndex]
                 let base = channel.flags.contains(.delta) ? SourceVector3.zero : bone.bindPosition
-                let x = try (channel.positionStreams[0]?.sample(frame: frame) ?? 0) * bone.positionScale.x + base.x
-                let y = try (channel.positionStreams[1]?.sample(frame: frame) ?? 0) * bone.positionScale.y + base.y
-                let z = try (channel.positionStreams[2]?.sample(frame: frame) ?? 0) * bone.positionScale.z + base.z
+                let x = try (channel.positionStreams[0]?.scaledSample(frame: frame, fraction: fraction, scale: bone.positionScale.x) ?? 0) + base.x
+                let y = try (channel.positionStreams[1]?.scaledSample(frame: frame, fraction: fraction, scale: bone.positionScale.y) ?? 0) + base.y
+                let z = try (channel.positionStreams[2]?.scaledSample(frame: frame, fraction: fraction, scale: bone.positionScale.z) ?? 0) + base.z
                 guard x.isFinite, y.isFinite, z.isFinite else {
                     throw SourceStudioAnimationError.nonFiniteFloat(field: "sampled animation position", offset: channel.boneIndex)
                 }
@@ -549,6 +591,7 @@ public struct SourceStudioAnimationModel: Sendable {
         return SourceStudioAnimationPose(
             animationIndex: animationIndex,
             frame: frame,
+            fraction: fraction,
             bones: bonePoses
         )
     }

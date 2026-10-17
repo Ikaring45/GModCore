@@ -181,3 +181,39 @@ Validation: 18 Windows animation and animated-renderable tests passed, including
 RLE run boundaries/repeats, signed negative samples, absent axes, malformed and
 truncated runs, and changed weighted vertices with preserved normals, indices
 and material draw ranges. Apple, Oracle and physical iPad output remain unverified.
+
+## Subframe position evaluation and immutable geometry identity (unreleased)
+
+Inline RLE positions now support a validated fractional frame. Sampling uses
+the Source >0.001 interpolation threshold, scales signed values before blending,
+crosses RLE run boundaries, and honors the paired extractor's initial 1/1 constant
+axis rule. Local positions are evaluated before rebuilding the bone hierarchy;
+model-space matrices are not linearly interpolated. Final-frame overshoot and
+non-finite/out-of-range fractions fail explicitly.
+
+The fraction survives prepared snapshot compilation, owner/followed bone-merge
+selection, GameSession resource keys, the App adapter's consistency checks, and
+Metal geometry identity/diagnostic keys. A replicated first-person frame can
+derive a frame plus fraction from its authoritative cycle and authored frame
+count without a second clock or integer rounding.
+
+Compressed rotations, activity selection, animation events, sections/external
+blocks, and live first-person Metal playback remain incomplete; this change is
+not evidence of physical iPad rendering parity.
+
+Validation: 26 Windows animation/cache tests passed, including fractional
+weighted positions, hierarchy, threshold/constant-axis behavior, owner/followed
+identity and cycle conversion. Apple-only geometry identity has an added test
+but is not covered by that Windows result.
+
+The original GLua sequence selection / SERVER fixed-clock / CLIENT FIFO test
+also passed with an assertion on the frame-plus-fraction derived from the
+replicated cycle (27 focused tests total). Changed Apple-only sources passed
+syntax parsing on Windows; this is not Apple type-check/build or device proof.
+
+Latest inspected Apple CI for preceding commit 7e5aaa4 (run 39011663881) built
+and launched the host but failed package tests. Failures include unavailable
+canonical Studio appearance/bodygroup resolvers, sky texture availability,
+platform-dependent allocation estimates and exact float comparisons. The
+Source-engine goal remains incomplete; passing focused animation tests does
+not clear these failures or establish release readiness.

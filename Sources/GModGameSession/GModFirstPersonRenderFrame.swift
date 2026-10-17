@@ -14,6 +14,15 @@ public struct GModFirstPersonRenderFrame: Sendable, Equatable {
     public let viewModel: GModFirstPersonViewModelSceneSnapshot?
     public let hands: GModFirstPersonHandsSceneSnapshot?
     public var handsEnabled: Bool { definition?.useHands == true && definition?.viewModel != nil }
+
+    /// Uses the same immutable CLIENT observation as the selected viewmodel.
+    /// Missing authored sequence timing is not replaced with a guessed frame.
+    public func viewModelAnimationSelection() throws -> GModStudioAnimationFrameSelection? {
+        guard let animation, animation.animationSequence >= 0,
+              animation.animationFrameCount > 0 else { return nil }
+        return try .fromCycle(sequenceIndex: Int(animation.animationSequence),
+            cycle: animation.animationCycle, frameCount: Int(animation.animationFrameCount))
+    }
 }
 
 extension GModPlayableSession {

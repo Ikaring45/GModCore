@@ -23,7 +23,7 @@ public struct GModStudioAnimatedRenderableVertex: Sendable, Equatable {
 }
 
 /// Immutable renderer handoff for one explicitly selected Source sequence
-/// table entry and integer animation frame.
+/// table entry, integer animation frame and validated subframe fraction.
 public struct GModStudioAnimatedRenderableModelSnapshot: Sendable, Equatable {
     public let checksum: Int32
     public let modelName: String
@@ -34,6 +34,7 @@ public struct GModStudioAnimatedRenderableModelSnapshot: Sendable, Equatable {
     public let blendIndex: Int
     public let animationIndex: Int
     public let frame: Int
+    public let fraction: SourceStudioAnimationFrameFraction
     public let boneModelTransforms: [SourceStudioMatrix3x4]
     public let vertices: [GModStudioAnimatedRenderableVertex]
     public let indices: [UInt32]
@@ -139,6 +140,7 @@ public enum GModStudioAnimatedRenderableModelCompiler {
         sequenceIndex: Int,
         blendIndex: Int,
         frame: Int,
+        fraction: SourceStudioAnimationFrameFraction = .zero,
         boneMerge: SourceStudioBoneMergeInput? = nil
     ) throws -> GModStudioAnimatedRenderableModelSnapshot {
         try validateIdentity(
@@ -157,7 +159,8 @@ public enum GModStudioAnimatedRenderableModelCompiler {
             )
             pose = try animationModel.pose(
                 animationIndex: animationIndex,
-                frame: frame
+                frame: frame,
+                fraction: fraction
             )
         } catch let error as SourceStudioAnimationError {
             throw GModStudioAnimatedRenderableModelError.animation(error)
@@ -233,6 +236,7 @@ public enum GModStudioAnimatedRenderableModelCompiler {
             blendIndex: blendIndex,
             animationIndex: animationIndex,
             frame: frame,
+            fraction: fraction,
             boneModelTransforms: modelTransforms,
             vertices: skinnedVertices,
             indices: renderable.indices,

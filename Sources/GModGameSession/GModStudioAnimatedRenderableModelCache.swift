@@ -12,12 +12,40 @@ public struct GModStudioAnimationFrameSelection:
     public let sequenceIndex: Int
     public let blendIndex: Int
     public let frame: Int
+    public let fraction: SourceStudioAnimationFrameFraction
 
-    public init(sequenceIndex: Int, blendIndex: Int, frame: Int) {
+    public init(sequenceIndex: Int, blendIndex: Int, frame: Int,
+                fraction: SourceStudioAnimationFrameFraction = .zero) {
         self.sequenceIndex = sequenceIndex
         self.blendIndex = blendIndex
         self.frame = frame
+        self.fraction = fraction
     }
+
+    /// Converts an authoritative sequence cycle; does not extrapolate time or
+    /// select an activity/blend. Source scales a cycle by (numframes - 1).
+    public static func fromCycle(sequenceIndex: Int, blendIndex: Int = 0,
+                                 cycle: Float, frameCount: Int) throws -> Self {
+        guard cycle.isFinite, cycle >= 0, cycle <= 1 else {
+            throw GModStudioAnimationFrameSelectionError.invalidCycle(cycle)
+        }
+        guard frameCount > 0, frameCount <= Int(Int32.max) else {
+            throw GModStudioAnimationFrameSelectionError.invalidFrameCount(frameCount)
+        }
+        let last = frameCount - 1
+        let sample = cycle * Float(last)
+        if sample >= Float(last) {
+            return Self(sequenceIndex: sequenceIndex, blendIndex: blendIndex, frame: last)
+        }
+        let frame = Int(sample)
+        return try Self(sequenceIndex: sequenceIndex, blendIndex: blendIndex,
+                        frame: frame, fraction: .init(sample - Float(frame)))
+    }
+}
+
+public enum GModStudioAnimationFrameSelectionError: Error, Equatable, Sendable {
+    case invalidCycle(Float)
+    case invalidFrameCount(Int)
 }
 
 public enum GModStudioAnimatedRenderablePreparationStage:
@@ -73,9 +101,9 @@ public enum GModStudioAnimatedRenderablePreparationError:
 }
 
 /// Immutable decoded inputs shared by every explicitly requested frame of one
-/// model/body/skin/LOD appearance. Raw bytes remain owned by the repository;
-/// this value retains only the validated Studio model, weighted mesh,
-/// animation tables, and bind-pose renderable needed for CPU skinning.
+/// model/body/skin/LOD appearance. The validated animation tables retain
+/// shared immutable encoded RLE bytes in addition to the Studio model,
+/// weighted mesh and bind-pose renderable needed for CPU skinning.
 public struct GModStudioPreparedAnimatedRenderableModel: Sendable {
     public let normalizedModelPath: String
     public let checksum: Int32
@@ -110,7 +138,7 @@ public struct GModStudioPreparedAnimatedRenderableModel: Sendable {
     }
 
     /// Produces a fresh immutable vertex snapshot for the exact authored table
-    /// entry and integer frame. No prior frame is mutated in place.
+    /// entry and subframe. No prior frame is mutated in place.
     public func snapshot(
         selection: GModStudioAnimationFrameSelection
     ) throws -> GModStudioAnimatedRenderableModelSnapshot {
@@ -121,7 +149,8 @@ public struct GModStudioPreparedAnimatedRenderableModel: Sendable {
             animationModel: animationModel,
             sequenceIndex: selection.sequenceIndex,
             blendIndex: selection.blendIndex,
-            frame: selection.frame
+            frame: selection.frame,
+            fraction: selection.fraction
         )
     }
 }
@@ -334,6 +363,7 @@ public struct GModStudioAnimatedRenderableModelResourceID:
     public let blendIndex: Int
     public let animationIndex: Int
     public let frame: Int
+    public let fraction: SourceStudioAnimationFrameFraction
 
     public init(
         normalizedModelPath: String,
@@ -344,7 +374,8 @@ public struct GModStudioAnimatedRenderableModelResourceID:
         sequenceIndex: Int,
         blendIndex: Int,
         animationIndex: Int,
-        frame: Int
+        frame: Int,
+        fraction: SourceStudioAnimationFrameFraction = .zero
     ) {
         self.normalizedModelPath = normalizedModelPath
         self.checksum = checksum
@@ -355,6 +386,7 @@ public struct GModStudioAnimatedRenderableModelResourceID:
         self.blendIndex = blendIndex
         self.animationIndex = animationIndex
         self.frame = frame
+        self.fraction = fraction
     }
 
     public static func < (
@@ -379,7 +411,8 @@ public struct GModStudioAnimatedRenderableModelResourceID:
         if lhs.animationIndex != rhs.animationIndex {
             return lhs.animationIndex < rhs.animationIndex
         }
-        return lhs.frame < rhs.frame
+        if lhs.frame != rhs.frame { return lhs.frame < rhs.frame }
+        return lhs.fraction < rhs.fraction
     }
 }
 
@@ -588,7 +621,8 @@ public final class GModStudioAnimatedRenderableModelCache:
                         sequenceIndex: snapshot.sequenceIndex,
                         blendIndex: snapshot.blendIndex,
                         animationIndex: snapshot.animationIndex,
-                        frame: snapshot.frame
+                        frame: snapshot.frame,
+                        fraction: snapshot.fraction
                     ),
                     model: snapshot
                 ))

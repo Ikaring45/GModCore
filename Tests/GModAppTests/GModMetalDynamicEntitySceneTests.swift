@@ -3,6 +3,20 @@ import GModEngine
 @testable import GModMetal
 
 final class GModMetalDynamicEntitySceneTests: XCTestCase {
+    func testSubframeGeometryHasDistinctStableResourceIdentity() throws {
+        let first = try GModMetalStudioGeometryIdentity.animated(sequenceIndex: 0,
+            blendIndex: 0, animationIndex: 0, frame: 5, fraction: .init(0.25))
+        let second = try GModMetalStudioGeometryIdentity.animated(sequenceIndex: 0,
+            blendIndex: 0, animationIndex: 0, frame: 5, fraction: .init(0.75))
+        XCTAssertNotEqual(first, second)
+        XCTAssertLessThan(first, second)
+        XCTAssertEqual(Set([first, second]).count, 2)
+        XCTAssertNotEqual(resourceID(geometryIdentity: first), resourceID(geometryIdentity: second))
+        XCTAssertEqual(GModMetalStudioGeometryIdentity.animated(sequenceIndex: 0,
+            blendIndex: 0, animationIndex: 0, frame: 5),
+            .animated(sequenceIndex: 0, blendIndex: 0, animationIndex: 0, frame: 5, fraction: .zero))
+    }
+
     func testBuildSortsResourcesAndFullHandlesAndMatchesSourceTransform() throws {
         let firstID = resourceID(
             path: "models/props/a_prop.mdl",

@@ -43,7 +43,8 @@ enum GModStudioAnimatedMetalResourceAdapter {
                 sequenceIndex: source.id.sequenceIndex,
                 blendIndex: source.id.blendIndex,
                 animationIndex: source.id.animationIndex,
-                frame: source.id.frame
+                frame: source.id.frame,
+                fraction: source.id.fraction
             )
         )
     }
@@ -201,6 +202,7 @@ private extension GModStudioAnimatedMetalResourceAdapter {
             ("blend", id.blendIndex == model.blendIndex),
             ("animation", id.animationIndex == model.animationIndex),
             ("frame", id.frame == model.frame),
+            ("frame fraction", id.fraction == model.fraction),
         ]
         if let invalid = fields.first(where: { !$0.1 }) {
             throw GModStudioAnimatedMetalResourceAdapterError

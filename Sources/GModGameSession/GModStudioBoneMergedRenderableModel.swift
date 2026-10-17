@@ -51,11 +51,12 @@ extension GModStudioPreparedAnimatedRenderableModel {
             sequenceIndex: followedSelection.sequenceIndex,
             blendIndex: followedSelection.blendIndex)
         let pose = try followed.animationModel.pose(animationIndex: animationIndex,
-                                                     frame: followedSelection.frame)
+            frame: followedSelection.frame, fraction: followedSelection.fraction)
         let merged = try GModStudioAnimatedRenderableModelCompiler.compile(
             renderable: renderable, sourceMesh: weightedMesh, studioModel: studioModel,
             animationModel: animationModel, sequenceIndex: ownerSelection.sequenceIndex,
             blendIndex: ownerSelection.blendIndex, frame: ownerSelection.frame,
+            fraction: ownerSelection.fraction,
             boneMerge: SourceStudioBoneMergeInput(
                 followedBones: followed.studioModel.bones.map(SourceStudioBoneMergeBone.init),
                 followedTransforms: pose.modelTransforms, boneMask: boneMask))
@@ -72,6 +73,6 @@ extension GModStudioPreparedAnimatedRenderableModel {
             normalizedModelPath: normalizedModelPath, checksum: checksum,
             lodIndex: lodIndex, bodyValue: bodyValue, skinFamilyIndex: skinFamilyIndex,
             sequenceIndex: selection.sequenceIndex, blendIndex: selection.blendIndex,
-            animationIndex: animationIndex, frame: selection.frame)
+            animationIndex: animationIndex, frame: selection.frame, fraction: selection.fraction)
     }
 }

@@ -6,6 +6,45 @@ import XCTest
 final class GModStudioAnimatedRenderableModelCacheTests: XCTestCase {
     private let checksum: Int32 = 0x1357_2468
 
+    func testSubframeIdentitySurvivesPreparedCacheResolution() throws {
+        let cache = try productionCache()
+        var values: [GModStudioAnimatedRenderableModelResource] = []
+        for fraction: Float in [0.25, 0.75] {
+            let selection = try GModStudioAnimationFrameSelection(sequenceIndex: 0,
+                blendIndex: 0, frame: 5, fraction: .init(fraction))
+            switch cache.resolve(model: .init(Paths.mdl), bodyValue: 0, skinFamilyIndex: 0,
+                                 lodIndex: 0, selection: selection) {
+            case let .resolved(value): values.append(value)
+            case let .failed(error): return XCTFail("subframe resolution failed: \(error)")
+            }
+        }
+        XCTAssertNotEqual(values[0].id, values[1].id)
+        XCTAssertLessThan(values[0].id, values[1].id)
+        XCTAssertEqual(values[0].id.fraction.value, 0.25)
+        XCTAssertEqual(values[1].model.fraction.value, 0.75)
+        XCTAssertEqual(cache.cachedPreparedEntryCount, 1)
+    }
+
+    func testCycleSelectionPreservesSubframeAndValidatesEndpoints() throws {
+        let half = try GModStudioAnimationFrameSelection.fromCycle(sequenceIndex: 2,
+            cycle: 0.5, frameCount: 30)
+        XCTAssertEqual(half.sequenceIndex, 2)
+        XCTAssertEqual(half.frame, 14)
+        XCTAssertEqual(half.fraction.value, 0.5)
+        let end = try GModStudioAnimationFrameSelection.fromCycle(sequenceIndex: 2,
+            cycle: 1, frameCount: 30)
+        XCTAssertEqual(end.frame, 29)
+        XCTAssertEqual(end.fraction, .zero)
+        XCTAssertEqual(try GModStudioAnimationFrameSelection.fromCycle(sequenceIndex: 0,
+            cycle: 0.5, frameCount: 1).frame, 0)
+        for cycle: Float in [-0.1, 1.1, .nan, .infinity] {
+            XCTAssertThrowsError(try GModStudioAnimationFrameSelection.fromCycle(
+                sequenceIndex: 0, cycle: cycle, frameCount: 30))
+        }
+        XCTAssertThrowsError(try GModStudioAnimationFrameSelection.fromCycle(
+            sequenceIndex: 0, cycle: 0, frameCount: 0))
+    }
+
     func testProductionRepositoryTripletProducesExactAnimatedSnapshot() throws {
         let reader = AnimatedStudioMemoryReader(files: fixture())
         let repository = GModStudioModelRepository(

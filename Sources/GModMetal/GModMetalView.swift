@@ -5448,10 +5448,10 @@ public struct GModMetalView:
             switch id.geometryIdentity {
             case .bindPose:
                 geometry = "bind"
-            case let .animated(sequence, blend, animation, frame):
+            case let .animated(sequence, blend, animation, frame, fraction):
                 geometry =
                     "seq=\(sequence):blend=\(blend):anim=\(animation):" +
-                    "frame=\(frame)"
+                    "frame=\(frame):fraction=\(fraction.value.bitPattern)"
             }
             return "\(id.normalizedModelPath)#\(id.checksum):" +
                 "lod=\(id.lodIndex):body=\(id.bodyValue):" +

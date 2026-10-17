@@ -57,7 +57,8 @@ public enum GModMetalStudioGeometryIdentity:
         sequenceIndex: Int,
         blendIndex: Int,
         animationIndex: Int,
-        frame: Int
+        frame: Int,
+        fraction: SourceStudioAnimationFrameFraction = .zero
     )
 
     public static func < (
@@ -72,15 +73,16 @@ public enum GModMetalStudioGeometryIdentity:
         case (.animated, .bindPose):
             return false
         case let (
-            .animated(lhsSequence, lhsBlend, lhsAnimation, lhsFrame),
-            .animated(rhsSequence, rhsBlend, rhsAnimation, rhsFrame)
+            .animated(lhsSequence, lhsBlend, lhsAnimation, lhsFrame, lhsFraction),
+            .animated(rhsSequence, rhsBlend, rhsAnimation, rhsFrame, rhsFraction)
         ):
             if lhsSequence != rhsSequence { return lhsSequence < rhsSequence }
             if lhsBlend != rhsBlend { return lhsBlend < rhsBlend }
             if lhsAnimation != rhsAnimation {
                 return lhsAnimation < rhsAnimation
             }
-            return lhsFrame < rhsFrame
+            if lhsFrame != rhsFrame { return lhsFrame < rhsFrame }
+            return lhsFraction < rhsFraction
         }
     }
 }
@@ -856,7 +858,7 @@ private extension GModMetalDynamicEntityScene {
                 field: "skin family"
             )
         }
-        if case let .animated(sequence, blend, animation, frame) =
+        if case let .animated(sequence, blend, animation, frame, _) =
             source.id.geometryIdentity {
             guard sequence >= 0, blend >= 0, animation >= 0, frame >= 0 else {
                 throw GModMetalDynamicEntitySceneError.invalidResourceIdentity(

@@ -32,6 +32,13 @@ final class GModStudioAnimatedRenderableModelTests: XCTestCase {
             XCTAssertEqual(snapshot.indices, renderable.indices)
             XCTAssertEqual(snapshot.drawRanges, renderable.drawRanges)
         }
+        let part = try SourceStudioAnimationFrameFraction(0.5)
+        let interpolated = try GModStudioAnimatedRenderableModelCompiler.compile(
+            renderable: renderable, sourceMesh: makeSourceMesh(), studioModel: studio,
+            animationModel: animation, sequenceIndex: 0, blendIndex: 0, frame: 0, fraction: part)
+        XCTAssertEqual(interpolated.fraction, part)
+        assertVector(interpolated.vertices[1].position, SourceVector3(8.5, 0, 0))
+        assertVector(interpolated.vertices[1].normal, SourceVector3(1, 0, 0))
     }
 
     func testSequenceMetadataUsesDecodedNameIndexAndFrameRate() throws {
@@ -87,6 +94,11 @@ final class GModStudioAnimatedRenderableModelTests: XCTestCase {
         XCTAssertEqual(first.id.owner, next.id.owner)
         XCTAssertEqual(first.id.followed.frame, 12)
         XCTAssertEqual(next.id.followed.frame, 13)
+        let subframe = try owner.snapshotFollowing(followed, ownerSelection: selection,
+            followedSelection: .init(sequenceIndex: 0, blendIndex: 0, frame: 12, fraction: .init(0.5)), boneMask: 1)
+        XCTAssertNotEqual(first.id, subframe.id)
+        XCTAssertEqual(first.id.owner, subframe.id.owner)
+        XCTAssertEqual(subframe.id.followed.fraction.value, 0.5)
         XCTAssertThrowsError(try owner.snapshotFollowing(followed, ownerSelection: selection,
             followedSelection: .init(sequenceIndex: 100, blendIndex: 0, frame: 0), boneMask: 1))
         XCTAssertEqual(try owner.snapshot(selection: selection), reference)
