@@ -464,6 +464,17 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     private let lock = NSLock()
     private var controls: [String: LuaTable] = [:]
     private var panels: [Int: LuaValue] = [:]
+    // Native ID order matches GetChildren's previous globally sorted scan.
+    // Cache IDs, not Lua values: this must not introduce additional GC roots.
+    private var directChildrenIndex: [Int?: [Int]]?
+    private var directChildrenIndexRebuilds: UInt64 = 0
+    private var directChildrenCandidatesVisited: UInt64 = 0
+
+    var hierarchyLookupStatistics: (rebuilds: UInt64, candidates: UInt64) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (directChildrenIndexRebuilds, directChildrenCandidatesVisited)
+    }
     private var nextPanelIdentifier = 1
     private var semanticIndex: LuaValue = .nilValue
 
@@ -2722,6 +2733,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         let value = try typeSystem.makeObject(metaName: "Panel", payload: descriptor)
         lock.lock()
         panels[identifier] = value
+        directChildrenIndex = nil
         lock.unlock()
 
         do {
@@ -2806,6 +2818,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         lock.lock()
         let identifiers = descendantIdentifiers(of: identifier)
         let removed = identifiers.compactMap { panels.removeValue(forKey: $0) }
+        directChildrenIndex = nil
         let removedIdentifiers = Set(identifiers)
         for removedIdentifier in removedIdentifiers {
             pendingDockSizeChanges.removeValue(forKey: removedIdentifier)
@@ -3038,6 +3051,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         }
         descriptor.parentIdentifier = parentIdentifier
         descriptor.isParentedToHUD = false
+        directChildrenIndex = nil
         descriptor.parentChangeDispatchDepth += 1
         lock.unlock()
 
@@ -3080,6 +3094,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         }
         descriptor.parentIdentifier = nil
         descriptor.isParentedToHUD = true
+        directChildrenIndex = nil
     }
 
     fileprivate func children(of identifier: Int) -> [LuaValue] {
@@ -3088,7 +3103,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         let nativeParentIdentifier = identifier == Self.worldPanelIdentifier
             ? nil
             : identifier
-        return panels.keys.sorted().compactMap { childIdentifier in
+        return directChildIdentifiersLocked(parent: nativeParentIdentifier).compactMap { childIdentifier in
             guard let value = panels[childIdentifier],
                   let child = panelDescriptor(from: value),
                   child.parentIdentifier == nativeParentIdentifier,
@@ -3107,7 +3122,8 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         defer { lock.unlock() }
         var width = 0.0
         var height = 0.0
-        for value in panels.values {
+        for childIdentifier in directChildIdentifiersLocked(parent: identifier) {
+            guard let value = panels[childIdentifier] else { continue }
             guard let child = panelDescriptor(from: value),
                   child.parentIdentifier == identifier,
                   GMLuaTypeSystem.typedObject(from: value)?.isValid == true else { continue }
@@ -3115,6 +3131,23 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
             height = max(height, child.y + child.height)
         }
         return (width, height)
+    }
+
+    /// Called under the registry lock. Rebuild once after topology mutations,
+    /// then visit only this parent's children on layout/Derma query hot paths.
+    private func directChildIdentifiersLocked(parent: Int?) -> [Int] {
+        if directChildrenIndex == nil {
+            var index: [Int?: [Int]] = [:]
+            for identifier in panels.keys.sorted() {
+                guard let value = panels[identifier], let descriptor = panelDescriptor(from: value) else { continue }
+                index[descriptor.parentIdentifier, default: []].append(identifier)
+            }
+            directChildrenIndex = index
+            directChildrenIndexRebuilds &+= 1
+        }
+        let identifiers = directChildrenIndex?[parent] ?? []
+        directChildrenCandidatesVisited &+= UInt64(identifiers.count)
+        return identifiers
     }
 
     fileprivate func noteSizeToChildrenDependency(

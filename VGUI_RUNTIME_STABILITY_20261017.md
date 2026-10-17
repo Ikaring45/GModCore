@@ -329,3 +329,27 @@ SERVER SendWeaponAnim resetting real sequence timing and CLIENT FIFO cycle
 observation. Original clip consumption, bullet trace/damage/event replication
 also passed after the integer RNG addition; its existing float path is unchanged.
 Apple, real-model activity playback and physical iPad results remain unverified.
+
+## VGUI direct-child query index (unreleased)
+
+GetChildren and ChildrenSize previously scanned the entire registry on every
+query, and GetChildren also sorted every panel ID. A lazy parent-to-child-ID
+index now amortizes that scan/sort across queries while the topology is stable.
+Creation, destruction, SetParent and ParentToHUD invalidate it before callbacks
+can observe changed membership. Child ID order, dynamic size reads, validity
+checks and WorldPanel's HUD exclusion are preserved. Only integer IDs are
+cached, not Lua values or userdata, so this adds no panel GC roots.
+
+Internal work counters distinguish index rebuilds and direct-child candidates
+visited, allowing bounded-work assertions independent of machine timing.
+This optimizes repeated Derma layout/control queries; it does not assert that
+all Q/C menu startup, layout or frame costs have been removed.
+
+Validation: 63 Windows VGUI/notification tests passed, including stock controls,
+layout, touch resizing, pointer capture, GC and notification expiry/isolation.
+With 516 panels, 100 paired child-list/extent queries rebuilt the index once
+and visited 400 direct-child candidates (plus the one index construction),
+rather than repeatedly scanning every panel. Reparent callbacks observed the
+new membership; HUD exclusion, deferred removal, recreation and live size
+updates remained correct. No iPad response-time improvement is claimed without
+physical measurement.

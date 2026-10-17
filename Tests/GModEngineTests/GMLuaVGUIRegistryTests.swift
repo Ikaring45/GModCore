@@ -1,10 +1,71 @@
 import Foundation
 import XCTest
-import GModEngine
+@testable import GModEngine
 import GModGameAssets
 import GModLua
 
 final class GMLuaVGUIRegistryTests: XCTestCase {
+    func testChildLookupUsesTopologyIndexAndPreservesLiveOrder() throws {
+        let state = LuaState(output: { _ in })
+        let types = try GMLuaTypeSystem.install(into: state, utilityLayer: .bundledFallback)
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: types)
+        try state.execute("""
+            ROOT = vgui.Create('Panel')
+            OTHER = vgui.Create('Panel')
+            A = vgui.Create('Panel', ROOT)
+            B = vgui.Create('Panel', ROOT)
+            A:SetPos(10, 2); A:SetSize(20, 8)
+            B:SetPos(3, 12); B:SetSize(7, 4)
+            for i = 1, 512 do vgui.Create('Panel', OTHER) end
+            """)
+        let before = registry.hierarchyLookupStatistics
+        try state.execute("""
+            for i = 1, 100 do
+                local children = ROOT:GetChildren()
+                assert(#children == 2 and children[1] == A and children[2] == B)
+                local w, h = ROOT:ChildrenSize()
+                assert(w == 30 and h == 16)
+            end
+            """)
+        let after = registry.hierarchyLookupStatistics
+        XCTAssertEqual(after.rebuilds - before.rebuilds, 1)
+        XCTAssertEqual(after.candidates - before.candidates, 400,
+            "100 GetChildren + ChildrenSize pairs must visit only two direct children, not all 516 panels")
+        try state.execute("""
+            ROOT.OnChildRemoved = function(self, child)
+                if child == B then assert(#self:GetChildren() == 1) end
+            end
+            ROOT.OnChildAdded = function(self, child)
+                local children = self:GetChildren()
+                assert(children[#children] == child)
+            end
+            B:SetParent(OTHER)
+            assert(#ROOT:GetChildren() == 1)
+            assert(ROOT:GetChildren()[1] == A)
+            B:SetParent(ROOT)
+            assert(ROOT:GetChildren()[2] == B)
+            A:SetSize(40, 20)
+            local w, h = ROOT:ChildrenSize()
+            assert(w == 50 and h == 22)
+            """)
+        XCTAssertEqual(registry.hierarchyLookupStatistics.rebuilds - after.rebuilds, 2)
+        try state.execute("""
+            B:ParentToHUD()
+            assert(#ROOT:GetChildren() == 1)
+            for _, child in ipairs(vgui.GetWorldPanel():GetChildren()) do assert(child ~= B) end
+            B:SetParent(ROOT)
+            assert(ROOT:GetChildren()[2] == B)
+            """)
+        try state.execute("B:Remove()")
+        _ = try registry.performPendingLayouts()
+        try state.execute("""
+            assert(not IsValid(B))
+            assert(#ROOT:GetChildren() == 1 and ROOT:GetChildren()[1] == A)
+            C = vgui.Create('Panel', ROOT)
+            assert(#ROOT:GetChildren() == 2 and ROOT:GetChildren()[2] == C)
+            """)
+    }
+
     func testModalStateRequiresPopupAndEndsWhenRemoved() throws {
         let state = LuaState(output: { _ in })
         let types = try GMLuaTypeSystem.install(into: state, utilityLayer: .bundledFallback)
