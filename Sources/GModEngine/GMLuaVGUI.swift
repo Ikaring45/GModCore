@@ -1223,33 +1223,25 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     private func livePanelDescriptorsLocked(
         scope: GMLuaVGUIRenderScope
     ) -> [Int: GMLuaPanelValue] {
-        let allLive = Dictionary(uniqueKeysWithValues: panels.compactMap {
-            identifier, value -> (Int, GMLuaPanelValue)? in
-            guard let descriptor = panelDescriptor(from: value),
-                  GMLuaTypeSystem.typedObject(from: value)?.isValid == true else {
-                return nil
-            }
-            return (identifier, descriptor)
-        })
-        guard scope == .overlay else { return allLive }
-
-        var childrenByParent: [Int: [Int]] = [:]
-        childrenByParent.reserveCapacity(allLive.count)
-        for (identifier, descriptor) in allLive {
-            guard let parentIdentifier = descriptor.parentIdentifier else {
-                continue
-            }
-            childrenByParent[parentIdentifier, default: []].append(identifier)
+        guard scope == .overlay else {
+            return Dictionary(uniqueKeysWithValues: panels.compactMap {
+                identifier, value -> (Int, GMLuaPanelValue)? in
+                guard let descriptor = panelDescriptor(from: value),
+                      GMLuaTypeSystem.typedObject(from: value)?.isValid == true else { return nil }
+                return (identifier, descriptor)
+            })
         }
 
         var selected: [Int: GMLuaPanelValue] = [:]
-        var pending = childrenByParent[Self.overlayPanelIdentifier] ?? []
+        var pending = directChildIdentifiersLocked(parent: Self.overlayPanelIdentifier)
         selected.reserveCapacity(pending.count)
         while let identifier = pending.popLast() {
             guard selected[identifier] == nil,
-                  let descriptor = allLive[identifier] else { continue }
+                  let value = panels[identifier],
+                  let descriptor = panelDescriptor(from: value),
+                  GMLuaTypeSystem.typedObject(from: value)?.isValid == true else { continue }
             selected[identifier] = descriptor
-            pending.append(contentsOf: childrenByParent[identifier] ?? [])
+            pending.append(contentsOf: directChildIdentifiersLocked(parent: identifier))
         }
         return selected
     }
@@ -3254,10 +3246,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
                   let descriptor = panelDescriptor(from: value),
                   GMLuaTypeSystem.typedObject(from: value)?.isValid == true else { continue }
             descriptor.keyboardInputEnabled = enabled
-            for (childIdentifier, childValue) in panels {
-                guard panelDescriptor(from: childValue)?.parentIdentifier == current else { continue }
-                pending.append(childIdentifier)
-            }
+            pending.append(contentsOf: directChildIdentifiersLocked(parent: current))
         }
     }
 

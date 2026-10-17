@@ -64,6 +64,19 @@ final class GMLuaVGUIRegistryTests: XCTestCase {
             C = vgui.Create('Panel', ROOT)
             assert(#ROOT:GetChildren() == 2 and ROOT:GetChildren()[2] == C)
             """)
+        let beforeInput = registry.hierarchyLookupStatistics
+        try state.execute("""
+            ROOT:SetKeyboardInputEnabled(true)
+            OTHER:SetKeyboardInputEnabled(false)
+            assert(ROOT:IsKeyboardInputEnabled() and A:IsKeyboardInputEnabled())
+            for _, child in ipairs(OTHER:GetChildren()) do assert(not child:IsKeyboardInputEnabled()) end
+            OTHER:SetKeyboardInputEnabled(true)
+            for _, child in ipairs(OTHER:GetChildren()) do assert(child:IsKeyboardInputEnabled()) end
+            """)
+        let afterInput = registry.hierarchyLookupStatistics
+        XCTAssertEqual(afterInput.rebuilds, beforeInput.rebuilds)
+        XCTAssertEqual(afterInput.candidates - beforeInput.candidates, 2 + 512 * 4,
+            "keyboard propagation and verification must scale with their subtrees, not total panels squared")
     }
 
     func testModalStateRequiresPopupAndEndsWhenRemoved() throws {

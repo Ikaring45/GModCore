@@ -353,3 +353,27 @@ rather than repeatedly scanning every panel. Reparent callbacks observed the
 new membership; HUD exclusion, deferred removal, recreation and live size
 updates remained correct. No iPad response-time improvement is claimed without
 physical measurement.
+
+## Overlay capture and menu input propagation work reduction (unreleased)
+
+Overlay descriptor collection previously built a live dictionary and a second
+parent map for every registered WorldPanel before selecting notices. Each
+overlay frame invokes this collection in multiple layout/Think/paint phases.
+It now traverses the indexed OverlayPanel subtree directly, reading live
+visibility, geometry and validity at each phase. Full foreground capture is
+unchanged; topology mutations still invalidate the ID index immediately.
+
+Recursive SetKeyboardInputEnabled also uses direct-child adjacency instead of
+scanning every registered panel once per descendant. This reduces opening/
+closing a large menu's input propagation from a repeated global scan to its
+own subtree, without removing any native input-state update or Lua callback.
+
+Validation: 63 Windows VGUI/notification tests passed. With 512 unrelated
+WorldPanel panels, overlay-frame candidate visits stayed below 64; 100 further
+visibility checks visited exactly 100 notice candidates with no index rebuild.
+Moving a notice out of and back into OverlayPanel changed visibility correctly,
+while full capture retained all WorldPanel layout/Think behavior. Keyboard
+propagation over 512 descendants plus verification made 2,050 direct-child
+candidate visits (including a separate two-child root), no index rebuild, and
+left unrelated input state unchanged. These are bounded-work measurements,
+not physical-iPad latency results.

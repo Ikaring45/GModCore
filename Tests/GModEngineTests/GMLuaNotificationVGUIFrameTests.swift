@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-import GModEngine
+@testable import GModEngine
 import GModGameAssets
 
 final class GMLuaNotificationVGUIFrameTests: XCTestCase {
@@ -159,12 +159,21 @@ final class GMLuaNotificationVGUIFrameTests: XCTestCase {
             sourceName: "=(large hidden spawn-tree overlay isolation)"
         )
 
+        let beforeOverlay = registry.hierarchyLookupStatistics
         _ = try registry.renderFrame(
             surface: surface,
             viewportWidth: 320,
             viewportHeight: 180,
             scope: .overlay
         )
+        let afterOverlay = registry.hierarchyLookupStatistics
+        XCTAssertEqual(afterOverlay.rebuilds - beforeOverlay.rebuilds, 1)
+        XCTAssertLessThan(afterOverlay.candidates - beforeOverlay.candidates, 64,
+            "overlay frame phases must walk the notice subtree, not the 512 WorldPanel siblings")
+        for _ in 0..<100 { XCTAssertTrue(registry.hasVisibleOverlayPanels) }
+        let afterVisibility = registry.hierarchyLookupStatistics
+        XCTAssertEqual(afterVisibility.rebuilds, afterOverlay.rebuilds)
+        XCTAssertEqual(afterVisibility.candidates - afterOverlay.candidates, 100)
         try runtime.execute(
             """
             local x, y = WORLD_PANELS[1]:GetPos()
@@ -190,6 +199,10 @@ final class GMLuaNotificationVGUIFrameTests: XCTestCase {
             """,
             sourceName: "=(foreground capture retained full-tree behavior)"
         )
+        try runtime.execute("OVERLAY_PANEL:SetParent(WORLD_PANELS[1])")
+        XCTAssertFalse(registry.hasVisibleOverlayPanels)
+        try runtime.execute("OVERLAY_PANEL:SetParent(GetOverlayPanel())")
+        XCTAssertTrue(registry.hasVisibleOverlayPanels)
     }
 
     func testStockNotificationUsesOverlayLayoutAndExpiresFromThink() throws {
