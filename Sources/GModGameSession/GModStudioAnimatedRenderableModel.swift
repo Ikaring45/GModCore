@@ -138,7 +138,8 @@ public enum GModStudioAnimatedRenderableModelCompiler {
         animationModel: SourceStudioAnimationModel,
         sequenceIndex: Int,
         blendIndex: Int,
-        frame: Int
+        frame: Int,
+        boneMerge: SourceStudioBoneMergeInput? = nil
     ) throws -> GModStudioAnimatedRenderableModelSnapshot {
         try validateIdentity(
             renderable: renderable,
@@ -168,8 +169,17 @@ public enum GModStudioAnimatedRenderableModelCompiler {
                 animation: pose.bones.count
             )
         }
-        let skinMatrices = zip(pose.bones, studioModel.bones).map { pair in
-            pair.0.modelTransform.concatenating(pair.1.poseToBone)
+        let modelTransforms: [SourceStudioMatrix3x4]
+        if let boneMerge {
+            modelTransforms = try SourceStudioBoneMerge.modelTransforms(
+                ownerBones: studioModel.bones.map(SourceStudioBoneMergeBone.init),
+                ownerLocalTransforms: pose.localTransforms, following: boneMerge
+            )
+        } else {
+            modelTransforms = pose.modelTransforms
+        }
+        let skinMatrices = zip(modelTransforms, studioModel.bones).map { pair in
+            pair.0.concatenating(pair.1.poseToBone)
         }
 
         let selectedVertices = try selectedSourceVertices(
@@ -223,7 +233,7 @@ public enum GModStudioAnimatedRenderableModelCompiler {
             blendIndex: blendIndex,
             animationIndex: animationIndex,
             frame: frame,
-            boneModelTransforms: pose.modelTransforms,
+            boneModelTransforms: modelTransforms,
             vertices: skinnedVertices,
             indices: renderable.indices,
             drawRanges: renderable.drawRanges

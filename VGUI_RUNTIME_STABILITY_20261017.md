@@ -68,3 +68,23 @@ merge, weapon animation pose and the actual additional draw remain unconnected.
 Four Windows tests pass, including active-weapon identity, live UseHands off/on
 and refusing a frame after lane close. No App/Metal or physical-device pass is
 claimed by these tests.
+
+## Named-bone following and CPU skinning (unreleased)
+
+Added an independent Source-style named-bone merge step. ASCII case-insensitive
+names select followed transforms; the owner's bone mask gates copying.
+Unmatched descendants use their actual local pose under the resulting parent.
+Transform counts, hierarchy, ambiguous names and non-finite matrices fail
+explicitly. Caller-provided followed matrices must share the owner's space.
+
+The existing animated Studio compiler accepts this input before computing
+bone-to-model * poseToBone and weighted position/normal/tangent skinning.
+Ten portable tests pass, including reordered/case-varied names, masks,
+unmatched descendants, malformed palettes, and a decoded two-bone fixture whose
+weighted vertices actually change after following. This is not Windows Oracle
+or real-asset/iPad parity proof. The live hands animation/cache and App/Metal
+additional draw are still unconnected; IK and procedural bones are not added.
+
+Contract references (read for behavior; not source-code transplantation):
+- https://github.com/ValveSoftware/source-sdk-2013/blob/master/src/game/client/bone_merge_cache.cpp
+- https://github.com/ValveSoftware/source-sdk-2013/blob/master/src/public/bone_setup.cpp

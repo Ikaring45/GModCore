@@ -7,6 +7,25 @@ final class GModStudioAnimatedRenderableModelTests: XCTestCase {
     private let checksum: Int32 = 0x2468_1357
     private let modelName = "models/codex/skinning_golden.mdl"
 
+    func testBoneMergeDrivesActualWeightedVerticesBeforeRendererHandoff() throws {
+        var data = bytes(of: makeAnimationMDL())
+        putInt32(1, at: Offsets.childBone + 160, into: &data)
+        let mdl = Data(data)
+        let studio = try SourceStudioModel(data: mdl)
+        let follow = SourceStudioMatrix3x4(1, 0, 0, 20, 0, 1, 0, 0, 0, 0, 1, 0)
+        let snapshot = try GModStudioAnimatedRenderableModelCompiler.compile(
+            renderable: makeRenderable(vertices: selectedVertices()), sourceMesh: makeSourceMesh(),
+            studioModel: studio, animationModel: SourceStudioAnimationDecoder.decode(mdlData: mdl),
+            sequenceIndex: 0, blendIndex: 0, frame: 12,
+            boneMerge: .init(followedBones: [.init(name: studio.bones[1].name.uppercased(), parent: -1, flags: 0)],
+                followedTransforms: [follow], boneMask: 1))
+        assertVector(snapshot.boneModelTransforms[1].position, SourceVector3(20, 0, 0))
+        assertVector(snapshot.vertices[1].position, SourceVector3(21, 0, 0))
+        assertVector(snapshot.vertices[1].normal, SourceVector3(1, 0, 0))
+        assertVector(snapshot.vertices[2].position, SourceVector3(17, 0, 0))
+        XCTAssertEqual(snapshot.indices, [0, 1, 2])
+    }
+
     func testSkinsPositionNormalAndTangentFromAuthoredSequenceFrame() throws {
         let mdl = makeAnimationMDL()
         let studio = try SourceStudioModel(data: mdl)
