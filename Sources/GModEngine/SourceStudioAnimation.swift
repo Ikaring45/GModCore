@@ -211,6 +211,18 @@ public struct SourceStudioAnimationValueStream: Equatable, Sendable {
     fileprivate let bytes: [UInt8]
     fileprivate let start: Int
 
+    func scaledPair(frame: Int, scale: Float) throws -> (Float, Float) {
+        if start >= 0, start < bytes.count - 1, bytes[start] == 1, bytes[start + 1] == 1 {
+            let value = try sample(frame: 0) * scale
+            return (value, value)
+        }
+        return try (sample(frame: frame) * scale, sample(frame: frame + 1) * scale)
+    }
+
+    func scaledValue(frame: Int, scale: Float) throws -> Float {
+        try sample(frame: frame) * scale
+    }
+
     fileprivate func scaledSample(frame: Int, fraction: SourceStudioAnimationFrameFraction,
                                   scale: Float) throws -> Float {
         guard fraction.value > 0.001 else { return try sample(frame: frame) * scale }
@@ -255,7 +267,7 @@ public struct SourceStudioAnimationValueStream: Equatable, Sendable {
     }
 }
 
-/// One authored `mstudioanim_t` channel. Compressed rotations remain unsupported.
+/// One authored `mstudioanim_t` channel, retaining inline RLE axis data.
 public struct SourceStudioAnimationBoneChannel: Equatable, Sendable {
     public let boneIndex: Int
     public let flags: SourceStudioAnimationValueFlags
@@ -263,6 +275,7 @@ public struct SourceStudioAnimationBoneChannel: Equatable, Sendable {
     public let constantRotation: SourceStudioQuaternion?
     public let constantRotationFormat: SourceStudioConstantRotationFormat?
     public let positionStreams: [SourceStudioAnimationValueStream?]
+    public let rotationStreams: [SourceStudioAnimationValueStream?]
 }
 
 public struct SourceStudioAnimationDescriptor: Equatable, Sendable {
@@ -332,6 +345,10 @@ public struct SourceStudioAnimationBoneDescriptor: Equatable, Sendable {
     public let bindPosition: SourceVector3
     public let positionScale: SourceVector3
     public let bindRotation: SourceStudioQuaternion
+    public let eulerRadians: SourceStudioRadianEuler
+    public let rotationScale: SourceVector3
+    public let flags: Int32
+    public let alignment: SourceStudioQuaternion
     public let bindLocalTransform: SourceStudioMatrix3x4
     public let bindModelTransform: SourceStudioMatrix3x4
 }
@@ -440,7 +457,7 @@ public struct SourceStudioAnimationModel: Sendable {
 
     /// Evaluates an integer frame plus a validated fraction. Constant RAWPOS/RAWROT/RAWROT2
     /// channels are frame-invariant by definition. RLE positions use authored
-    /// bone scales. Compressed rotation channels and animation
+    /// bone scales. RLE rotations use aligned normalized quaternion blending. Animation
     /// blocks that require other runtime state fail with a
     /// typed `unsupported` error instead of being guessed.
     public func pose(
@@ -524,18 +541,12 @@ public struct SourceStudioAnimationModel: Sendable {
         var rotations = skeleton.bones.map(\.bindRotation)
 
         for channel in animation.boneChannels {
-            if channel.flags.contains(.animatedRotation) {
-                throw SourceStudioAnimationError.unsupported(
-                    .compressedBoneValues(
-                        animation: animationIndex,
-                        bone: channel.boneIndex,
-                        flags: channel.flags.rawValue
-                    )
-                )
-            }
-
             if let constantRotation = channel.constantRotation {
                 rotations[channel.boneIndex] = constantRotation
+            } else if channel.flags.contains(.animatedRotation) {
+                rotations[channel.boneIndex] = try SourceStudioAnimationRotation.evaluate(
+                    channel: channel, bone: skeleton.bones[channel.boneIndex],
+                    frame: frame, fraction: fraction)
             } else if channel.flags.contains(.delta) {
                 rotations[channel.boneIndex] = .identity
             }
@@ -682,6 +693,10 @@ public enum SourceStudioAnimationDecoder {
                 bindPosition: bone.position,
                 positionScale: bone.positionScale,
                 bindRotation: bone.quaternion,
+                eulerRadians: bone.eulerRadians,
+                rotationScale: bone.rotationScale,
+                flags: bone.flags,
+                alignment: bone.alignment,
                 bindLocalTransform: bone.quaternion.matrix(position: bone.position),
                 bindModelTransform: bindModelTransforms[index]
             )
@@ -942,6 +957,7 @@ public enum SourceStudioAnimationDecoder {
             var cursor = offset + 4
             var constantRotation: SourceStudioQuaternion?
             var rotationFormat: SourceStudioConstantRotationFormat?
+            var rotationStreams: [SourceStudioAnimationValueStream?] = []
             if flags.contains(.rawRotation48) {
                 constantRotation = try reader.quaternion48(
                     at: cursor,
@@ -964,6 +980,15 @@ public enum SourceStudioAnimationDecoder {
                     byteCount: 6,
                     field: "\(recordField).animatedRotationOffsets"
                 )
+                for axis in 0..<3 {
+                    let relative = try reader.int16(at: cursor + axis * 2, field: "\(recordField).rotationAxis")
+                    if relative > 0 {
+                        let address = try reader.relativeAddress(base: cursor, relativeOffset: Int32(relative), field: "\(recordField).rotationAxis")
+                        rotationStreams.append(SourceStudioAnimationValueStream(bytes: reader.bytes, start: address))
+                    } else {
+                        rotationStreams.append(nil)
+                    }
+                }
                 cursor += 6
             }
 
@@ -1006,7 +1031,8 @@ public enum SourceStudioAnimationDecoder {
                     constantPosition: constantPosition,
                     constantRotation: constantRotation,
                     constantRotationFormat: rotationFormat,
-                    positionStreams: positionStreams
+                    positionStreams: positionStreams,
+                    rotationStreams: rotationStreams
                 )
             )
             previousBone = bone

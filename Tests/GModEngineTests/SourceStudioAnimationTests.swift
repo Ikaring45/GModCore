@@ -3,6 +3,93 @@ import XCTest
 @testable import GModEngine
 
 final class SourceStudioAnimationTests: XCTestCase {
+    func testRLERotationUsesRadianBaseAndQuaternionSubframeBlend() throws {
+        let model = try SourceStudioAnimationDecoder.decode(mdlData: makeRotationAnimation())
+        let pose = try model.pose(animationIndex: 0, frame: 0, fraction: .init(0.5))
+        let radians = Float.pi * 55 / 180
+        XCTAssertEqual(pose.bones[0].localTransform.m00, cos(radians), accuracy: 0.00001)
+        XCTAssertEqual(pose.bones[0].localTransform.m10, sin(radians), accuracy: 0.00001)
+        XCTAssertEqual(pose.bones[1].modelTransform.position.x, 1 + 2 * cos(radians), accuracy: 0.00001)
+        let first = try model.pose(animationIndex: 0, frame: 0, fraction: .init(0.001))
+        XCTAssertEqual(first.bones[0].rotation.z, sin(Float.pi / 36), accuracy: 0.00001)
+        let repeated = try model.pose(animationIndex: 0, frame: 12)
+        XCTAssertEqual(repeated.bones[0].rotation.z, sin(Float.pi * 50 / 180), accuracy: 0.00001)
+        let quarter = try model.pose(animationIndex: 0, frame: 0, fraction: .init(0.25))
+        let z = 0.75 * sin(Float.pi * 5 / 180) + 0.25 * sin(Float.pi * 50 / 180)
+        let w = 0.75 * cos(Float.pi * 5 / 180) + 0.25 * cos(Float.pi * 50 / 180)
+        XCTAssertEqual(quarter.bones[0].rotation.z, z / sqrt(z * z + w * w), accuracy: 0.00001)
+        XCTAssertGreaterThan(abs(quarter.bones[0].rotation.z - sin(Float.pi * 16.25 / 180)), 0.001,
+                             "Source uses normalized quaternion blending, not linear Euler angles")
+    }
+
+    func testRLERotationAxesUseSourceRadianEulerOrder() throws {
+        for axis in 0..<3 {
+            var data = bytes(of: makeRotationAnimation())
+            for offset in 1_164..<1_170 { data[offset] = 0 }
+            putInt16(Int16(data.count - 6 - 1_164), at: 1_164 + axis * 2, into: &data)
+            putFloat(0, at: 408 + 68, into: &data)
+            putFloat(Float.pi / 180, at: 408 + 84 + axis * 4, into: &data)
+            let rotation = try SourceStudioAnimationDecoder.decode(mdlData: Data(data))
+                .pose(animationIndex: 0, frame: 1).bones[0].rotation
+            let components = [rotation.x, rotation.y, rotation.z]
+            for component in 0..<3 {
+                XCTAssertEqual(components[component], component == axis ? sqrt(0.5) : 0, accuracy: 0.00001)
+            }
+            XCTAssertEqual(rotation.w, sqrt(0.5), accuracy: 0.00001)
+        }
+    }
+
+    func testRLERotationShortestArcFixedAlignmentAndDeltaBase() throws {
+        var data = bytes(of: makeRotationAnimation())
+        let stream = data.count - 6
+        putInt16(170, at: stream + 2, into: &data)
+        putInt16(-170, at: stream + 4, into: &data)
+        putFloat(0, at: 408 + 68, into: &data)
+        let shortest = try SourceStudioAnimationDecoder.decode(mdlData: Data(data))
+            .pose(animationIndex: 0, frame: 0, fraction: .init(0.5))
+        XCTAssertEqual(shortest.bones[0].localTransform.m00, -1, accuracy: 0.00001)
+        XCTAssertEqual(shortest.bones[0].localTransform.m10, 0, accuracy: 0.00001)
+        data = bytes(of: makeRotationAnimation())
+        putInt32(0x00100000, at: 408 + 160, into: &data)
+        putFloat(-1, at: 408 + 156, into: &data)
+        let aligned = try SourceStudioAnimationDecoder.decode(mdlData: Data(data))
+            .pose(animationIndex: 0, frame: 0, fraction: .init(0.5))
+        XCTAssertLessThan(aligned.bones[0].rotation.w, 0)
+        data[1_161] |= 0x10
+        let delta = try SourceStudioAnimationDecoder.decode(mdlData: Data(data))
+            .pose(animationIndex: 0, frame: 0, fraction: .init(0.5))
+        XCTAssertEqual(delta.bones[0].rotation.z, sin(Float.pi / 8), accuracy: 0.00001)
+        XCTAssertGreaterThan(delta.bones[0].rotation.w, 0)
+        XCTAssertEqual(delta.bones[0].position, .zero)
+    }
+
+    func testCombinedRLEPositionAndRotationUseSeparateRelativePointerTables() throws {
+        var data = bytes(of: makeRotationAnimation())
+        data[1_161] = 0x0C
+        for offset in 1_170..<1_176 { data[offset] = 0 }
+        putInt16(Int16(data.count - 1_170), at: 1_170, into: &data)
+        data.append(contentsOf: [2, 30, 0, 0, 10, 0])
+        putFloat(0.5, at: 408 + 72, into: &data)
+        putInt32(Int32(data.count), at: 76, into: &data)
+        let pose = try SourceStudioAnimationDecoder.decode(mdlData: Data(data))
+            .pose(animationIndex: 0, frame: 0, fraction: .init(0.5))
+        XCTAssertEqual(pose.bones[0].position.x, 3.5)
+        XCTAssertEqual(pose.bones[0].rotation.z, sin(Float.pi * 27.5 / 180), accuracy: 0.00001)
+    }
+
+    private func makeRotationAnimation() -> Data {
+        var data = bytes(of: makeAnimationModel())
+        data[1_161] = 0x08
+        for offset in 1_164..<1_170 { data[offset] = 0 }
+        putFloat(Float.pi / 18, at: 408 + 68, into: &data)
+        putFloat(Float.pi / 180, at: 408 + 92, into: &data)
+        if data.count % 2 != 0 { data.append(0) }
+        putInt16(Int16(data.count - 1_164), at: 1_168, into: &data)
+        data.append(contentsOf: [2, 30, 0, 0, 90, 0])
+        putInt32(Int32(data.count), at: 76, into: &data)
+        return Data(data)
+    }
+
     func testRLESubframesInterpolateLocalPositionsAndRebuildHierarchy() throws {
         let model = try SourceStudioAnimationDecoder.decode(mdlData: makePositionAnimation())
         for (frame, fraction, expected) in [(0, Float(0.5), Float(3.5)), (1, 0.5, 6),
@@ -251,10 +338,6 @@ final class SourceStudioAnimationTests: XCTestCase {
         try assertPoseUnsupported(
             mutating: { putInt16(1, at: 840 + 90, into: &$0) },
             equals: .zeroFrameData(animation: 0, count: 1)
-        )
-        try assertPoseUnsupported(
-            mutating: { $0[1_161] = 0x08 },
-            equals: .compressedBoneValues(animation: 0, bone: 0, flags: 0x08)
         )
     }
 

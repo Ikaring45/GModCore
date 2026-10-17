@@ -7,6 +7,33 @@ final class GModStudioAnimatedRenderableModelTests: XCTestCase {
     private let checksum: Int32 = 0x2468_1357
     private let modelName = "models/codex/skinning_golden.mdl"
 
+    func testRLERotationDrivesWeightedPositionNormalAndTangent() throws {
+        var data = bytes(of: makeAnimationMDL())
+        data[Offsets.animationRecord + 1] = 0x08
+        let table = Offsets.animationRecord + 4
+        for index in table..<(table + 6) { data[index] = 0 }
+        putFloat(Float.pi / 180, at: Offsets.childBone + 92, into: &data)
+        if data.count % 2 != 0 { data.append(0) }
+        putInt16(Int16(data.count - table), at: table + 4, into: &data)
+        data.append(contentsOf: [2, 30, 0, 0, 90, 0])
+        putInt32(Int32(data.count), at: 76, into: &data)
+        let mdl = Data(data)
+        let renderable = makeRenderable(vertices: selectedVertices())
+        let result = try GModStudioAnimatedRenderableModelCompiler.compile(
+            renderable: renderable, sourceMesh: makeSourceMesh(),
+            studioModel: SourceStudioModel(data: mdl),
+            animationModel: SourceStudioAnimationDecoder.decode(mdlData: mdl),
+            sequenceIndex: 0, blendIndex: 0, frame: 0, fraction: .init(0.5))
+        let half: Float = sqrt(0.5)
+        assertVector(result.vertices[1].position, SourceVector3(10 + half, half, 0))
+        assertVector(result.vertices[1].normal, SourceVector3(half, half, 0))
+        let tangent = try XCTUnwrap(result.vertices[1].tangent)
+        assertVector(SourceVector3(tangent.x, tangent.y, tangent.z), SourceVector3(-half, half, 0))
+        XCTAssertEqual(tangent.w, -1)
+        XCTAssertEqual(result.indices, renderable.indices)
+        XCTAssertEqual(result.drawRanges, renderable.drawRanges)
+    }
+
     func testRLEPositionDrivesWeightedGeometryAcrossFrames() throws {
         var data = bytes(of: makeAnimationMDL())
         data[Offsets.animationRecord + 1] = 0x04
@@ -354,9 +381,11 @@ final class GModStudioAnimatedRenderableModelTests: XCTestCase {
         )
     }
 
-    func testPropagatesCompressedAnimationAndBlendFailuresWithoutFallback() throws {
+    func testPropagatesMalformedCompressedAnimationAndBlendFailuresWithoutFallback() throws {
         var compressedBytes = bytes(of: makeAnimationMDL())
         compressedBytes[1_161] = 0x08 // STUDIO_ANIM_ANIMROT
+        for offset in 1_164..<1_172 { compressedBytes[offset] = 0 }
+        putInt16(6, at: 1_164, into: &compressedBytes)
         let compressedData = Data(compressedBytes)
         let compressedAnimation = try SourceStudioAnimationDecoder.decode(
             mdlData: compressedData
@@ -370,11 +399,7 @@ final class GModStudioAnimatedRenderableModelTests: XCTestCase {
             source: source,
             studio: studio,
             animation: compressedAnimation,
-            equals: .animation(.unsupported(.compressedBoneValues(
-                animation: 0,
-                bone: 1,
-                flags: 0x08
-            )))
+            equals: .animation(.invalidValueRun(offset: 1_170, valid: 0, total: 0))
         )
 
         XCTAssertThrowsError(try GModStudioAnimatedRenderableModelCompiler.compile(

@@ -239,3 +239,30 @@ and resource selection. A new count-only-layout test explicitly rejects skin
 mutation and body-group name queries while preserving the exact canonical
 snapshot/revision and pending journal. This corrects fixture coverage, not a
 claim that shipped assets or physical iPad behavior have been newly validated.
+
+## Inline Studio RLE rotation channels (unreleased)
+
+ANIMROT pointer tables now retain immutable RLE axis streams alongside ANIMPOS.
+Rotation sampling uses authored RadianEuler bases and per-axis scales (not the
+bind quaternion as an Euler substitute), omits the base for per-channel DELTA,
+and applies Source's >0.001 paired-sample threshold. Subframes convert both
+sampled angles to quaternions, align their signs, normalize their linear blend,
+and honor BONE_FIXED_ALIGNMENT for non-delta channels. Raw rotations retain
+their existing precedence. Malformed compressed streams fail through the same
+typed animation error boundary rather than falling back to bind pose.
+
+References: fixed Source SDK 2013 commit c8f4c6351162fbff83bfa5a428d45d1e6eed3824,
+bone_setup.cpp CalcBoneQuaternion and mathlib_base.cpp AngleQuaternion,
+QuaternionAlign, QuaternionBlend (independent implementation).
+https://github.com/ValveSoftware/source-sdk-2013/blob/c8f4c6351162fbff83bfa5a428d45d1e6eed3824/src/public/bone_setup.cpp
+
+This does not implement external animation blocks, sections, IK, global delta
+animation blending, activities/events or live first-person Metal playback.
+
+Validation: 31 Windows animation/renderable/cache tests passed. Added coverage
+checks all RadianEuler axes, non-midpoint normalized blending (distinct from
+Euler interpolation), shortest-arc crossing, fixed alignment, channel DELTA,
+combined position/rotation pointer tables, hierarchy and weighted geometry.
+The weighted rotation test also checks normal/tangent rotation, handedness and
+unchanged indices/material ranges. Malformed rotation RLE remains a typed
+failure. Apple/Oracle/physical iPad behavior is not established by these tests.
