@@ -4,6 +4,35 @@ import GModGameAssets
 @testable import GModApp
 
 final class GModDermaMenuSessionLaneTests: XCTestCase {
+    func testCapturedCloseActionCannotLeakIntoReopenedSettings() async throws {
+        let lane = GModDermaMenuSessionLane()
+        let files = try GMLuaHostDirectoryFileSystem(rootURL: GModGameAssets.clientContentRootURL(), writable: false)
+        let session = GMLuaMenuSession(fileSystem: files, logger: { _ in })
+        try await lane.replace(with: session, generation: 1)
+        let viewport = GMLuaViewportSize(width: 1_024, height: 768)
+        for cycle in 0..<3 {
+            try await lane.present(.problems, viewport: viewport, expectedGeneration: 1)
+            _ = try await lane.captureFrame(viewport: viewport, expectedGeneration: 1)
+            for phase: GMLuaPointerPhase in [.began, .ended] {
+                _ = try await lane.submitPointer(.init(x: 4, y: 4, viewWidth: 1_024,
+                    viewHeight: 768, phase: phase, timestamp: Double(cycle + 1)),
+                    viewport: viewport, expectedGeneration: 1)
+            }
+            let closed = try await lane.captureFrame(viewport: viewport, expectedGeneration: 1)
+            XCTAssertEqual(closed.actions, [.closeUtility])
+            try await lane.dismissUtility(expectedGeneration: 1)
+            try await lane.present(.settings, viewport: viewport, expectedGeneration: 1)
+            let reopened = try await lane.captureFrame(viewport: viewport, expectedGeneration: 1)
+            XCTAssertTrue(reopened.actions.isEmpty)
+            XCTAssertTrue(reopened.snapshot.commands.contains {
+                if case let .text(value, _, _, _, _) = $0 { return value.utf8String == "Settings" }
+                return false
+            })
+            try await lane.dismissUtility(expectedGeneration: 1)
+        }
+        await lane.removeSession(generation: 2)
+    }
+
     func testLoadingResourceUsesActorProgressAndCancelAction() async throws {
         let lane = GModDermaMenuSessionLane()
         let files = try GMLuaHostDirectoryFileSystem(rootURL: GModGameAssets.clientContentRootURL(), writable: false)

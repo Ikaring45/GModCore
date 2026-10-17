@@ -528,6 +528,8 @@ final class GModDermaMenuModel: ObservableObject {
         presentationRevision &+= 1
         deferredActions = []
         surfaceScene = nil
+        wantsTextInput = false
+        focusedTextEntry = nil
         failure = nil
         presentedUtility = utility
         let generation = sessionGeneration
@@ -608,6 +610,7 @@ final class GModDermaMenuModel: ObservableObject {
         resourcePresented = false
         presentedUtility = nil
         wantsTextInput = false
+        focusedTextEntry = nil
         guard hasSession else { return }
         let generation = sessionGeneration
         let installation = installationTask
@@ -644,25 +647,27 @@ final class GModDermaMenuModel: ObservableObject {
         }
         let activeViewport = viewport
         let generation = sessionGeneration
+        let presentation = presentationRevision
         let installation = installationTask
         let previousMutation = mutationTask
         let task = Task { [weak self] in
             guard let self else { return }
             await previousMutation?.value
             await installation?.value
+            guard generation == sessionGeneration, presentation == presentationRevision else { return }
             do {
                 let output = try await sessionLane.submitPointer(
                     sample,
                     viewport: activeViewport,
                     expectedGeneration: generation
                 )
-                guard generation == sessionGeneration else { return }
+                guard generation == sessionGeneration, presentation == presentationRevision else { return }
                 wantsTextInput = output.wantsTextInput
                 focusedTextEntry = output.focusedTextEntry
                 if !output.actions.isEmpty { onActions(output.actions) }
                 requestFrame()
             } catch {
-                guard generation == sessionGeneration else { return }
+                guard generation == sessionGeneration, presentation == presentationRevision else { return }
                 fail(error)
             }
         }
@@ -675,23 +680,25 @@ final class GModDermaMenuModel: ObservableObject {
     ) {
         guard !text.isEmpty, hasSession, let focus = focusedTextEntry else { return }
         let generation = sessionGeneration
+        let presentation = presentationRevision
         let installation = installationTask
         let previousMutation = mutationTask
         let task = Task { [weak self] in
             guard let self else { return }
             await previousMutation?.value
             await installation?.value
+            guard generation == sessionGeneration, presentation == presentationRevision else { return }
             do {
                 let actions = try await sessionLane.insertText(
                     text,
                     focusedTextEntry: focus,
                     expectedGeneration: generation
                 )
-                guard generation == sessionGeneration else { return }
+                guard generation == sessionGeneration, presentation == presentationRevision else { return }
                 if !actions.isEmpty { onActions(actions) }
                 requestFrame()
             } catch {
-                guard generation == sessionGeneration else { return }
+                guard generation == sessionGeneration, presentation == presentationRevision else { return }
                 fail(error)
             }
         }
@@ -701,21 +708,23 @@ final class GModDermaMenuModel: ObservableObject {
     func deleteTextBackward() {
         guard hasSession, let focus = focusedTextEntry else { return }
         let generation = sessionGeneration
+        let presentation = presentationRevision
         let installation = installationTask
         let previousMutation = mutationTask
         let task = Task { [weak self] in
             guard let self else { return }
             await previousMutation?.value
             await installation?.value
+            guard generation == sessionGeneration, presentation == presentationRevision else { return }
             do {
                 try await sessionLane.deleteTextBackward(
                     focusedTextEntry: focus,
                     expectedGeneration: generation
                 )
-                guard generation == sessionGeneration else { return }
+                guard generation == sessionGeneration, presentation == presentationRevision else { return }
                 requestFrame()
             } catch {
-                guard generation == sessionGeneration else { return }
+                guard generation == sessionGeneration, presentation == presentationRevision else { return }
                 fail(error)
             }
         }

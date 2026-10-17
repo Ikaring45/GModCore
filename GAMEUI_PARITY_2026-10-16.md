@@ -79,6 +79,18 @@ alone restores the C++ GameUI dialogs: https://wiki.facepunch.com/gmod/Panel
 
 ## Physical-device regression follow-up
 
+Storage recovery continuation: local compilation resumed with about 59 GB free.
+The focused MENU/resource run executed nine tests: eight passed, one skipped
+without an explicit installed asset. This includes five Problems close ->
+Settings cycles and the segmented ProgressBar rectangle assertion. A separate
+installed-resource attempt failed because the old Steam file path no longer
+exists; it is not an installed-resource pass.
+
+Queued pointer/text/delete tasks now carry the presentation revision as well
+as the session generation, checked before and after actor delivery. Switching
+utilities clears text focus. Added an App actor regression repeating atomic
+close-action capture then Settings reopen three times; Apple execution pending.
+
 The supplied 0.1.64 iPad photographs still show vertically inverted VGUI text.
 The prior orientation change was not device-validated. Remove the remaining
 manual raw-row reversal; the Apple pixel gate must decide correctness before
