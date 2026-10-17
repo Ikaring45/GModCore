@@ -3,6 +3,39 @@ import GModEngine
 import GModGameAssets
 
 final class GMLuaVGUIResourceInstanceTests: XCTestCase {
+    func testResourceIdleLayoutPreservesTouchDraggedFrame() throws {
+        let files = try GMLuaHostDirectoryFileSystem(rootURL: GModGameAssets.clientContentRootURL(), writable: false)
+        let session = GMLuaMenuSession(fileSystem: files, logger: { _ in })
+        defer { _ = session.close() }
+        _ = try session.start()
+        let resource = try SourceVGUIResource(source: """
+            "test.res" {
+                "Window" { "ControlName" "Frame" "title" "Draggable" "draggable" "1" "xpos" "40" "ypos" "40" "wide" "300" "tall" "150" }
+                "Caption" { "ControlName" "Label" "labelText" "Drag marker" "xpos" "10" "ypos" "40" "wide" "200" "tall" "24" }
+            }
+            """)
+        let instance = try session.loadResource(resource, rootControlName: "Window") { _ in }
+        try instance.layout(viewportWidth: 640, viewportHeight: 480)
+        func markerX() throws -> Double {
+            let frame = try session.renderFrame(viewportWidth: 640, viewportHeight: 480)
+            return try XCTUnwrap(frame.commands.compactMap { command -> Double? in
+                if case let .text(value, position, _, _, _) = command, value.utf8String == "Drag marker" { return position.x }
+                return nil
+            }.first)
+        }
+        let before = try markerX()
+        for (phase, x, y): (GMLuaPointerPhase, Double, Double) in [(.began, 100, 50), (.moved, 140, 80), (.ended, 140, 80)] {
+            _ = try session.dispatchPointerEvent(x: x, y: y, phase: phase, timestamp: 1,
+                viewportWidth: 640, viewportHeight: 480)
+        }
+        let dragged = try markerX()
+        XCTAssertEqual(dragged - before, 40, accuracy: 0.001)
+        for _ in 0..<5 { try instance.layout(viewportWidth: 640, viewportHeight: 480) }
+        XCTAssertEqual(try markerX(), dragged, accuracy: 0.001)
+        try instance.layout(viewportWidth: 800, viewportHeight: 600)
+        XCTAssertEqual(try markerX(), before, accuracy: 0.001)
+    }
+
     func testResourceCheckButtonRetainsCaptionAndAuthoredSelection() throws {
         let files = try GMLuaHostDirectoryFileSystem(rootURL: GModGameAssets.clientContentRootURL(), writable: false)
         let session = GMLuaMenuSession(fileSystem: files, logger: { _ in })

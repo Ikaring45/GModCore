@@ -400,6 +400,8 @@ HUD filtering, GC, touch and notifications retained their tested behavior.
 Physical iPad timings remain unmeasured.
 # Options entry point follow-up
 
+- Resource layout is now applied on initial layout and viewport changes, not every captured frame. This avoids resetting live touch-dragged/resized frames to authored positions and repeated Lua geometry calls. All coordinates are resolved before applying any live geometry. Regression drags a resource frame by 40px, verifies five idle layouts preserve it, then verifies a viewport change reapplies resource coordinates. Windows resource tests: 5 passed, 1 installed-resource test skipped. Physical-device behavior remains unverified.
+
 - Native resource CheckButton now creates the stock DCheckBoxLabel, retaining its caption instead of only the bare DCheckBox. Authored `selected` accepts 0/1 and calls SetChecked; the host can read actual user changes through isChecked. Regression verifies caption rendering, selected=true, pointer toggle to false, and rejection of invalid selection. Windows resource suite: 4 passed, 1 installed-resource test skipped (asset not supplied). This does not supply missing Options resources or bind arbitrary cvars.
 
 - Subtree deletion now snapshots parent edges once per traversal, preserving the previous dictionary sibling order for OnRemove while removing the per-descendant whole-registry scan. Traversal cost changes from O(panel count times subtree size) to O(panel count plus subtree size). A 128-level regression verifies exactly-once callbacks and survival of a reparented child. Focused registry/notification/MENU tests: 70 passed on Windows; no device latency claim.

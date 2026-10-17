@@ -29,6 +29,7 @@ public final class GMLuaVGUIResourceInstance {
     private var panels: [String: LuaValue] = [:]
     private var resource: SourceVGUIResource
     private let rootControlName: String?
+    private var laidOutViewport: GMLuaViewportSize?
 
     private static let classes = [
         "frame": "DFrame", "panel": "DPanel", "editablepanel": "EditablePanel",
@@ -173,16 +174,26 @@ public final class GMLuaVGUIResourceInstance {
     }
 
     public func layout(viewportWidth: Int, viewportHeight: Int) throws {
+        guard viewportWidth > 0, viewportHeight > 0 else {
+            throw ResourceError.invalidField(control: resource.name, key: "viewport")
+        }
+        let viewport = GMLuaViewportSize(width: viewportWidth, height: viewportHeight)
+        guard viewport != laidOutViewport else { return }
         let screen = GMLuaPanelRect(x: 0, y: 0, width: Double(viewportWidth), height: Double(viewportHeight))
         var parent = screen
+        var frames: [(String, GMLuaPanelRect)] = []
         if let root = resource.controls.first(where: { $0.fieldName == rootControlName }) {
             let frame = try root.frame(parent: screen, screen: screen)
-            try applyFrame(frame, to: root.fieldName)
+            frames.append((root.fieldName, frame))
             parent = GMLuaPanelRect(x: 0, y: 0, width: frame.width, height: frame.height)
         }
         for control in resource.controls where control.fieldName != rootControlName {
-            try applyFrame(control.frame(parent: parent, screen: screen), to: control.fieldName)
+            frames.append((control.fieldName, try control.frame(parent: parent, screen: screen)))
         }
+        // Resolve all coordinates before touching live panels. Reapplying them
+        // on idle frames would undo native dragging/resizing and relayout.
+        for (name, frame) in frames { try applyFrame(frame, to: name) }
+        laidOutViewport = viewport
     }
 
     public func setText(_ text: String, control: String) throws {
@@ -211,6 +222,7 @@ public final class GMLuaVGUIResourceInstance {
     public func remove() throws {
         for name in panels.keys.sorted() { _ = try call(name, "Remove", []) }
         panels.removeAll()
+        laidOutViewport = nil
     }
 
     private func applyFrame(_ frame: GMLuaPanelRect, to control: String) throws {
