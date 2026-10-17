@@ -3,6 +3,26 @@ import GModEngine
 @testable import GModGameSession
 
 final class GModSpawnMenuInteractionTests: XCTestCase {
+    func testImmediateQCFrameBeforeNextHostTick() throws {
+        let session = try GModPlayableSession(
+            configuration: GModPlayableSessionConfiguration(map: .construct), logger: { _, _ in })
+        defer { _ = try? session.close() }
+        try session.updateViewport(width: 1_024, height: 768)
+        try session.setSpawnMenuOpen(true)
+        let q = try session.renderClientVGUIFrame()
+        XCTAssertFalse(q.commands.isEmpty)
+        let registry = try XCTUnwrap(session.clientRuntime.vguiRegistry)
+        XCTAssertTrue(registry.renderTree(viewportWidth: 1_024, viewportHeight: 768)
+            .contains { $0.requestedClassName == "SpawnMenu" && $0.clipRect.height > 0 })
+        try session.setSpawnMenuOpen(false)
+        try session.setContextMenuOpen(true)
+        let c = try session.renderClientVGUIFrame()
+        XCTAssertFalse(c.commands.isEmpty)
+        XCTAssertTrue(registry.renderTree(viewportWidth: 1_024, viewportHeight: 768)
+            .contains { $0.requestedClassName == "ContextMenu" && $0.clipRect.height > 0 })
+        try session.setContextMenuOpen(false)
+    }
+
     func testStrictStockSpawnMenuInteraction() throws {
         let session = try GModPlayableSession(
             configuration: GModPlayableSessionConfiguration(map: .construct),
@@ -704,7 +724,10 @@ final class GModSpawnMenuInteractionTests: XCTestCase {
         let wheel = try session.dispatchClientVGUIPointerEvent(
             x: realWheelPoint.x,
             y: realWheelPoint.y,
-            phase: .scroll(delta: -1),
+            // Three real wheel notches reveal the lower model selector. A
+            // single notch is only 50 px in stock DVScrollBar and does not
+            // reach it once the slider's edge-docked labels occupy real space.
+            phase: .scroll(delta: -3),
             timestamp: 6.1
         )
         XCTAssertEqual(wheel.hitPanelIdentifier, stockBalloonVBar.identifier)
@@ -748,7 +771,7 @@ final class GModSpawnMenuInteractionTests: XCTestCase {
         )
         let revealedPropSelect = try XCTUnwrap(compactTreeAfter.first(where: {
             $0.identifier == balloonPropSelect.identifier
-        }))
+        }), "scroll=\(compactScrollAfter), content=\(compactContentHeight), canvas=\(compactCanvasHeight), control=\(compactControlPanelAfter.frame), original prop=\(balloonPropSelect.frame)")
         XCTAssertGreaterThan(
             revealedPropSelect.clipRect.height,
             compactPropSelectHeightBefore

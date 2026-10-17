@@ -77,6 +77,21 @@ alone restores the C++ GameUI dialogs: https://wiki.facepunch.com/gmod/Panel
   Full-suite success is explicitly NOT claimed; UI failures remain follow-up work.
 # Native resource field continuation (2026-10-17)
 
+## Q/C continuation
+
+- Failed first foreground publication now closes the invisible menu through
+  the original Lua/FIFO lifecycle instead of retaining an input-stealing owner.
+  The first-frame guard stays active during recovery, excluding rapid taps.
+- Unchanged, fully resolved snapshots retain the published scene instead of
+  repeating CoreText/texture builds. Think/Paint still run; changed commands,
+  unresolved assets, dropped commands and ownership changes do not reuse it.
+- Windows immediate Q/C capture before the next host tick and stock Q pointer,
+  tool selection and compact scroll tests passed. The old one-notch scroll
+  assertion was a test-distance assumption, not a demonstrated renderer bug:
+  stock scroll=50 did not reach the lower selector. Three genuine notches do.
+- This is not evidence that the reported physical iPad blank Q/C is fully
+  fixed. Apple typechecking and real-device display/input remain separate.
+
 The resource adapter now applies textinsetx/textinsety, Label wrap,
 paintbackground/paintborder and titled Frame sizable/draggable through real
 Derma methods. Invalid boolean/non-finite inset values fail explicitly;

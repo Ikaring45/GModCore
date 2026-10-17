@@ -469,6 +469,7 @@ final class GModGameSessionModel: ObservableObject {
     private var pointerEpoch: UInt64?
     private var inputEpoch: UInt64?
     private var surfaceRequestRevision: UInt64 = 0
+    private var lastPublishedSurfaceSnapshot: GMLuaSurfaceFrameSnapshot?
     private var surfaceRefreshQueue = GModGameSurfaceRefreshPendingQueue()
     private var surfaceRefreshTask: Task<Void, Never>?
     private var clientTextMutationTask: Task<Void, Never>?
@@ -1445,6 +1446,7 @@ final class GModGameSessionModel: ObservableObject {
                     // burst of fixed-step work can repeatedly win the actor
                     // race and leave a successful Q lifecycle with no pixels.
                     initialForegroundSurfaceCaptureInFlight = true
+                    defer { initialForegroundSurfaceCaptureInFlight = false }
                     await refreshClientSurface(request:
                         GModGameSurfaceRefreshRequest(
                             generation: GModGameSessionGenerationToken(
@@ -1454,12 +1456,47 @@ final class GModGameSessionModel: ObservableObject {
                             scope: .all
                         )
                     )
-                    initialForegroundSurfaceCaptureInFlight = false
+                    guard requestedGeneration == sessionGeneration, isReady else { return }
                     // A hard renderer failure also completes this one-shot
                     // transition attempt. Passive 120 Hz host frames must not
                     // immediately turn missing content into a rebuild loop.
                     capturedInitialMenuSurface =
                         surfaceScene != nil || lastSurfaceFailure != nil
+                    if surfaceScene == nil, lastSurfaceFailure != nil,
+                       let failedMenu = activeClientMenu,
+                       let recoveryPointerEpoch = pointerEpoch,
+                       let recoveryInputEpoch = inputEpoch {
+                        // Do not leave a logically open but invisible Q/C
+                        // owner swallowing world controls. Close through the
+                        // same original Lua lifecycle and FIFO as a user tap;
+                        // a subsequent tap is a fresh explicit retry.
+                        do {
+                            let recovery = try await lane.transitionClientMenu(
+                                from: failedMenu.playableMenu, to: nil,
+                                cancelActivePointer: true,
+                                cancellationTimestamp: Date().timeIntervalSinceReferenceDate,
+                                expectedGeneration: requestedLaneGeneration,
+                                expectedPointerEpoch: recoveryPointerEpoch,
+                                expectedInputEpoch: recoveryInputEpoch
+                            )
+                            guard requestedGeneration == sessionGeneration, isReady else { return }
+                            pointerEpoch = recovery.pointerEpoch
+                            inputEpoch = recovery.inputEpoch
+                            activeClientMenu = recovery.committedMenu.map(GModGameClientMenu.init)
+                            reportPointerCancellationFailure(recovery.cancellationFailure)
+                            if let failure = recovery.lifecycleFailure {
+                                appendLog("[CLIENT][VGUI] Invisible menu recovery failed: \(failure)")
+                            }
+                            if activeClientMenu == nil {
+                                foregroundSurfaceRetryBudget.cancel()
+                                pointerMailbox.setEnabled(false)
+                                surfaceStatus = "VGUI menu closed after failed first frame; tap Q/C to retry"
+                            }
+                        } catch {
+                            guard requestedGeneration == sessionGeneration else { return }
+                            appendLog("[CLIENT][VGUI] Invisible menu recovery failed: \(GMLuaRuntime.describe(error))")
+                        }
+                    }
                 }
                 if isInputSuspended {
                     beginInputSuspensionIfPossible()
@@ -1609,6 +1646,14 @@ final class GModGameSessionModel: ObservableObject {
         _ snapshot: GMLuaSurfaceFrameSnapshot,
         token: GModSurfacePublicationToken
     ) async {
+        // Think/Paint must still run, but an unchanged complete command stream
+        // does not need another CoreText/texture build or Metal publication.
+        // Never reuse an unresolved scene: newly available assets must retry.
+        if surfaceScene != nil, surfaceTokenIsCurrent(token),
+           lastPublishedSurfaceSnapshot == snapshot {
+            lastForegroundSurfaceCompletionTime = ProcessInfo.processInfo.systemUptime
+            return
+        }
         if token.activeMenu != nil {
             let needsResolvedPublication =
                 GModGameForegroundSurfacePublicationPolicy
@@ -1627,7 +1672,7 @@ final class GModGameSessionModel: ObservableObject {
                 )
                 guard surfaceTokenIsCurrent(token) else { return }
                 if let scene = resolvedBuild.scene {
-                    if publishSurfaceScene(scene) {
+                    if publishSurfaceScene(scene, snapshot: snapshot) {
                         lastForegroundSurfaceCompletionTime =
                             ProcessInfo.processInfo.systemUptime
                     }
@@ -1647,7 +1692,7 @@ final class GModGameSessionModel: ObservableObject {
         let build = await makeResolvedSurfaceBuild(snapshot: snapshot)
         guard surfaceTokenIsCurrent(token) else { return }
         if let scene = build.scene {
-            publishSurfaceScene(scene)
+            publishSurfaceScene(scene, snapshot: snapshot)
         } else if let failure = build.failure {
             publishSurfaceFailure("surface build failed: \(failure)")
         }
@@ -1719,7 +1764,7 @@ final class GModGameSessionModel: ObservableObject {
             }.value
             guard surfaceTokenIsCurrent(request.token) else { continue }
             if let scene = build.scene {
-                _ = publishSurfaceScene(scene)
+                _ = publishSurfaceScene(scene, snapshot: request.snapshot)
             } else if let failure = build.failure {
                 publishSurfaceFailure("surface build failed: \(failure)")
             }
@@ -1744,6 +1789,7 @@ final class GModGameSessionModel: ObservableObject {
     @discardableResult
     private func publishSurfaceScene(
         _ scene: GModMetalSurfaceScene,
+        snapshot: GMLuaSurfaceFrameSnapshot,
         statusPrefix: String = "VGUI"
     ) -> Bool {
         guard GModGameForegroundSurfacePublicationPolicy
@@ -1774,6 +1820,9 @@ final class GModGameSessionModel: ObservableObject {
             return false
         }
         surfaceScene = scene
+        lastPublishedSurfaceSnapshot = scene.diagnostics.unresolvedCommands.isEmpty &&
+            scene.diagnostics.droppedSnapshotCommandCount == 0 &&
+            scene.diagnostics.captureDiagnostics.droppedCommandCount == 0 ? snapshot : nil
         if activeClientMenu != nil {
             foregroundSurfaceRetryBudget.cancel()
         }
@@ -1821,6 +1870,7 @@ final class GModGameSessionModel: ObservableObject {
 
     private func invalidateSurfaceRequests() {
         surfaceRequestRevision &+= 1
+        lastPublishedSurfaceSnapshot = nil
         surfaceRefreshQueue.removeAll()
         pendingForegroundSurfaceBuild = nil
         lastForegroundSurfaceCompletionTime = nil
