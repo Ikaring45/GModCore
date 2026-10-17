@@ -3,6 +3,17 @@ import GModEngine
 @testable import GModGameSession
 
 final class GModSpawnMenuInteractionTests: XCTestCase {
+    func testStockHintsRemainValidAcrossExplicitCollections() throws {
+        let session = try GModPlayableSession(
+            configuration: .init(map: .flatgrass), logger: { _, _ in })
+        defer { _ = try? session.close() }
+        _ = try session.updateViewport(width: 1024, height: 768)
+        for _ in 0..<4 {
+            try session.clientRuntime.execute("collectgarbage('collect'); notification.AddLegacy('Hint regression', NOTIFY_HINT, 10)", sourceName: "=(hint GC regression)")
+            _ = try session.runFixedTick()
+            _ = try session.renderClientVGUIFrame()
+        }
+    }
     func testStockRopeMaterialLayoutSettlesAtIPadViewport() throws {
         let session = try GModPlayableSession(
             configuration: GModPlayableSessionConfiguration(map: .construct), logger: { _, _ in })

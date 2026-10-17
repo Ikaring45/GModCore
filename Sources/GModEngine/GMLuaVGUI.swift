@@ -2639,6 +2639,9 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
             + panelValues
             + instanceTables
             + [worldPanelValue, .table(worldPanelDescriptor.instanceTable)]
+            // The overlay is an engine-owned root, not an entry in `panels`.
+            // Stock notifications create children here after timer/GC activity.
+            + [overlayPanelValue, .table(overlayPanelDescriptor.instanceTable)]
             + [.table(panelMetatable), semanticIndex]
     }
 
