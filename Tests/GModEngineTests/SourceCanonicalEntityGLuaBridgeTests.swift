@@ -5,6 +5,41 @@ import XCTest
 import GModLua
 
 final class SourceCanonicalEntityGLuaBridgeTests: XCTestCase {
+    func testCountOnlyLayoutCannotMasqueradeAsStudioAppearance() throws {
+        let runtime = makeRuntime()
+        let model = SourceEntityModelReference("models/test/count_only.mdl")
+        let layout = try SourceStudioBodyGroupLayout(bodyParts: [
+            .init(modelSelectionBase: 1, modelCount: 2)
+        ])
+        let adapter = try GMLuaSourceRuntimeAdapter(serverRuntime: runtime,
+            canonicalModelValidator: { _, _ in .valid },
+            canonicalBodyGroupLayoutResolver: { _ in layout })
+        defer { try? adapter.close(); _ = runtime.close() }
+        try adapter.installCanonicalEntityLuaBridge()
+        let values = try runtime.executeReturningValues("""
+            countOnlyProp = ents.Create('prop_physics')
+            countOnlyProp:SetModel('models/test/count_only.mdl')
+            return countOnlyProp
+            """)
+        let value = try XCTUnwrap(values.first)
+        let before = try XCTUnwrap(runtime.entityRegistry?.canonicalSnapshot(for: value))
+        let pending = adapter.pendingCanonicalEntityOperationCount
+        XCTAssertThrowsError(try adapter.canonicalModelAppearance(for: model)) { error in
+            guard case let .canonicalAppearanceUnavailable(rejected)? = error as? GMLuaSourceRuntimeAdapterError else {
+                return XCTFail("unexpected appearance failure: \(error)")
+            }
+            XCTAssertEqual(rejected, model)
+        }
+        try runtime.execute("""
+            local ok, message = pcall(countOnlyProp.SetSkin, countOnlyProp, 0)
+            assert(not ok and string.find(message, 'appearance metadata is unavailable', 1, true))
+            local queryOK, queryMessage = pcall(countOnlyProp.GetBodyGroups, countOnlyProp)
+            assert(not queryOK and string.find(queryMessage, 'appearance metadata is unavailable', 1, true))
+            """)
+        XCTAssertEqual(runtime.entityRegistry?.canonicalSnapshot(for: value), before)
+        XCTAssertEqual(adapter.pendingCanonicalEntityOperationCount, pending)
+    }
+
     func testPlayerQueriesAndPropMutationsUseCanonicalSnapshots() throws {
         let runtime = makeRuntime()
         let acceptedModel = SourceEntityModelReference(
@@ -269,6 +304,10 @@ final class SourceCanonicalEntityGLuaBridgeTests: XCTestCase {
     func testBodyGroupFailuresLeaveCanonicalStateRevisionAndJournalExact() throws {
         let acceptedModel = SourceEntityModelReference("models/props/test.mdl")
         let mesh = makeBodyGroupMesh()
+        let layout = try makeSyntheticStudioBodyGroupLayout(model: acceptedModel,
+            bodyParts: mesh.bodyParts.map {
+                .init(modelSelectionBase: $0.modelSelectionBase, modelCount: $0.models.count)
+            }, checksum: mesh.checksum)
         let runtime = makeRuntime()
         let adapter = try GMLuaSourceRuntimeAdapter(
             serverRuntime: runtime,
@@ -282,7 +321,8 @@ final class SourceCanonicalEntityGLuaBridgeTests: XCTestCase {
                     applyingBodyGroups: subModelIDs,
                     to: currentBodyValue
                 )
-            }
+            },
+            canonicalBodyGroupLayoutResolver: { candidate in candidate == acceptedModel ? layout : nil }
         )
         defer {
             try? adapter.close()
@@ -400,6 +440,9 @@ final class SourceCanonicalEntityGLuaBridgeTests: XCTestCase {
                     applyingBodyGroups: subModelIDs,
                     to: currentBodyValue
                 )
+            },
+            canonicalBodyGroupLayoutResolver: { candidate in
+                try repository.bodyGroupLayout(for: candidate)
             }
         )
         defer {

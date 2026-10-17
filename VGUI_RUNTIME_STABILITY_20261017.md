@@ -217,3 +217,25 @@ canonical Studio appearance/bodygroup resolvers, sky texture availability,
 platform-dependent allocation estimates and exact float comparisons. The
 Source-engine goal remains incomplete; passing focused animation tests does
 not clear these failures or establish release readiness.
+
+## Canonical appearance route fixture correction (unreleased)
+
+The Apple appearance failures were reproduced in test configuration: injected
+count/base-only layouts were still being used by stock SetupHands, whose current
+route also invokes SetSkin and GetBodyGroups. Production repository resolution
+already decodes appearance from the validated asset; the count-only attestation
+intentionally cannot supply unknown names or skin families.
+
+Route fixtures now supply explicit synthetic appearance metadata (clearly named
+fixture groups/submodels). The stock prop fixture supplies its own appearance
+resolver, and the repository-backed bridge fixture installs the actual repository
+layout resolver rather than only its body-value mutation callback. No shipped
+MDL metadata is guessed, and no runtime fallback or failure boundary is relaxed.
+
+Validation: 13 focused Windows tests passed: stock SetupHands and replacement,
+stock SpawnIcon/gm_spawn/replication/undo, original Sandbox PlayerSpawn, bridge
+transactional rejection, repository-backed layout resolution, appearance FIFO
+and resource selection. A new count-only-layout test explicitly rejects skin
+mutation and body-group name queries while preserving the exact canonical
+snapshot/revision and pending journal. This corrects fixture coverage, not a
+claim that shipped assets or physical iPad behavior have been newly validated.

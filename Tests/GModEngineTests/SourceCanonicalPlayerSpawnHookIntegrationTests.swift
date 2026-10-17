@@ -202,13 +202,13 @@ final class SourceCanonicalPlayerSpawnHookIntegrationTests: XCTestCase {
         // This fixture stands in for already-decoded Studio metadata only in
         // the route test. Production sessions resolve the same fields from
         // validated MDL/VVD/VTX bytes or an exact full-identity attestation.
-        let playerBodyGroupLayout = try SourceStudioBodyGroupLayout(
+        let playerBodyGroupLayout = try makeSyntheticStudioBodyGroupLayout(model: playerModel,
             bodyParts: [
                 .init(modelSelectionBase: 1, modelCount: 2),
                 .init(modelSelectionBase: 2, modelCount: 3),
             ]
         )
-        let handsBodyGroupLayout = try SourceStudioBodyGroupLayout(
+        let handsBodyGroupLayout = try makeSyntheticStudioBodyGroupLayout(model: handsModel,
             bodyParts: [
                 .init(modelSelectionBase: 1, modelCount: 2),
                 .init(modelSelectionBase: 2, modelCount: 1),

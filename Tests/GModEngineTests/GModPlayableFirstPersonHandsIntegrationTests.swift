@@ -11,13 +11,13 @@ final class GModPlayableFirstPersonHandsIntegrationTests: XCTestCase {
         let handsModel = SourceEntityModelReference(
             "models/weapons/c_arms_citizen.mdl"
         )
-        let playerLayout = try SourceStudioBodyGroupLayout(
+        let playerLayout = try makeSyntheticStudioBodyGroupLayout(model: playerModel,
             bodyParts: [
                 .init(modelSelectionBase: 1, modelCount: 2),
                 .init(modelSelectionBase: 2, modelCount: 3),
             ]
         )
-        let handsLayout = try SourceStudioBodyGroupLayout(
+        let handsLayout = try makeSyntheticStudioBodyGroupLayout(model: handsModel,
             bodyParts: [
                 .init(modelSelectionBase: 1, modelCount: 2),
                 .init(modelSelectionBase: 2, modelCount: 1),

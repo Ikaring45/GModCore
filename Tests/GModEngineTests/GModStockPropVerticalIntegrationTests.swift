@@ -96,6 +96,11 @@ final class GModStockPropVerticalIntegrationTests: XCTestCase {
             },
             attestedPropPhysicsAssetResolverForTesting: resolver,
             attestedStudioBodyGroupMetadataForTesting: [bodyGroupMetadata],
+            canonicalBodyGroupLayoutResolverForTesting: { [model, studioChecksum] requested in
+                guard requested == model else { return nil }
+                return try makeSyntheticStudioBodyGroupLayout(model: model,
+                    bodyParts: bodyGroupMetadata.bodyParts, checksum: studioChecksum)
+            },
             studioRenderableModelCacheForTesting: renderCache
         )
         defer { _ = try? session.close() }

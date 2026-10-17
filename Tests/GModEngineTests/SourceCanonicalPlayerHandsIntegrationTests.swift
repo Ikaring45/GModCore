@@ -18,7 +18,7 @@ final class SourceCanonicalPlayerHandsIntegrationTests: XCTestCase {
         let handsModel = SourceEntityModelReference(
             "models/weapons/c_arms_citizen.mdl"
         )
-        let playerLayout = try SourceStudioBodyGroupLayout(
+        let playerLayout = try makeSyntheticStudioBodyGroupLayout(model: playerModel,
             bodyParts: [
                 .init(modelSelectionBase: 1, modelCount: 2),
                 .init(modelSelectionBase: 2, modelCount: 3),
@@ -26,7 +26,7 @@ final class SourceCanonicalPlayerHandsIntegrationTests: XCTestCase {
         )
         // A test-owned decoded Studio layout. Production resolves the same
         // descriptors from mounted MDL/VVD/VTX or exact owned attestation.
-        let handsLayout = try SourceStudioBodyGroupLayout(
+        let handsLayout = try makeSyntheticStudioBodyGroupLayout(model: handsModel,
             bodyParts: [
                 .init(modelSelectionBase: 1, modelCount: 2),
                 .init(modelSelectionBase: 2, modelCount: 1),
