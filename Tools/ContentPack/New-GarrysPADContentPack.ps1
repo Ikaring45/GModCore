@@ -305,7 +305,7 @@ function Get-CompressionLevel {
 
 function Add-FileToArchive {
     param(
-        [System.IO.Compression.ZipArchive] $Archive,
+        $Archive,
         [System.IO.FileInfo] $Source,
         [string] $LogicalPath
     )
@@ -385,6 +385,9 @@ if (Test-Path -LiteralPath $resolvedOutput) {
 }
 
 Add-Type -AssemblyName System.IO.Compression
+if (-not ('GarrysPADStoredZip64Writer' -as [type])) {
+    Add-Type -Path (Join-Path $PSScriptRoot 'StoredZip64Writer.cs')
+}
 $partialPath = "$resolvedOutput.partial-$([guid]::NewGuid().ToString('N'))"
 $stream = $null
 $archive = $null
@@ -395,11 +398,7 @@ try {
         [System.IO.FileAccess]::ReadWrite,
         [System.IO.FileShare]::None
     )
-    $archive = [System.IO.Compression.ZipArchive]::new(
-        $stream,
-        [System.IO.Compression.ZipArchiveMode]::Create,
-        $true
-    )
+    $archive = [GarrysPADStoredZip64Writer]::new($stream)
 
     $manifestFiles = [System.Collections.Generic.List[object]]::new()
     $completedBytes = [int64] 0

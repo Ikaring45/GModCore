@@ -51,7 +51,7 @@ internal sealed class PackWindow : Form
 
     public PackWindow()
     {
-        Text = "Garry's PAD  /  Content Builder 1.1.0";
+        Text = "Garry's PAD  /  Content Builder 1.1.1";
         Size = new Size(980, 760); MinimumSize = new Size(860, 680);
         AutoScaleMode = AutoScaleMode.Dpi;
         BackColor = Canvas; ForeColor = Color.FromArgb(237, 242, 247);
@@ -107,7 +107,7 @@ internal sealed class PackWindow : Form
         log.Multiline = true; log.ReadOnly = true; log.ScrollBars = ScrollBars.Both; log.WordWrap = false;
         log.Dock = DockStyle.Fill; log.Font = new Font("Consolas", 9);
         log.BackColor = Color.FromArgb(17, 21, 25); log.ForeColor = Color.FromArgb(183, 201, 217); log.BorderStyle = BorderStyle.FixedSingle;
-        log.Text = "> Content Builder 1.1.0\r\n> Select your installation and output archive to begin.\r\n";
+        log.Text = "> Content Builder 1.1.1\r\n> Select your installation and output archive to begin.\r\n";
         layout.Controls.Add(log, 0, 7); layout.SetColumnSpan(log, 3);
         for (int i = 0; i < 7; i++) layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));

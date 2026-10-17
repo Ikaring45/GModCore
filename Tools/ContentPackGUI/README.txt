@@ -1,7 +1,11 @@
-Garry's PAD Content Builder 1.1.0 | Windows x64
+Garry's PAD Content Builder 1.1.1 | Windows x64
+
+IMPORTANT: 1.1.1 fixes Windows PowerShell 5.1 ZIP output. Earlier builds could
+emit DEFLATE entries even with NoCompression, breaking the app's VPK range reads.
+This version writes STORED (method 0) directly with Zip64 and CRC32.
 
 Extract the entire ZIP and launch GarrysPAD-ZIP-Builder.exe.
-Keep the Scripts folder beside the executable.
+Keep the entire Scripts folder beside the executable, including StoredZip64Writer.cs.
 Requires Windows 10/11, .NET Framework 4.8 and Windows PowerShell 5.1.
 No administrator rights required. The executable is unsigned.
 

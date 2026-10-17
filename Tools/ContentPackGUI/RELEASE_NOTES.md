@@ -1,4 +1,15 @@
-# Garry's PAD Content Builder 1.1.0 — Windows
+# Garry's PAD Content Builder 1.1.1 — Windows
+
+Critical archive compatibility fix: Windows PowerShell 5.1/.NET Framework could
+write method-8 DEFLATE entries for NoCompression. Nested VPK range reads in the
+iPad runtime require method-0 STORED entries. The builder now streams STORED
+payloads directly with Zip64 offsets/sizes and CRC32, avoiding that runtime
+behavior entirely. Includes StoredZip64Writer.cs; keep it beside the scripts.
+
+Windows PowerShell 5.1 round-trip tests passed for empty, binary and Unicode
+entries; independent Python validation confirms method 0 and correct CRCs.
+Full multi-GB generation with the new writer remains unverified. Previously
+repaired owned ZIP passed all 2,298 payload hashes but is not new-writer proof.
 
 English-first redesign with a GMod-inspired charcoal palette, blue g badge,
 cleaner typography, spacious fields, a highlighted Build ZIP action and
