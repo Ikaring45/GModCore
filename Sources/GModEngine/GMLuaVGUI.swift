@@ -3683,17 +3683,22 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     }
 
     private func descendantIdentifiers(of root: Int) -> [Int] {
+        // Snapshot edges once in the existing dictionary iteration order.
+        // OnRemove ordering must not change to the sorted GetChildren order,
+        // but scanning the complete registry for every descendant is quadratic.
+        var children: [Int: [Int]] = [:]
+        for (identifier, value) in panels {
+            guard let descriptor = panelDescriptor(from: value),
+                  let parent = descriptor.parentIdentifier else { continue }
+            children[parent, default: []].append(identifier)
+        }
         var result: [Int] = []
         var pending = [root]
         var visited: Set<Int> = []
         while let current = pending.popLast() {
             guard visited.insert(current).inserted else { continue }
             result.append(current)
-            for (identifier, value) in panels {
-                guard let descriptor = panelDescriptor(from: value),
-                      descriptor.parentIdentifier == current else { continue }
-                pending.append(identifier)
-            }
+            pending.append(contentsOf: children[current] ?? [])
         }
         return result
     }

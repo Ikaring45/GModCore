@@ -400,6 +400,8 @@ HUD filtering, GC, touch and notifications retained their tested behavior.
 Physical iPad timings remain unmeasured.
 # Options entry point follow-up
 
+- Subtree deletion now snapshots parent edges once per traversal, preserving the previous dictionary sibling order for OnRemove while removing the per-descendant whole-registry scan. Traversal cost changes from O(panel count times subtree size) to O(panel count plus subtree size). A 128-level regression verifies exactly-once callbacks and survival of a reparented child. Focused registry/notification/MENU tests: 70 passed on Windows; no device latency claim.
+
 - The HTML command parser accepted `gamemenucommand OpenOptionsDialog` but silently ignored the direct engine entry point `RunGameUICommand("OpenOptionsDialog")`. Route this entry point to the existing layered MENU utility; also route its disconnect/resume/problems/quit commands. Unknown commands now appear in the Playgrounds console instead of disappearing silently.
 - Added parser regression assertions for direct Options, disconnect, unknown commands and quoted non-calls. Parser source type-checks on Windows. The standalone Swift interpreter could not execute the assertions because its JIT failed to resolve Foundation symbols; this is not a runtime test pass. Existing MENU settings/proble​​ms close/reopen tests: 5 passed.
 - This addresses a missing entry point, not confirmed attribution of the physical-device failure. The current settings utility is still the limited host-backed Derma settings window, not complete original Source Options resource parity. Physical iPad opening remains unverified.

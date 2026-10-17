@@ -5,6 +5,31 @@ import GModGameAssets
 import GModLua
 
 final class GMLuaVGUIRegistryTests: XCTestCase {
+    func testDeepSubtreeRemovalNotifiesOnceAndPreservesReparentedChild() throws {
+        let state = LuaState(output: { _ in })
+        let types = try GMLuaTypeSystem.install(into: state, utilityLayer: .bundledFallback)
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: types)
+        try state.execute("""
+            ROOT = vgui.Create('Panel')
+            OTHER = vgui.Create('Panel')
+            REMOVED = 0
+            local parent = ROOT
+            ROOT.OnRemove = function() REMOVED = REMOVED + 1 end
+            for i = 1, 128 do
+                parent = vgui.Create('Panel', parent)
+                parent.OnRemove = function() REMOVED = REMOVED + 1 end
+            end
+            SURVIVOR = vgui.Create('Panel', parent)
+            SURVIVOR:SetParent(OTHER)
+            ROOT:Remove()
+            assert(IsValid(SURVIVOR))
+            """)
+        _ = try registry.performPendingLayouts()
+        try state.execute("assert(REMOVED == 129 and IsValid(SURVIVOR) and SURVIVOR:GetParent() == OTHER)")
+        _ = try registry.performPendingLayouts()
+        try state.execute("assert(REMOVED == 129)")
+    }
+
     func testWarmChildIndexSurvivesNoticeCreationReparentAndRemovalWithoutGlobalRebuild() throws {
         let state = LuaState(output: { _ in })
         let types = try GMLuaTypeSystem.install(into: state, utilityLayer: .bundledFallback)
