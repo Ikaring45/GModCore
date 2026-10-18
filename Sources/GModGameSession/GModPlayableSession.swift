@@ -1761,8 +1761,11 @@ public final class GModPlayableSession {
     /// Paints the live CLIENT VGUI tree into renderer-neutral surface
     /// commands using the same registry, surface state, and viewport exposed
     /// to the bundled Sandbox Lua runtime.
+    /// The optional CPU profile observer runs after the successful snapshot;
+    /// it must not reenter or mutate the runtime. It is not GPU timing.
     public func renderClientVGUIFrame(
-        scope: GMLuaVGUIRenderScope = .all
+        scope: GMLuaVGUIRenderScope = .all,
+        onFrameProfile: ((GMLuaVGUIFrameProfile) -> Void)? = nil
     ) throws -> GMLuaSurfaceFrameSnapshot {
         try ensureOpen()
         _ = try clientVGUIRegistry()
@@ -1775,7 +1778,8 @@ public final class GModPlayableSession {
         return try clientRuntime.renderVGUIFrame(
             viewportWidth: viewport.width,
             viewportHeight: viewport.height,
-            scope: scope
+            scope: scope,
+            onFrameProfile: onFrameProfile
         )
     }
 

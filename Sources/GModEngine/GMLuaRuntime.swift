@@ -239,7 +239,8 @@ public final class GMLuaRuntime {
     public func renderVGUIFrame(
         viewportWidth: Int,
         viewportHeight: Int,
-        scope: GMLuaVGUIRenderScope = .all
+        scope: GMLuaVGUIRenderScope = .all,
+        onFrameProfile: ((GMLuaVGUIFrameProfile) -> Void)? = nil
     ) throws -> GMLuaSurfaceFrameSnapshot {
         guard let registry = vguiRegistry, let surface = surfaceCommandState else {
             throw LuaError.runtime("VGUI render surface is unavailable")
@@ -260,7 +261,8 @@ public final class GMLuaRuntime {
                 guard reportedVGUIFrameFailures.count < 64 else { return }
                 reportedVGUIFrameFailures.append(message)
                 logger(message)
-            }
+            },
+            onFrameProfile: onFrameProfile
         )
     }
 

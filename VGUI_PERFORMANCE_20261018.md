@@ -62,3 +62,25 @@ test skipped, no failures. It includes resource-backed controls and all six
 stock spawn/context-menu interaction cases. The owned-pack second-open layout
 count is now asserted zero rather than merely printed; a repeat observed Q
 74.7ms and C 5.2ms, with unchanged draw-command counts.
+
+## Opt-in stage timing
+
+`renderClientVGUIFrame(onFrameProfile:)` now exposes monotonic nanosecond CPU
+stage timings through the normal session/runtime/registry path. No clock reads
+are performed without the observer; the observer is invoked once after the
+successful command snapshot, outside the measured stages. It must not reenter
+or mutate the runtime. This does not measure Metal submission or presentation.
+
+Owned-pack Windows Debug sample after the Label correction:
+
+| Stage, ms | First Q frame | Reopened Q warm mean | Reopened C warm mean |
+| --- | ---: | ---: | ---: |
+| Layout/docking | 998.7 | 0.85 | 0.70 |
+| AnimationThink/Think | 29.1 | 12.90 | 1.07 |
+| Render tree | 0.63 | 0.61 | 0.49 |
+| Paint/PaintOver and command snapshot | 58.9 | 58.86 | 3.33 |
+
+The next primary targets are cold Lua layout and steady-state Lua painting,
+not render-tree construction. Profiling is opt-in, and a regression compares
+observed/unobserved draw commands. The owned-pack profile asserts one timing
+record per frame and retains the zero-layout reopened-menu regression.

@@ -23,16 +23,22 @@ final class GarrysPADContentPackTests: XCTestCase {
                 else { try session.setSpawnMenuOpen(true) }
                 let openMS = (ProcessInfo.processInfo.systemUptime - opened) * 1000
                 var frameMS: [Double] = []
+                var profiles: [GMLuaVGUIFrameProfile] = []
                 var commands = 0
                 let layouts = registry.completedLayoutPassCount
                 for _ in 0..<10 {
                     let before = ProcessInfo.processInfo.systemUptime
-                    let frame = try session.renderClientVGUIFrame()
+                    let frame = try session.renderClientVGUIFrame(onFrameProfile: { profiles.append($0) })
                     frameMS.append((ProcessInfo.processInfo.systemUptime - before) * 1000)
                     commands = frame.commands.count
                     XCTAssertGreaterThan(commands, 0)
                 }
                 print("[Owned VGUI profile] menu=\(context ? "C" : "Q") cycle=\(cycle) open-ms=\(openMS) first-frame-ms=\(frameMS[0]) warm-mean-ms=\(frameMS.dropFirst().reduce(0, +) / 9) panels=\(registry.livePanelCount) layouts=\(registry.completedLayoutPassCount - layouts) commands=\(commands)")
+                XCTAssertEqual(profiles.count, 10)
+                let first = try XCTUnwrap(profiles.first)
+                print("[Owned VGUI stages ms] menu=\(context ? "C" : "Q") cycle=\(cycle) first layout=\(Double(first.layoutNanoseconds) / 1e6) think=\(Double(first.callbackNanoseconds) / 1e6) tree=\(Double(first.treeNanoseconds) / 1e6) paint=\(Double(first.paintNanoseconds) / 1e6)")
+                let warm = profiles.dropFirst()
+                print("[Owned VGUI stages ms] warm layout=\(warm.reduce(0.0) { $0 + Double($1.layoutNanoseconds) } / 9e6) think=\(warm.reduce(0.0) { $0 + Double($1.callbackNanoseconds) } / 9e6) tree=\(warm.reduce(0.0) { $0 + Double($1.treeNanoseconds) } / 9e6) paint=\(warm.reduce(0.0) { $0 + Double($1.paintNanoseconds) } / 9e6)")
                 if cycle == 2 {
                     XCTAssertEqual(registry.completedLayoutPassCount, layouts,
                         "Unchanged reopened menus must not perpetually relayout their DTab controls")

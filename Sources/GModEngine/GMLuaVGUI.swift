@@ -1,5 +1,15 @@
 import Foundation
+import Dispatch
 import GModLua
+
+/// Opt-in CPU diagnostics, not GPU timing. No clock reads occur when the
+/// observer is absent. Values cover successful frame stages only.
+public struct GMLuaVGUIFrameProfile: Equatable, Sendable {
+    public let layoutNanoseconds: UInt64
+    public let callbackNanoseconds: UInt64
+    public let treeNanoseconds: UInt64
+    public let paintNanoseconds: UInt64
+}
 
 /// Value-only foreground color retained by the logical VGUI host.
 ///
@@ -2057,8 +2067,10 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         viewportWidth: Int,
         viewportHeight: Int,
         scope: GMLuaVGUIRenderScope = .all,
-        onCallbackFailure: ((Int, String, Error) -> Void)? = nil
+        onCallbackFailure: ((Int, String, Error) -> Void)? = nil,
+        onFrameProfile: ((GMLuaVGUIFrameProfile) -> Void)? = nil
     ) throws -> GMLuaSurfaceFrameSnapshot {
+        let layoutStart = onFrameProfile.map { _ in DispatchTime.now().uptimeNanoseconds }
         // Native VGUI resolves Dock against the implicit world panel before
         // Lua PerformLayout. A second resolution after Lua layout captures any
         // size/dock changes the callbacks made before the final tree is built.
@@ -2089,15 +2101,18 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         // while SetTerm/NewAnimation work is active; executing that live Lua
         // callback is what makes DNotify expiry, AlphaTo and LerpPositions
         // real state transitions instead of inert compatibility methods.
+        let callbackStart = layoutStart.map { _ in DispatchTime.now().uptimeNanoseconds }
         try dispatchVisiblePanelFrameCallbacks(
             scope: scope,
             onCallbackFailure: onCallbackFailure
         )
+        let treeStart = layoutStart.map { _ in DispatchTime.now().uptimeNanoseconds }
         let tree = renderTree(
             viewportWidth: viewportWidth,
             viewportHeight: viewportHeight,
             scope: scope
         )
+        let paintStart = layoutStart.map { _ in DispatchTime.now().uptimeNanoseconds }
         surface.beginFrame(viewportWidth: viewportWidth, viewportHeight: viewportHeight)
         let byParent = Dictionary(grouping: tree, by: \.parentIdentifier)
 
@@ -2164,7 +2179,14 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         case .overlay:
             for root in byParent[Self.overlayPanelIdentifier] ?? [] { try paint(root) }
         }
-        return surface.frameSnapshot
+        let snapshot = surface.frameSnapshot
+        if let onFrameProfile, let layoutStart, let callbackStart, let treeStart, let paintStart {
+            let end = DispatchTime.now().uptimeNanoseconds
+            onFrameProfile(GMLuaVGUIFrameProfile(layoutNanoseconds: callbackStart - layoutStart,
+                callbackNanoseconds: treeStart - callbackStart, treeNanoseconds: paintStart - treeStart,
+                paintNanoseconds: end - paintStart))
+        }
+        return snapshot
     }
 
     /// Runs a stable start-of-boundary set. Panels created by a callback begin

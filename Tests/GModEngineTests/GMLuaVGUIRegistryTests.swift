@@ -5,6 +5,30 @@ import GModGameAssets
 import GModLua
 
 final class GMLuaVGUIRegistryTests: XCTestCase {
+    func testOptInFrameProfilePreservesCommandsAndRunsAfterPaint() throws {
+        let state = LuaState(output: { _ in })
+        let types = try GMLuaTypeSystem.install(into: state, utilityLayer: .bundledFallback)
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: types)
+        let surface = try GMLuaSurface.install(into: state)
+        try state.execute("""
+            PROFILE_PANEL = vgui.Create('Panel')
+            PROFILE_PANEL.Paint = function(self, w, h)
+                surface.SetDrawColor(255, 0, 0, 255)
+                surface.DrawRect(0, 0, w, h)
+                PROFILE_PAINTED = true
+            end
+            """)
+        let baseline = try registry.renderFrame(surface: surface, viewportWidth: 320, viewportHeight: 240)
+        try state.execute("PROFILE_PAINTED = false")
+        var profiles: [GMLuaVGUIFrameProfile] = []
+        let observed = try registry.renderFrame(surface: surface, viewportWidth: 320, viewportHeight: 240,
+            onFrameProfile: { profiles.append($0) })
+        XCTAssertEqual(observed.commands, baseline.commands)
+        XCTAssertEqual(profiles.count, 1)
+        XCTAssertGreaterThan(try XCTUnwrap(profiles.first).paintNanoseconds, 0)
+        try state.execute("assert(PROFILE_PAINTED)")
+    }
+
     func testLabelInsetInsideLayoutDoesNotPerpetuallyRequeueItself() throws {
         let state = LuaState(output: { _ in })
         let types = try GMLuaTypeSystem.install(into: state, utilityLayer: .bundledFallback)
