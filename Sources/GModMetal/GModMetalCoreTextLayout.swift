@@ -10,7 +10,7 @@ public struct GModMetalCoreTextLayout {
     public let ascents: [CGFloat]
     public let widths: [Double]
 
-    public init(text: String, font: CTFont, requestedTall: Int) {
+    public init(text: String, font: CTFont, requestedTall: Int, fitsFallbackGlyphs: Bool = true) {
         let strings = text.split(separator: "\n", omittingEmptySubsequences: false)
         let usesJapaneseKana = text.unicodeScalars.contains {
             (0x3040...0x30FF).contains($0.value) || (0xFF66...0xFF9F).contains($0.value)
@@ -39,18 +39,21 @@ public struct GModMetalCoreTextLayout {
         let tall = CGFloat(max(1, requestedTall))
         // Normalize per font, never per input string: measuring "ABC" as a
         // caret prefix must use the same size as "ABC日本語" in the full line.
-        let probe = CTLineCreateWithAttributedString(NSAttributedString(
-            string: "Ag日本語かなカナ",
-            attributes: [
-                NSAttributedString.Key(kCTFontAttributeName as String): font,
-                NSAttributedString.Key(kCTLanguageAttributeName as String): "ja"
-            ]
-        ))
-        let m = metrics(probe)
-        let maximumHeight = max(
-            CTFontGetAscent(font) + CTFontGetDescent(font) + CTFontGetLeading(font),
-            m.ascent + m.descent + max(0, m.leading)
-        )
+        let faceHeight = CTFontGetAscent(font) + CTFontGetDescent(font) + CTFontGetLeading(font)
+        // A symbol image must not shrink to accommodate unrelated CJK probe
+        // fallback glyphs. Its supported characters come from the exact face.
+        var maximumHeight = faceHeight
+        if fitsFallbackGlyphs {
+            let probe = CTLineCreateWithAttributedString(NSAttributedString(
+                string: "Ag日本語かなカナ",
+                attributes: [
+                    NSAttributedString.Key(kCTFontAttributeName as String): font,
+                    NSAttributedString.Key(kCTLanguageAttributeName as String): "ja"
+                ]
+            ))
+            let m = metrics(probe)
+            maximumHeight = max(faceHeight, m.ascent + m.descent + max(0, m.leading))
+        }
         var fitted = font
         if maximumHeight.isFinite, maximumHeight > tall + 0.01 {
             fitted = CTFontCreateCopyWithAttributes(

@@ -33,6 +33,8 @@ Native resource colors now apply, when an explicit Scheme is supplied, to:
 - Button normal/hover/depressed foreground, background and line border;
 - segmented ProgressBar foreground/background;
 - CCvarSlider thumb, track, caption and disabled tick colors.
+- CheckButton caption/check-image normal, selected, hover and disabled colors,
+  using the original layered Marlett symbols (SOURCE_GAMEUI_CHECKBUTTON.md).
 
 The loading app path supplies the actual mounted Scheme. Without a Scheme,
 legacy adapter calls retain their existing behavior. Controls still using the

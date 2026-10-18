@@ -7,6 +7,7 @@ public enum GModMetalCoreTextRasterizerError: Error, Sendable, Equatable,
     CustomStringConvertible
 {
     case unsupportedFontEffects([String])
+    case unsupportedSymbolText(String)
     case unresolvedFont(String)
     case unavailableFontTraits(String)
     case invalidMetrics
@@ -17,6 +18,8 @@ public enum GModMetalCoreTextRasterizerError: Error, Sendable, Equatable,
         switch self {
         case let .unsupportedFontEffects(effects):
             return "unsupported CoreText font effects: \(effects.joined(separator: ", "))"
+        case let .unsupportedSymbolText(name):
+            return "unsupported symbol font or character in '\(name)'"
         case let .unresolvedFont(name):
             return "CoreText did not resolve requested font '\(name)'"
         case let .unavailableFontTraits(name):
@@ -64,6 +67,7 @@ public final class GModMetalCoreTextRasterizer:
         let weight: Int
         let italic: Bool
         let antialias: Bool
+        let symbol: Bool
     }
 
     public init(
@@ -112,6 +116,14 @@ public final class GModMetalCoreTextRasterizer:
         }
 
         let requestedName = String(decoding: descriptor.font.bytes, as: UTF8.self)
+        let layoutText: String
+        if descriptor.symbol {
+            guard GMLuaMarlettSymbolText.supports(face: requestedName),
+                  let mapped = GMLuaMarlettSymbolText.mapped(text) else {
+                throw GModMetalCoreTextRasterizerError.unsupportedSymbolText(requestedName)
+            }
+            layoutText = mapped
+        } else { layoutText = text }
         let resolvedByHost = fontNameResolver?(
             requestedName,
             descriptor.weight,
@@ -124,7 +136,8 @@ public final class GModMetalCoreTextRasterizer:
             size: descriptor.size,
             weight: descriptor.weight,
             italic: descriptor.italic,
-            antialias: descriptor.antialias
+            antialias: descriptor.antialias,
+            symbol: descriptor.symbol
         )
         if let cached = cachedBitmap(for: cacheKey) { return cached }
 
@@ -137,6 +150,9 @@ public final class GModMetalCoreTextRasterizer:
         )
         guard Self.font(base, matches: baseName) else {
             throw GModMetalCoreTextRasterizerError.unresolvedFont(baseName)
+        }
+        if descriptor.symbol, !Self.font(base, matches: requestedName) {
+            throw GModMetalCoreTextRasterizerError.unresolvedFont(requestedName)
         }
 
         let styled: CTFont
@@ -182,9 +198,24 @@ public final class GModMetalCoreTextRasterizer:
             CGFloat(pointSize),
             nil
         )
+        if descriptor.symbol {
+            let characters = Array(layoutText.utf16.filter { $0 != 10 })
+            var glyphs = [CGGlyph](repeating: 0, count: characters.count)
+            if !characters.isEmpty {
+                let mapped = characters.withUnsafeBufferPointer { input in
+                    glyphs.withUnsafeMutableBufferPointer { output in
+                        CTFontGetGlyphsForCharacters(font, input.baseAddress!, output.baseAddress!, input.count)
+                    }
+                }
+                guard mapped, !glyphs.contains(0) else {
+                    throw GModMetalCoreTextRasterizerError.unsupportedSymbolText(requestedName)
+                }
+            }
+        }
 
         let layout = GModMetalCoreTextLayout(
-            text: text, font: font, requestedTall: descriptor.size
+            text: layoutText, font: font, requestedTall: descriptor.size,
+            fitsFallbackGlyphs: !descriptor.symbol
         )
         let coreTextLines = layout.lines
         let widths = layout.widths
@@ -315,7 +346,6 @@ public final class GModMetalCoreTextRasterizer:
         if descriptor.scanlines != 0 { effects.append("scanlines") }
         if descriptor.underline { effects.append("underline") }
         if descriptor.strikeout { effects.append("strikeout") }
-        if descriptor.symbol { effects.append("symbol") }
         if descriptor.rotary { effects.append("rotary") }
         if descriptor.shadow { effects.append("shadow") }
         if descriptor.additive { effects.append("additive") }

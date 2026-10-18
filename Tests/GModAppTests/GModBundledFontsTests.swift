@@ -8,6 +8,38 @@ import CoreText
 @testable import GModApp
 
 final class GModBundledFontsTests: XCTestCase {
+    func testMarlettSymbolMeasurementAndRasterUseTheExactBundledFace() throws {
+        let factory = GModAppRuntimeFactory()
+        let runtime = factory.makeRuntime(realm: .menu, logger: { _ in })
+        defer { _ = runtime.close() }
+        try runtime.execute("surface.CreateFont('SourceCheckImageProbe', {font='Marlett',size=14,weight=0,symbol=true,antialias=false})")
+        let font = try XCTUnwrap(runtime.surfaceCommandState?.fontDescriptor(named: "SourceCheckImageProbe"))
+        let measurer = GModCoreTextMeasurer()
+        let face = CTFontCreateWithName("marlett" as CFString, 14, nil)
+        XCTAssertEqual((CTFontCopyPostScriptName(face) as String).lowercased(), "marlett")
+        for text in ["g", "e", "f", "b"] {
+            let mapped = try XCTUnwrap(GMLuaMarlettSymbolText.mapped(text))
+            var character = try XCTUnwrap(mapped.utf16.first)
+            var glyph: CGGlyph = 0
+            XCTAssertTrue(CTFontGetGlyphsForCharacters(face, &character, &glyph, 1))
+            XCTAssertNotEqual(glyph, 0, "No substitute/tofu glyph for the native check image")
+            let measurement = measurer.measure(LuaString(text), using: font)
+            let bitmap = try XCTUnwrap(factory.surfaceTextRasterizer.rasterizeSurfaceText(text, font: font))
+            XCTAssertEqual(bitmap.width, measurement.width)
+            XCTAssertEqual(bitmap.height, measurement.height)
+            XCTAssertEqual(bitmap.height, 14)
+            XCTAssertTrue(stride(from: 3, to: bitmap.premultipliedRGBA8.count, by: 4).contains {
+                bitmap.premultipliedRGBA8[$0] > 0
+            })
+            XCTAssertTrue(bitmap.resourceIdentifier.lowercased().contains("marlett"))
+        }
+        XCTAssertThrowsError(try factory.surfaceTextRasterizer.rasterizeSurfaceText("z", font: font))
+        let wrongFace = GModMetalCoreTextRasterizer(fontNameResolver: { _, _, _ in "Roboto-Regular" })
+        XCTAssertThrowsError(try wrongFace.rasterizeSurfaceText("g", font: font)) {
+            XCTAssertEqual($0 as? GModMetalCoreTextRasterizerError, .unresolvedFont("Marlett"))
+        }
+    }
+
     func testJapaneseMeasurementCacheIsBoundedAndTracksFontRedefinition() throws {
         let factory = GModAppRuntimeFactory()
         let client = factory.makeRuntime(realm: .client, logger: { _ in })

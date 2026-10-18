@@ -4,6 +4,85 @@ import GModEngine
 import GModGameAssets
 
 final class SourceVGUISchemeTests: XCTestCase {
+    func testSourceCheckButtonUsesAuthoredColorsMarlettLayersAndSingleClickRegion() throws {
+        let scheme = try SourceVGUIScheme(source: """
+            Scheme { BaseSettings {
+                CheckButton.TextColor "10 11 12 255" CheckButton.SelectedTextColor "20 21 22 255"
+                CheckButton.HighlightFgColor "30 31 32 255" CheckButton.BgColor "40 41 42 200"
+                CheckButton.Border1 "50 51 52 255" CheckButton.Border2 "60 61 62 255"
+                CheckButton.Check "70 71 72 255" CheckButton.DisabledFgColor "80 81 82 255"
+                CheckButton.DisabledBgColor "90 91 92 255" Label.DisabledFgColor1 "100 101 102 255"
+            } Fonts {
+                Default { One { name SourceFace tall 16 weight 500 } }
+                Marlett { One { name Marlett tall 14 weight 0 symbol 1 } }
+                MarlettSmall { One { name Marlett tall 10 weight 0 symbol 1 } }
+            } }
+            """, activeSymbols: [])
+        let files = try GMLuaHostDirectoryFileSystem(rootURL: GModGameAssets.clientContentRootURL(), writable: false)
+        let session = GMLuaMenuSession(fileSystem: files, logger: { _ in })
+        defer { _ = session.close() }
+        _ = try session.start()
+        let resource = try SourceVGUIResource(source: """
+            test {
+                Enabled { ControlName CheckButton labelText Enable selected 0 textAlignment west
+                    textinsetx 6 xpos 20 ypos 20 wide 230 tall 24 }
+                Disabled { ControlName CheckButton labelText Disabled selected 1 enabled 0
+                    smallcheckimage 1 xpos 20 ypos 70 wide 230 tall 24 }
+            }
+            """)
+        let instance = try session.loadResource(resource, scheme: scheme) { _ in XCTFail("A plain CheckButton must not invent a command") }
+        try instance.layout(viewportWidth: 640, viewportHeight: 480)
+        XCTAssertTrue(instance.unappliedFields.isEmpty)
+        XCTAssertTrue(instance.unappliedSchemeColorControls.isEmpty)
+        XCTAssertTrue(instance.unappliedSchemeFontControls.isEmpty)
+        func color(_ red: Double, _ alpha: Double = 255) -> GMLuaSurfaceColor {
+            .init(red: red, green: red + 1, blue: red + 2, alpha: alpha)
+        }
+        let initial = try session.renderFrame(viewportWidth: 640, viewportHeight: 480)
+        let glyphs = initial.commands.compactMap { command -> (String, GMLuaFontDescriptor, GMLuaSurfaceColor)? in
+            if case let .text(text, _, font, color, _) = command, font.symbol { return (text.utf8String, font, color) }
+            return nil
+        }
+        XCTAssertEqual(glyphs.map { $0.0 }, ["g", "e", "f", "g", "e", "f", "b"])
+        XCTAssertEqual(glyphs[0].2, color(40, 200)); XCTAssertEqual(glyphs[1].2, color(50))
+        XCTAssertEqual(glyphs[2].2, color(60)); XCTAssertEqual(glyphs[3].2, color(90))
+        XCTAssertEqual(glyphs[6].2, color(80))
+        XCTAssertEqual(glyphs[0].1.font.utf8String, "Marlett"); XCTAssertEqual(glyphs[0].1.size, 14)
+        XCTAssertEqual(glyphs[3].1.size, 10)
+        XCTAssertTrue(initial.commands.contains {
+            if case let .text(text, _, font, c, _) = $0 {
+                return text.utf8String == "Enable" && c == color(10) && font.size == 16
+            }; return false
+        })
+        // Click whitespace inside the authored bounds, beyond both glyph and
+        // caption. Native CheckButton is one input button, not two hit regions.
+        for phase: GMLuaPointerPhase in [.began, .ended] {
+            _ = try session.dispatchPointerEvent(x: 240, y: 32, phase: phase, timestamp: 1,
+                viewportWidth: 640, viewportHeight: 480)
+        }
+        XCTAssertTrue(try instance.isChecked(control: "Enabled"))
+        _ = try session.dispatchPointerEvent(x: 600, y: 400, phase: .moved, timestamp: 2,
+            viewportWidth: 640, viewportHeight: 480)
+        let selected = try session.renderFrame(viewportWidth: 640, viewportHeight: 480)
+        XCTAssertTrue(selected.commands.contains {
+            if case let .text(text, _, _, c, _) = $0 { return text.utf8String == "Enable" && c == color(20) }; return false
+        })
+        XCTAssertTrue(selected.commands.contains {
+            if case let .text(text, _, font, c, _) = $0 { return text.utf8String == "b" && font.size == 14 && c == color(70) }; return false
+        })
+        _ = try session.dispatchPointerEvent(x: 240, y: 32, phase: .moved, timestamp: 3,
+            viewportWidth: 640, viewportHeight: 480)
+        let hovered = try session.renderFrame(viewportWidth: 640, viewportHeight: 480)
+        XCTAssertTrue(hovered.commands.contains {
+            if case let .text(text, _, _, c, _) = $0 { return text.utf8String == "Enable" && c == color(30) }; return false
+        })
+        for phase: GMLuaPointerPhase in [.began, .ended] {
+            _ = try session.dispatchPointerEvent(x: 240, y: 82, phase: phase, timestamp: 4,
+                viewportWidth: 640, viewportHeight: 480)
+        }
+        XCTAssertTrue(try instance.isChecked(control: "Disabled"))
+    }
+
     func testResourceSchemeColorsFollowHoverPressAndRetainRealButtonCommand() throws {
         let roles: [(String, String)] = [
             ("Frame.BgColor", "20 21 22 250"), ("Frame.OutOfFocusBgColor", "30 31 32 240"),
@@ -166,5 +245,35 @@ final class SourceVGUISchemeTests: XCTestCase {
                 return text.utf8String == "30.00" && font.font.utf8String == "Tahoma" && font.size == 12
             }; return false
         })
+        try slider.remove()
+        _ = try session.renderFrame(viewportWidth: 1_024, viewportHeight: 768)
+        // Project an actual, unmodified plain CheckButton block from the owned
+        // Voice page. Other factories on that page are not claimed as supported.
+        let voiceData = try pack.data(for: "garrysmod/resource/OptionsSubVoice.res", maximumByteCount: 1_024 * 1_024)
+        let voice = try SourceVGUIResource(source: String(decoding: voiceData, as: UTF8.self))
+        let original = try XCTUnwrap(voice.controls.first { $0.fieldName == "voice_modenable" })
+        XCTAssertEqual(original.controlName, "CheckButton")
+        let fields = try original.entries.map { entry -> String in
+            guard entry.conditional == nil, case let .string(value) = entry.value,
+                  !entry.key.contains("\""), !value.contains("\"") else { throw CocoaError(.fileReadCorruptFile) }
+            return "\"\(entry.key)\" \"\(value)\""
+        }.joined(separator: "\n")
+        let checkResource = try SourceVGUIResource(source: "Voice { Original { \(fields) } }")
+        let check = try session.loadResource(checkResource, scheme: scheme) { _ in }
+        try check.layout(viewportWidth: 1_024, viewportHeight: 768)
+        let checkFrame = try session.renderFrame(viewportWidth: 1_024, viewportHeight: 768)
+        let background = try capturedColor("CheckButton.BgColor")
+        XCTAssertTrue(checkFrame.commands.contains {
+            if case let .text(text, _, font, color, _) = $0 {
+                return text.utf8String == "g" && font.font.utf8String == "Marlett" && font.symbol &&
+                    font.size == 14 && color == background
+            }; return false
+        })
+        for phase: GMLuaPointerPhase in [.began, .ended] {
+            _ = try session.dispatchPointerEvent(x: 240, y: 46, phase: phase, timestamp: 2,
+                viewportWidth: 1_024, viewportHeight: 768)
+        }
+        XCTAssertTrue(try check.isChecked(control: "voice_modenable"))
+        XCTAssertFalse(check.unappliedFields.isEmpty, "Remaining native page fields must still be reported")
     }
 }

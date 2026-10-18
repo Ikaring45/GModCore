@@ -48,6 +48,11 @@ CustomFontFiles registration from the mounted Scheme, proportional scaling,
 multiple native glyph ranges and full Options-page integration remain open.
 The independent settings utility is still not the original Source Options UI.
 
+The later CheckButton slice adds the authored caption font and
+Marlett/MarlettSmall check-image descriptors. CoreText now supports the exact
+bundled Marlett symbol cmap through an explicit byte-to-private-use adapter;
+other symbol fonts/effects remain unsupported. See SOURCE_GAMEUI_CHECKBUTTON.md.
+
 Windows validation on 2026-10-18: 121 tests executed, 120 passed, one separate
 installed-resource opt-in test skipped, no failures. The actual Stored-ZIP
 Scheme/loading/slider regression ran and passed. Three stock Sandbox Q/C and

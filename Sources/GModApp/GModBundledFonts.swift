@@ -425,6 +425,7 @@ public final class GModCoreTextMeasurer: GMLuaTextMeasurer, @unchecked Sendable 
         let size: Int
         let weight: Int
         let italic: Bool
+        let symbol: Bool
     }
 
     public var cachedMeasurementCount: Int {
@@ -444,7 +445,7 @@ public final class GModCoreTextMeasurer: GMLuaTextMeasurer, @unchecked Sendable 
     ) -> GMLuaTextMeasurement {
         let key = MeasurementKey(
             text: text, font: descriptor.font, size: descriptor.size,
-            weight: descriptor.weight, italic: descriptor.italic
+            weight: descriptor.weight, italic: descriptor.italic, symbol: descriptor.symbol
         )
         measurementLock.lock()
         if let cached = measurements[key] {
@@ -455,8 +456,11 @@ public final class GModCoreTextMeasurer: GMLuaTextMeasurer, @unchecked Sendable 
         registry.registerAllFonts()
         let font = makeFont(for: descriptor)
         let decoded = String(decoding: text.bytes, as: UTF8.self)
+        let isMarlett = descriptor.symbol && GMLuaMarlettSymbolText.supports(face: descriptor.font.utf8String)
+        let layoutText = isMarlett ? GMLuaMarlettSymbolText.mapped(decoded) ?? decoded : decoded
         let layout = GModMetalCoreTextLayout(
-            text: decoded, font: font, requestedTall: descriptor.size
+            text: layoutText, font: font, requestedTall: descriptor.size,
+            fitsFallbackGlyphs: !isMarlett
         )
         let maximumWidth = layout.widths.map(Self.pixelDimension).max() ?? 0
 

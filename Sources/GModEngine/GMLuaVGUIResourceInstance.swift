@@ -80,6 +80,9 @@ public final class GMLuaVGUIResourceInstance {
                 sliders[control.fieldName] = try GMLuaVGUIResourceCvarSlider(
                     control: control, registry: runtime.conVarRegistry)
             }
+            if name.lowercased() == "checkbutton", let scheme, scheme.fonts.isEmpty {
+                throw SourceVGUIScheme.SchemeError.missingFont("Marlett")
+            }
         }
         var ordered = resource.controls
         if let rootControlName, let offset = ordered.firstIndex(where: { $0.fieldName == rootControlName }) {
@@ -91,11 +94,19 @@ public final class GMLuaVGUIResourceInstance {
                 let parent = control.fieldName == rootControlName ? LuaValue.nilValue
                     : rootControlName.flatMap { panels[$0] } ?? .nilValue
                 let hidesTitle = control.controlName?.lowercased() == "frame" && control.value("settitlebarvisible") == "0"
+                let sourceCheck = scheme != nil && control.controlName?.lowercased() == "checkbutton"
                 let panel = try runtime.state.call(create, arguments: [
-                    .string(LuaString(hidesTitle ? "DPanel" : Self.classes[control.controlName!.lowercased()]!)),
+                    .string(LuaString(hidesTitle ? "DPanel" : sourceCheck ? "DButton" : Self.classes[control.controlName!.lowercased()]!)),
                     parent, .string(LuaString(control.fieldName))
                 ]).first ?? .nilValue
                 panels[control.fieldName] = panel
+                if sourceCheck, let scheme {
+                    try GMLuaVGUIResourceSchemeCheckButton.install(runtime: runtime, panel: panel, scheme: scheme)
+                    _ = try call(control.fieldName, "SetContentAlignment", [.number(4)])
+                    if let value = control.value("smallcheckimage"), value != "0" && value != "1" {
+                        throw ResourceError.invalidField(control: control.name, key: "smallcheckimage")
+                    }
+                }
                 if let slider = sliders[control.fieldName] {
                     try slider.install(runtime: runtime, panel: panel, scheme: scheme)
                 }
@@ -138,6 +149,7 @@ public final class GMLuaVGUIResourceInstance {
                 }
                 var applied: Set<String> = ["controlname", "fieldname", "xpos", "ypos", "wide", "tall",
                     "labeltext", "title", "font", "visible", "enabled", "command", "textalignment"]
+                if sourceCheck { applied.insert("smallcheckimage") }
                 if sliders[control.fieldName] != nil {
                     applied.formUnion(["minvalue", "maxvalue", "cvar_name", "allowoutofrange", "use_convar_minmax"])
                 }
@@ -213,7 +225,7 @@ public final class GMLuaVGUIResourceInstance {
                 if let scheme {
                     try GMLuaVGUIResourceSchemeColors.install(runtime: runtime, panel: panel, control: control, scheme: scheme)
                     let kind = control.controlName?.lowercased() ?? ""
-                    if !["label", "button", "progressbar", "ccvarslider"].contains(kind) &&
+                    if !["label", "button", "checkbutton", "progressbar", "ccvarslider"].contains(kind) &&
                         !(kind == "frame" && hidesTitle) {
                         unappliedSchemeColorControls.append(control.fieldName)
                     }
@@ -259,20 +271,29 @@ public final class GMLuaVGUIResourceInstance {
                 let kind = control.controlName?.lowercased() ?? ""
                 let alias = control.value("font") ?? (kind == "ccvarslider" ? "DefaultVerySmall" :
                     (kind == "frame" ? scheme.string("FrameTitleBar.Font") ?? "Default" : "Default"))
-                return (control, try scheme.font(alias, viewportHeight: viewportHeight))
+                let symbol = kind == "checkbutton" ? try scheme.font(
+                    control.value("smallcheckimage") == "1" ? "MarlettSmall" : "Marlett",
+                    viewportHeight: viewportHeight) : nil
+                if let symbol, !GMLuaMarlettSymbolText.supports(face: symbol.face) || symbol.flags["symbol"] != true {
+                    throw SourceVGUIScheme.SchemeError.unsupportedFont(symbol.alias)
+                }
+                return (control, try scheme.font(alias, viewportHeight: viewportHeight), symbol)
             }
             let assign = try runtime.executeReturningValues("""
-                return function(p, kind, name)
+                return function(p, kind, name, symbol)
                     if kind == 'frame' then p.lblTitle:SetFont(name)
                     elseif kind == 'ccvarslider' then p.GarrysPAD_SourceCaptionFont = name
                     else p:SetFont(name) end
+                    if symbol then p.GarrysPAD_SourceCheckFont = symbol end
                 end
                 """).first ?? .nilValue
-            for (control, definition) in resolved {
+            for (control, definition, symbol) in resolved {
                 guard let panel = panels[control.fieldName] else { throw ResourceError.missingControl(control.fieldName) }
                 let name = try GMLuaVGUIResourceSchemeFont.install(definition, runtime: runtime)
+                let symbolName = try symbol.map { try GMLuaVGUIResourceSchemeFont.install($0, runtime: runtime) }
                 _ = try runtime.state.call(assign, arguments: [panel,
-                    .string(LuaString(control.controlName!.lowercased())), .string(LuaString(name))])
+                    .string(LuaString(control.controlName!.lowercased())), .string(LuaString(name)),
+                    symbolName.map { .string(LuaString($0)) } ?? .nilValue])
             }
         }
         // Resolve all coordinates before touching live panels. Reapplying them
@@ -283,7 +304,7 @@ public final class GMLuaVGUIResourceInstance {
 
     private static func usesSchemeFont(_ control: SourceVGUIResource.Control) -> Bool {
         let kind = control.controlName?.lowercased() ?? ""
-        return ["label", "button", "textentry", "combobox", "ccvarslider"].contains(kind) ||
+        return ["label", "button", "checkbutton", "textentry", "combobox", "ccvarslider"].contains(kind) ||
             (kind == "frame" && control.value("settitlebarvisible") != "0")
     }
 
