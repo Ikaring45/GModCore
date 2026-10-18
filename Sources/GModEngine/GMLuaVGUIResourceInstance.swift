@@ -34,7 +34,8 @@ public final class GMLuaVGUIResourceInstance {
     private static let classes = [
         "frame": "DFrame", "panel": "DPanel", "editablepanel": "EditablePanel",
         "label": "DLabel", "button": "DButton", "checkbutton": "DCheckBoxLabel",
-        "textentry": "DTextEntry", "progressbar": "DProgress", "imagepanel": "DImage"
+        "textentry": "DTextEntry", "progressbar": "DProgress", "imagepanel": "DImage",
+        "combobox": "DComboBox"
     ]
 
     init(runtime: GMLuaRuntime, resource: SourceVGUIResource,
@@ -61,6 +62,11 @@ public final class GMLuaVGUIResourceInstance {
             }
             guard let name = control.controlName, Self.classes[name.lowercased()] != nil else {
                 throw ResourceError.unsupportedControl(control.controlName ?? control.name)
+            }
+            // Native ComboBox_Factory defaults to editable. DComboBox is not
+            // a TextEntry: support only the explicitly read-only resource mode.
+            if name.lowercased() == "combobox", control.value("editable") != "0" {
+                throw ResourceError.invalidField(control: control.name, key: "editable")
             }
         }
         var ordered = resource.controls
@@ -117,7 +123,13 @@ public final class GMLuaVGUIResourceInstance {
                 }
                 var applied: Set<String> = ["controlname", "fieldname", "xpos", "ypos", "wide", "tall",
                     "labeltext", "title", "font", "visible", "enabled", "command", "textalignment"]
-                if control.controlName?.lowercased() == "textentry",
+                if control.controlName?.lowercased() == "combobox" {
+                    // Source inserts choices in host-provided order; stock
+                    // DComboBox otherwise sorts them alphabetically on open.
+                    _ = try call(control.fieldName, "SetSortItems", [.boolean(false)])
+                    applied.insert("editable")
+                }
+                if ["textentry", "combobox"].contains(control.controlName?.lowercased() ?? ""),
                    let text = control.value("text") {
                     _ = try call(control.fieldName, "SetText", [.string(LuaString(text))])
                     applied.insert("text")
@@ -210,11 +222,43 @@ public final class GMLuaVGUIResourceInstance {
 
     public func text(control: String) throws -> String {
         guard resource.controls.contains(where: {
-            $0.fieldName == control && $0.controlName?.lowercased() == "textentry"
+            $0.fieldName == control && ["textentry", "combobox"].contains($0.controlName?.lowercased() ?? "")
         }), case let .string(value) = try call(control, "GetText", []).first else {
             throw ResourceError.invalidField(control: control, key: "text")
         }
         return value.utf8String
+    }
+
+    /// Host-populated choices use stock DComboBox's one-based indices. This
+    /// does not invent available video modes or bind/persist a Source convar.
+    @discardableResult
+    public func addChoice(_ text: String, control: String) throws -> Int {
+        try requireComboBox(control)
+        guard case let .number(index) = try call(control, "AddChoice", [.string(LuaString(text))]).first,
+              let index = Int(exactly: index) else {
+            throw ResourceError.invalidField(control: control, key: "choice")
+        }
+        return index
+    }
+
+    public func selectChoice(at index: Int, control: String) throws {
+        try requireComboBox(control)
+        guard index > 0, case .string = try call(control, "GetOptionText", [.number(Double(index))]).first else {
+            throw ResourceError.invalidField(control: control, key: "choice")
+        }
+        _ = try call(control, "ChooseOptionID", [.number(Double(index))])
+    }
+
+    public func selectedChoiceIndex(control: String) throws -> Int? {
+        try requireComboBox(control)
+        guard case let .number(index) = try call(control, "GetSelectedID", []).first else { return nil }
+        return Int(exactly: index)
+    }
+
+    private func requireComboBox(_ control: String) throws {
+        guard resource.controls.contains(where: {
+            $0.fieldName == control && $0.controlName?.lowercased() == "combobox"
+        }) else { throw ResourceError.invalidField(control: control, key: "choice") }
     }
 
     /// Reads the live control, including user changes, rather than the .res

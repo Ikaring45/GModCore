@@ -26,3 +26,14 @@ syntax parsing on Windows only. Apple typecheck, sampler execution, Simulator
 tests and physical iPad remain separate gates; no new Apple PASS is asserted.
 The wider material/VPK/allocation/terrain run also passed: 20 executed, two
 installed-content opt-in diagnostics skipped, no failures.
+
+## Completed Apple revalidation
+
+[Run 39112335597](https://github.com/Ikaring45/GModCore/actions/runs/39112335597)
+completed successfully at commit `ca6dcf5aaa00f387076901ab3dfb0ddac722ac7b`.
+All required steps succeeded: strict arm64 library builds, generic iPadOS app
+build, embedded Metal pipeline smoke, iPad Simulator install/launch,
+accessibility launch, Japanese VGUI/IME/stock Q/noclip recovery, and package
+XCTest on Simulator. This supersedes the pending-Apple status above for that
+commit only. Later resource ComboBox/popup changes are not covered by this run;
+physical iPad verification remains outstanding.

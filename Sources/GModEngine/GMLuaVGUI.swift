@@ -353,6 +353,7 @@ private final class GMLuaPanelValue: @unchecked Sendable {
     var mouseInputEnabled = true
     var keyboardInputEnabled = true
     var isPopup = false
+    var popupStackOrder: UInt64 = 0
     var isWorldClicker = false
     var isFocusTopLevel = false
     // Panel:Remove invalidates the typed object immediately, but native VGUI
@@ -495,6 +496,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         return (directChildrenIndexRebuilds, directChildrenCandidatesVisited, directChildrenIndexUpdates)
     }
     private var nextPanelIdentifier = 1
+    private var nextPopupStackOrder: UInt64 = 0
     private var semanticIndex: LuaValue = .nilValue
 
     /// Number of live script-created panels attached directly to WorldPanel.
@@ -1192,6 +1194,8 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         panel.mouseInputEnabled = true
         panel.keyboardInputEnabled = true
         panel.isPopup = true
+        nextPopupStackOrder &+= 1
+        panel.popupStackOrder = nextPopupStackOrder
         moveToStackEdgeLocked(panel, front: true)
         focusedPanelIdentifier = identifier
     }
@@ -1203,6 +1207,17 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         _ target: GMLuaPanelValue,
         front: Bool
     ) {
+        if target.isPopup {
+            let popups = panels.values.compactMap { value -> GMLuaPanelValue? in
+                guard let panel = panelDescriptor(from: value), panel.isPopup,
+                      GMLuaTypeSystem.typedObject(from: value)?.isValid == true else { return nil }
+                return panel
+            }.sorted { $0.popupStackOrder < $1.popupStackOrder }
+            let others = popups.filter { $0.identifier != target.identifier }
+            let reordered = front ? others + [target] : [target] + others
+            for (index, popup) in reordered.enumerated() { popup.popupStackOrder = UInt64(index + 1) }
+            nextPopupStackOrder = UInt64(reordered.count)
+        }
         let peers = panels.values.compactMap { value -> GMLuaPanelValue? in
             guard let panel = panelDescriptor(from: value),
                   panel.parentIdentifier == target.parentIdentifier,
@@ -1529,7 +1544,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         var drawableChildrenByParent: [Int?: [GMLuaPanelValue]] = [:]
         drawableChildrenByParent.reserveCapacity(descriptors.count)
         for descriptor in descriptors.values
-        where descriptor.isVisible && descriptor.alpha > 0 {
+        where descriptor.isVisible && descriptor.alpha > 0 && !descriptor.isPopup {
             drawableChildrenByParent[
                 descriptor.parentIdentifier,
                 default: []
@@ -1619,6 +1634,28 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
                     inheritedDrawOnTopOrder: nil
                 )
             }
+        }
+        // Popup ownership is retained in parentIdentifier for GetParent,
+        // removal and modal ancestry, but its surface is screen-space and
+        // must not inherit its owner's small clipping rectangle.
+        func popupOwnerIsVisible(_ popup: GMLuaPanelValue) -> Bool {
+            var parent = popup.parentIdentifier
+            var visited: Set<Int> = [popup.identifier]
+            while let identifier = parent {
+                guard visited.insert(identifier).inserted else { return false }
+                if identifier == Self.worldPanelIdentifier { return worldPanelDescriptor.isVisible }
+                if identifier == Self.overlayPanelIdentifier { return overlayPanelDescriptor.isVisible }
+                guard let owner = descriptors[identifier], owner.isVisible else { return false }
+                parent = owner.parentIdentifier
+            }
+            return true
+        }
+        let popups = descriptors.values.filter {
+            $0.isPopup && $0.isVisible && $0.alpha > 0 && popupOwnerIsVisible($0)
+        }.sorted { $0.popupStackOrder < $1.popupStackOrder }
+        for popup in popups {
+            append(popup, originX: 0, originY: 0, ancestorClip: viewport,
+                ancestorAlpha: 255, inheritedDrawOnTopOrder: nil)
         }
         guard placeDrawOnTopLast, result.contains(where: \.drawOnTop) else { return result }
         let normal = result.filter { !$0.drawOnTop }
@@ -2114,7 +2151,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         )
         let paintStart = layoutStart.map { _ in DispatchTime.now().uptimeNanoseconds }
         surface.beginFrame(viewportWidth: viewportWidth, viewportHeight: viewportHeight)
-        let byParent = Dictionary(grouping: tree, by: \.parentIdentifier)
+        let byParent = Dictionary(grouping: tree.filter { !$0.isPopup }, by: \.parentIdentifier)
 
         func withinPanelContext<T>(
             _ panel: GMLuaPanelRenderSnapshot,
@@ -2179,6 +2216,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         case .overlay:
             for root in byParent[Self.overlayPanelIdentifier] ?? [] { try paint(root) }
         }
+        for popup in tree where popup.isPopup { try paint(popup) }
         let snapshot = surface.frameSnapshot
         if let onFrameProfile, let layoutStart, let callbackStart, let treeStart, let paintStart {
             let end = DispatchTime.now().uptimeNanoseconds
@@ -3327,6 +3365,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
             }
             originX += panel.x
             originY += panel.y
+            if panel.isPopup { break }
             current = panel.parentIdentifier
         }
         return (originX, originY)

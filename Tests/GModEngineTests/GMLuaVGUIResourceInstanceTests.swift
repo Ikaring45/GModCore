@@ -3,6 +3,67 @@ import GModEngine
 import GModGameAssets
 
 final class GMLuaVGUIResourceInstanceTests: XCTestCase {
+    func testReadOnlyComboResourceUsesRealDropdownAndRetainsLiveChoice() throws {
+        let files = try GMLuaHostDirectoryFileSystem(rootURL: GModGameAssets.clientContentRootURL(), writable: false)
+        let session = GMLuaMenuSession(fileSystem: files, logger: { _ in })
+        defer { _ = session.close() }
+        _ = try session.start()
+        let resource = try SourceVGUIResource(source: """
+            "settings.res" {
+                "Mode" { "ControlName" "ComboBox" "editable" "0" "text" "Choose mode"
+                    "xpos" "20" "ypos" "20" "wide" "200" "tall" "30" }
+            }
+            """)
+        let instance = try session.loadResource(resource) { _ in }
+        try instance.layout(viewportWidth: 640, viewportHeight: 480)
+        XCTAssertTrue(instance.unappliedFields.isEmpty)
+        XCTAssertNil(try instance.selectedChoiceIndex(control: "Mode"))
+        XCTAssertEqual(try instance.text(control: "Mode"), "Choose mode")
+        XCTAssertEqual(try instance.addChoice("Zulu mode", control: "Mode"), 1)
+        XCTAssertEqual(try instance.addChoice("Alpha mode", control: "Mode"), 2)
+        try instance.selectChoice(at: 2, control: "Mode")
+        XCTAssertEqual(try instance.text(control: "Mode"), "Alpha mode")
+        XCTAssertThrowsError(try instance.selectChoice(at: 3, control: "Mode"))
+        XCTAssertEqual(try instance.selectedChoiceIndex(control: "Mode"), 2)
+        _ = try session.renderFrame(viewportWidth: 640, viewportHeight: 480)
+        for phase: GMLuaPointerPhase in [.began, .ended] {
+            _ = try session.dispatchPointerEvent(x: 100, y: 35, phase: phase, timestamp: 1,
+                viewportWidth: 640, viewportHeight: 480)
+        }
+        let opened = try session.renderFrame(viewportWidth: 640, viewportHeight: 480)
+        let choicePosition = try XCTUnwrap(opened.commands.compactMap { command -> GMLuaCursorPosition? in
+            if case let .text(value, position, _, _, _) = command, value.utf8String == "Zulu mode" { return position }
+            return nil
+        }.first)
+        let alphaY = try XCTUnwrap(opened.commands.compactMap { command -> Double? in
+            if case let .text(value, position, _, _, _) = command, value.utf8String == "Alpha mode" { return position.y }
+            return nil
+        }.max())
+        XCTAssertLessThan(choicePosition.y, alphaY, "Choices must retain insertion order, not alphabetical order")
+        for phase: GMLuaPointerPhase in [.began, .ended] {
+            _ = try session.dispatchPointerEvent(x: choicePosition.x + 5, y: choicePosition.y + 5,
+                phase: phase, timestamp: 2, viewportWidth: 640, viewportHeight: 480)
+        }
+        XCTAssertEqual(try instance.selectedChoiceIndex(control: "Mode"), 1)
+        XCTAssertEqual(try instance.text(control: "Mode"), "Zulu mode")
+    }
+
+    func testEditableComboResourcesAreRejectedBeforePanelCreation() throws {
+        let files = try GMLuaHostDirectoryFileSystem(rootURL: GModGameAssets.clientContentRootURL(), writable: false)
+        let session = GMLuaMenuSession(fileSystem: files, logger: { _ in })
+        defer { _ = session.close() }
+        _ = try session.start()
+        for field in ["", "\"editable\" \"1\""] {
+            let resource = try SourceVGUIResource(source: """
+                "settings.res" { "Mode" { "ControlName" "ComboBox" \(field) } }
+                """)
+            XCTAssertThrowsError(try session.loadResource(resource) { _ in }) { error in
+                XCTAssertEqual(error as? GMLuaVGUIResourceInstance.ResourceError,
+                    .invalidField(control: "Mode", key: "editable"))
+            }
+        }
+    }
+
     func testResourceTextEntryUsesInitialTextAndLiveUserEdits() throws {
         let files = try GMLuaHostDirectoryFileSystem(rootURL: GModGameAssets.clientContentRootURL(), writable: false)
         let session = GMLuaMenuSession(fileSystem: files, logger: { _ in })

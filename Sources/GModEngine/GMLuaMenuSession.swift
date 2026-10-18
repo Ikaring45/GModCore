@@ -293,6 +293,9 @@ public final class GMLuaMenuSession: @unchecked Sendable {
         "lua/vgui/dhorizontalscroller.lua",
         "lua/vgui/dpropertysheet.lua",
         "lua/vgui/dcheckbox.lua",
+        "lua/vgui/dmenuoption.lua",
+        "lua/vgui/dmenu.lua",
+        "lua/vgui/dcombobox.lua",
         "lua/menu/problems/problems_pnl.lua",
         "lua/skins/default.lua",
     ]

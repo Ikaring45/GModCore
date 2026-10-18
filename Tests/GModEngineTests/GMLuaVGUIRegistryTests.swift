@@ -5,6 +5,41 @@ import GModGameAssets
 import GModLua
 
 final class GMLuaVGUIRegistryTests: XCTestCase {
+    func testOwnedPopupDrawsAndReceivesInputOutsideOwnerWithoutLosingOwnership() throws {
+        let state = LuaState(output: { _ in })
+        let types = try GMLuaTypeSystem.install(into: state, utilityLayer: .bundledFallback)
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: types)
+        let surface = try GMLuaSurface.install(into: state)
+        try state.execute("""
+            POPUP_OWNER = vgui.Create('Panel')
+            POPUP_OWNER:SetPos(100, 100); POPUP_OWNER:SetSize(20, 20)
+            OWNED_POPUP = vgui.Create('Panel', POPUP_OWNER)
+            OWNED_POPUP:SetPos(50, 70); OWNED_POPUP:SetSize(100, 60)
+            OWNED_POPUP:MakePopup()
+            assert(OWNED_POPUP:GetParent() == POPUP_OWNER)
+            local x, y = OWNED_POPUP:LocalToScreen(0, 0)
+            assert(x == 50 and y == 70)
+            OWNED_POPUP.OnMousePressed = function() POPUP_PRESSED = true end
+            OWNED_POPUP.Paint = function(self, w, h)
+                surface.SetDrawColor(255, 0, 0, 255)
+                surface.DrawRect(0, 0, w, h)
+            end
+            """)
+        let tree = registry.renderTree(viewportWidth: 320, viewportHeight: 240)
+        let popup = try XCTUnwrap(tree.first(where: \.isPopup))
+        XCTAssertEqual(popup.frame, GMLuaPanelRect(x: 50, y: 70, width: 100, height: 60))
+        XCTAssertEqual(popup.clipRect, popup.frame)
+        let frame = try registry.renderFrame(surface: surface, viewportWidth: 320, viewportHeight: 240)
+        XCTAssertEqual(frame.commands.count, 1, "An owned popup must be painted exactly once")
+        _ = try registry.dispatchPointerEvent(x: 60, y: 80, phase: .began, timestamp: 1,
+            viewportWidth: 320, viewportHeight: 240)
+        try state.execute("assert(POPUP_PRESSED); POPUP_OWNER:SetVisible(false)")
+        XCTAssertFalse(registry.renderTree(viewportWidth: 320, viewportHeight: 240).contains(where: \.isPopup))
+        try state.execute("POPUP_OWNER:Remove()")
+        _ = try registry.performPendingLayouts()
+        try state.execute("assert(not IsValid(OWNED_POPUP))")
+    }
+
     func testHiddenDeferredLayoutWaitsForVisibilityButExplicitLayoutStillRuns() throws {
         let state = LuaState(output: { _ in })
         let types = try GMLuaTypeSystem.install(into: state, utilityLayer: .bundledFallback)
