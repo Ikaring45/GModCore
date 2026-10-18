@@ -5,6 +5,60 @@ import GModGameAssets
 import GModLua
 
 final class GMLuaVGUIRegistryTests: XCTestCase {
+    func testPanelRawLookupRemainsLiveAndFallsBackToMetamethodAfterRemoval() throws {
+        let state = LuaState(output: { _ in })
+        let types = try GMLuaTypeSystem.install(into: state, utilityLayer: .bundledFallback)
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: types)
+        let surface = try GMLuaSurface.install(into: state)
+        try state.execute("""
+            LOOKUP_PANEL = vgui.Create('Panel')
+            LOOKUP_TABLE = LOOKUP_PANEL:GetTable()
+            FALLBACK_FIELDS = 0
+            FALLBACK_PAINTS = 0
+            PAINT_VALUE = 0
+            setmetatable(LOOKUP_TABLE, { __index = function(self, key)
+                if key == 'ProbeField' then FALLBACK_FIELDS = FALLBACK_FIELDS + 1 return 41 end
+                if key == 'Paint' then
+                    FALLBACK_PAINTS = FALLBACK_PAINTS + 1
+                    collectgarbage('collect')
+                    return function() PAINT_VALUE = 3 end
+                end
+            end })
+            LOOKUP_TABLE.ProbeField = false
+            LOOKUP_HELPER_CALLS = 0
+            debug.sethook(function(event)
+                local info = debug.getinfo(2, 'S')
+                if event == 'call' and info and string.find(info.source,
+                    'GModLua VGUI index helper', 1, true) then
+                    LOOKUP_HELPER_CALLS = LOOKUP_HELPER_CALLS + 1
+                end
+            end, 'c')
+            assert(LOOKUP_PANEL.ProbeField == false and FALLBACK_FIELDS == 0)
+            assert(LOOKUP_HELPER_CALLS == 0)
+            LOOKUP_TABLE.ProbeField = nil
+            assert(LOOKUP_PANEL.ProbeField == 41 and FALLBACK_FIELDS == 1)
+            assert(LOOKUP_HELPER_CALLS > 0)
+            local helperCalls = LOOKUP_HELPER_CALLS
+            LOOKUP_TABLE.ProbeField = 42
+            assert(LOOKUP_PANEL.ProbeField == 42 and FALLBACK_FIELDS == 1)
+            assert(LOOKUP_HELPER_CALLS == helperCalls)
+            debug.sethook()
+            LOOKUP_TABLE.Paint = function() PAINT_VALUE = 1 end
+            """)
+        _ = try registry.renderFrame(surface: surface, viewportWidth: 320, viewportHeight: 240)
+        try state.execute("""
+            assert(PAINT_VALUE == 1 and FALLBACK_PAINTS == 0)
+            LOOKUP_TABLE.Paint = function() PAINT_VALUE = 2 end
+            """)
+        _ = try registry.renderFrame(surface: surface, viewportWidth: 320, viewportHeight: 240)
+        try state.execute("""
+            assert(PAINT_VALUE == 2 and FALLBACK_PAINTS == 0)
+            LOOKUP_TABLE.Paint = nil
+            """)
+        _ = try registry.renderFrame(surface: surface, viewportWidth: 320, viewportHeight: 240)
+        try state.execute("assert(PAINT_VALUE == 3 and FALLBACK_PAINTS == 1)")
+    }
+
     func testOptInFrameProfilePreservesCommandsAndRunsAfterPaint() throws {
         let state = LuaState(output: { _ in })
         let types = try GMLuaTypeSystem.install(into: state, utilityLayer: .bundledFallback)

@@ -84,3 +84,24 @@ The next primary targets are cold Lua layout and steady-state Lua painting,
 not render-tree construction. Profiling is opt-in, and a regression compares
 observed/unobserved draw commands. The owned-pack profile asserts one timing
 record per frame and retains the zero-layout reopened-menu regression.
+
+## Live raw-hit panel lookup
+
+Panel field lookup and lifecycle callback dispatch now check raw instance
+storage first, exactly as `LuaState.getTableValue` does. A raw nil with no
+metatable returns nil immediately; all other misses still execute the original
+semantic helper. This removes an artificial Lua helper frame for raw hits
+without caching a method or changing actual scripted callback execution.
+Init, PerformLayout and OnRemove use the same lookup boundary.
+
+Regressions cover false shadows, field replacement, nil removal, dynamic
+function-valued `__index`, GC in the fallback and live Paint replacement.
+A Lua debug call-hook verifies raw hits make zero index-helper calls, a
+metamethod miss does call it, and a later raw replacement does not call it.
+67 registry tests plus the owned-pack Q/C profile pass (68 total).
+
+Two Windows Debug samples of reopened Q warm stages were Think 9.76/13.41ms,
+Paint 54.74/63.75ms, against the preceding 12.90/58.86ms sample. These noisy
+runs do not establish a stable percentage latency improvement. Initial layout
+remains roughly a second. Panel and draw counts and the zero repeated-layout
+assertion remain unchanged. Physical-device and Release profiling are open.

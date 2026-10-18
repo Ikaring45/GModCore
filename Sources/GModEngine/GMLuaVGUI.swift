@@ -2430,16 +2430,25 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         value = stored
         descriptor = storedDescriptor
         lock.unlock()
-        let callback = try state.call(
-            semanticIndex,
-            arguments: [.table(descriptor.instanceTable), .string(LuaString(name))]
-        ).first ?? .nilValue
+        let callback = try indexedPanelTableValue(.string(LuaString(name)), in: descriptor.instanceTable)
         switch callback {
         case .luaFunction, .nativeFunction:
             return try callVGUIFunction(callback, arguments: [value] + arguments)
         default:
             return nil
         }
+    }
+
+    /// Lua table indexing checks raw storage before consulting __index. Most
+    /// original scripted-panel methods are merged into the instance sidecar;
+    /// avoid an artificial Lua helper call for these hits. Misses still use
+    /// the original semantic path, including arbitrary live __index functions.
+    /// No method cache: replacement, false shadows and removal remain live.
+    fileprivate func indexedPanelTableValue(_ key: LuaValue, in table: LuaTable) throws -> LuaValue {
+        let raw = try state.rawTableValue(for: key, in: table)
+        if !isNil(raw) { return raw }
+        guard table.metatable != nil else { return .nilValue }
+        return try state.call(semanticIndex, arguments: [.table(table), key]).first ?? .nilValue
     }
 
     fileprivate func beginHTMLDocumentLoad(
@@ -2776,10 +2785,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
             )
             for control in resolution.controlsBaseFirst {
                 try prepare(descriptor, using: control)
-                let initializer = try state.call(
-                    semanticIndex,
-                    arguments: [.table(descriptor.instanceTable), .string("Init")]
-                ).first ?? .nilValue
+                let initializer = try indexedPanelTableValue(.string("Init"), in: descriptor.instanceTable)
                 if case .luaFunction = initializer {
                     _ = try callVGUIFunction(initializer, arguments: [value])
                 } else if case .nativeFunction = initializer {
@@ -2917,7 +2923,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
             guard let identifier else { return }
             defer { destroy(identifier: identifier) }
             for (id, value, table) in callbacks where notified.insert(id).inserted {
-                let callback = try state.call(semanticIndex, arguments: [.table(table), .string("OnRemove")]).first ?? .nilValue
+                let callback = try indexedPanelTableValue(.string("OnRemove"), in: table)
                 switch callback {
                 case .luaFunction, .nativeFunction:
                     _ = try callVGUIFunction(callback, arguments: [value])
@@ -3597,10 +3603,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
             lock.unlock()
         }
 
-        let callback = try state.call(
-            semanticIndex,
-            arguments: [.table(descriptor.instanceTable), .string("PerformLayout")]
-        ).first ?? .nilValue
+        let callback = try indexedPanelTableValue(.string("PerformLayout"), in: descriptor.instanceTable)
         if case .luaFunction = callback {
             _ = try callVGUIFunction(callback, arguments: [
                 value, .number(descriptor.width), .number(descriptor.height)
@@ -3790,10 +3793,7 @@ public enum GMLuaVGUI {
                 default: break
                 }
             }
-            let value = try state.call(
-                semanticIndex,
-                arguments: [.table(descriptor.instanceTable), arguments[1]]
-            ).first ?? .nilValue
+            let value = try registry.indexedPanelTableValue(arguments[1], in: descriptor.instanceTable)
             if !isNil(value) { return [value] }
             let nativeValue = try state.rawTableValue(for: arguments[1], in: panelMetatable)
             if !isNil(nativeValue) { return [nativeValue] }
