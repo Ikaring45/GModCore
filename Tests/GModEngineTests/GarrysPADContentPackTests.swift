@@ -16,12 +16,34 @@ final class GarrysPADContentPackTests: XCTestCase {
         print("[Owned VGUI profile] startup-ms=\((ProcessInfo.processInfo.systemUptime - start) * 1000)")
         _ = try session.updateViewport(width: 1024, height: 768)
         let registry = try XCTUnwrap(session.clientRuntime.vguiRegistry)
+        let coldCensus = ProcessInfo.processInfo.environment["GMOD_VGUI_LAYOUT_CENSUS"] == "1"
         for cycle in 1...2 {
             for context in [false, true] {
                 let opened = ProcessInfo.processInfo.systemUptime
                 if context { try session.setContextMenuOpen(true) }
                 else { try session.setSpawnMenuOpen(true) }
                 let openMS = (ProcessInfo.processInfo.systemUptime - opened) * 1000
+                if coldCensus && cycle == 1 && !context {
+                    print("[Owned VGUI profile] instrumented layout census; timings are not baseline-comparable")
+                    try session.clientRuntime.execute("""
+                        COLD_LAYOUT_CENSUS = {}
+                        for _, panel in ipairs(vgui.GetAll()) do
+                            local original = panel.PerformLayout
+                            if original then
+                                local key = panel:GetClassName()
+                                panel.PerformLayout = function(self, ...)
+                                    local start = SysTime()
+                                    local result = original(self, ...)
+                                    local stats = COLD_LAYOUT_CENSUS[key] or { count = 0, seconds = 0 }
+                                    stats.count = stats.count + 1
+                                    stats.seconds = stats.seconds + SysTime() - start
+                                    COLD_LAYOUT_CENSUS[key] = stats
+                                    return result
+                                end
+                            end
+                        end
+                        """, sourceName: "=(owned cold layout census)")
+                }
                 var frameMS: [Double] = []
                 var profiles: [GMLuaVGUIFrameProfile] = []
                 var commands = 0
@@ -36,6 +58,24 @@ final class GarrysPADContentPackTests: XCTestCase {
                 print("[Owned VGUI profile] menu=\(context ? "C" : "Q") cycle=\(cycle) open-ms=\(openMS) first-frame-ms=\(frameMS[0]) warm-mean-ms=\(frameMS.dropFirst().reduce(0, +) / 9) panels=\(registry.livePanelCount) layouts=\(registry.completedLayoutPassCount - layouts) commands=\(commands)")
                 XCTAssertEqual(profiles.count, 10)
                 let first = try XCTUnwrap(profiles.first)
+                if coldCensus && cycle == 1 && !context {
+                    let values = try session.clientRuntime.executeReturningValues("""
+                        local result = {}
+                        for name, stats in pairs(COLD_LAYOUT_CENSUS) do
+                            result[#result + 1] = { name = name, count = stats.count, seconds = stats.seconds }
+                        end
+                        table.sort(result, function(a, b) return a.seconds > b.seconds end)
+                        local lines = {}
+                        for i = 1, math.min(12, #result) do
+                            local value = result[i]
+                            lines[#lines + 1] = value.name .. ':' .. value.count .. ':' .. value.seconds
+                        end
+                        return table.concat(lines, ',')
+                        """, sourceName: "=(owned cold layout census result)")
+                    if case let .string(value) = values.first {
+                        print("[Owned cold layout census inclusive seconds] \(value.utf8String)")
+                    }
+                }
                 print("[Owned VGUI stages ms] menu=\(context ? "C" : "Q") cycle=\(cycle) first layout=\(Double(first.layoutNanoseconds) / 1e6) think=\(Double(first.callbackNanoseconds) / 1e6) tree=\(Double(first.treeNanoseconds) / 1e6) paint=\(Double(first.paintNanoseconds) / 1e6)")
                 let warm = profiles.dropFirst()
                 print("[Owned VGUI stages ms] warm layout=\(warm.reduce(0.0) { $0 + Double($1.layoutNanoseconds) } / 9e6) think=\(warm.reduce(0.0) { $0 + Double($1.callbackNanoseconds) } / 9e6) tree=\(warm.reduce(0.0) { $0 + Double($1.treeNanoseconds) } / 9e6) paint=\(warm.reduce(0.0) { $0 + Double($1.paintNanoseconds) } / 9e6)")

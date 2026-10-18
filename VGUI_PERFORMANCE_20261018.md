@@ -105,3 +105,33 @@ Paint 54.74/63.75ms, against the preceding 12.90/58.86ms sample. These noisy
 runs do not establish a stable percentage latency improvement. Initial layout
 remains roughly a second. Panel and draw counts and the zero repeated-layout
 assertion remain unchanged. Physical-device and Release profiling are open.
+
+## Hidden deferred-layout correction
+
+Set `GMOD_VGUI_LAYOUT_CENSUS=1` for an instrumented, inclusive per-class census
+of the first Q opening's ten sampled frames. This changes callback cost and is
+explicitly not baseline-comparable. It located DMenu (8 calls, 0.757s inclusive)
+and DMenuOptionCVar (225 calls, 0.639s inclusive) as dominant initial work.
+Nested times overlap and must not be added.
+
+The registry previously dispatched ordinary deferred layouts even for locally
+hidden panels. Valve's
+[Panel::Think and InvalidateLayout](https://github.com/ValveSoftware/source-sdk-2013/blob/c8f4c6351162fbff83bfa5a428d45d1e6eed3824/src/vgui2/vgui_controls/Panel.cpp)
+distinguish these paths: Think performs deferred layout only when IsVisible,
+while explicit InvalidateLayout(true) performs it immediately, including while
+hidden. The host now preserves that distinction in pending-layout collection.
+Hidden flags remain dirty, and showing the panel processes the pending work.
+This is a local visibility check, not a new ancestor-visibility policy.
+
+Uninstrumented owned-pack Windows Debug sample after correction: first Q frame
+594ms, layout stage 504.5ms, against the earlier 1078ms / 998.7ms sample. Initial
+ten-frame layout count falls from 674 to 501. Draw counts remain Q 285 / C 24,
+and reopened menus still assert zero deferred layouts. One reopened-Q paint
+sample had a 183ms spike; steady warm mean was 62.4ms. This is not a guarantee
+that every open or input event is now fast, nor physical-iPad validation.
+
+The hidden/deferred/explicit/show regression and the 68 registry tests plus
+owned-pack profile pass (69 tests total).
+The additional stock-menu/resource run also passed: 13 executed, one opt-in
+resource skipped, no failures. This includes immediate Q/C frames, stock rope
+layout, context rays, strict spawn-menu interaction and resource input/layout.

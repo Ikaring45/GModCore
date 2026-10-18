@@ -5,6 +5,31 @@ import GModGameAssets
 import GModLua
 
 final class GMLuaVGUIRegistryTests: XCTestCase {
+    func testHiddenDeferredLayoutWaitsForVisibilityButExplicitLayoutStillRuns() throws {
+        let state = LuaState(output: { _ in })
+        let types = try GMLuaTypeSystem.install(into: state, utilityLayer: .bundledFallback)
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: types)
+        try state.execute("""
+            HIDDEN_LAYOUT_CALLS = 0
+            HIDDEN_LAYOUT = vgui.Create('Panel')
+            HIDDEN_LAYOUT.PerformLayout = function() HIDDEN_LAYOUT_CALLS = HIDDEN_LAYOUT_CALLS + 1 end
+            HIDDEN_LAYOUT:SetVisible(false)
+            HIDDEN_LAYOUT:InvalidateLayout()
+            """)
+        XCTAssertEqual(try registry.performPendingLayouts(), 0)
+        try state.execute("""
+            assert(HIDDEN_LAYOUT_CALLS == 0)
+            HIDDEN_LAYOUT:InvalidateLayout(true)
+            assert(HIDDEN_LAYOUT_CALLS == 1)
+            HIDDEN_LAYOUT:InvalidateLayout()
+            """)
+        XCTAssertEqual(try registry.performPendingLayouts(), 0)
+        try state.execute("HIDDEN_LAYOUT:SetVisible(true)")
+        XCTAssertEqual(try registry.performPendingLayouts(), 1)
+        try state.execute("assert(HIDDEN_LAYOUT_CALLS == 2)")
+        XCTAssertEqual(try registry.performPendingLayouts(), 0)
+    }
+
     func testPanelRawLookupRemainsLiveAndFallsBackToMetamethodAfterRemoval() throws {
         let state = LuaState(output: { _ in })
         let types = try GMLuaTypeSystem.install(into: state, utilityLayer: .bundledFallback)

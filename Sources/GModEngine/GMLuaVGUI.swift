@@ -3422,6 +3422,8 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     /// Dispatches deferred Lua `PerformLayout` hooks at a host-selected VGUI
     /// frame boundary. Each panel present at the start is visited at most once;
     /// a hook that invalidates itself remains pending for a later boundary.
+    /// Like Source Panel::Think, locally hidden panels retain deferred layout
+    /// until shown. InvalidateLayout(true) remains immediate even when hidden.
     ///
     /// This advances logical Lua layout only. It does not claim UIKit, docking,
     /// clipping, hit-testing, or renderer-backed geometry is implemented.
@@ -3445,6 +3447,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
             // but don't allocate a full descriptor index or sort clean panels.
             identifiers = panels.compactMap { identifier, value -> Int? in
                 guard let descriptor = panelDescriptor(from: value),
+                      descriptor.isVisible,
                       descriptor.isLayoutInvalidated,
                       !descriptor.isPerformingLayout,
                       GMLuaTypeSystem.typedObject(from: value)?.isValid == true else { return nil }
@@ -3453,7 +3456,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         } else {
             let descriptors = livePanelDescriptorsLocked(scope: scope)
             identifiers = descriptors.compactMap { identifier, descriptor -> Int? in
-                guard descriptor.isLayoutInvalidated, !descriptor.isPerformingLayout,
+                guard descriptor.isVisible, descriptor.isLayoutInvalidated, !descriptor.isPerformingLayout,
                       let value = panels[identifier],
                       GMLuaTypeSystem.typedObject(from: value)?.isValid == true else { return nil }
                 return identifier
