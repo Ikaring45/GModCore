@@ -19,6 +19,8 @@ public struct SourceVGUIScheme: Equatable, Sendable {
         case invalidColor(String)
         case aliasCycle(String)
         case unsupportedBorder(String)
+        case missingFont(String)
+        case unsupportedFont(String)
     }
 
     public let entries: [SourceKeyValuesParser.Entry]

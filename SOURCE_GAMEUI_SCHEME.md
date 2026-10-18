@@ -56,8 +56,10 @@ data, not asserted as native pixel parity without image comparison. Custom or
 rounded/image borders remain unsupported. Insets are preserved as data, not
 claimed as full native layout support.
 
-Fonts and CustomFontFiles are retained in parsed entries but not applied by this
-palette adapter. Native title controls, proportional scaling, focus transitions,
+The later font-descriptor adapter now connects authored single-glyph-set aliases
+to resource controls; see SOURCE_GAMEUI_FONTS.md for its strict subset and
+typeface/rendering gates. CustomFontFiles are still not registered from Scheme
+entries. Native title controls, proportional scaling, focus transitions,
 keyboard focus/default/selected button decoration, disabled-label embossing,
 editable ComboBox and remaining resource control types are still open. The
 app's original Options pages and real settings application must be integrated;

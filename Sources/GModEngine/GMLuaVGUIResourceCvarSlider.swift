@@ -172,7 +172,7 @@ struct GMLuaVGUIResourceCvarSlider {
                 for i = 0, 10 do
                     surface.DrawRect(math.floor(4 + i * math.max(0, w - 16) / 10), 16, 1, 5)
                 end
-                surface.SetFont('Default')
+                surface.SetFont(self.GarrysPAD_SourceCaptionFont or 'Default')
                 surface.SetTextColor(color.r, color.g, color.b, color.a)
                 surface.SetTextPos(0, 20)
                 surface.DrawText(string.format('%.2f', captionLow))

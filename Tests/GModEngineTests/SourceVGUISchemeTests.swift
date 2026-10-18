@@ -34,6 +34,8 @@ final class SourceVGUISchemeTests: XCTestCase {
             """)
         var commands: [String] = []
         let instance = try session.loadResource(resource, rootControlName: "Root", scheme: scheme) { commands.append($0) }
+        XCTAssertEqual(instance.unappliedSchemeFontControls.sorted(), ["Apply", "Caption"],
+            "A palette-only Scheme must not claim native font application")
         try instance.layout(viewportWidth: 640, viewportHeight: 480)
         func frameWithButtonColor(_ rgb: Double) throws -> GMLuaSurfaceFrameSnapshot {
             let frame = try session.renderFrame(viewportWidth: 640, viewportHeight: 480)
@@ -132,8 +134,9 @@ final class SourceVGUISchemeTests: XCTestCase {
             }; return false
         })
         XCTAssertTrue(frame.commands.contains {
-            if case let .text(text, _, _, color, _) = $0 {
-                return text.utf8String == "Starting Lua..." && color == label
+            if case let .text(text, _, font, color, _) = $0 {
+                return text.utf8String == "Starting Lua..." && color == label &&
+                    font.font.utf8String == "Tahoma" && font.size == 16 && font.name.utf8String.hasPrefix("GarrysPAD.GameUI.")
             }; return false
         })
         for phase: GMLuaPointerPhase in [.began, .ended] {
@@ -157,6 +160,11 @@ final class SourceVGUISchemeTests: XCTestCase {
         })
         XCTAssertTrue(sliderFrame.commands.contains {
             if case let .rectangle(rect, color, _) = $0 { return rect.width == 8 && rect.height == 16 && color == knob }; return false
+        })
+        XCTAssertTrue(sliderFrame.commands.contains {
+            if case let .text(text, _, font, _, _) = $0 {
+                return text.utf8String == "30.00" && font.font.utf8String == "Tahoma" && font.size == 12
+            }; return false
         })
     }
 }

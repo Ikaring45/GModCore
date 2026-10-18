@@ -26,11 +26,13 @@ public final class GMLuaVGUIResourceInstance {
     /// Controls still using their shipped Derma color path when an authored
     /// GameUI Scheme is supplied. This is separate from font/geometry parity.
     public private(set) var unappliedSchemeColorControls: [String] = []
+    public private(set) var unappliedSchemeFontControls: [String] = []
     private let runtime: GMLuaRuntime
     private let index: LuaValue
     private let roots: Roots
     private var panels: [String: LuaValue] = [:]
     private var resource: SourceVGUIResource
+    private let scheme: SourceVGUIScheme?
     private let rootControlName: String?
     private var laidOutViewport: GMLuaViewportSize?
 
@@ -46,6 +48,7 @@ public final class GMLuaVGUIResourceInstance {
          onCommand: @escaping (String) throws -> Void) throws {
         self.runtime = runtime
         self.resource = resource
+        self.scheme = scheme
         self.rootControlName = rootControlName
         index = try runtime.executeReturningValues("return function(p,k) return p[k] end").first ?? .nilValue
         roots = Roots([index])
@@ -217,6 +220,9 @@ public final class GMLuaVGUIResourceInstance {
                     if control.controlName?.lowercased() == "label" {
                         applied.formUnion(["dulltext", "brighttext"])
                     }
+                    if scheme.fonts.isEmpty, Self.usesSchemeFont(control) {
+                        unappliedSchemeFontControls.append(control.fieldName)
+                    }
                 }
                 unappliedFields += control.entries.filter { !applied.contains($0.key.lowercased()) }
                     .filter { !(hidesTitle && $0.key.lowercased() == "settitlebarvisible") }
@@ -245,10 +251,40 @@ public final class GMLuaVGUIResourceInstance {
         for control in resource.controls where control.fieldName != rootControlName {
             frames.append((control.fieldName, try control.frame(parent: parent, screen: screen)))
         }
+        // Resolve every alias/range before mutating live control fonts. Names
+        // are content-addressed so another resource can use a different Scheme
+        // without replacing Default or any of the original Derma fonts.
+        if let scheme, !scheme.fonts.isEmpty {
+            let resolved = try resource.controls.filter(Self.usesSchemeFont).map { control in
+                let kind = control.controlName?.lowercased() ?? ""
+                let alias = control.value("font") ?? (kind == "ccvarslider" ? "DefaultVerySmall" :
+                    (kind == "frame" ? scheme.string("FrameTitleBar.Font") ?? "Default" : "Default"))
+                return (control, try scheme.font(alias, viewportHeight: viewportHeight))
+            }
+            let assign = try runtime.executeReturningValues("""
+                return function(p, kind, name)
+                    if kind == 'frame' then p.lblTitle:SetFont(name)
+                    elseif kind == 'ccvarslider' then p.GarrysPAD_SourceCaptionFont = name
+                    else p:SetFont(name) end
+                end
+                """).first ?? .nilValue
+            for (control, definition) in resolved {
+                guard let panel = panels[control.fieldName] else { throw ResourceError.missingControl(control.fieldName) }
+                let name = try GMLuaVGUIResourceSchemeFont.install(definition, runtime: runtime)
+                _ = try runtime.state.call(assign, arguments: [panel,
+                    .string(LuaString(control.controlName!.lowercased())), .string(LuaString(name))])
+            }
+        }
         // Resolve all coordinates before touching live panels. Reapplying them
         // on idle frames would undo native dragging/resizing and relayout.
         for (name, frame) in frames { try applyFrame(frame, to: name) }
         laidOutViewport = viewport
+    }
+
+    private static func usesSchemeFont(_ control: SourceVGUIResource.Control) -> Bool {
+        let kind = control.controlName?.lowercased() ?? ""
+        return ["label", "button", "textentry", "combobox", "ccvarslider"].contains(kind) ||
+            (kind == "frame" && control.value("settitlebarvisible") != "0")
     }
 
     public func setText(_ text: String, control: String) throws {
