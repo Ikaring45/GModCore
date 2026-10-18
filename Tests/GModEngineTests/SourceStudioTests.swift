@@ -3,6 +3,28 @@ import XCTest
 @testable import GModEngine
 
 final class SourceStudioTests: XCTestCase {
+    func testV44MetadataIgnoresReservedSequenceTail() throws {
+        var data = makeStudioModel()
+        data[4] = 44
+        // Nonzero reserved bytes must not be interpreted as modifier pointers.
+        for offset in (920 + 184)..<(920 + 212) { data[offset] = 0xFF }
+        // Convert the fixture's v48 relative name pointer into v44 absolute form.
+        let hitboxBase = 852
+        let nameField = hitboxBase + 32
+        let relative = (0..<4).reduce(UInt32(0)) { $0 | UInt32(data[nameField + $1]) << ($1 * 8) }
+        let absolute = relative + UInt32(hitboxBase)
+        for byte in 0..<4 { data[nameField + byte] = UInt8(truncatingIfNeeded: absolute >> (byte * 8)) }
+        let model = try SourceStudioModel(data: data)
+        XCTAssertEqual(model.header.version, 44)
+        XCTAssertEqual(model.bones.count, 2)
+        XCTAssertEqual(model.hitboxSets.count, 1)
+        XCTAssertEqual(model.hitboxSets[0].hitboxes[0].name, "child_box")
+        XCTAssertEqual(model.sequences.first?.label, "run_all")
+        XCTAssertTrue(try XCTUnwrap(model.sequences.first).activityModifiers.isEmpty)
+        for byte in 0..<4 { data[nameField + byte] = 0x7F }
+        XCTAssertThrowsError(try SourceStudioModel(data: data))
+    }
+
     func testSyntheticV48ParsesHeaderBonesHitboxesAndSequenceMetadata() throws {
         let model = try SourceStudioModel(data: makeStudioModel())
 
@@ -52,7 +74,7 @@ final class SourceStudioTests: XCTestCase {
         XCTAssertFalse(SourceStudioModel.decodesCompressedAnimations)
         XCTAssertFalse(SourceStudioModel.parsesVTX)
         XCTAssertFalse(SourceStudioModel.parsesVVD)
-        XCTAssertEqual(SourceStudioModel.supportedVersions, [48])
+        XCTAssertEqual(SourceStudioModel.supportedVersions, [44, 48])
     }
 
     func testDefaultBoneWorldUsesParentTimesLocalSourceOrder() throws {

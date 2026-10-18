@@ -22,6 +22,6 @@ final class SourceStudioFileIdentityTests: XCTestCase {
         XCTAssertThrowsError(try SourceStudioFileIdentity(data: fixture(version: 44, length: 81)))
         XCTAssertThrowsError(try SourceStudioFileIdentity(data: fixture(version: 44), expectedChecksum: 124))
         XCTAssertThrowsError(try SourceStudioFileIdentity(data: Data(repeating: 0, count: 79)))
-        XCTAssertEqual(SourceStudioModel.supportedVersions, [48], "identity support must not claim v44 rendering")
+        XCTAssertEqual(SourceStudioModel.supportedVersions, [44, 48])
     }
 }

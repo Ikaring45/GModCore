@@ -341,7 +341,11 @@ public struct SourceStudioSequence: Equatable, Sendable {
     }
 }
 
-/// Validated, read-only core of a Source 1 v48 MDL.
+/// Validated, read-only core of a Source 1 v44/v48 MDL.
+/// v44 here is the legacy HL2 layout (absolute hitbox-name addresses), not
+/// game-specific forks such as Vindictus. Layout definitions were checked
+/// against Crowbar ReadBones/ReadHitboxes/ReadSequenceDescs at
+/// 0d46f3b6a694b74453db407c72c12a9685d8eb1d; no conversion or byte rewriting.
 ///
 /// Grounding: Source SDK 2013 `studio.h` (`STUDIO_VERSION`, `studiohdr_t`,
 /// `mstudiobone_t`, `mstudiohitboxset_t`, `mstudiobbox_t`, and
@@ -354,7 +358,7 @@ public struct SourceStudioSequence: Equatable, Sendable {
 /// default bone pose; it does not claim to evaluate animated poses or meshes.
 public struct SourceStudioModel: Sendable {
     public static let magic: UInt32 = 0x5453_4449 // little-endian bytes "IDST"
-    public static let supportedVersions: Set<Int32> = [48]
+    public static let supportedVersions: Set<Int32> = [44, 48]
     public static let studioHeaderSize = 408
     public static let boneRecordSize = 216
     public static let hitboxSetRecordSize = 12
@@ -450,7 +454,8 @@ public struct SourceStudioModel: Sendable {
                     reader: reader,
                     base: base,
                     setIndex: setIndex,
-                    boneCount: boneCount
+                    boneCount: boneCount,
+                    version: version
                 )
             )
         }
@@ -470,7 +475,7 @@ public struct SourceStudioModel: Sendable {
         for sequenceIndex in 0..<sequenceCount {
             let base = sequenceStart + sequenceIndex * Self.sequenceRecordSize
             parsedSequences.append(
-                try Self.readSequence(reader: reader, base: base, index: sequenceIndex)
+                try Self.readSequence(reader: reader, base: base, index: sequenceIndex, version: version)
             )
         }
 
@@ -614,7 +619,8 @@ public struct SourceStudioModel: Sendable {
         reader: SourceStudioReader,
         base: Int,
         setIndex: Int,
-        boneCount: Int
+        boneCount: Int,
+        version: Int32
     ) throws -> SourceStudioHitboxSet {
         let prefix = "hitboxset[\(setIndex)]"
         let nameOffset = try reader.int32(at: base, field: "\(prefix).sznameindex")
@@ -655,7 +661,8 @@ public struct SourceStudioModel: Sendable {
                 field: "\(hitboxPrefix).szhitboxnameindex"
             )
             let name = try reader.relativeCString(
-                base: hitboxBase,
+                // Legacy HL2 v44 stores an absolute hitbox-name address.
+                base: version == 44 ? 0 : hitboxBase,
                 relativeOffset: nameOffset,
                 field: "\(hitboxPrefix).name",
                 required: false
@@ -676,7 +683,8 @@ public struct SourceStudioModel: Sendable {
     private static func readSequence(
         reader: SourceStudioReader,
         base: Int,
-        index: Int
+        index: Int,
+        version: Int32
     ) throws -> SourceStudioSequence {
         let prefix = "sequence[\(index)]"
         let basePointer = try reader.int32(at: base, field: "\(prefix).baseptr")
@@ -729,11 +737,12 @@ public struct SourceStudioModel: Sendable {
         let nextSequence = try reader.int32(at: base + 136, field: "\(prefix).nextseq")
         let pose = try reader.int32(at: base + 140, field: "\(prefix).pose")
 
-        let modifierOffset = try reader.int32(
+        // v44 has seven reserved Int32 fields at 184, not activity modifiers.
+        let modifierOffset = version == 44 ? 0 : try reader.int32(
             at: base + 184,
             field: "\(prefix).activitymodifierindex"
         )
-        let modifierCount = try reader.validatedCount(
+        let modifierCount = version == 44 ? 0 : try reader.validatedCount(
             at: base + 188,
             field: "\(prefix).numactivitymodifiers"
         )

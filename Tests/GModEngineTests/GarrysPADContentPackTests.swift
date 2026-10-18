@@ -35,6 +35,30 @@ final class GarrysPADContentPackTests: XCTestCase {
         let mdl = try XCTUnwrap(source.data(for: "models/props_junk/wood_crate001a.mdl"))
         let phy = try XCTUnwrap(source.data(for: "models/props_junk/wood_crate001a.phy"))
         let model = try SourceStudioFileIdentity(data: mdl)
+        let studio = try SourceStudioModel(data: mdl, expectedChecksum: model.checksum)
+        XCTAssertFalse(studio.bones.isEmpty)
+        print("[Owned prop Studio] bones=\(studio.bones.count) sequences=\(studio.sequences.count)")
+        let loader = SourceStudioModelAssetLoader(reader: source, budget: .init(
+            maximumBytesByKind: [.mdl: 16_777_216, .vvd: 16_777_216, .vtx: 16_777_216],
+            maximumTotalBytes: 50_331_648, maximumVVDVertices: 65_536,
+            maximumVVDFixups: 65_536, maximumVTXBodyParts: 256))
+        let stem = "models/props_junk/wood_crate001a"
+        let loaded = loader.load(paths: .init(mdl: stem + ".mdl", vvd: stem + ".vvd",
+            vtx: stem + ".dx90.vtx"), requirement: .render)
+        guard case let .loaded(asset) = loaded else {
+            return XCTFail("Owned crate asset load failed: \(String(describing: loaded.unavailableReason))")
+        }
+        let mesh = try SourceStudioModelMeshDecoder.decodeRootLOD(asset.renderPayload,
+            budget: .init(maximumRootVertices: 65_536, maximumBodyParts: 256,
+                maximumModels: 256, maximumMeshes: 1024, maximumStripGroups: 4096,
+                maximumDecodedVertices: 262_144, maximumIndices: 1_048_576,
+                maximumStrips: 65_536, maximumBoneStateChanges: 65_536))
+        let groups = mesh.bodyParts.flatMap(\.models).flatMap(\.meshes).flatMap(\.stripGroups)
+        let vertices = groups.reduce(0) { $0 + $1.vertices.count }
+        let indices = groups.reduce(0) { $0 + $1.indices.count }
+        XCTAssertGreaterThan(vertices, 0)
+        XCTAssertGreaterThan(indices, 0)
+        print("[Owned prop mesh] vertices=\(vertices) indices=\(indices)")
         let envelope = try SourcePHYCollisionDecoder.decodeEnvelope(phy,
             expectedSourceModelChecksum: model.checksum,
             budget: .init(maximumFileBytes: 16_777_216, maximumSolids: 64,

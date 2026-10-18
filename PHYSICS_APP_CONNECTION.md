@@ -35,8 +35,19 @@ found a single MDL in `sourceengine/hl2_misc_dir.vpk`: version 44, 1,604 bytes,
 checksum -1388713967. This is not a newer model hidden by VPK mount precedence.
 The matching 1,208-byte PHY passes checksum matching and decodes one collision
 ledge, still explicitly unattested. The prefix identity reader accepts v44;
-the full Studio/render decoder remains v48-only. Neither structural collision
-decoding nor the inventory establishes drawable or physically spawnable props.
+the Studio core now reads v44 bones, hitboxes and sequence metadata as well.
+The v44 sequence tail is reserved, not an activity-modifier table. Record
+The HL2 v44 hitbox-name address is absolute, unlike v48's record-relative
+address. Game-specific v44 forks are not claimed supported. Record
+layout evidence: Crowbar's original v44 reader at fixed commit
+`0d46f3b6a694b74453db407c72c12a9685d8eb1d`,
+[`ReadBones` and `ReadSequenceDescs`](https://github.com/ZeqMacaw/Crowbar/blob/0d46f3b6a694b74453db407c72c12a9685d8eb1d/Crowbar/Core/GameModel/SourceModel44/SourceMdlFile44.vb).
+The owned MDL/VVD/DX90-VTX bundle now passes checksum/budget validation and
+root-LOD mesh decoding (400 expanded vertices, 600 indices). Windows Studio
+regressions pass. This is CPU decoding evidence, not a GPU screenshot or iPad
+acceptance. Animation integration and rendering still require separate validation.
+Neither structural collision decoding nor metadata parsing establishes drawable
+or physically spawnable props.
 
 Nested VPK reads now preserve backing-store errors (including unsupported ZIP
 compression) instead of relabeling every failure as truncated VPK data. A
