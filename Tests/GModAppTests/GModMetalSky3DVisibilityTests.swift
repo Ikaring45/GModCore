@@ -12,7 +12,9 @@ final class GModMetalSky3DVisibilityTests: XCTestCase {
         let resolver = GModMetalSurfaceSourceMaterialResolver { path in
             try pak.data(for: path)
         }
-        let bitmap = try XCTUnwrap(resolver.resolveWorldTexture(
+        // This BSP entry is a VTF cubemap, not a VMT. A material lookup must
+        // not invent a VMT or silently turn a missing material into a texture.
+        let bitmap = try XCTUnwrap(resolver.resolveWorldSourceTexture(
             named: "maps/gm_construct/c1436_-571_-71"
         ))
 

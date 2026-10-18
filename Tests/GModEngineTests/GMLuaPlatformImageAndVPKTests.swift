@@ -2,8 +2,23 @@ import Dispatch
 import Foundation
 import XCTest
 import GModEngine
+import GModGameAssets
 
 final class GMLuaPlatformImageAndVPKTests: XCTestCase {
+    func testBundledConstructCubemapIsAnAuthoredTextureNotAMaterial() throws {
+        let bsp = try SourceBSP(data: GModGameAssets.data(for: .construct, kind: .bsp))
+        let pak = try SourceBSPPakFileSystem(bsp: bsp)
+        let resolver = GMLuaSourceMaterialResolver { try pak.data(for: $0) }
+        let name = "maps/gm_construct/c1436_-571_-71"
+        XCTAssertEqual(try resolver.resolve(named: name).metadata.status, .materialMissing)
+        let texture = try XCTUnwrap(resolver.resolveTexture(named: name, mipPolicy: .authoredChain))
+        XCTAssertEqual(texture.status, .decoded)
+        XCTAssertEqual(texture.mipImages.map { [$0.width, $0.height] },
+            [[32, 32], [16, 16], [8, 8], [4, 4], [2, 2], [1, 1]])
+        XCTAssertTrue(try XCTUnwrap(texture.flags).contains(.clampS))
+        XCTAssertTrue(try XCTUnwrap(texture.flags).contains(.clampT))
+    }
+
     func testPNGDecodePreservesTopLeftOrientationAndStraightAlphaRGBA() throws {
 #if os(Windows) || os(iOS) || os(macOS)
         // A deliberately asymmetric 2x2 RGBA PNG. The two translucent primary

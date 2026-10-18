@@ -293,7 +293,9 @@ public final class GModMetalSurfaceSourceMaterialResolver:
         return bitmap
     }
 
-    private func resolveWorldSourceTexture(
+    /// Explicit authored VTF boundary, distinct from the VMT material path.
+    /// Shared by terrain bindings and exact file-backed sampler validation.
+    func resolveWorldSourceTexture(
         named textureName: String
     ) throws -> GModMetalSurfaceBitmap? {
         let logicalKey = textureName

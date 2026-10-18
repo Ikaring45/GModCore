@@ -124,15 +124,22 @@ final class GModWorldDisplacementTerrainLODTests: XCTestCase {
                 $0.renderLayer != .sky2D || !$0.isDisplacement
             })
             if case .construct = fixture.map {
-                let ordinaryFlatgrass = mesh.materialRanges.filter {
-                    $0.renderLayer == .world &&
-                        $0.materialName == "gm_construct/flatgrass"
+                let flatgrass = mesh.materialRanges.filter {
+                    $0.materialName == "gm_construct/flatgrass"
                 }
                 XCTAssertEqual(
-                    Set(ordinaryFlatgrass.map(\.isDisplacement)),
+                    Set(flatgrass.map(\.isDisplacement)),
                     [false, true],
                     "real construct brush and displacement faces share this VMT"
                 )
+                // The shared VMT crosses render layers: the ordinary brush
+                // lives in the authored 3D skybox, not the playable world.
+                let brushes = flatgrass.filter { !$0.isDisplacement }
+                let terrain = flatgrass.filter(\.isDisplacement)
+                XCTAssertEqual(Set(brushes.map(\.renderLayer)), [.sky3D])
+                XCTAssertEqual(brushes.reduce(0) { $0 + $1.indexCount }, 84)
+                XCTAssertEqual(Set(terrain.map(\.renderLayer)), [.world])
+                XCTAssertEqual(terrain.reduce(0) { $0 + $1.indexCount }, 13_824)
             }
 
             for (rangeIndex, range) in displacementRanges {

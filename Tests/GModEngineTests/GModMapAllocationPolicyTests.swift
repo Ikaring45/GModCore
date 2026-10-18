@@ -64,9 +64,10 @@ final class GModMapAllocationPolicyTests: XCTestCase {
                     worldIndexCount: 139_548,
                     displacementVertexCount: 12_638,
                     displacementIndexCount: 62_976,
-                    worldVertexWorkingByteCount: 7_708_480,
+                    // Vertex working storage includes authored displacement alpha.
+                    worldVertexWorkingByteCount: 8_161_920,
                     worldIndexWorkingByteCount: 1_116_384,
-                    displacementVertexWorkingByteCount: 1_213_248,
+                    displacementVertexWorkingByteCount: 1_263_800,
                     displacementIndexWorkingByteCount: 503_808
                 )
             case .flatgrass:
@@ -75,9 +76,9 @@ final class GModMapAllocationPolicyTests: XCTestCase {
                     worldIndexCount: 44_427,
                     displacementVertexCount: 4_624,
                     displacementIndexCount: 24_576,
-                    worldVertexWorkingByteCount: 2_320_840,
+                    worldVertexWorkingByteCount: 2_457_360,
                     worldIndexWorkingByteCount: 355_416,
-                    displacementVertexWorkingByteCount: 443_904,
+                    displacementVertexWorkingByteCount: 462_400,
                     displacementIndexWorkingByteCount: 196_608
                 )
             }
