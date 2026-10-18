@@ -2,6 +2,22 @@ import XCTest
 @testable import GModApp
 
 final class GModMenuWebContractTests: XCTestCase {
+    func testExternalURLAllowsOnlyExplicitBrowserSchemesAndNoCredentials() {
+        XCTAssertEqual(GModHomeMenuCommandParser.externalURL(in:
+            "gui.OpenURL( 'https://github.com/solsticegamestudios/GModPatchTool' )")?.host, "github.com")
+        XCTAssertEqual(GModHomeMenuCommandParser.externalURL(in:
+            "gui.OpenURL('http://gmod.facepunch.com/changes/')")?.scheme, "http")
+        for command in [
+            "gui.OpenURL('file:///private/data')", "gui.OpenURL('javascript:alert(1)')",
+            "gui.OpenURL('garryspad://launch')", "gui.OpenURL('//example.com')",
+            "gui.OpenURL('https://user:pass@example.com')", "gui.OpenURL('https://')",
+            "gui.OpenURL('https://example.com', 'extra')",
+            "print(\"gui.OpenURL('https://example.com')\")",
+            "-- gui.OpenURL('https://example.com')",
+            "gui.OpenURL('https://example.com\\nheader')"
+        ] { XCTAssertNil(GModHomeMenuCommandParser.externalURL(in: command), command) }
+    }
+
     func testZoomContractForcesViewportAndDisablesOnlyZoomGestures() {
         let script = GModMenuWebContract.zoomLockScript
 

@@ -12,6 +12,20 @@ enum GModHomeMenuAction: Equatable, Sendable {
 }
 
 enum GModHomeMenuCommandParser {
+    /// Only browser URLs cross this boundary. File, script and custom app
+    /// schemes from content-pack Lua must never become native URL launches.
+    static func externalURL(in source: String) -> URL? {
+        guard let arguments = callArguments(function: "gui.OpenURL", in: source),
+              arguments.count == 1,
+              !arguments[0].unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+              let url = URL(string: arguments[0]),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "https" || scheme == "http",
+              let host = url.host, !host.isEmpty,
+              url.user == nil, url.password == nil else { return nil }
+        return url
+    }
+
     static func parse(_ source: String) -> GModHomeMenuAction? {
         // HTML menus can call the engine GameUI entry point directly, rather
         // than forwarding it through the gamemenucommand console command.

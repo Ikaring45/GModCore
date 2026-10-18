@@ -20,7 +20,7 @@ session; they are not implemented multiplayer configuration.
 ## Remaining, not hidden
 
 MENU map/language/news/addon/server-browser callbacks and launch convars;
-external URL routing; users.txt startup warning; unsupported AI command hosts;
+users.txt startup warning; unsupported AI command hosts;
 player editor nil selection; empty table random interval; stuckRecovery;
 native weapon_357 projection; separate c_arms rendering. These require actual
 behavior and are not fixed by silencing diagnostics or no-op command handlers.
@@ -34,3 +34,18 @@ pointer coordinates and stable unscaled RealTime have direct regressions.
 The endpoint regression finds actual Float reassociation differences while
 retaining rejection of a 1-unit corrupted endpoint. Notification suite also
 passed in the earlier 68-test timing/VGUI run. Apple/device checks pending.
+
+## External browser route
+
+`gui.OpenURL` now reaches UIKit's external URL opener from the menu bridge.
+The parser accepts one explicit HTTP/HTTPS URL with a host and rejects control
+characters, user credentials, file/script/custom schemes and quoted/commented
+lookalike commands. Failed browser handoff remains logged. Windows compiled
+parser checks passed, and changed UIKit/test sources passed syntax parsing;
+neither is Apple typecheck or physical-iPad browser-launch proof. Original
+news/patch-tool links are used as authored, not redirected to substitute pages.
+
+Server configuration is still incomplete: GModPlayableSession explicitly
+rejects maxPlayers other than one. The menu's multi-player selection must not
+be represented as implemented by merely storing a convar or removing that
+guard; transport/player-session support and end-to-end configuration are needed.

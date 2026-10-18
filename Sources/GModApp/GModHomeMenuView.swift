@@ -544,7 +544,13 @@ struct GModHomeMenuView: UIViewRepresentable {
                 return
             }
 
-            if let parsed = GModHomeMenuCommandParser.parse(command) {
+            if let url = GModHomeMenuCommandParser.externalURL(in: command) {
+                UIApplication.shared.open(url, options: [:]) { opened in
+                    if !opened {
+                        print("[GarrysPAD][MENU] External browser could not open: \(url.absoluteString)")
+                    }
+                }
+            } else if let parsed = GModHomeMenuCommandParser.parse(command) {
                 handleMenuAction(parsed, in: message.webView)
             } else if command.contains("UpdateServerSettings") {
                 message.webView?.evaluateJavaScript(Self.serverSettingsScript)
