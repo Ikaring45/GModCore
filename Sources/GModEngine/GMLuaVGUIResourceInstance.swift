@@ -152,6 +152,15 @@ public final class GMLuaVGUIResourceInstance {
                 }
                 if control.controlName?.lowercased() == "textentry" {
                     booleanFields.append(("editable", "SetEditable"))
+                    booleanFields.append(("numericinputonly", "SetAllowNumericInputOnly"))
+                    booleanFields.append(("unicode", "SetAllowNonAsciiCharacters"))
+                    if let raw = control.value("maxchars") {
+                        guard let maximum = Int(raw) else {
+                            throw ResourceError.invalidField(control: control.name, key: "maxchars")
+                        }
+                        _ = try call(control.fieldName, "SetMaximumCharCount", [.number(Double(maximum))])
+                        applied.insert("maxchars")
+                    }
                 }
                 for (key, method) in booleanFields {
                     if let value = control.value(key) {

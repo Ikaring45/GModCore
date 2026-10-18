@@ -380,6 +380,8 @@ private final class GMLuaPanelValue: @unchecked Sendable {
     var foregroundColor: GMLuaPanelColorSnapshot?
     var contentAlignment = 5
     var allowsNonASCIICharacters = false
+    var allowsNumericInputOnly = false
+    var maximumCharacterCount = -1
     var caretPosition = 0
     var expensiveShadow: GMLuaTextShadowSnapshot?
     var dock = GMLuaPanelDock.none
@@ -2306,9 +2308,19 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
             // restricted, preserve the US-ASCII subsequence of a mixed Swift
             // String. The public API documents the character restriction but
             // does not specify native mixed-paste aggregation behavior.
-            let accepted = descriptor.allowsNonASCIICharacters
-                ? supplied
-                : supplied.filter { $0 <= 0x7f }
+            let asciiAccepted = descriptor.allowsNonASCIICharacters
+                ? text
+                : String(decoding: supplied.filter { $0 <= 0x7f }, as: UTF8.self)
+            let filtered = descriptor.allowsNumericInputOnly
+                ? String(String.UnicodeScalarView(asciiAccepted.unicodeScalars.filter {
+                    CharacterSet.decimalDigits.contains($0) || $0 == "."
+                })) : asciiAccepted
+            var accepted = Array(filtered.utf8)
+            if descriptor.maximumCharacterCount >= 0 {
+                let available = max(0, descriptor.maximumCharacterCount - utf8CharacterCount(in: descriptor.text.bytes))
+                let boundaries = utf8CharacterBoundaries(in: accepted)
+                accepted = Array(accepted.prefix(boundaries[min(available, boundaries.count - 1)]))
+            }
             if !accepted.isEmpty {
                 let boundaries = utf8CharacterBoundaries(in: descriptor.text.bytes)
                 let clampedCaret = min(
@@ -4474,6 +4486,20 @@ public enum GMLuaVGUI {
                     "SetAllowNonAsciiCharacters"
                 )
                 return []
+            }),
+            ("SetAllowNumericInputOnly", { arguments in
+                let panel = try requiredTextEntry(arguments, "SetAllowNumericInputOnly")
+                panel.allowsNumericInputOnly = try requiredBoolean(arguments, 1, "SetAllowNumericInputOnly")
+                return []
+            }),
+            ("SetMaximumCharCount", { arguments in
+                let panel = try requiredTextEntry(arguments, "SetMaximumCharCount")
+                panel.maximumCharacterCount = try requiredCoercibleInteger(arguments, 1, "SetMaximumCharCount")
+                return []
+            }),
+            ("GetMaximumCharCount", { arguments in
+                let panel = try requiredTextEntry(arguments, "GetMaximumCharCount")
+                return [.number(Double(panel.maximumCharacterCount))]
             }),
             ("SetExpensiveShadow", { arguments in
                 let panel = try requiredLabel(arguments, "SetExpensiveShadow")

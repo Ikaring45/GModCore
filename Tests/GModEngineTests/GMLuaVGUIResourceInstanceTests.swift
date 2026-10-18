@@ -3,6 +3,32 @@ import GModEngine
 import GModGameAssets
 
 final class GMLuaVGUIResourceInstanceTests: XCTestCase {
+    func testResourceFPSInputAppliesNumericMaximumAndUnicodeFields() throws {
+        let files = try GMLuaHostDirectoryFileSystem(rootURL: GModGameAssets.clientContentRootURL(), writable: false)
+        let session = GMLuaMenuSession(fileSystem: files, logger: { _ in })
+        defer { _ = session.close() }
+        _ = try session.start()
+        let resource = try SourceVGUIResource(source: """
+            "settings.res" {
+                "FPS" { "ControlName" "TextEntry" "editable" "1" "maxchars" "3"
+                    "NumericInputOnly" "1" "unicode" "0"
+                    "xpos" "20" "ypos" "20" "wide" "100" "tall" "30" }
+            }
+            """)
+        let instance = try session.loadResource(resource) { _ in }
+        try instance.layout(viewportWidth: 640, viewportHeight: 480)
+        XCTAssertTrue(instance.unappliedFields.isEmpty)
+        _ = try session.renderFrame(viewportWidth: 640, viewportHeight: 480)
+        for phase: GMLuaPointerPhase in [.began, .ended] {
+            _ = try session.dispatchPointerEvent(x: 80, y: 35, phase: phase, timestamp: 1,
+                viewportWidth: 640, viewportHeight: 480)
+        }
+        _ = try session.insertText("a30語00")
+        XCTAssertEqual(try instance.text(control: "FPS"), "300")
+        _ = try session.insertText("9")
+        XCTAssertEqual(try instance.text(control: "FPS"), "300")
+    }
+
     func testReadOnlyComboResourceUsesRealDropdownAndRetainsLiveChoice() throws {
         let files = try GMLuaHostDirectoryFileSystem(rootURL: GModGameAssets.clientContentRootURL(), writable: false)
         let session = GMLuaMenuSession(fileSystem: files, logger: { _ in })

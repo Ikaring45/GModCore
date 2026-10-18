@@ -5,6 +5,50 @@ import GModGameAssets
 import GModLua
 
 final class GMLuaVGUIRegistryTests: XCTestCase {
+    func testNativeTextEntryNumericAndMaximumInputLimitsRetainCaretAndCallbacks() throws {
+        let state = LuaState(output: { _ in })
+        let types = try GMLuaTypeSystem.install(into: state, utilityLayer: .bundledFallback)
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: types)
+        try state.execute("""
+            LIMIT_ENTRY = vgui.Create('TextEntry')
+            LIMIT_ENTRY:RequestFocus()
+            LIMIT_ENTRY:SetAllowNumericInputOnly(true)
+            LIMIT_ENTRY:SetMaximumCharCount(3)
+            assert(LIMIT_ENTRY:GetMaximumCharCount() == 3)
+            LIMIT_CHANGES = 0
+            LIMIT_ENTRY.OnTextChanged = function() LIMIT_CHANGES = LIMIT_CHANGES + 1 end
+            """)
+        XCTAssertNotNil(try registry.insertText("-a1.23"))
+        try state.execute("assert(LIMIT_ENTRY:GetText() == '1.2'); assert(LIMIT_ENTRY:GetCaretPos() == 3); assert(LIMIT_CHANGES == 1)")
+        XCTAssertNotNil(try registry.insertText("4"))
+        try state.execute("assert(LIMIT_CHANGES == 1)")
+        _ = try registry.deleteTextBackward()
+        _ = try registry.insertText("9")
+        try state.execute("""
+            assert(LIMIT_ENTRY:GetText() == '1.9')
+            assert(LIMIT_CHANGES == 3)
+            LIMIT_ENTRY:SetMaximumCharCount(0)
+            LIMIT_ENTRY:SetText('')
+            """)
+        _ = try registry.insertText("1")
+        try state.execute("""
+            assert(LIMIT_ENTRY:GetText() == '')
+            LIMIT_ENTRY:SetMaximumCharCount(-1)
+            LIMIT_ENTRY:SetAllowNumericInputOnly(false)
+            LIMIT_ENTRY:SetAllowNonAsciiCharacters(true)
+            """)
+        _ = try registry.insertText("日本語")
+        try state.execute("""
+            assert(LIMIT_ENTRY:GetText() == '日本語')
+            LIMIT_ENTRY:SetMaximumCharCount(2)
+            assert(LIMIT_ENTRY:GetText() == '日本語') -- changing the limit does not truncate existing text
+            LIMIT_ENTRY:SetText('日')
+            LIMIT_ENTRY:SetCaretPos(1)
+            """)
+        _ = try registry.insertText("本語")
+        try state.execute("assert(LIMIT_ENTRY:GetText() == '日本'); assert(LIMIT_ENTRY:GetCaretPos() == 2)")
+    }
+
     func testOwnedPopupDrawsAndReceivesInputOutsideOwnerWithoutLosingOwnership() throws {
         let state = LuaState(output: { _ in })
         let types = try GMLuaTypeSystem.install(into: state, utilityLayer: .bundledFallback)
