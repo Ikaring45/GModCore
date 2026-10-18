@@ -116,10 +116,11 @@ actor GModDermaMenuSessionLane {
         lastAdvanceTimestamp = nil
     }
 
-    func loadLoadingResource(_ resource: SourceVGUIResource, expectedGeneration: UInt64) throws -> [GMLuaVGUIResourceInstance.UnappliedField] {
+    func loadLoadingResource(_ resource: SourceVGUIResource, scheme: SourceVGUIScheme? = nil,
+        expectedGeneration: UInt64) throws -> [GMLuaVGUIResourceInstance.UnappliedField] {
         let session = try requiredSession(expectedGeneration: expectedGeneration)
         try resourceInstance?.remove()
-        resourceInstance = try session.loadLoadingResource(resource)
+        resourceInstance = try session.loadLoadingResource(resource, scheme: scheme)
         return resourceInstance?.unappliedFields ?? []
     }
 
@@ -556,7 +557,7 @@ final class GModDermaMenuModel: ObservableObject {
         mutationTask = task
     }
 
-    func presentLoadingResource(_ resource: SourceVGUIResource) {
+    func presentLoadingResource(_ resource: SourceVGUIResource, scheme: SourceVGUIScheme) {
         guard hasSession, !resourcePresented else { return }
         presentationRevision &+= 1
         deferredActions = []
@@ -569,7 +570,7 @@ final class GModDermaMenuModel: ObservableObject {
             await previous?.value
             guard let self else { return }
             do {
-                let fields = try await sessionLane.loadLoadingResource(resource, expectedGeneration: generation)
+                let fields = try await sessionLane.loadLoadingResource(resource, scheme: scheme, expectedGeneration: generation)
                 guard generation == sessionGeneration else { return }
                 if !fields.isEmpty {
                     GModAppDiagnosticsStore.shared.record(kind: .compatibility, severity: .warning,

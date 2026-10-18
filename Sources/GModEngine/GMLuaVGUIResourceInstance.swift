@@ -23,6 +23,9 @@ public final class GMLuaVGUIResourceInstance {
     }
 
     public private(set) var unappliedFields: [UnappliedField] = []
+    /// Controls still using their shipped Derma color path when an authored
+    /// GameUI Scheme is supplied. This is separate from font/geometry parity.
+    public private(set) var unappliedSchemeColorControls: [String] = []
     private let runtime: GMLuaRuntime
     private let index: LuaValue
     private let roots: Roots
@@ -39,7 +42,8 @@ public final class GMLuaVGUIResourceInstance {
     ]
 
     init(runtime: GMLuaRuntime, resource: SourceVGUIResource,
-         rootControlName: String?, onCommand: @escaping (String) throws -> Void) throws {
+         rootControlName: String?, scheme: SourceVGUIScheme? = nil,
+         onCommand: @escaping (String) throws -> Void) throws {
         self.runtime = runtime
         self.resource = resource
         self.rootControlName = rootControlName
@@ -90,7 +94,7 @@ public final class GMLuaVGUIResourceInstance {
                 ]).first ?? .nilValue
                 panels[control.fieldName] = panel
                 if let slider = sliders[control.fieldName] {
-                    try slider.install(runtime: runtime, panel: panel)
+                    try slider.install(runtime: runtime, panel: panel, scheme: scheme)
                 }
                 if control.controlName?.lowercased() == "progressbar" {
                     // Native Source ProgressBar is segmented, unlike Derma's
@@ -202,6 +206,17 @@ public final class GMLuaVGUIResourceInstance {
                     // path as original Lua DButton.DoClick overrides.
                     let setter = try runtime.executeReturningValues("return function(p,k,v) p[k]=v end").first ?? .nilValue
                     _ = try runtime.state.call(setter, arguments: [panel, .string("DoClick"), callback])
+                }
+                if let scheme {
+                    try GMLuaVGUIResourceSchemeColors.install(runtime: runtime, panel: panel, control: control, scheme: scheme)
+                    let kind = control.controlName?.lowercased() ?? ""
+                    if !["label", "button", "progressbar", "ccvarslider"].contains(kind) &&
+                        !(kind == "frame" && hidesTitle) {
+                        unappliedSchemeColorControls.append(control.fieldName)
+                    }
+                    if control.controlName?.lowercased() == "label" {
+                        applied.formUnion(["dulltext", "brighttext"])
+                    }
                 }
                 unappliedFields += control.entries.filter { !applied.contains($0.key.lowercased()) }
                     .filter { !(hidesTitle && $0.key.lowercased() == "settitlebarvisible") }

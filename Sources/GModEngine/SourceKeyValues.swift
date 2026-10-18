@@ -128,6 +128,14 @@ public struct SourceKeyValuesParser {
             case let .text(rawKey, _, _):
                 _ = try consume()
                 let key = options.preserveKeyCase ? rawKey : rawKey.lowercased()
+                // Source schemes place platform conditions before a font's
+                // object as well as after scalar values. Preserve both forms
+                // instead of rejecting the authored font block as bad syntax.
+                var expressionBeforeValue: String?
+                if case let .conditional(expression, _, _) = try peek() {
+                    _ = try consume()
+                    expressionBeforeValue = expression
+                }
                 let valueToken = try consume()
                 let value: Value
                 switch valueToken {
@@ -144,8 +152,13 @@ public struct SourceKeyValuesParser {
                     )
                 }
 
-                var conditional: String?
+                var conditional = options.preserveConditionals ? expressionBeforeValue : nil
                 if case let .conditional(expression, _, _) = try peek() {
+                    guard expressionBeforeValue == nil else {
+                        let location = (try peek()).location
+                        throw SourceKeyValuesError.unexpectedToken(line: location.line, column: location.column,
+                            expected: "one conditional per entry")
+                    }
                     _ = try consume()
                     if options.preserveConditionals { conditional = expression }
                 }

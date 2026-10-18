@@ -443,16 +443,17 @@ public final class GMLuaMenuSession: @unchecked Sendable {
     /// The host must inspect unappliedFields before claiming dialog parity.
     public func loadResource(
         _ resource: SourceVGUIResource, rootControlName: String? = nil,
+        scheme: SourceVGUIScheme? = nil,
         onCommand: @escaping (String) throws -> Void
     ) throws -> GMLuaVGUIResourceInstance {
         try requireActive()
         return try GMLuaVGUIResourceInstance(runtime: runtime, resource: resource,
-                                            rootControlName: rootControlName, onCommand: onCommand)
+                                            rootControlName: rootControlName, scheme: scheme, onCommand: onCommand)
     }
 
-    public func loadLoadingResource(_ resource: SourceVGUIResource) throws -> GMLuaVGUIResourceInstance {
+    public func loadLoadingResource(_ resource: SourceVGUIResource, scheme: SourceVGUIScheme? = nil) throws -> GMLuaVGUIResourceInstance {
         let hostState = self.hostState
-        return try loadResource(resource, rootControlName: "LoadingDialog") { command in
+        return try loadResource(resource, rootControlName: "LoadingDialog", scheme: scheme) { command in
             guard command.lowercased() == "cancel" else {
                 throw GMLuaMenuSessionError.invalidAction("unsupported loading resource command: \(command)")
             }

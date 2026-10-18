@@ -47,7 +47,9 @@ or inverted ranges, not an assertion that these unsupported cases match Source.
 The resource-created pointer model is covered; native action-signal delivery
 (ControlModified/SliderMoved), dynamic/proportional schemes, native border/font
 palette, full float32 edge equivalence and code-created-slider lifecycle remain
-open. The current colors use the installed Derma palette.
+open. With an explicit SourceVGUIScheme, thumb/track/tick/caption colors now
+come from the authored GameUI Scheme; otherwise legacy calls retain Derma
+colors. See SOURCE_GAMEUI_SCHEME.md for the palette path and fidelity gates.
 
 The full OptionsSubVideo dialog is still not complete: URLButton, other
 unapplied resource fields, real device-mode enumeration and settings-page

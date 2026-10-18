@@ -900,10 +900,20 @@ public struct GModMainView: View {
                 data = try pack.data(for: "garrysmod/resource/LoadingDialogGMod.res", maximumByteCount: 1_024 * 1_024)
             }
             let resource = try SourceVGUIResource(source: String(decoding: data, as: UTF8.self))
+            let schemeData: Data
+            if let mounted = try content.assetSource?.data(for: "resource/SourceScheme.res", maximumByteCount: 1_024 * 1_024) {
+                schemeData = mounted
+            } else {
+                schemeData = try pack.data(for: "garrysmod/resource/SourceScheme.res", maximumByteCount: 1_024 * 1_024)
+            }
+            // Match the Windows desktop GameUI supplied as the visual reference;
+            // never select Xbox/POSIX colors from the iPad host's own OS.
+            let scheme = try SourceVGUIScheme(source: String(decoding: schemeData, as: UTF8.self),
+                activeSymbols: ["WIN32", "WINDOWS"])
             loadingDerma.activate(mountGeneration: content.activeMountGeneration,
                 phrases: localizationSelection.snapshot.phrases, problemLines: [], consoleLines: [],
                 settings: dermaMenuSettings, permissionSessionTransport: nil)
-            loadingDerma.presentLoadingResource(resource)
+            loadingDerma.presentLoadingResource(resource, scheme: scheme)
             updateLoadingResource()
         } catch {
             diagnostics.record(kind: .compatibility, severity: .warning,

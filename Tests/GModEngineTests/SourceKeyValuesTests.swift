@@ -3,6 +3,19 @@ import XCTest
 import GModEngine
 
 final class SourceKeyValuesTests: XCTestCase {
+    func testSchemeConditionBeforeObjectIsPreservedLikeTrailingValueCondition() throws {
+        var parser = SourceKeyValuesParser(source: """
+            "UiBold" { "1" [$WIN32] { "name" "Tahoma" [$WINDOWS] "tall" "12" } }
+            """, options: .init(preserveKeyCase: true, preserveConditionals: true))
+        let root = try parser.parse()
+        guard case let .object(fonts) = root[0].value,
+              case let .object(fields) = fonts[0].value else { return XCTFail("Missing authored font") }
+        XCTAssertEqual(fonts[0].conditional, "$WIN32")
+        XCTAssertEqual(fields[0].conditional, "$WINDOWS")
+        var plain = SourceKeyValuesParser(source: "Root [$WIN32] { key value }", options: .init(preserveConditionals: false))
+        XCTAssertNil(try plain.parse()[0].conditional)
+    }
+
     func testFixtureParsesCommentsQuotedBareNestedDuplicatesAndConditionals() throws {
         let source = try fixtureSource()
         var parser = SourceKeyValuesParser(

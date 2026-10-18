@@ -42,6 +42,13 @@ also passed. The stock Sandbox immediate Q/C, strict spawn-menu interaction
 and live context screen-ray regressions then passed: three tests, no failures.
 These are Windows CPU/runtime checks, not physical-iPad interaction evidence.
 
+Apple revalidation completed successfully for commit `8afaf5a` in
+[run 39129421893](https://github.com/Ikaring45/GModCore/actions/runs/39129421893):
+the strict libraries, generic iPadOS app, Metal pipelines, Simulator launch,
+accessibility, Japanese/IME/Q/noclip checks and package XCTest steps passed.
+This covers the ComboBox/owned-popup commit, not later text-input, CCvarSlider
+or Scheme-color changes. Physical-iPad acceptance remains outstanding.
+
 Full OptionsSubVideo loading is still incomplete: URLButton, native editable
 ComboBox, other reported unapplied fields, real device mode enumeration and
 applying settings remain required. CCvarSlider's binding/pointer subset is

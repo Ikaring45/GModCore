@@ -47,16 +47,28 @@ struct GMLuaVGUIResourceCvarSlider {
         allowsOutOfRange = try boolean("allowoutofrange")
     }
 
-    func install(runtime: GMLuaRuntime, panel: LuaValue) throws {
+    func install(runtime: GMLuaRuntime, panel: LuaValue, scheme: SourceVGUIScheme?) throws {
+        let palette = LuaTable()
+        if let scheme {
+            for key in ["Slider.NobColor", "Slider.TextColor", "Slider.TrackColor",
+                        "Slider.DisabledTextColor1", "Slider.DisabledTextColor2"] {
+                let color = try scheme.color(key)
+                let record = LuaTable()
+                for (name, value) in [("r", color.red), ("g", color.green), ("b", color.blue), ("a", color.alpha)] {
+                    try runtime.state.setRawTableValue(.number(value), for: .string(LuaString(name)), in: record)
+                }
+                try runtime.state.setRawTableValue(.table(record), for: .string(LuaString(key)), in: palette)
+            }
+        }
         let configure = try runtime.executeReturningValues(Self.source,
             sourceName: "@garryspad/resource_cvar_slider.lua").first ?? .nilValue
         _ = try runtime.state.call(configure, arguments: [panel, .string(LuaString(conVarName)),
             .number(Double(minimum)), .number(Double(maximum)), .boolean(allowsOutOfRange),
-            .number(captionMinimum), .number(captionMaximum)])
+            .number(captionMinimum), .number(captionMaximum), .table(palette)])
     }
 
     private static let source = """
-        return function(p, name, low, high, allowOutside, captionLow, captionHigh)
+        return function(p, name, low, high, allowOutside, captionLow, captionHigh, palette)
             local cvar = assert(GetConVar(name))
             local s = { raw = low, initial = low, last = low,
                 start = 0, current = 0, modified = false, updating = false }
@@ -117,7 +129,7 @@ struct GMLuaVGUIResourceCvarSlider {
                 return math.floor(math.max(0, p:GetWide() - 16) * p:GetSlideX() + 0.5)
             end
             p.Knob.Paint = function(knob, w, h)
-                local color = knob:GetSkin().colNumSliderNotch
+                local color = palette['Slider.NobColor'] or knob:GetSkin().colNumSliderNotch
                 surface.SetDrawColor(color.r, color.g, color.b, color.a)
                 surface.DrawRect(0, 0, w, h)
             end
@@ -141,10 +153,22 @@ struct GMLuaVGUIResourceCvarSlider {
                 end
             end
             p.Paint = function(self, w, h)
-                local color = self:GetSkin().colNumSliderNotch
-                surface.SetDrawColor(0, 0, 0, 128)
+                local enabled = self:IsEnabled()
+                local color = palette[enabled and 'Slider.TextColor' or 'Slider.DisabledTextColor1']
+                    or self:GetSkin().colNumSliderNotch
+                local track = palette['Slider.TrackColor'] or Color(0, 0, 0, 128)
+                surface.SetDrawColor(track.r, track.g, track.b, track.a)
                 surface.DrawRect(0, 8, math.max(0, w - 8), 4)
-                surface.SetDrawColor(color.r, color.g, color.b, color.a)
+                if not enabled and palette['Slider.DisabledTextColor2'] then
+                    surface.SetDrawColor(color.r, color.g, color.b, color.a)
+                    for i = 0, 10 do
+                        surface.DrawRect(math.floor(4 + i * math.max(0, w - 16) / 10) + 1, 17, 1, 5)
+                    end
+                    local shadow = palette['Slider.DisabledTextColor2']
+                    surface.SetDrawColor(shadow.r, shadow.g, shadow.b, shadow.a)
+                else
+                    surface.SetDrawColor(color.r, color.g, color.b, color.a)
+                end
                 for i = 0, 10 do
                     surface.DrawRect(math.floor(4 + i * math.max(0, w - 16) / 10), 16, 1, 5)
                 end
