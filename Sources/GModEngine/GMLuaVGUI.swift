@@ -3411,13 +3411,25 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
         guard maxLayouts > 0 else { return 0 }
 
         lock.lock()
-        let descriptors = livePanelDescriptorsLocked(scope: scope)
-        let identifiers = descriptors.keys.sorted().filter { identifier in
-            guard let descriptor = descriptors[identifier],
-                  let value = panels[identifier] else { return false }
-            return descriptor.isLayoutInvalidated &&
-                !descriptor.isPerformingLayout &&
-                GMLuaTypeSystem.typedObject(from: value)?.isValid == true
+        let identifiers: [Int]
+        if scope == .all {
+            // Preserve the start-of-pass snapshot and ascending dispatch order,
+            // but don't allocate a full descriptor index or sort clean panels.
+            identifiers = panels.compactMap { identifier, value -> Int? in
+                guard let descriptor = panelDescriptor(from: value),
+                      descriptor.isLayoutInvalidated,
+                      !descriptor.isPerformingLayout,
+                      GMLuaTypeSystem.typedObject(from: value)?.isValid == true else { return nil }
+                return identifier
+            }.sorted()
+        } else {
+            let descriptors = livePanelDescriptorsLocked(scope: scope)
+            identifiers = descriptors.compactMap { identifier, descriptor -> Int? in
+                guard descriptor.isLayoutInvalidated, !descriptor.isPerformingLayout,
+                      let value = panels[identifier],
+                      GMLuaTypeSystem.typedObject(from: value)?.isValid == true else { return nil }
+                return identifier
+            }.sorted()
         }
         lock.unlock()
 

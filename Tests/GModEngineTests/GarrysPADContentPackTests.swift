@@ -5,6 +5,69 @@ import GModGameAssets
 import GModGameSession
 
 final class GarrysPADContentPackTests: XCTestCase {
+    func testConfiguredRealPackProfilesRepeatedQCFrames() throws {
+        guard let path = ProcessInfo.processInfo.environment["GMOD_CONTENT_PACK_DIAGNOSTIC_PATH"], !path.isEmpty else {
+            throw XCTSkip("GMOD_CONTENT_PACK_DIAGNOSTIC_PATH is not configured")
+        }
+        let start = ProcessInfo.processInfo.systemUptime
+        let session = try GModPlayableSession(configuration: .init(map: .flatgrass,
+            contentPackURL: URL(fileURLWithPath: path)), logger: { _, _ in })
+        defer { _ = try? session.close() }
+        print("[Owned VGUI profile] startup-ms=\((ProcessInfo.processInfo.systemUptime - start) * 1000)")
+        _ = try session.updateViewport(width: 1024, height: 768)
+        let registry = try XCTUnwrap(session.clientRuntime.vguiRegistry)
+        for cycle in 1...2 {
+            for context in [false, true] {
+                let opened = ProcessInfo.processInfo.systemUptime
+                if context { try session.setContextMenuOpen(true) }
+                else { try session.setSpawnMenuOpen(true) }
+                let openMS = (ProcessInfo.processInfo.systemUptime - opened) * 1000
+                var frameMS: [Double] = []
+                var commands = 0
+                let layouts = registry.completedLayoutPassCount
+                for _ in 0..<10 {
+                    let before = ProcessInfo.processInfo.systemUptime
+                    let frame = try session.renderClientVGUIFrame()
+                    frameMS.append((ProcessInfo.processInfo.systemUptime - before) * 1000)
+                    commands = frame.commands.count
+                    XCTAssertGreaterThan(commands, 0)
+                }
+                print("[Owned VGUI profile] menu=\(context ? "C" : "Q") cycle=\(cycle) open-ms=\(openMS) first-frame-ms=\(frameMS[0]) warm-mean-ms=\(frameMS.dropFirst().reduce(0, +) / 9) panels=\(registry.livePanelCount) layouts=\(registry.completedLayoutPassCount - layouts) commands=\(commands)")
+                if cycle == 2 && context {
+                    // Separate diagnostic frame: wrapping callbacks changes
+                    // their cost, so exclude it from the timings above.
+                    try session.clientRuntime.execute("""
+                        PROFILE_LAYOUTS = {}
+                        for _, panel in ipairs(vgui.GetAll()) do
+                            local original = panel.PerformLayout
+                            if original then
+                                local key = panel:GetClassName()
+                                panel.PerformLayout = function(self, ...)
+                                    PROFILE_LAYOUTS[key] = (PROFILE_LAYOUTS[key] or 0) + 1
+                                    return original(self, ...)
+                                end
+                            end
+                        end
+                        """, sourceName: "=(owned VGUI layout census)")
+                    _ = try session.renderClientVGUIFrame()
+                    let census = try session.clientRuntime.executeReturningValues("""
+                        local result = {}
+                        for name, count in pairs(PROFILE_LAYOUTS) do
+                            result[#result + 1] = name .. '=' .. count
+                        end
+                        table.sort(result)
+                        return table.concat(result, ',')
+                        """, sourceName: "=(owned VGUI layout census result)")
+                    if case let .string(value) = census.first {
+                        print("[Owned VGUI layout census] \(value.utf8String)")
+                    }
+                }
+                if context { try session.setContextMenuOpen(false) }
+                else { try session.setSpawnMenuOpen(false) }
+            }
+        }
+    }
+
     func testCompressedNestedVPKPreservesBackingCompressionError() throws {
         let fixture = try makeTemporaryZIP(entries: [
             ("garrysmod/maps/gm_construct.bsp", Data("construct".utf8), 0),
