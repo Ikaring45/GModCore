@@ -33,6 +33,10 @@ final class GarrysPADContentPackTests: XCTestCase {
                     XCTAssertGreaterThan(commands, 0)
                 }
                 print("[Owned VGUI profile] menu=\(context ? "C" : "Q") cycle=\(cycle) open-ms=\(openMS) first-frame-ms=\(frameMS[0]) warm-mean-ms=\(frameMS.dropFirst().reduce(0, +) / 9) panels=\(registry.livePanelCount) layouts=\(registry.completedLayoutPassCount - layouts) commands=\(commands)")
+                if cycle == 2 {
+                    XCTAssertEqual(registry.completedLayoutPassCount, layouts,
+                        "Unchanged reopened menus must not perpetually relayout their DTab controls")
+                }
                 if cycle == 2 && context {
                     // Separate diagnostic frame: wrapping callbacks changes
                     // their cost, so exclude it from the timings above.

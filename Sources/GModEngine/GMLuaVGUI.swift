@@ -4458,7 +4458,14 @@ public enum GMLuaVGUI {
                 )
                 panel.textInsetX = x
                 panel.textInsetY = y
-                try registry.invalidateLayout(identifier: panel.identifier, layoutNow: false)
+                // Valve Label::SetTextInset updates TextImage draw width but
+                // does not invalidate Label layout. Our content measurement
+                // reads these live insets, so no cached draw width is needed.
+                // Invalidating here requeues DTab from its own PerformLayout
+                // forever because ApplySchemeSettings sets the insets again.
+                if panel.engineClassName != "Label" {
+                    try registry.invalidateLayout(identifier: panel.identifier, layoutNow: false)
+                }
                 return []
             }),
             ("GetTextInset", { arguments in

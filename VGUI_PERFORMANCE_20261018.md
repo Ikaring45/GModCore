@@ -33,3 +33,32 @@ path even for repeated input. No blanket suppression of those callbacks was
 introduced to obtain an artificial benchmark win. The optional census wraps
 layout callbacks only after timed frames, and therefore does not affect the
 reported timing samples.
+
+## Source Label inset correction
+
+The perpetual DTab layout was caused by an extra host invalidation:
+`DTab:PerformLayout` calls `ApplySchemeSettings`, which calls `SetTextInset`.
+The host invalidated Label layout there; the original
+[Valve Label::SetTextInset](https://github.com/ValveSoftware/source-sdk-2013/blob/c8f4c6351162fbff83bfa5a428d45d1e6eed3824/src/vgui2/vgui_controls/Label.cpp)
+only updates the insets and TextImage draw width. Removing the extra Label
+invalidation preserves live content measurement and breaks that host-created
+self-requeue loop. Explicit InvalidateLayout and actual size changes still work.
+TextEntry behavior is not changed by this Label-specific correction.
+
+Same owned pack, Windows Debug, after correction:
+
+- Second-open ten-frame layout count: Q 0, C 0 (previously 100 each).
+- Q second-open warm mean: 72.9ms (preceding run 92.0ms).
+- C second-open warm mean: 5.2ms (preceding run 39.9ms).
+- First-ever Q frame remains approximately 1.1 seconds; this is not solved.
+- Commands remain Q 285 / C 24, panels remain 233.
+
+The 65 registry tests and owned-pack profile passed (66 total). A dedicated
+regression verifies SetTextInset inside PerformLayout settles, retains the
+insets, and still responds to explicit invalidation. Timings are coarse
+system-uptime samples and single-run observations, not an iPad latency claim.
+The wider follow-up run also passed: 80 tests executed, one opt-in resource
+test skipped, no failures. It includes resource-backed controls and all six
+stock spawn/context-menu interaction cases. The owned-pack second-open layout
+count is now asserted zero rather than merely printed; a repeat observed Q
+74.7ms and C 5.2ms, with unchanged draw-command counts.

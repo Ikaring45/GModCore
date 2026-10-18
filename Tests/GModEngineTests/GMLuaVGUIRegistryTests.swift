@@ -5,6 +5,34 @@ import GModGameAssets
 import GModLua
 
 final class GMLuaVGUIRegistryTests: XCTestCase {
+    func testLabelInsetInsideLayoutDoesNotPerpetuallyRequeueItself() throws {
+        let state = LuaState(output: { _ in })
+        let types = try GMLuaTypeSystem.install(into: state, utilityLayer: .bundledFallback)
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: types)
+        try state.execute("""
+            INSET_LAYOUT_CALLS = 0
+            local PROBE = {}
+            function PROBE:PerformLayout()
+                INSET_LAYOUT_CALLS = INSET_LAYOUT_CALLS + 1
+                self:SetTextInset(10, 4)
+            end
+            vgui.Register('InsetLayoutProbe', PROBE, 'Label')
+            INSET_PROBE = vgui.Create('InsetLayoutProbe')
+            INSET_PROBE:SetText('test')
+            """)
+        XCTAssertEqual(try registry.performPendingLayouts(), 1)
+        for _ in 0..<5 { XCTAssertEqual(try registry.performPendingLayouts(), 0) }
+        try state.execute("""
+            assert(INSET_LAYOUT_CALLS == 1)
+            local x, y = INSET_PROBE:GetTextInset()
+            assert(x == 10 and y == 4)
+            INSET_PROBE:InvalidateLayout()
+            """)
+        XCTAssertEqual(try registry.performPendingLayouts(), 1)
+        XCTAssertEqual(try registry.performPendingLayouts(), 0)
+        try state.execute("assert(INSET_LAYOUT_CALLS == 2)")
+    }
+
     func testTypedSnapshotsStaySortedWithManyUnrelatedAndRemovedPanels() throws {
         let state = LuaState(output: { _ in })
         let types = try GMLuaTypeSystem.install(into: state, utilityLayer: .bundledFallback)
