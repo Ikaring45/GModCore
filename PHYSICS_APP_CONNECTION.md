@@ -44,7 +44,10 @@ layout evidence: Crowbar's original v44 reader at fixed commit
 [`ReadBones` and `ReadSequenceDescs`](https://github.com/ZeqMacaw/Crowbar/blob/0d46f3b6a694b74453db407c72c12a9685d8eb1d/Crowbar/Core/GameModel/SourceModel44/SourceMdlFile44.vb).
 The owned MDL/VVD/DX90-VTX bundle now passes checksum/budget validation and
 root-LOD mesh decoding (400 expanded vertices, 600 indices). Windows Studio
-regressions pass. This is CPU decoding evidence, not a GPU screenshot or iPad
+regressions pass. The renderer-neutral compiler also produces draw ranges, and
+their authored VMT resolves `woodcrates01a` to a real 512-by-512 RGBA texture.
+No fallback texture or guessed material is accepted by this integration test.
+This is CPU decoding evidence, not a GPU screenshot or iPad
 acceptance. Animation integration and rendering still require separate validation.
 Neither structural collision decoding nor metadata parsing establishes drawable
 or physically spawnable props.

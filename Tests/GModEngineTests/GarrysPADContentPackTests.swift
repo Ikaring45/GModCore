@@ -59,6 +59,20 @@ final class GarrysPADContentPackTests: XCTestCase {
         XCTAssertGreaterThan(vertices, 0)
         XCTAssertGreaterThan(indices, 0)
         print("[Owned prop mesh] vertices=\(vertices) indices=\(indices)")
+        let renderable = try GModStudioRenderableModelCompiler.compile(asset: asset,
+            bodyValue: 0, skinFamilyIndex: 0, policy: .initialIpadProp)
+        XCTAssertFalse(renderable.drawRanges.isEmpty)
+        XCTAssertEqual(renderable.indices.count, indices)
+        let materialResolver = GMLuaSourceMaterialResolver { try source.data(for: $0) }
+        for draw in renderable.drawRanges {
+            let selected = try XCTUnwrap(draw.material.vmtCandidates.first(where: {
+                (try? source.data(for: $0)) != nil
+            }), "Owned crate must resolve an authored VMT, not a fallback")
+            let material = try materialResolver.resolve(named: selected)
+            XCTAssertEqual(material.metadata.status, .resolved)
+            XCTAssertFalse(try XCTUnwrap(material.rgbaBytes).isEmpty)
+            print("[Owned prop material] \(selected): \(String(describing: material.metadata.dimensions))")
+        }
         let envelope = try SourcePHYCollisionDecoder.decodeEnvelope(phy,
             expectedSourceModelChecksum: model.checksum,
             budget: .init(maximumFileBytes: 16_777_216, maximumSolids: 64,

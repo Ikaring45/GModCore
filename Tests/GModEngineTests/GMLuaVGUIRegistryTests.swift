@@ -5,6 +5,31 @@ import GModGameAssets
 import GModLua
 
 final class GMLuaVGUIRegistryTests: XCTestCase {
+    func testTypedSnapshotsStaySortedWithManyUnrelatedAndRemovedPanels() throws {
+        let state = LuaState(output: { _ in })
+        let types = try GMLuaTypeSystem.install(into: state, utilityLayer: .bundledFallback)
+        let registry = try GMLuaVGUI.install(into: state, typeSystem: types)
+        try state.execute("""
+            for i = 1, 128 do vgui.Create('Panel') end
+            for i = 1, 12 do
+                vgui.Create('Label')
+                vgui.Create('HTML')
+                vgui.Create('ModelImage')
+            end
+            vgui.Create('Label'):Remove()
+            vgui.Create('HTML'):Remove()
+            vgui.Create('ModelImage'):Remove()
+            """)
+        let lists = [registry.textPanelStateSnapshots.map(\.panelIdentifier),
+            registry.htmlPanelStateSnapshots.map(\.panelIdentifier),
+            registry.modelImageStateSnapshots.map(\.panelIdentifier)]
+        for identifiers in lists {
+            XCTAssertEqual(identifiers.count, 12)
+            XCTAssertEqual(identifiers, identifiers.sorted())
+            XCTAssertEqual(Set(identifiers).count, 12)
+        }
+    }
+
     func testCursorPosUsesLiveNestedPanelOriginDuringPointerCallback() throws {
         let state = LuaState(output: { _ in })
         let types = try GMLuaTypeSystem.install(into: state, utilityLayer: .bundledFallback)

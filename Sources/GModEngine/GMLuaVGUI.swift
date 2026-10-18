@@ -932,9 +932,8 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     public var textPanelStateSnapshots: [GMLuaTextPanelStateSnapshot] {
         lock.lock()
         defer { lock.unlock() }
-        return panels.keys.sorted().compactMap { identifier in
-            guard let value = panels[identifier],
-                  let descriptor = panelDescriptor(from: value),
+        return panels.compactMap { _, value -> GMLuaTextPanelStateSnapshot? in
+            guard let descriptor = panelDescriptor(from: value),
                   isTextEngineClass(descriptor.engineClassName),
                   GMLuaTypeSystem.typedObject(from: value)?.isValid == true else { return nil }
             return GMLuaTextPanelStateSnapshot(
@@ -954,7 +953,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
                 wrapsText: descriptor.wrapsText,
                 expensiveShadow: descriptor.expensiveShadow
             )
-        }
+        }.sorted { $0.panelIdentifier < $1.panelIdentifier }
     }
 
     /// Stable load-state snapshots for live native HTML controls. Page pixels,
@@ -963,9 +962,8 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     public var htmlPanelStateSnapshots: [GMLuaHTMLPanelStateSnapshot] {
         lock.lock()
         defer { lock.unlock() }
-        return panels.keys.sorted().compactMap { identifier in
-            guard let value = panels[identifier],
-                  let descriptor = panelDescriptor(from: value),
+        return panels.compactMap { _, value -> GMLuaHTMLPanelStateSnapshot? in
+            guard let descriptor = panelDescriptor(from: value),
                   descriptor.engineClassName == "HTML",
                   GMLuaTypeSystem.typedObject(from: value)?.isValid == true else { return nil }
             return GMLuaHTMLPanelStateSnapshot(
@@ -979,7 +977,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
                 javascriptObjects: descriptor.htmlJavaScriptObjects,
                 javascriptCallbacks: descriptor.htmlJavaScriptCallbacks
             )
-        }
+        }.sorted { $0.panelIdentifier < $1.panelIdentifier }
     }
 
     /// Stable requests for live native ModelImage controls. No preview image
@@ -987,9 +985,8 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
     public var modelImageStateSnapshots: [GMLuaModelImageStateSnapshot] {
         lock.lock()
         defer { lock.unlock() }
-        return panels.keys.sorted().compactMap { identifier in
-            guard let value = panels[identifier],
-                  let descriptor = panelDescriptor(from: value),
+        return panels.compactMap { _, value -> GMLuaModelImageStateSnapshot? in
+            guard let descriptor = panelDescriptor(from: value),
                   descriptor.engineClassName == "ModelImage",
                   GMLuaTypeSystem.typedObject(from: value)?.isValid == true else { return nil }
             return GMLuaModelImageStateSnapshot(
@@ -1001,7 +998,7 @@ public final class GMLuaVGUIRegistry: @unchecked Sendable {
                 spawnIconName: descriptor.modelImageSpawnIconName,
                 previewState: .unavailable
             )
-        }
+        }.sorted { $0.panelIdentifier < $1.panelIdentifier }
     }
 
     /// Completes the renderer side of the exact HTML request represented by a
