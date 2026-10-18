@@ -12,6 +12,7 @@ final class SourceVGUISchemeTests: XCTestCase {
                 CheckButton.Border1 "50 51 52 255" CheckButton.Border2 "60 61 62 255"
                 CheckButton.Check "70 71 72 255" CheckButton.DisabledFgColor "80 81 82 255"
                 CheckButton.DisabledBgColor "90 91 92 255" Label.DisabledFgColor1 "100 101 102 255"
+                Label.DisabledFgColor2 "110 111 112 255"
             } Fonts {
                 Default { One { name SourceFace tall 16 weight 500 } }
                 Marlett { One { name Marlett tall 14 weight 0 symbol 1 } }
@@ -54,6 +55,21 @@ final class SourceVGUISchemeTests: XCTestCase {
                 return text.utf8String == "Enable" && c == color(10) && font.size == 16
             }; return false
         })
+        let imageX = try XCTUnwrap(initial.commands.compactMap { command -> Double? in
+            if case let .text(text, position, font, _, _) = command, text.utf8String == "g", font.size == 14 {
+                return position.x
+            }; return nil
+        }.first)
+        XCTAssertEqual(imageX, 26, "The six-pixel offset is before the image; caption textinsetx does not move it")
+        let embossed = initial.commands.compactMap { command -> (GMLuaCursorPosition, GMLuaSurfaceColor)? in
+            if case let .text(text, position, _, c, _) = command, text.utf8String == "Disabled" {
+                return (position, c)
+            }; return nil
+        }
+        XCTAssertEqual(embossed.count, 2)
+        XCTAssertEqual(embossed[0].1, color(100)); XCTAssertEqual(embossed[1].1, color(110))
+        XCTAssertEqual(embossed[0].0.x, embossed[1].0.x + 1)
+        XCTAssertEqual(embossed[0].0.y, embossed[1].0.y + 1)
         // Click whitespace inside the authored bounds, beyond both glyph and
         // caption. Native CheckButton is one input button, not two hit regions.
         for phase: GMLuaPointerPhase in [.began, .ended] {

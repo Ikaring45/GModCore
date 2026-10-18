@@ -7,7 +7,8 @@ enum GMLuaVGUIResourceSchemeCheckButton {
         let colors = LuaTable()
         for key in ["CheckButton.TextColor", "CheckButton.SelectedTextColor", "CheckButton.HighlightFgColor",
                     "CheckButton.BgColor", "CheckButton.Border1", "CheckButton.Border2", "CheckButton.Check",
-                    "CheckButton.DisabledFgColor", "CheckButton.DisabledBgColor", "Label.DisabledFgColor1"] {
+                    "CheckButton.DisabledFgColor", "CheckButton.DisabledBgColor",
+                    "Label.DisabledFgColor1", "Label.DisabledFgColor2"] {
             let color = try scheme.color(key)
             let record = LuaTable()
             for (name, value) in [("r", color.red), ("g", color.green), ("b", color.blue), ("a", color.alpha)] {
@@ -44,14 +45,21 @@ enum GMLuaVGUIResourceSchemeCheckButton {
                 local insetX, insetY = self:GetTextInset()
                 local align = self:GetContentAlignment()
                 local groupWidth = iw + 6 + tw
+                local groupHeight = math.max(ih, th)
                 local column = (align - 1) % 3
                 local row = math.floor((align - 1) / 3)
-                local x = column == 0 and insetX or (column == 1 and (w - groupWidth) / 2 or w - groupWidth - insetX)
+                local function trunc(v) if v < 0 then return math.ceil(v) end return math.floor(v) end
+                local actualColumn = (iw > w or tw > w) and 0 or column
+                local x = actualColumn == 0 and 0 or (actualColumn == 1 and trunc((w - groupWidth) / 2) or w - groupWidth)
+                local groupY = insetY + (row == 2 and 0 or (row == 1 and trunc((h - groupHeight) / 2) or h - groupHeight))
                 local function y(tall)
-                    return row == 2 and insetY or (row == 1 and (h - tall) / 2 or h - tall - insetY)
+                    return groupY + (row == 1 and trunc((groupHeight - tall) / 2) or 0)
                 end
-                x = math.floor(x)
-                local imageY = math.floor(y(ih))
+                -- Label::SetImageAtIndex's offset is BEFORE the image, not a
+                -- post-image gap. The text inset applies to the caption only.
+                x = x + 6
+                local captionX = x + iw + (column == 0 and insetX or (column == 2 and -insetX or 0))
+                local imageY = y(ih)
                 local enabled = self:IsEnabled()
                 -- Native CheckImage layers the Marlett g/e/f background and
                 -- border glyphs at (0,1), then selected b at (0,2).
@@ -61,10 +69,14 @@ enum GMLuaVGUIResourceSchemeCheckButton {
                 if checked then
                     draw('b', symbol, c[enabled and 'CheckButton.Check' or 'CheckButton.DisabledFgColor'], x, imageY + 2)
                 end
-                local role = not enabled and 'Label.DisabledFgColor1' or
-                    (self.Hovered and 'CheckButton.HighlightFgColor' or
-                    (checked and 'CheckButton.SelectedTextColor' or 'CheckButton.TextColor'))
-                draw(text, font, c[role], x + iw + 6, math.floor(y(th)))
+                if enabled then
+                    local role = self.Hovered and 'CheckButton.HighlightFgColor' or
+                        (checked and 'CheckButton.SelectedTextColor' or 'CheckButton.TextColor')
+                    draw(text, font, c[role], captionX, y(th))
+                else
+                    draw(text, font, c['Label.DisabledFgColor1'], captionX + 1, y(th) + 1)
+                    draw(text, font, c['Label.DisabledFgColor2'], captionX, y(th))
+                end
                 return true
             end
         end

@@ -41,8 +41,9 @@ Tahoma parity. Exact permitted font assets, CJK fallback/shaping and physical
 pixel comparison remain required. No Windows system font was copied, bundled
 or redistributed by this change.
 
-The current CoreText rasterizer supports antialias selection but explicitly
-rejects underline/strikeout/symbol/shadow/outline/blur/scanline/additive effects.
+The current CoreText rasterizer supports antialias selection and the narrow
+Marlett symbol path below, but explicitly rejects underline/strikeout/shadow/
+outline/blur/scanline/additive effects and other symbol fonts.
 Preserving these flags in descriptors does not implement their glyph rendering.
 CustomFontFiles registration from the mounted Scheme, proportional scaling,
 multiple native glyph ranges and full Options-page integration remain open.

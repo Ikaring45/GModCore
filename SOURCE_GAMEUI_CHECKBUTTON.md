@@ -11,6 +11,7 @@ Valve SDK revision `c8f4c6351162fbff83bfa5a428d45d1e6eed3824`:
 
 - [CheckButton.cpp](https://github.com/ValveSoftware/source-sdk-2013/blob/c8f4c6351162fbff83bfa5a428d45d1e6eed3824/src/vgui2/vgui_controls/CheckButton.cpp)
 - [CheckButton.h](https://github.com/ValveSoftware/source-sdk-2013/blob/c8f4c6351162fbff83bfa5a428d45d1e6eed3824/src/public/vgui_controls/CheckButton.h)
+- [Label.cpp](https://github.com/ValveSoftware/source-sdk-2013/blob/c8f4c6351162fbff83bfa5a428d45d1e6eed3824/src/vgui2/vgui_controls/Label.cpp)
 
 With an explicit GameUI Scheme, a resource CheckButton now uses the shipped
 DButton input/capture path, one authored input region, and independent native
@@ -20,7 +21,9 @@ their legacy behavior. Global Derma/GWEN Q/C controls are not replaced or recolo
 The authored caption font and Marlett/MarlettSmall check-image font are resolved
 at layout. Missing/unsupported fonts are explicit errors, not generic square or
 Unicode-check substitutes. Native check-image drawing layers `g`, `e`, `f` at
-image y+1, and selected `b` at y+2, with the six-pixel image/text gap. The palette
+image y+1, and selected `b` at y+2. The six-pixel image pre-offset is not a
+post-image gap; caption text insets do not move the check image. Disabled
+captions use the two authored Label colors at offsets (1,1) and (0,0). The palette
 comes from the actual CheckButton background, Border1/Border2, check, selected,
 highlight, disabled glyph/background and caption Scheme roles. Selection is
 live, `selected` is honored, disabled input stays disabled, and no ConVar or
@@ -52,8 +55,8 @@ bundled face to resolve, each native check-image symbol to have a nonzero glyph,
 nonempty raster pixels, and measurement/bitmap dimensions to agree.
 
 These tests do not establish native pixel-identical alignment, proportional
-scaling, wrapped labels, keyboard mnemonics/focus decoration or disabled-caption
-embossing. The current layout is an independent unscaled implementation over
+scaling, wrapped labels or keyboard mnemonics/focus decoration. The current
+layout is an independent unscaled implementation over
 Derma input, not a claim that the original C++ CheckButton is executing.
 Other native factories, including CCvarToggleCheckButton, are not silently
 aliased to this plain checkbox. Their actual binding lifecycle remains separate.
