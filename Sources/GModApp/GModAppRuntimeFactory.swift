@@ -232,6 +232,7 @@ public final class GModAppRuntimeFactory: @unchecked Sendable {
     /// falling back to logical glyph estimates.
     public func makeMenuSession(
         fileSystem: any LuaVirtualFileSystem & Sendable,
+        engineConVarCatalog: GMLuaEngineConVarCatalog? = nil,
         initialViewport: GMLuaViewportSize = .logicalDesktopDefault,
         languageConfiguration: GMLuaLanguageConfiguration = .empty,
         permissionsHost: GMLuaPermissionsHost? = nil,
@@ -240,6 +241,7 @@ public final class GModAppRuntimeFactory: @unchecked Sendable {
     ) -> GMLuaMenuSession {
         GMLuaMenuSession(
             fileSystem: fileSystem,
+            engineConVarCatalog: engineConVarCatalog,
             initialViewport: initialViewport,
             textMeasurer: textMeasurer,
             languageConfiguration: languageConfiguration,

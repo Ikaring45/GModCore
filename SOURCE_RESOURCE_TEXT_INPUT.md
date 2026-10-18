@@ -33,7 +33,7 @@ deletion/reinsertion, zero/unlimited limits, preserving existing text when the
 limit changes, and Japanese text boundaries/caret. Apple execution of these
 changes and physical-iPad input acceptance remain outstanding.
 
-CCvarSlider is deliberately still rejected: its native implementation has
-ConVar bounds, reset/external-change synchronization, modified-state tracking
-and resource-created drag-end ApplyChanges behavior. Mapping it to a naked
-DSlider with immediate SetConVarX would not implement that contract.
+CCvarSlider's later binding/pointer implementation and remaining gates are
+documented in SOURCE_RESOURCE_CVARSLIDER.md. It is not mapped to a naked
+DSlider with immediate SetConVarX; explicit host catalog ownership, bounds,
+reset/external-change synchronization and drag-end ApplyChanges are required.

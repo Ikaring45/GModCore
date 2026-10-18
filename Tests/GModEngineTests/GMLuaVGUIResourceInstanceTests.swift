@@ -3,6 +3,159 @@ import GModEngine
 import GModGameAssets
 
 final class GMLuaVGUIResourceInstanceTests: XCTestCase {
+    func testResourceCvarSliderUsesRealBoundsDeferredApplyAndExternalValue() throws {
+        let files = try GMLuaHostDirectoryFileSystem(rootURL: GModGameAssets.clientContentRootURL(), writable: false)
+        let catalog = try GMLuaEngineConVarCatalog(descriptors: [
+            .init(name: "fps_max", defaultValue: "60", minimum: 40, maximum: 144)
+        ])
+        let session = GMLuaMenuSession(fileSystem: files, engineConVarCatalog: catalog, logger: { _ in })
+        defer { _ = session.close() }
+        _ = try session.start()
+        let resource = try SourceVGUIResource(source: """
+            "settings.res" { "FPS" { "ControlName" "CCvarSlider" "cvar_name" "fps_max"
+                "minvalue" "30" "maxvalue" "300" "allowoutofrange" "0"
+                "xpos" "20" "ypos" "20" "wide" "200" "tall" "50" } }
+            """)
+        let instance = try session.loadResource(resource) { _ in }
+        try instance.layout(viewportWidth: 640, viewportHeight: 480)
+        XCTAssertTrue(instance.unappliedFields.isEmpty)
+        XCTAssertEqual(try instance.sliderValue(control: "FPS"), 60)
+        XCTAssertFalse(try instance.sliderHasBeenModified(control: "FPS"))
+        try instance.setSliderValue(60.129, control: "FPS")
+        XCTAssertEqual(try instance.sliderValue(control: "FPS"), 60.12, "Native storage truncates at hundredth ticks")
+        try instance.setSliderValue(200, control: "FPS")
+        XCTAssertEqual(try instance.sliderValue(control: "FPS"), 144)
+        XCTAssertEqual(catalog.currentValue(for: "fps_max"), "60", "Editing must not apply prematurely")
+        XCTAssertTrue(try instance.sliderHasBeenModified(control: "FPS"))
+        try instance.applySliderChanges(control: "FPS")
+        XCTAssertEqual(Double(try XCTUnwrap(catalog.currentValue(for: "fps_max"))), 144)
+        XCTAssertTrue(catalog.setCurrentValue("72", for: "fps_max"))
+        let frame = try session.renderFrame(viewportWidth: 640, viewportHeight: 480)
+        XCTAssertEqual(try instance.sliderValue(control: "FPS"), 72)
+        XCTAssertTrue(frame.commands.contains {
+            if case let .rectangle(rect, _, _) = $0 {
+                return rect.width == 8 && rect.height == 16 && rect.x == 77 && rect.y == 22
+            }; return false
+        }, "External ConVar changes must move the thumb in the same captured frame")
+        let captions = frame.commands.compactMap { command -> String? in
+            if case let .text(text, _, _, _, _) = command { return text.utf8String }; return nil
+        }
+        XCTAssertTrue(captions.contains("40.00")); XCTAssertTrue(captions.contains("144.00"))
+        XCTAssertEqual(frame.commands.filter {
+            if case let .rectangle(rect, _, _) = $0 { return rect.width == 1 && rect.height == 5 }; return false
+        }.count, 11)
+        try instance.setSliderValue(20, control: "FPS")
+        XCTAssertEqual(try instance.sliderValue(control: "FPS"), 40)
+        try instance.resetSlider(control: "FPS")
+        XCTAssertEqual(try instance.sliderValue(control: "FPS"), 72)
+        XCTAssertTrue(try instance.sliderHasBeenModified(control: "FPS"), "Native modified-once flag is sticky across Reset")
+        XCTAssertThrowsError(try instance.setSliderValue(.nan, control: "FPS"))
+    }
+
+    func testResourceCvarSliderPointerReleaseAppliesLiveCatalog() throws {
+        let files = try GMLuaHostDirectoryFileSystem(rootURL: GModGameAssets.clientContentRootURL(), writable: false)
+        let catalog = try GMLuaEngineConVarCatalog(descriptors: [.init(name: "test_slider", defaultValue: "25")])
+        let session = GMLuaMenuSession(fileSystem: files, engineConVarCatalog: catalog, logger: { _ in })
+        defer { _ = session.close() }
+        _ = try session.start()
+        let resource = try SourceVGUIResource(source: """
+            "settings.res" { "Volume" { "ControlName" "CCvarSlider" "cvar_name" "test_slider"
+                "minvalue" "0" "maxvalue" "100" "xpos" "20" "ypos" "20" "wide" "200" "tall" "50" } }
+            """)
+        let instance = try session.loadResource(resource) { _ in }
+        try instance.layout(viewportWidth: 640, viewportHeight: 480)
+        _ = try session.renderFrame(viewportWidth: 640, viewportHeight: 480)
+        _ = try session.dispatchPointerEvent(x: 180, y: 30, phase: .began, timestamp: 1,
+            viewportWidth: 640, viewportHeight: 480)
+        let trackValue = try instance.sliderValue(control: "Volume")
+        XCTAssertEqual(trackValue, 83.77, "Native track jump uses width minus thumb minus one, with nearest tick rounding")
+        XCTAssertEqual(catalog.currentValue(for: "test_slider"), "25")
+        _ = try session.dispatchPointerEvent(x: 200, y: 30, phase: .moved, timestamp: 2,
+            viewportWidth: 640, viewportHeight: 480)
+        XCTAssertEqual(try instance.sliderValue(control: "Volume"), trackValue,
+            "Native default does not begin dragging after a track jump")
+        XCTAssertEqual(catalog.currentValue(for: "test_slider"), "25")
+        _ = try session.dispatchPointerEvent(x: 200, y: 30, phase: .ended, timestamp: 3,
+            viewportWidth: 640, viewportHeight: 480)
+        XCTAssertEqual(Double(try XCTUnwrap(catalog.currentValue(for: "test_slider"))),
+            try instance.sliderValue(control: "Volume"))
+        // Reset to an exactly located thumb: 25% of 184 free pixels = 46.
+        try instance.setSliderValue(25, control: "Volume")
+        try instance.applySliderChanges(control: "Volume")
+        _ = try session.renderFrame(viewportWidth: 640, viewportHeight: 480)
+        _ = try session.dispatchPointerEvent(x: 70, y: 30, phase: .began, timestamp: 4,
+            viewportWidth: 640, viewportHeight: 480)
+        XCTAssertEqual(try instance.sliderValue(control: "Volume"), 25, "Pressing the thumb must not jump its value")
+        _ = try session.dispatchPointerEvent(x: 116, y: 30, phase: .moved, timestamp: 5,
+            viewportWidth: 640, viewportHeight: 480)
+        XCTAssertEqual(try instance.sliderValue(control: "Volume"), 50, "Drag retains the initial press offset")
+        XCTAssertEqual(Double(try XCTUnwrap(catalog.currentValue(for: "test_slider"))), 25)
+        _ = try session.dispatchPointerEvent(x: 116, y: 30, phase: .ended, timestamp: 6,
+            viewportWidth: 640, viewportHeight: 480)
+        XCTAssertEqual(Double(try XCTUnwrap(catalog.currentValue(for: "test_slider"))), 50)
+    }
+
+    func testResourceCvarSliderPreservesAllowedOutOfRangeValueAndConvarBoundsMode() throws {
+        let files = try GMLuaHostDirectoryFileSystem(rootURL: GModGameAssets.clientContentRootURL(), writable: false)
+        let catalog = try GMLuaEngineConVarCatalog(descriptors: [
+            .init(name: "free_slider", defaultValue: "1"),
+            .init(name: "bounded_slider", defaultValue: "5", minimum: 2, maximum: 8)
+        ])
+        let session = GMLuaMenuSession(fileSystem: files, engineConVarCatalog: catalog, logger: { _ in })
+        defer { _ = session.close() }
+        _ = try session.start()
+        let resource = try SourceVGUIResource(source: """
+            "settings.res" {
+                "Free" { "ControlName" "CCvarSlider" "cvar_name" "free_slider"
+                    "minvalue" "0" "maxvalue" "2" "allowoutofrange" "1" }
+                "Bounded" { "ControlName" "CCvarSlider" "cvar_name" "bounded_slider"
+                    "minvalue" "3" "maxvalue" "7" "use_convar_minmax" "1" }
+                "Fractional" { "ControlName" "CCvarSlider" "cvar_name" "free_slider"
+                    "minvalue" "0.129" "maxvalue" "1.237" "ypos" "100" "wide" "200" "tall" "50" }
+            }
+            """)
+        let instance = try session.loadResource(resource) { _ in }
+        try instance.layout(viewportWidth: 640, viewportHeight: 480)
+        let frame = try session.renderFrame(viewportWidth: 640, viewportHeight: 480)
+        let captions = frame.commands.compactMap { command -> String? in
+            if case let .text(text, _, _, _, _) = command { return text.utf8String }; return nil
+        }
+        XCTAssertTrue(captions.contains("0.13")); XCTAssertTrue(captions.contains("1.24"),
+            "Captions round original bounds, not the truncated integer storage ticks")
+        try instance.setSliderValue(3.259, control: "Free")
+        XCTAssertEqual(try instance.sliderValue(control: "Free"), 3.259)
+        try instance.applySliderChanges(control: "Free")
+        XCTAssertEqual(Double(try XCTUnwrap(catalog.currentValue(for: "free_slider"))), 3.259)
+        try instance.setSliderValue(0, control: "Bounded")
+        XCTAssertEqual(try instance.sliderValue(control: "Bounded"), 2)
+        try instance.setSliderValue(9, control: "Bounded")
+        XCTAssertEqual(try instance.sliderValue(control: "Bounded"), 8)
+    }
+
+    func testResourceCvarSliderRejectsMissingBindingAndInvalidRangesBeforeConstruction() throws {
+        let files = try GMLuaHostDirectoryFileSystem(rootURL: GModGameAssets.clientContentRootURL(), writable: false)
+        let catalog = try GMLuaEngineConVarCatalog(descriptors: [.init(name: "known", defaultValue: "0.5")])
+        let session = GMLuaMenuSession(fileSystem: files, engineConVarCatalog: catalog, logger: { _ in })
+        defer { _ = session.close() }
+        _ = try session.start()
+        for (fields, key) in [
+            ("\"cvar_name\" \"unknown\"", "cvar_name"),
+            ("\"cvar_name\" \"known\" \"minvalue\" \"nan\"", "minvalue"),
+            ("\"cvar_name\" \"known\" \"minvalue\" \"2\" \"maxvalue\" \"1\"", "minvalue/maxvalue"),
+            ("\"cvar_name\" \"known\" \"allowoutofrange\" \"2\"", "allowoutofrange")
+        ] {
+            let resource = try SourceVGUIResource(source: """
+                "test.res" { "First" { "ControlName" "Label" "labelText" "must not leak" }
+                    "Slider" { "ControlName" "CCvarSlider" \(fields) } }
+                """)
+            XCTAssertThrowsError(try session.loadResource(resource) { _ in }) { error in
+                XCTAssertEqual(error as? GMLuaVGUIResourceInstance.ResourceError,
+                    .invalidField(control: "Slider", key: key))
+            }
+            XCTAssertTrue(try session.renderFrame(viewportWidth: 640, viewportHeight: 480).commands.isEmpty)
+        }
+    }
+
     func testResourceFPSInputAppliesNumericMaximumAndUnicodeFields() throws {
         let files = try GMLuaHostDirectoryFileSystem(rootURL: GModGameAssets.clientContentRootURL(), writable: false)
         let session = GMLuaMenuSession(fileSystem: files, logger: { _ in })
@@ -281,7 +434,7 @@ final class GMLuaVGUIResourceInstanceTests: XCTestCase {
         defer { _ = session.close() }
         _ = try session.start()
         let resource = try SourceVGUIResource(source: """
-            "test.res" { "Slider" { "ControlName" "CCvarSlider" } }
+            "test.res" { "Unimplemented" { "ControlName" "URLButton" } }
             """)
         XCTAssertThrowsError(try session.loadResource(resource) { _ in })
     }

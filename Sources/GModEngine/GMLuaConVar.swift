@@ -230,6 +230,15 @@ public final class GMLuaConVarRegistry: @unchecked Sendable {
         return conVar.value
     }
 
+    /// Preserve absent bounds instead of interpreting GetMin/GetMax's public
+    /// zero fallback as an actual constraint in native resource widgets.
+    func bounds(for name: String) -> (minimum: Double?, maximum: Double?)? {
+        guard let value = luaValue(for: name),
+              let conVar = GMLuaTypeSystem.typedObject(from: value)?.payload
+                as? GMLuaConVarValue else { return nil }
+        return (conVar.minimum, conVar.maximum)
+    }
+
     /// Applies the console form of assigning a Lua-created ConVar. Returns
     /// false for engine-owned or unknown variables, which belong to the host.
     @discardableResult

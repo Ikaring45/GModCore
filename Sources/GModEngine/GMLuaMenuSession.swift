@@ -296,6 +296,7 @@ public final class GMLuaMenuSession: @unchecked Sendable {
         "lua/vgui/dmenuoption.lua",
         "lua/vgui/dmenu.lua",
         "lua/vgui/dcombobox.lua",
+        "lua/vgui/dslider.lua",
         "lua/menu/problems/problems_pnl.lua",
         "lua/skins/default.lua",
     ]
@@ -310,6 +311,7 @@ public final class GMLuaMenuSession: @unchecked Sendable {
 
     public init(
         fileSystem: any LuaVirtualFileSystem & Sendable,
+        engineConVarCatalog: GMLuaEngineConVarCatalog? = nil,
         initialViewport: GMLuaViewportSize = .logicalDesktopDefault,
         textMeasurer: (any GMLuaTextMeasurer)? = nil,
         languageConfiguration: GMLuaLanguageConfiguration = .empty,
@@ -327,6 +329,7 @@ public final class GMLuaMenuSession: @unchecked Sendable {
             bootstrapMode: .strict,
             initialViewport: initialViewport,
             textMeasurer: textMeasurer,
+            engineConVarCatalog: engineConVarCatalog,
             systemTimeSource: systemTimeSource,
             languageConfiguration: languageConfiguration
         )

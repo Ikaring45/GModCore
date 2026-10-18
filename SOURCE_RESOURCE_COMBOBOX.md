@@ -42,7 +42,8 @@ also passed. The stock Sandbox immediate Q/C, strict spawn-menu interaction
 and live context screen-ray regressions then passed: three tests, no failures.
 These are Windows CPU/runtime checks, not physical-iPad interaction evidence.
 
-Full OptionsSubVideo loading is still incomplete: URLButton, CCvarSlider,
-native editable ComboBox, other reported unapplied fields, real device mode
-enumeration and applying settings remain required. This is not a claim that
-the original Options dialog is complete.
+Full OptionsSubVideo loading is still incomplete: URLButton, native editable
+ComboBox, other reported unapplied fields, real device mode enumeration and
+applying settings remain required. CCvarSlider's binding/pointer subset is
+now documented in SOURCE_RESOURCE_CVARSLIDER.md, with its remaining gates.
+This is not a claim that the original Options dialog is complete.

@@ -35,7 +35,7 @@ public final class GMLuaVGUIResourceInstance {
         "frame": "DFrame", "panel": "DPanel", "editablepanel": "EditablePanel",
         "label": "DLabel", "button": "DButton", "checkbutton": "DCheckBoxLabel",
         "textentry": "DTextEntry", "progressbar": "DProgress", "imagepanel": "DImage",
-        "combobox": "DComboBox"
+        "combobox": "DComboBox", "ccvarslider": "DSlider"
     ]
 
     init(runtime: GMLuaRuntime, resource: SourceVGUIResource,
@@ -53,6 +53,7 @@ public final class GMLuaVGUIResourceInstance {
         // Validate factories before constructing anything. Unknown native C++
         // controls must never become dummy panels or fictitious cvar widgets.
         var fieldNames: Set<String> = []
+        var sliders: [String: GMLuaVGUIResourceCvarSlider] = [:]
         for control in resource.controls {
             guard fieldNames.insert(control.fieldName).inserted else {
                 throw ResourceError.invalidField(control: control.name, key: "duplicate fieldName")
@@ -67,6 +68,10 @@ public final class GMLuaVGUIResourceInstance {
             // a TextEntry: support only the explicitly read-only resource mode.
             if name.lowercased() == "combobox", control.value("editable") != "0" {
                 throw ResourceError.invalidField(control: control.name, key: "editable")
+            }
+            if name.lowercased() == "ccvarslider" {
+                sliders[control.fieldName] = try GMLuaVGUIResourceCvarSlider(
+                    control: control, registry: runtime.conVarRegistry)
             }
         }
         var ordered = resource.controls
@@ -84,6 +89,9 @@ public final class GMLuaVGUIResourceInstance {
                     parent, .string(LuaString(control.fieldName))
                 ]).first ?? .nilValue
                 panels[control.fieldName] = panel
+                if let slider = sliders[control.fieldName] {
+                    try slider.install(runtime: runtime, panel: panel)
+                }
                 if control.controlName?.lowercased() == "progressbar" {
                     // Native Source ProgressBar is segmented, unlike Derma's
                     // continuous green DProgress skin. Independently implement
@@ -123,6 +131,9 @@ public final class GMLuaVGUIResourceInstance {
                 }
                 var applied: Set<String> = ["controlname", "fieldname", "xpos", "ypos", "wide", "tall",
                     "labeltext", "title", "font", "visible", "enabled", "command", "textalignment"]
+                if sliders[control.fieldName] != nil {
+                    applied.formUnion(["minvalue", "maxvalue", "cvar_name", "allowoutofrange", "use_convar_minmax"])
+                }
                 if control.controlName?.lowercased() == "combobox" {
                     // Source inserts choices in host-provided order; stock
                     // DComboBox otherwise sorts them alphabetically on open.
@@ -262,6 +273,48 @@ public final class GMLuaVGUIResourceInstance {
         try requireComboBox(control)
         guard case let .number(index) = try call(control, "GetSelectedID", []).first else { return nil }
         return Int(exactly: index)
+    }
+
+    /// Live CCvarSlider value. A drag changes this before writing its ConVar
+    /// on release; host-edited fields can explicitly call applySliderChanges.
+    public func sliderValue(control: String) throws -> Double {
+        try requireSlider(control)
+        guard case let .number(value) = try call(control, "GetSliderValue", []).first else {
+            throw ResourceError.invalidField(control: control, key: "slider")
+        }
+        return value
+    }
+
+    public func setSliderValue(_ value: Double, control: String) throws {
+        try requireSlider(control)
+        guard value.isFinite, (value * 100).isFinite else {
+            throw ResourceError.invalidField(control: control, key: "slider")
+        }
+        _ = try call(control, "SetSliderValue", [.number(value)])
+    }
+
+    public func resetSlider(control: String) throws {
+        try requireSlider(control)
+        _ = try call(control, "Reset", [])
+    }
+
+    public func applySliderChanges(control: String) throws {
+        try requireSlider(control)
+        _ = try call(control, "ApplyChanges", [])
+    }
+
+    public func sliderHasBeenModified(control: String) throws -> Bool {
+        try requireSlider(control)
+        guard case let .boolean(value) = try call(control, "HasBeenModified", []).first else {
+            throw ResourceError.invalidField(control: control, key: "slider")
+        }
+        return value
+    }
+
+    private func requireSlider(_ control: String) throws {
+        guard resource.controls.contains(where: {
+            $0.fieldName == control && $0.controlName?.lowercased() == "ccvarslider"
+        }) else { throw ResourceError.invalidField(control: control, key: "slider") }
     }
 
     private func requireComboBox(_ control: String) throws {
