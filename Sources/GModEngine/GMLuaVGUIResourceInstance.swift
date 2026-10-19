@@ -80,8 +80,17 @@ public final class GMLuaVGUIResourceInstance {
                 sliders[control.fieldName] = try GMLuaVGUIResourceCvarSlider(
                     control: control, registry: runtime.conVarRegistry)
             }
-            if name.lowercased() == "checkbutton", let scheme, scheme.fonts.isEmpty {
+            if ["checkbutton", "frame"].contains(name.lowercased()),
+               !(name.lowercased() == "frame" && control.value("settitlebarvisible") == "0"),
+               let scheme, scheme.fonts.isEmpty {
                 throw SourceVGUIScheme.SchemeError.missingFont("Marlett")
+            }
+            if name.lowercased() == "frame" {
+                for key in ["settitlebarvisible", "setclosebuttonvisible"] {
+                    if let value = control.value(key), value != "0" && value != "1" {
+                        throw ResourceError.invalidField(control: control.name, key: key)
+                    }
+                }
             }
         }
         var ordered = resource.controls
@@ -100,12 +109,37 @@ public final class GMLuaVGUIResourceInstance {
                     parent, .string(LuaString(control.fieldName))
                 ]).first ?? .nilValue
                 panels[control.fieldName] = panel
+                if control.controlName?.lowercased() == "frame", !hidesTitle {
+                    // Source Frame defaults to retaining its instance on Close.
+                    // Derma's global DFrame default is intentionally unchanged.
+                    let configure = try runtime.executeReturningValues("""
+                        return function(p, close)
+                            p:SetDeleteOnClose(false)
+                            p.btnClose:SetDoubleClickingEnabled(false)
+                            p.btnClose:SetVisible(close)
+                            p.btnMaxim:SetVisible(false)
+                            p.btnMinim:SetVisible(false)
+                        end
+                        """).first ?? .nilValue
+                    _ = try runtime.state.call(configure, arguments: [panel, .boolean(control.value("setclosebuttonvisible") != "0")])
+                }
                 if sourceCheck, let scheme {
                     try GMLuaVGUIResourceSchemeCheckButton.install(runtime: runtime, panel: panel, scheme: scheme)
                     _ = try call(control.fieldName, "SetContentAlignment", [.number(4)])
                     if let value = control.value("smallcheckimage"), value != "0" && value != "1" {
                         throw ResourceError.invalidField(control: control.name, key: "smallcheckimage")
                     }
+                }
+                if control.controlName?.lowercased() == "button" {
+                    _ = try call(control.fieldName, "SetDoubleClickingEnabled", [.boolean(false)])
+                } else if control.controlName?.lowercased() == "checkbutton", !sourceCheck {
+                    let configure = try runtime.executeReturningValues("""
+                        return function(p)
+                            p.Button:SetDoubleClickingEnabled(false)
+                            p.Label:SetDoubleClickingEnabled(false)
+                        end
+                        """).first ?? .nilValue
+                    _ = try runtime.state.call(configure, arguments: [panel])
                 }
                 if let slider = sliders[control.fieldName] {
                     try slider.install(runtime: runtime, panel: panel, scheme: scheme)
@@ -134,6 +168,7 @@ public final class GMLuaVGUIResourceInstance {
                 }
                 for (key, method) in [("labelText", "SetText"), ("title", "SetTitle"), ("font", "SetFont")] {
                     if key == "title", hidesTitle { continue }
+                    if key == "font", control.controlName?.lowercased() == "frame" { continue }
                     if let text = control.value(key) {
                         _ = try call(control.fieldName, method, [.string(LuaString(text))])
                     }
@@ -149,6 +184,12 @@ public final class GMLuaVGUIResourceInstance {
                 }
                 var applied: Set<String> = ["controlname", "fieldname", "xpos", "ypos", "wide", "tall",
                     "labeltext", "title", "font", "visible", "enabled", "command", "textalignment"]
+                if control.controlName?.lowercased() == "frame" {
+                    applied.insert("settitlebarvisible")
+                    applied.remove("font")
+                    if !hidesTitle { applied.insert("setclosebuttonvisible") }
+                    if !hidesTitle, let scheme, !scheme.fonts.isEmpty { applied.insert("title_font") }
+                }
                 if sourceCheck { applied.insert("smallcheckimage") }
                 if sliders[control.fieldName] != nil {
                     applied.formUnion(["minvalue", "maxvalue", "cvar_name", "allowoutofrange", "use_convar_minmax"])
@@ -172,8 +213,11 @@ public final class GMLuaVGUIResourceInstance {
                     _ = try call(control.fieldName, "SetChecked", [.boolean(selected == "1")])
                     applied.insert("selected")
                 }
-                var booleanFields = [("visible", "SetVisible"), ("enabled", "SetEnabled"),
+                var booleanFields = [("enabled", "SetEnabled"),
                     ("paintbackground", "SetPaintBackgroundEnabled"), ("paintborder", "SetPaintBorderEnabled")]
+                // Native Frame::ApplySettings explicitly ignores .res visible;
+                // its owning host controls visibility, not the saved resource.
+                if control.controlName?.lowercased() != "frame" { booleanFields.append(("visible", "SetVisible")) }
                 if control.controlName?.lowercased() == "frame", !hidesTitle {
                     booleanFields += [("sizable", "SetSizable"), ("draggable", "SetDraggable")]
                 }
@@ -225,8 +269,7 @@ public final class GMLuaVGUIResourceInstance {
                 if let scheme {
                     try GMLuaVGUIResourceSchemeColors.install(runtime: runtime, panel: panel, control: control, scheme: scheme)
                     let kind = control.controlName?.lowercased() ?? ""
-                    if !["label", "button", "checkbutton", "progressbar", "ccvarslider"].contains(kind) &&
-                        !(kind == "frame" && hidesTitle) {
+                    if !["label", "button", "checkbutton", "progressbar", "ccvarslider", "frame"].contains(kind) {
                         unappliedSchemeColorControls.append(control.fieldName)
                     }
                     if control.controlName?.lowercased() == "label" {
@@ -269,10 +312,10 @@ public final class GMLuaVGUIResourceInstance {
         if let scheme, !scheme.fonts.isEmpty {
             let resolved = try resource.controls.filter(Self.usesSchemeFont).map { control in
                 let kind = control.controlName?.lowercased() ?? ""
-                let alias = control.value("font") ?? (kind == "ccvarslider" ? "DefaultVerySmall" :
-                    (kind == "frame" ? scheme.string("FrameTitleBar.Font") ?? "Default" : "Default"))
-                let symbol = kind == "checkbutton" ? try scheme.font(
-                    control.value("smallcheckimage") == "1" ? "MarlettSmall" : "Marlett",
+                let alias = kind == "frame" ? (control.value("title_font") ?? scheme.string("FrameTitleBar.Font") ?? "Default") :
+                    (control.value("font") ?? (kind == "ccvarslider" ? "DefaultVerySmall" : "Default"))
+                let symbol = ["checkbutton", "frame"].contains(kind) ? try scheme.font(
+                    kind == "checkbutton" && control.value("smallcheckimage") == "1" ? "MarlettSmall" : "Marlett",
                     viewportHeight: viewportHeight) : nil
                 if let symbol, !GMLuaMarlettSymbolText.supports(face: symbol.face) || symbol.flags["symbol"] != true {
                     throw SourceVGUIScheme.SchemeError.unsupportedFont(symbol.alias)
@@ -281,7 +324,13 @@ public final class GMLuaVGUIResourceInstance {
             }
             let assign = try runtime.executeReturningValues("""
                 return function(p, kind, name, symbol)
-                    if kind == 'frame' then p.lblTitle:SetFont(name)
+                    if kind == 'frame' then
+                        p.lblTitle:SetFont(name)
+                        if symbol then
+                            p.btnClose:SetFont(symbol)
+                            p.GarrysPAD_SourceFrameButtonFont = symbol
+                        end
+                        p:InvalidateLayout(true)
                     elseif kind == 'ccvarslider' then p.GarrysPAD_SourceCaptionFont = name
                     else p:SetFont(name) end
                     if symbol then p.GarrysPAD_SourceCheckFont = symbol end
@@ -310,6 +359,23 @@ public final class GMLuaVGUIResourceInstance {
 
     public func setText(_ text: String, control: String) throws {
         _ = try call(control, "SetText", [.string(LuaString(text))])
+    }
+
+    /// Live host visibility/focus, distinct from Frame::ApplySettings ignoring
+    /// a saved .res visible field. Retained resource frames can be reopened.
+    public func setVisible(_ visible: Bool, control: String) throws {
+        _ = try call(control, "SetVisible", [.boolean(visible)])
+    }
+
+    public func isVisible(control: String) throws -> Bool {
+        guard case let .boolean(value) = try call(control, "IsVisible", []).first else {
+            throw ResourceError.invalidField(control: control, key: "visible")
+        }
+        return value
+    }
+
+    public func requestFocus(control: String) throws {
+        _ = try call(control, "RequestFocus", [])
     }
 
     public func text(control: String) throws -> String {

@@ -29,6 +29,8 @@ condition expressions and unresolved include/base directives remain errors.
 Native resource colors now apply, when an explicit Scheme is supplied, to:
 
 - hidden-title Frame background/focus background and authored line border;
+- titled Frame normal/inactive background, title and Marlett close-button
+  colors and borders (SOURCE_GAMEUI_FRAME.md);
 - Label normal/dull/bright foreground;
 - Button normal/hover/depressed foreground, background and line border;
 - segmented ProgressBar foreground/background;
@@ -78,3 +80,7 @@ skipped test. Changed Apple-only host files passed syntax parsing on Windows.
 Three stock Sandbox immediate-Q/C, strict spawn-menu interaction and context-ray
 regressions also passed after the final code changes. Physical rendering and
 full native Options remain unverified.
+
+Later Apple CI 39131978040 passed the complete pipeline for head 2848c37,
+including the Scheme/loading app path and earlier numeric/CCvarSlider work.
+The later fonts/Marlett and titled-Frame changes have separate validation gates.

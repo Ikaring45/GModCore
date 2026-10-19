@@ -23,6 +23,7 @@ enum GMLuaVGUIResourceSchemeCheckButton {
 
     private static let source = """
         return function(p, c)
+            p:SetDoubleClickingEnabled(false)
             local checked = false
             function p:GetChecked() return checked end
             function p:SetChecked(value) checked = value and true or false end

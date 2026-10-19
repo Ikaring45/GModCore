@@ -3,6 +3,37 @@ import GModEngine
 import GModGameAssets
 
 final class GMLuaVGUIResourceInstanceTests: XCTestCase {
+    func testNativeResourceButtonsDoNotSwallowRapidRepeatedPressesAsDermaDoubleClicks() throws {
+        let files = try GMLuaHostDirectoryFileSystem(rootURL: GModGameAssets.clientContentRootURL(), writable: false)
+        let session = GMLuaMenuSession(fileSystem: files, logger: { _ in })
+        defer { _ = session.close() }
+        _ = try session.start()
+        let resource = try SourceVGUIResource(source: """
+            Native {
+                Apply { ControlName Button labelText Apply command Apply xpos 20 ypos 20 wide 150 tall 30 }
+                Toggle { ControlName CheckButton labelText Toggle selected 0 xpos 20 ypos 70 wide 150 tall 30 }
+            }
+            """)
+        var commands: [String] = []
+        let instance = try session.loadResource(resource) { commands.append($0) }
+        try instance.layout(viewportWidth: 640, viewportHeight: 480)
+        _ = try session.renderFrame(viewportWidth: 640, viewportHeight: 480)
+        for index in 0..<3 {
+            for phase: GMLuaPointerPhase in [.began, .ended] {
+                _ = try session.dispatchPointerEvent(x: 60, y: 35, phase: phase, timestamp: Double(index) * 0.01,
+                    viewportWidth: 640, viewportHeight: 480)
+            }
+        }
+        XCTAssertEqual(commands, ["Apply", "Apply", "Apply"])
+        for index in 0..<2 {
+            for phase: GMLuaPointerPhase in [.began, .ended] {
+                _ = try session.dispatchPointerEvent(x: 26, y: 85, phase: phase, timestamp: 1 + Double(index) * 0.01,
+                    viewportWidth: 640, viewportHeight: 480)
+            }
+            XCTAssertEqual(try instance.isChecked(control: "Toggle"), index == 0)
+        }
+    }
+
     func testResourceCvarSliderUsesRealBoundsDeferredApplyAndExternalValue() throws {
         let files = try GMLuaHostDirectoryFileSystem(rootURL: GModGameAssets.clientContentRootURL(), writable: false)
         let catalog = try GMLuaEngineConVarCatalog(descriptors: [

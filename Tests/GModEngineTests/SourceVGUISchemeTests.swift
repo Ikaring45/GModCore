@@ -291,5 +291,32 @@ final class SourceVGUISchemeTests: XCTestCase {
         }
         XCTAssertTrue(try check.isChecked(control: "voice_modenable"))
         XCTAssertFalse(check.unappliedFields.isEmpty, "Remaining native page fields must still be reported")
+        try check.remove()
+        _ = try session.renderFrame(viewportWidth: 1_024, viewportHeight: 768)
+        XCTAssertTrue(try scheme.borderSegments("TitleButtonBorder").isEmpty)
+        let nativeFrame = try SourceVGUIResource(source: """
+            Test { Root { ControlName Frame title "Source Frame" xpos 300 ypos 50 wide 240 tall 150 } }
+            """)
+        let window = try session.loadResource(nativeFrame, rootControlName: "Root", scheme: scheme) { _ in }
+        try window.layout(viewportWidth: 1_024, viewportHeight: 768)
+        try window.requestFocus(control: "Root")
+        let windowFrame = try session.renderFrame(viewportWidth: 1_024, viewportHeight: 768)
+        let titleColor = try capturedColor("FrameTitleBar.TextColor")
+        XCTAssertTrue(windowFrame.commands.contains {
+            if case let .text(text, position, font, color, _) = $0 {
+                return text.utf8String == "Source Frame" && position.x == 316 && position.y == 59 &&
+                    font.font.utf8String == "Tahoma" && font.size == 12 && font.weight == 1_000 && color == titleColor
+            }; return false
+        })
+        XCTAssertTrue(windowFrame.commands.contains {
+            if case let .text(text, _, font, _, _) = $0 { return text.utf8String == "r" && font.symbol && font.font.utf8String == "Marlett" }; return false
+        })
+        for phase: GMLuaPointerPhase in [.began, .ended] {
+            _ = try session.dispatchPointerEvent(x: 524, y: 67, phase: phase, timestamp: 3,
+                viewportWidth: 1_024, viewportHeight: 768)
+        }
+        XCTAssertFalse(try window.isVisible(control: "Root"))
+        try window.setVisible(true, control: "Root")
+        XCTAssertTrue(try window.isVisible(control: "Root"))
     }
 }

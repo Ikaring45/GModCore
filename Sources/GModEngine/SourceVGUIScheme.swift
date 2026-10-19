@@ -118,6 +118,12 @@ public struct SourceVGUIScheme: Equatable, Sendable {
             }
             if case let .string(alias) = entry.value { key = alias; continue }
             guard case let .object(fields) = entry.value else { throw SchemeError.unsupportedBorder(name) }
+            // The owned Source Scheme explicitly defines its three title-button
+            // borders as empty backgroundtype=0 objects. This narrow empty
+            // border case does not implement image/rounded/custom backgrounds.
+            if fields.allSatisfy({ ["backgroundtype", "inset"].contains($0.key.lowercased()) }),
+               let type = fields.first(where: { $0.key.lowercased() == "backgroundtype" }),
+               case .string("0") = type.value { return [] }
             guard fields.allSatisfy({ ["inset", "left", "right", "top", "bottom"].contains($0.key.lowercased()) }) else {
                 throw SchemeError.unsupportedBorder(name)
             }
