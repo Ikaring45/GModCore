@@ -13,6 +13,32 @@ public final class GMLuaVGUIResourceInstance {
         public let key: String
     }
 
+    /// A real panel from this adapter, usable only on the same runtime lane.
+    /// Supplying it does not implement the C++ behavior of a custom page class.
+    public struct ExistingPanel {
+        fileprivate let runtime: GMLuaRuntime
+        fileprivate let panel: LuaValue
+        fileprivate let baseControlName: String
+    }
+
+    public enum MissingFactoryPolicy: Equatable, Sendable {
+        case fail
+        /// Source BuildGroup continues after a null factory result. No dummy
+        /// panel is created, and every omitted control remains inspectable.
+        case sourceContinue
+    }
+
+    public struct SkippedControl: Equatable, Sendable {
+        public let name: String
+        public let controlName: String?
+    }
+
+    public struct ReusedControl: Equatable, Sendable {
+        public let name: String
+        public let declaredControlName: String?
+        public let appliedBaseControlName: String
+    }
+
     public enum ResourceError: Error, Equatable {
         case unresolvedDirectives
         case unresolvedConditional(String)
@@ -20,6 +46,7 @@ public final class GMLuaVGUIResourceInstance {
         case missingRoot(String)
         case missingControl(String)
         case invalidField(control: String, key: String)
+        case foreignPanel
     }
 
     public private(set) var unappliedFields: [UnappliedField] = []
@@ -27,14 +54,22 @@ public final class GMLuaVGUIResourceInstance {
     /// GameUI Scheme is supplied. This is separate from font/geometry parity.
     public private(set) var unappliedSchemeColorControls: [String] = []
     public private(set) var unappliedSchemeFontControls: [String] = []
+    public private(set) var skippedControls: [SkippedControl] = []
+    public private(set) var reusedControls: [ReusedControl] = []
     private let runtime: GMLuaRuntime
     private let index: LuaValue
     private let roots: Roots
     private var panels: [String: LuaValue] = [:]
+    private var ownedPanels: Set<String> = []
+    private var panelKinds: [String: String] = [:]
+    private var controls: [SourceVGUIResource.Control] = []
     private var resource: SourceVGUIResource
     private let scheme: SourceVGUIScheme?
     private let rootControlName: String?
+    private let contextPanel: LuaValue?
+    private let worldPanel: LuaValue?
     private var laidOutViewport: GMLuaViewportSize?
+    private var laidOutContextBounds: GMLuaPanelRect?
 
     private static let classes = [
         "frame": "DFrame", "panel": "DPanel", "editablepanel": "EditablePanel",
@@ -45,11 +80,14 @@ public final class GMLuaVGUIResourceInstance {
 
     init(runtime: GMLuaRuntime, resource: SourceVGUIResource,
          rootControlName: String?, scheme: SourceVGUIScheme? = nil,
+         context: ExistingPanel? = nil, existingPanels: [ExistingPanel] = [],
+         missingFactoryPolicy: MissingFactoryPolicy = .fail,
          onCommand: @escaping (String) throws -> Void) throws {
         self.runtime = runtime
         self.resource = resource
         self.scheme = scheme
-        self.rootControlName = rootControlName
+        self.contextPanel = context?.panel
+        worldPanel = context == nil ? nil : try runtime.executeReturningValues("return vgui.GetWorldPanel()").first
         index = try runtime.executeReturningValues("return function(p,k) return p[k] end").first ?? .nilValue
         roots = Roots([index])
         runtime.state.registerGarbageCollectionRootProvider { [weak roots] in roots?.values ?? [] }
@@ -57,11 +95,61 @@ public final class GMLuaVGUIResourceInstance {
         if let rootControlName, !resource.controls.contains(where: { $0.fieldName == rootControlName }) {
             throw ResourceError.missingRoot(rootControlName)
         }
-        // Validate factories before constructing anything. Unknown native C++
-        // controls must never become dummy panels or fictitious cvar widgets.
+        // BuildGroup matches existing panels by resource BLOCK key, case
+        // insensitively, before asking the context's factory for a new panel.
+        // Retain native order: the context precedes other supplied controls.
+        let isValid = try runtime.executeReturningValues("return IsValid").first ?? .nilValue
+        var candidates: [(ExistingPanel, String)] = []
+        for binding in (context.map { [$0] } ?? []) + existingPanels {
+            guard binding.runtime === runtime else { throw ResourceError.foreignPanel }
+            guard case .boolean(true) = try runtime.state.call(isValid, arguments: [binding.panel]).first else {
+                throw ResourceError.missingControl("existing panel")
+            }
+            let getName = try runtime.state.call(index, arguments: [binding.panel, .string("GetName")]).first ?? .nilValue
+            guard case let .string(name) = try runtime.state.call(getName, arguments: [binding.panel]).first else {
+                throw ResourceError.missingControl("existing panel name")
+            }
+            candidates.append((binding, name.utf8String))
+        }
+        var reusedPanels: [String: LuaValue] = [:]
+        var contextField: String?
+        for original in resource.controls {
+            guard original.conditional == nil, original.entries.allSatisfy({ $0.conditional == nil }) else {
+                throw ResourceError.unresolvedConditional(original.name)
+            }
+            if let (binding, _) = candidates.first(where: {
+                $0.1.caseInsensitiveCompare(original.name) == .orderedSame
+            }) {
+                let entries = original.entries.filter { $0.key.caseInsensitiveCompare("ControlName") != .orderedSame }
+                    + [.init(key: "ControlName", value: .string(binding.baseControlName), conditional: nil)]
+                controls.append(.init(name: original.name, entries: entries, conditional: nil))
+                reusedPanels[original.fieldName] = binding.panel
+                reusedControls.append(.init(name: original.name, declaredControlName: original.controlName,
+                    appliedBaseControlName: binding.baseControlName))
+                if context != nil, candidates.first?.1.caseInsensitiveCompare(original.name) == .orderedSame {
+                    contextField = original.fieldName
+                }
+            } else if let name = original.controlName, Self.classes[name.lowercased()] != nil {
+                controls.append(original)
+            } else if missingFactoryPolicy == .sourceContinue {
+                skippedControls.append(.init(name: original.name, controlName: original.controlName))
+            } else {
+                throw ResourceError.unsupportedControl(original.controlName ?? original.name)
+            }
+        }
+        if context != nil, let rootControlName, rootControlName != contextField {
+            throw ResourceError.invalidField(control: rootControlName, key: "context root")
+        }
+        self.rootControlName = contextField ?? rootControlName
+        if let rootControlName = self.rootControlName,
+           !controls.contains(where: { $0.fieldName == rootControlName }) {
+            throw ResourceError.missingRoot(rootControlName)
+        }
+        // Validate remaining factories/fields before constructing anything.
+        // Unknown native classes never become dummy or fictitious cvar widgets.
         var fieldNames: Set<String> = []
         var sliders: [String: GMLuaVGUIResourceCvarSlider] = [:]
-        for control in resource.controls {
+        for control in controls {
             guard fieldNames.insert(control.fieldName).inserted else {
                 throw ResourceError.invalidField(control: control.name, key: "duplicate fieldName")
             }
@@ -93,35 +181,46 @@ public final class GMLuaVGUIResourceInstance {
                 }
             }
         }
-        var ordered = resource.controls
-        if let rootControlName, let offset = ordered.firstIndex(where: { $0.fieldName == rootControlName }) {
+        var ordered = controls
+        if let rootControlName = self.rootControlName, let offset = ordered.firstIndex(where: { $0.fieldName == rootControlName }) {
             ordered.insert(ordered.remove(at: offset), at: 0)
         }
         let create = try runtime.executeReturningValues("return vgui.Create").first ?? .nilValue
         do {
             for control in ordered {
-                let parent = control.fieldName == rootControlName ? LuaValue.nilValue
-                    : rootControlName.flatMap { panels[$0] } ?? .nilValue
+                let parent = control.fieldName == self.rootControlName ? LuaValue.nilValue
+                    : self.rootControlName.flatMap { panels[$0] } ?? contextPanel ?? .nilValue
                 let hidesTitle = control.controlName?.lowercased() == "frame" && control.value("settitlebarvisible") == "0"
                 let sourceCheck = scheme != nil && control.controlName?.lowercased() == "checkbutton"
-                let panel = try runtime.state.call(create, arguments: [
-                    .string(LuaString(hidesTitle ? "DPanel" : sourceCheck ? "DButton" : Self.classes[control.controlName!.lowercased()]!)),
-                    parent, .string(LuaString(control.fieldName))
-                ]).first ?? .nilValue
+                let panel: LuaValue
+                if let existing = reusedPanels[control.fieldName] {
+                    panel = existing
+                } else {
+                    panel = try runtime.state.call(create, arguments: [
+                        .string(LuaString(hidesTitle ? "DPanel" : sourceCheck ? "DButton" : Self.classes[control.controlName!.lowercased()]!)),
+                        parent, .string(LuaString(control.name))
+                    ]).first ?? .nilValue
+                    ownedPanels.insert(control.fieldName)
+                }
                 panels[control.fieldName] = panel
+                panelKinds[control.fieldName] = hidesTitle ? "Panel" : control.controlName!
+                if let fieldName = control.value("fieldName") {
+                    _ = try call(control.fieldName, "SetName", [.string(LuaString(fieldName))])
+                }
                 if control.controlName?.lowercased() == "frame", !hidesTitle {
                     // Source Frame defaults to retaining its instance on Close.
                     // Derma's global DFrame default is intentionally unchanged.
                     let configure = try runtime.executeReturningValues("""
-                        return function(p, close)
-                            p:SetDeleteOnClose(false)
+                        return function(p, close, created)
+                            if created then p:SetDeleteOnClose(false) end
                             p.btnClose:SetDoubleClickingEnabled(false)
                             p.btnClose:SetVisible(close)
                             p.btnMaxim:SetVisible(false)
                             p.btnMinim:SetVisible(false)
                         end
                         """).first ?? .nilValue
-                    _ = try runtime.state.call(configure, arguments: [panel, .boolean(control.value("setclosebuttonvisible") != "0")])
+                    _ = try runtime.state.call(configure, arguments: [panel,
+                        .boolean(control.value("setclosebuttonvisible") != "0"), .boolean(ownedPanels.contains(control.fieldName))])
                 }
                 if sourceCheck, let scheme {
                     try GMLuaVGUIResourceSchemeCheckButton.install(runtime: runtime, panel: panel, scheme: scheme)
@@ -269,7 +368,7 @@ public final class GMLuaVGUIResourceInstance {
                 if let scheme {
                     try GMLuaVGUIResourceSchemeColors.install(runtime: runtime, panel: panel, control: control, scheme: scheme)
                     let kind = control.controlName?.lowercased() ?? ""
-                    if !["label", "button", "checkbutton", "progressbar", "ccvarslider", "frame"].contains(kind) {
+                    if !["label", "button", "checkbutton", "progressbar", "ccvarslider", "frame", "panel", "editablepanel"].contains(kind) {
                         unappliedSchemeColorControls.append(control.fieldName)
                     }
                     if control.controlName?.lowercased() == "label" {
@@ -294,23 +393,39 @@ public final class GMLuaVGUIResourceInstance {
             throw ResourceError.invalidField(control: resource.name, key: "viewport")
         }
         let viewport = GMLuaViewportSize(width: viewportWidth, height: viewportHeight)
-        guard viewport != laidOutViewport else { return }
+        if contextPanel == nil, viewport == laidOutViewport { return }
         let screen = GMLuaPanelRect(x: 0, y: 0, width: Double(viewportWidth), height: Double(viewportHeight))
         var parent = screen
+        if let contextPanel {
+            if rootControlName == nil {
+                parent = try panelBounds(contextPanel)
+            } else {
+                let contextParent = try callPanel(contextPanel, "GetParent", []).first ?? .nilValue
+                switch contextParent {
+                case .nilValue: break
+                case let .userdata(value):
+                    if case let .userdata(world)? = worldPanel, value === world { break }
+                    parent = try panelBounds(contextParent)
+                default: parent = try panelBounds(contextParent)
+                }
+            }
+        }
+        let contextBounds = contextPanel == nil ? nil : parent
+        guard viewport != laidOutViewport || contextBounds != laidOutContextBounds else { return }
         var frames: [(String, GMLuaPanelRect)] = []
-        if let root = resource.controls.first(where: { $0.fieldName == rootControlName }) {
-            let frame = try root.frame(parent: screen, screen: screen)
+        if let root = controls.first(where: { $0.fieldName == rootControlName }) {
+            let frame = try root.frame(parent: parent, screen: screen)
             frames.append((root.fieldName, frame))
             parent = GMLuaPanelRect(x: 0, y: 0, width: frame.width, height: frame.height)
         }
-        for control in resource.controls where control.fieldName != rootControlName {
+        for control in controls where control.fieldName != rootControlName {
             frames.append((control.fieldName, try control.frame(parent: parent, screen: screen)))
         }
         // Resolve every alias/range before mutating live control fonts. Names
         // are content-addressed so another resource can use a different Scheme
         // without replacing Default or any of the original Derma fonts.
         if let scheme, !scheme.fonts.isEmpty {
-            let resolved = try resource.controls.filter(Self.usesSchemeFont).map { control in
+            let resolved = try controls.filter(Self.usesSchemeFont).map { control in
                 let kind = control.controlName?.lowercased() ?? ""
                 let alias = kind == "frame" ? (control.value("title_font") ?? scheme.string("FrameTitleBar.Font") ?? "Default") :
                     (control.value("font") ?? (kind == "ccvarslider" ? "DefaultVerySmall" : "Default"))
@@ -349,12 +464,22 @@ public final class GMLuaVGUIResourceInstance {
         // on idle frames would undo native dragging/resizing and relayout.
         for (name, frame) in frames { try applyFrame(frame, to: name) }
         laidOutViewport = viewport
+        laidOutContextBounds = contextBounds
     }
 
     private static func usesSchemeFont(_ control: SourceVGUIResource.Control) -> Bool {
         let kind = control.controlName?.lowercased() ?? ""
         return ["label", "button", "checkbutton", "textentry", "combobox", "ccvarslider"].contains(kind) ||
             (kind == "frame" && control.value("settitlebarvisible") != "0")
+    }
+
+    /// Bind only an actually constructed panel. Name matching is performed at
+    /// load time using Panel:GetName(), never a caller-provided class alias.
+    public func existingPanel(control: String) throws -> ExistingPanel {
+        guard let panel = panels[control], let kind = panelKinds[control] else {
+            throw ResourceError.missingControl(control)
+        }
+        return ExistingPanel(runtime: runtime, panel: panel, baseControlName: kind)
     }
 
     public func setText(_ text: String, control: String) throws {
@@ -379,7 +504,7 @@ public final class GMLuaVGUIResourceInstance {
     }
 
     public func text(control: String) throws -> String {
-        guard resource.controls.contains(where: {
+        guard controls.contains(where: {
             $0.fieldName == control && ["textentry", "combobox"].contains($0.controlName?.lowercased() ?? "")
         }), case let .string(value) = try call(control, "GetText", []).first else {
             throw ResourceError.invalidField(control: control, key: "text")
@@ -450,13 +575,13 @@ public final class GMLuaVGUIResourceInstance {
     }
 
     private func requireSlider(_ control: String) throws {
-        guard resource.controls.contains(where: {
+        guard controls.contains(where: {
             $0.fieldName == control && $0.controlName?.lowercased() == "ccvarslider"
         }) else { throw ResourceError.invalidField(control: control, key: "slider") }
     }
 
     private func requireComboBox(_ control: String) throws {
-        guard resource.controls.contains(where: {
+        guard controls.contains(where: {
             $0.fieldName == control && $0.controlName?.lowercased() == "combobox"
         }) else { throw ResourceError.invalidField(control: control, key: "choice") }
     }
@@ -464,7 +589,7 @@ public final class GMLuaVGUIResourceInstance {
     /// Reads the live control, including user changes, rather than the .res
     /// default. Persisting this value remains the owning settings host's job.
     public func isChecked(control: String) throws -> Bool {
-        guard resource.controls.contains(where: {
+        guard controls.contains(where: {
             $0.fieldName == control && $0.controlName?.lowercased() == "checkbutton"
         }), case let .boolean(value) = try call(control, "GetChecked", []).first else {
             throw ResourceError.invalidField(control: control, key: "selected")
@@ -474,16 +599,21 @@ public final class GMLuaVGUIResourceInstance {
 
     public func setProgress(_ fraction: Double, control: String) throws {
         guard fraction.isFinite, (0...1).contains(fraction),
-              resource.controls.contains(where: { $0.fieldName == control && $0.controlName?.lowercased() == "progressbar" }) else {
+              controls.contains(where: { $0.fieldName == control && $0.controlName?.lowercased() == "progressbar" }) else {
             throw ResourceError.invalidField(control: control, key: "progress")
         }
         _ = try call(control, "SetFraction", [.number(fraction)])
     }
 
     public func remove() throws {
-        for name in panels.keys.sorted() { _ = try call(name, "Remove", []) }
+        // BuildGroup destroys only controls created from this resource, never
+        // its code-created context or other supplied live panels.
+        for name in ownedPanels.sorted() { _ = try call(name, "Remove", []) }
         panels.removeAll()
+        ownedPanels.removeAll()
+        panelKinds.removeAll()
         laidOutViewport = nil
+        laidOutContextBounds = nil
     }
 
     private func applyFrame(_ frame: GMLuaPanelRect, to control: String) throws {
@@ -494,6 +624,18 @@ public final class GMLuaVGUIResourceInstance {
     @discardableResult
     private func call(_ control: String, _ method: String, _ args: [LuaValue]) throws -> [LuaValue] {
         guard let panel = panels[control] else { throw ResourceError.missingControl(control) }
+        return try callPanel(panel, method, args)
+    }
+
+    private func panelBounds(_ panel: LuaValue) throws -> GMLuaPanelRect {
+        guard case let .number(width) = try callPanel(panel, "GetWide", []).first,
+              case let .number(height) = try callPanel(panel, "GetTall", []).first else {
+            throw ResourceError.invalidField(control: resource.name, key: "context bounds")
+        }
+        return .init(x: 0, y: 0, width: width, height: height)
+    }
+
+    private func callPanel(_ panel: LuaValue, _ method: String, _ args: [LuaValue]) throws -> [LuaValue] {
         let function = try runtime.state.call(index, arguments: [panel, .string(LuaString(method))]).first ?? .nilValue
         return try runtime.state.call(function, arguments: [panel] + args)
     }

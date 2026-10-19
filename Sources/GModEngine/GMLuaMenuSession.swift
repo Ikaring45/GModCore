@@ -444,11 +444,15 @@ public final class GMLuaMenuSession: @unchecked Sendable {
     public func loadResource(
         _ resource: SourceVGUIResource, rootControlName: String? = nil,
         scheme: SourceVGUIScheme? = nil,
+        context: GMLuaVGUIResourceInstance.ExistingPanel? = nil,
+        existingPanels: [GMLuaVGUIResourceInstance.ExistingPanel] = [],
+        missingFactoryPolicy: GMLuaVGUIResourceInstance.MissingFactoryPolicy = .fail,
         onCommand: @escaping (String) throws -> Void
     ) throws -> GMLuaVGUIResourceInstance {
         try requireActive()
         return try GMLuaVGUIResourceInstance(runtime: runtime, resource: resource,
-                                            rootControlName: rootControlName, scheme: scheme, onCommand: onCommand)
+            rootControlName: rootControlName, scheme: scheme, context: context, existingPanels: existingPanels,
+            missingFactoryPolicy: missingFactoryPolicy, onCommand: onCommand)
     }
 
     public func loadLoadingResource(_ resource: SourceVGUIResource, scheme: SourceVGUIScheme? = nil) throws -> GMLuaVGUIResourceInstance {

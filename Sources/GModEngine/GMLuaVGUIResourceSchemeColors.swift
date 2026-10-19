@@ -8,6 +8,7 @@ enum GMLuaVGUIResourceSchemeColors {
         let kind = control.controlName?.lowercased() ?? ""
         let roles: [String]
         switch kind {
+        case "panel", "editablepanel": roles = ["Panel.BgColor"]
         case "label":
             roles = ["Label.TextColor", "Label.TextDullColor", "Label.TextBrightColor", "Label.DisabledFgColor1"]
         case "button":
@@ -76,6 +77,13 @@ enum GMLuaVGUIResourceSchemeColors {
 
     private static let source = """
         return function(p, kind, c, dull, bright, paintBackground, paintBorder, titledFrame)
+            -- Applying another resource to a code-created panel must replace
+            -- this adapter's Think wrapper, not grow a per-frame call chain.
+            if not p.GarrysPAD_SourceSchemeThinkCaptured or p.Think ~= p.GarrysPAD_SourceSchemeThink then
+                p.GarrysPAD_SourceSchemeOriginalThink = p.Think
+                p.GarrysPAD_SourceSchemeThinkCaptured = true
+            end
+            local originalThink = p.GarrysPAD_SourceSchemeOriginalThink
             local function fill(color, x, y, w, h)
                 surface.SetDrawColor(color.r, color.g, color.b, color.a)
                 surface.DrawRect(x, y, w, h)
@@ -101,7 +109,7 @@ enum GMLuaVGUIResourceSchemeColors {
                     return c['Button.TextColor']
                 end
                 p.UpdateColours = function(self) self:SetTextColor(textColor(self)) end
-                local think = p.Think
+                local think = originalThink
                 p.Think = function(self) if think then think(self) end self:UpdateColours() end
                 p:UpdateColours()
             end
@@ -128,7 +136,7 @@ enum GMLuaVGUIResourceSchemeColors {
                         border(c[edge], w, h)
                         return false
                     end
-                    local think = p.Think
+                    local think = originalThink
                     local lastFocus = p:HasHierarchicalFocus()
                     p.Think = function(self)
                         if think then think(self) end
@@ -164,6 +172,11 @@ enum GMLuaVGUIResourceSchemeColors {
                     if paintBorder then border(c.border, w, h) end
                     return true
                 end
+            elseif kind == 'panel' or kind == 'editablepanel' then
+                p.Paint = function(self, w, h)
+                    if paintBackground then fill(c['Panel.BgColor'], 0, 0, w, h) end
+                    return true
+                end
             elseif kind == 'button' then
                 p.Paint = function(self, w, h)
                     local down = self:IsDown()
@@ -181,6 +194,7 @@ enum GMLuaVGUIResourceSchemeColors {
                     return true
                 end
             end
+            p.GarrysPAD_SourceSchemeThink = p.Think
         end
         """
 }

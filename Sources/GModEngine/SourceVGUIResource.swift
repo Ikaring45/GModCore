@@ -10,10 +10,11 @@ public struct SourceVGUIResource: Equatable, Sendable {
         public let conditional: String?
 
         public func value(_ key: String) -> String? {
-            for entry in entries.reversed() where entry.key.caseInsensitiveCompare(key) == .orderedSame {
-                if case let .string(value) = entry.value { return value }
-            }
-            return nil
+            // KeyValues::FindKey returns the first case-insensitive match.
+            // GLua table conversion has a separate, intentionally different contract.
+            guard let entry = entries.first(where: { $0.key.caseInsensitiveCompare(key) == .orderedSame }),
+                  case let .string(value) = entry.value else { return nil }
+            return value
         }
 
         public var controlName: String? { value("ControlName") }
@@ -54,6 +55,7 @@ public struct SourceVGUIResource: Equatable, Sendable {
         case unsupportedCoordinate(control: String, field: String, value: String)
         case negativeSize(String)
         case missingRoot
+        case unsupportedConditional(String)
     }
 
     public let name: String
@@ -63,11 +65,20 @@ public struct SourceVGUIResource: Equatable, Sendable {
     /// Do not silently ignore #base/#include or platform conditionals.
     public let directives: [SourceKeyValuesParser.Entry]
 
-    public init(source: String) throws {
+    /// Omitting activeSymbols preserves conditionals for a later mounting
+    /// adapter. Supplying a reference platform resolves them before lookup.
+    public init(source: String, activeSymbols: Set<String>? = nil) throws {
         var parser = SourceKeyValuesParser(source: source, options: .init(
             preserveKeyCase: true, preserveConditionals: true
         ))
-        let entries = try parser.parse()
+        var entries = try parser.parse()
+        if let activeSymbols {
+            do {
+                entries = try SourceKeyValuesPlatformSelection.select(entries, activeSymbols: activeSymbols)
+            } catch let SourceKeyValuesPlatformSelection.SelectionError.unsupportedConditional(expression) {
+                throw ResourceError.unsupportedConditional(expression)
+            }
+        }
         self.entries = entries
         guard let root = entries.first(where: {
             if case .object = $0.value { return true }

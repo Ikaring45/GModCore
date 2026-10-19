@@ -32,37 +32,16 @@ public struct SourceVGUIScheme: Equatable, Sendable {
     public let borders: [SourceKeyValuesParser.Entry]
 
     public init(source: String, activeSymbols: Set<String>) throws {
-        let known: Set<String> = ["WIN32", "WINDOWS", "X360", "LINUX", "OSX", "POSIX"]
-        let active = Set(activeSymbols.map { $0.uppercased() })
-        guard active.isSubset(of: known) else {
-            throw SchemeError.unsupportedConditional(active.subtracting(known).sorted().joined(separator: ","))
-        }
         var parser = SourceKeyValuesParser(source: source, options: .init(
             preserveKeyCase: true, preserveConditionals: true))
-        func select(_ values: [SourceKeyValuesParser.Entry]) throws -> [SourceKeyValuesParser.Entry] {
-            var result: [SourceKeyValuesParser.Entry] = []
-            for entry in values {
-                if entry.key.hasPrefix("#") { throw SchemeError.unresolvedDirective(entry.key) }
-                if let expression = entry.conditional {
-                    var symbol = expression.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-                    let negated = symbol.hasPrefix("!")
-                    if negated { symbol.removeFirst() }
-                    guard symbol.hasPrefix("$"), known.contains(String(symbol.dropFirst())) else {
-                        throw SchemeError.unsupportedConditional(expression)
-                    }
-                    let enabled = active.contains(String(symbol.dropFirst()))
-                    if enabled == negated { continue }
-                }
-                let value: SourceKeyValuesParser.Value
-                switch entry.value {
-                case .string: value = entry.value
-                case let .object(children): value = .object(try select(children))
-                }
-                result.append(.init(key: entry.key, value: value, conditional: nil))
-            }
-            return result
+        do {
+            entries = try SourceKeyValuesPlatformSelection.select(parser.parse(), activeSymbols: activeSymbols,
+                rejectDirectives: true)
+        } catch let SourceKeyValuesPlatformSelection.SelectionError.unsupportedConditional(expression) {
+            throw SchemeError.unsupportedConditional(expression)
+        } catch let SourceKeyValuesPlatformSelection.SelectionError.unresolvedDirective(name) {
+            throw SchemeError.unresolvedDirective(name)
         }
-        entries = try select(parser.parse())
         guard let root = entries.first(where: { $0.key.caseInsensitiveCompare("Scheme") == .orderedSame }),
               case let .object(children) = root.value else { throw SchemeError.missingScheme }
         func section(_ name: String) -> [SourceKeyValuesParser.Entry] {
