@@ -292,6 +292,8 @@ public struct SourcePhysicsBodyCreationCommand: Equatable, Sendable {
     public let massProperties: SourcePhysicsMassProperties
     public let transform: SourceEntityTransform
     public let linearVelocity: SourceVector3
+    /// Object-local axis/twist vector in degrees/second, as returned by
+    /// IPhysicsObject::GetVelocity. Not (pitchRate, yawRate, rollRate).
     public let angularVelocity: SourceVector3
     public let damping: SourcePhysicsDamping
     public let motionType: SourcePhysicsMotionType
@@ -371,6 +373,7 @@ public enum SourcePhysicsBodyMutation: Equatable, Sendable {
     case setCollisionEnabled(Bool)
     case setLinearVelocity(SourceVector3)
     case addLinearVelocity(SourceVector3)
+    /// Object-local axis/twist degrees/second, not QAngle component rates.
     case setAngularVelocity(SourceVector3)
     case addAngularVelocity(SourceVector3)
     case applyCenterForce(SourceVector3)
@@ -663,6 +666,7 @@ public struct SourcePhysicsBodySnapshot: Equatable, Sendable {
     public let massProperties: SourcePhysicsMassProperties
     public let transform: SourceEntityTransform
     public let linearVelocity: SourceVector3
+    /// Object-local axis/twist degrees/second, not QAngle component rates.
     public let angularVelocity: SourceVector3
     public let damping: SourcePhysicsDamping
     public let motionType: SourcePhysicsMotionType

@@ -442,6 +442,56 @@ struct SourcePhysicsConstraintQuaternion: Equatable {
             quaternionVector.crossForConstraint(twiceCross)
     }
 
+    /// Source AngularImpulse is an axis/twist vector, not Euler-angle rates.
+    /// IPhysicsObject publishes angular velocity in object-local axes, so the
+    /// exponential-map increment multiplies on the RIGHT of the body pose.
+    func advanced(
+        localAngularVelocity: SourceVector3,
+        deltaSeconds: Float
+    ) -> Self {
+        let vx = Double(localAngularVelocity.x)
+        let vy = Double(localAngularVelocity.y)
+        let vz = Double(localAngularVelocity.z)
+        let speed = (vx * vx + vy * vy + vz * vz).squareRoot()
+        guard speed > 0, deltaSeconds != 0 else { return self }
+        let halfAngle = (speed * Double(deltaSeconds) * Double.pi / 360)
+            .truncatingRemainder(dividingBy: 2 * Double.pi)
+        let scale = sin(halfAngle) / speed
+        let increment = Self(
+            x: Float(vx * scale),
+            y: Float(vy * scale),
+            z: Float(vz * scale),
+            w: Float(cos(halfAngle)),
+            normalize: true
+        )
+        return self * increment
+    }
+
+    /// Shortest orientation error expressed in this body's local axis/twist
+    /// convention. Euler component subtraction is not a relative rotation.
+    func localAngularDisplacement(to target: Self) -> SourceVector3 {
+        let difference = inverse * target
+        let sign: Float = difference.w < 0 ? -1 : 1
+        let vector = SourceVector3(
+            difference.x * sign,
+            difference.y * sign,
+            difference.z * sign
+        )
+        let length = (
+            Double(vector.x) * Double(vector.x) +
+            Double(vector.y) * Double(vector.y) +
+            Double(vector.z) * Double(vector.z)
+        ).squareRoot()
+        guard length > 0 else { return .zero }
+        let scale = 2 * atan2(length, Double(difference.w * sign)) *
+            180 / Double.pi / length
+        return SourceVector3(
+            Float(Double(vector.x) * scale),
+            Float(Double(vector.y) * scale),
+            Float(Double(vector.z) * scale)
+        )
+    }
+
     func interpolated(
         toward target: SourcePhysicsConstraintQuaternion,
         fraction: Float

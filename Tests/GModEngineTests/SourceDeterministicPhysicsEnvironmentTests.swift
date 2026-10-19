@@ -676,7 +676,8 @@ struct SourceDeterministicPhysicsEnvironmentTests {
         var body = try #require(snapshot.bodies.first)
         #expect(abs(body.linearVelocity.x - 5.015) < 0.000_01)
         #expect(abs(body.transform.origin.x - 0.075_225) < 0.000_01)
-        #expect(abs(body.transform.angles.pitch - 0.075) < 0.000_01)
+        #expect(abs(body.transform.angles.roll - 0.075) < 0.000_01)
+        #expect(abs(body.transform.angles.pitch) < 0.000_01)
         #expect(body.angularVelocity == SourceVector3(5, 0, 0))
         #expect(body.isMotionEnabled)
         #expect(!body.isGravityEnabled)
@@ -784,16 +785,18 @@ struct SourceDeterministicPhysicsEnvironmentTests {
         #expect(abs(body.linearVelocity.z) < 0.000_001)
 
         // r x F is (-10, 0, 0) in world space. At yaw 90 that axis maps to
-        // the body's principal Y inertia (4), then radians/s becomes the
-        // Source angular-velocity degrees/s contract.
-        let expectedAngularX = (-10 / Float(4)) * (180 / Float.pi)
-        #expect(abs(body.angularVelocity.x - expectedAngularX) < 0.000_01)
-        #expect(abs(body.angularVelocity.y) < 0.000_01)
+        // body's LOCAL +Y inertia (4), then radians/s becomes degrees/s.
+        // The public angular vector stays local, not world -X.
+        let expectedAngularY = (10 / Float(4)) * (180 / Float.pi)
+        // Float sin/cos at 90 degrees leave a small orthogonal residual.
+        let angularTolerance = expectedAngularY * 2 * Float.ulpOfOne
+        #expect(abs(body.angularVelocity.x) < angularTolerance)
+        #expect(abs(body.angularVelocity.y - expectedAngularY) < 0.000_01)
         #expect(abs(body.angularVelocity.z) < 0.000_01)
         #expect(
             abs(
                 body.transform.angles.pitch -
-                    expectedAngularX *
+                    expectedAngularY *
                     SourcePhysicsContract.fixedTimeStepSeconds
             ) < 0.000_01
         )
@@ -837,11 +840,11 @@ struct SourceDeterministicPhysicsEnvironmentTests {
         ))
 
         let body = try #require(snapshot.bodies.first)
-        // Yaw 90 maps world +X onto the body Y principal axis. Valve's
+        // Yaw 90 maps world +X onto the body NEGATIVE Y principal axis. Valve's
         // AngularImpulse is already kilograms-degrees/second, so 8 / 4 adds
-        // exactly 2 degrees/second without a radians conversion or fixed tick.
-        #expect(abs(body.angularVelocity.x - 3) < 0.000_01)
-        #expect(abs(body.angularVelocity.y - 2) < 0.000_01)
+        // exactly -2 local Y degrees/second without a radians conversion.
+        #expect(abs(body.angularVelocity.x - 1) < 0.000_01)
+        #expect(abs(body.angularVelocity.y) < 0.000_01)
         #expect(abs(body.angularVelocity.z - 3) < 0.000_01)
         #expect(body.transform == creation.transform)
         #expect(!body.isSleeping)

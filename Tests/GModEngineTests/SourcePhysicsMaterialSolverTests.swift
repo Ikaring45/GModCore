@@ -210,7 +210,8 @@ struct SourcePhysicsMaterialSolverTests {
 
         let contactOffset = result.contact.position -
             result.body.transform.origin
-        let angularVelocityRadians = result.body.angularVelocity *
+        let angularVelocityRadians = result.body.transform
+            .transformDirectionFromLocal(result.body.angularVelocity) *
             (Float.pi / 180)
         let contactPointVelocity = result.body.linearVelocity +
             cross(angularVelocityRadians, contactOffset)
@@ -231,11 +232,54 @@ struct SourcePhysicsMaterialSolverTests {
         #expect(abs(result.body.linearVelocity.z) < 0.0001)
     }
 
+    @Test("rotating a spinning contact scene preserves local angular response")
+    func rotatedContactUsesLocalAngularState() throws {
+        let velocity = SourceVector3(1, 2, -10)
+        let angularVelocity = SourceVector3(75, -40, 30)
+        let rotation = SourceEntityTransform(
+            origin: .zero,
+            angles: SourceQAngle(yaw: 47)
+        )
+        let original = try simulateImpact(
+            velocity: velocity,
+            staticFriction: 0.7,
+            dynamicFriction: 0.4,
+            restitution: 0.25,
+            angularVelocity: angularVelocity
+        )
+        let rotated = try simulateImpact(
+            velocity: rotation.transformDirectionFromLocal(velocity),
+            staticFriction: 0.7,
+            dynamicFriction: 0.4,
+            restitution: 0.25,
+            angularVelocity: angularVelocity,
+            sceneYaw: 47
+        )
+
+        // A rigid rotation of the whole fixture changes world vectors, not
+        // the body's local angular components or the magnitude of impulse.
+        // This exercises both contact-point velocity and applied torque,
+        // rather than checking only orientation integration in free space.
+        #expect((original.body.angularVelocity - angularVelocity).length > 1)
+        #expect((rotated.body.angularVelocity - original.body.angularVelocity).length < 0.001)
+        #expect((rotated.body.linearVelocity - rotation.transformDirectionFromLocal(
+            original.body.linearVelocity
+        )).length < 0.001)
+        #expect((rotated.contact.position - rotation.transformPointFromLocal(
+            original.contact.position
+        )).length < 0.001)
+        #expect((rotated.contact.normal - rotation.transformDirectionFromLocal(
+            original.contact.normal
+        )).length < 0.001)
+    }
+
     private func simulateImpact(
         velocity: SourceVector3,
         staticFriction: Float,
         dynamicFriction: Float,
-        restitution: Float
+        restitution: Float,
+        angularVelocity: SourceVector3 = .zero,
+        sceneYaw: Float = 0
     ) throws -> (
         body: SourcePhysicsBodySnapshot,
         contact: SourceDeterministicPhysicsEnvironment.ContactSnapshot
@@ -246,7 +290,8 @@ struct SourcePhysicsMaterialSolverTests {
             configuration: try .init(gravity: .zero),
             staticCollisionScene: try makeFloorScene(
                 bodyID: worldID,
-                materialIndex: 3
+                materialIndex: 3,
+                yaw: sceneYaw
             ),
             materialTable: try makeTable(
                 first: 3,
@@ -260,7 +305,9 @@ struct SourcePhysicsMaterialSolverTests {
             creation: makeCreation(
                 bodyID: propID,
                 materialIndex: 7,
-                velocity: velocity
+                velocity: velocity,
+                angularVelocity: angularVelocity,
+                angles: SourceQAngle(yaw: sceneYaw)
             )
         ))
         return (
@@ -309,7 +356,9 @@ struct SourcePhysicsMaterialSolverTests {
         materialIndex: Int,
         velocity: SourceVector3,
         origin: SourceVector3 = SourceVector3(0, 0, 0.5),
-        motionType: SourcePhysicsMotionType = .dynamicBody
+        motionType: SourcePhysicsMotionType = .dynamicBody,
+        angularVelocity: SourceVector3 = .zero,
+        angles: SourceQAngle = .zero
     ) throws -> SourcePhysicsBodyCreationCommand {
         try SourcePhysicsBodyCreationCommand(
             bodyID: bodyID,
@@ -320,10 +369,10 @@ struct SourcePhysicsMaterialSolverTests {
             ),
             transform: SourceEntityTransform(
                 origin: origin,
-                angles: .zero
+                angles: angles
             ),
             linearVelocity: velocity,
-            angularVelocity: .zero,
+            angularVelocity: angularVelocity,
             damping: .zero,
             motionType: motionType,
             materialIndex: materialIndex,
@@ -364,13 +413,15 @@ struct SourcePhysicsMaterialSolverTests {
 
     private func makeFloorScene(
         bodyID: SourcePhysicsBodyID,
-        materialIndex: Int?
+        materialIndex: Int?,
+        yaw: Float = 0
     ) throws -> SourceDeterministicPhysicsStaticScene {
+        let rotation = SourceEntityTransform(origin: .zero, angles: SourceQAngle(yaw: yaw))
         let vertices = [
             SourceVector3(-20, -20, 0),
             SourceVector3(20, -20, 0),
             SourceVector3(0, 20, 0),
-        ]
+        ].map { rotation.transformPointFromLocal($0) }
         let triangle = try SourceDeterministicPhysicsStaticTriangle(
             first: 0,
             second: 1,

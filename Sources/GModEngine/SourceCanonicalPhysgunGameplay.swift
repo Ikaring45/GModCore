@@ -1085,20 +1085,22 @@ public final class SourceCanonicalPhysgunGameplayController {
         let eye = player.transform.origin + player.viewOffset
         let targetGrabPoint = eye +
             player.transform.angles.sourceBasis.forward * held.grabDistance
-        let currentGrabOffset = body.transform.transformDirectionFromLocal(
-            held.localGrabPoint
-        )
-        let targetOrigin = targetGrabPoint - currentGrabOffset
+        // Position and rotation target the same pose. Rotating the local hit
+        // point by the OLD pose makes an off-center grab slide as it turns.
+        let targetGrabOffset = SourceEntityTransform(
+            origin: .zero,
+            angles: held.targetAngles
+        ).transformDirectionFromLocal(held.localGrabPoint)
+        let targetOrigin = targetGrabPoint - targetGrabOffset
         let delta = targetOrigin - body.transform.origin
         let desiredLinear = clamped(
             delta / SourcePhysicsContract.fixedTimeStepSeconds,
             maximumLength: Self.maximumLinearSpeed
         )
-        let angularDelta = SourceVector3(
-            normalizedAngle(held.targetAngles.pitch - body.transform.angles.pitch),
-            normalizedAngle(held.targetAngles.yaw - body.transform.angles.yaw),
-            normalizedAngle(held.targetAngles.roll - body.transform.angles.roll)
-        )
+        let angularDelta = SourcePhysicsConstraintQuaternion(body.transform.angles)
+            .localAngularDisplacement(to: SourcePhysicsConstraintQuaternion(
+                held.targetAngles
+            ))
         let desiredAngular = clamped(
             angularDelta / SourcePhysicsContract.fixedTimeStepSeconds,
             maximumLength: Self.maximumAngularSpeed

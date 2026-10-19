@@ -1104,7 +1104,7 @@ public final class SourceDeterministicPhysicsEnvironment:
             // r x impulse / inertia is radians/second. Source publishes
             // angular velocity in degrees/second, matching the contact solver.
             let angularVelocityDelta = try checked(
-                inverseInertiaMultiply(
+                inverseInertiaLocalMultiply(
                     body: body,
                     worldVector: angularImpulse
                 ) * (180 / Float.pi),
@@ -1129,7 +1129,7 @@ public final class SourceDeterministicPhysicsEnvironment:
             // kilograms-degrees/second. Applying inverse principal inertia
             // therefore yields the immediate degrees/second delta directly;
             // unlike contact torque, there is no radians conversion here.
-            let angularVelocityDelta = inverseInertiaMultiply(
+            let angularVelocityDelta = inverseInertiaLocalMultiply(
                 body: body,
                 worldVector: torqueImpulse
             )
@@ -1236,7 +1236,7 @@ public final class SourceDeterministicPhysicsEnvironment:
                     body.accumulatedCenterForce = .zero
                 }
                 if body.accumulatedCenterTorque != .zero {
-                    let angularAccelerationRadians = inverseInertiaMultiply(
+                    let angularAccelerationRadians = inverseInertiaLocalMultiply(
                         body: body,
                         worldVector: body.accumulatedCenterTorque
                     )
@@ -1588,13 +1588,26 @@ public final class SourceDeterministicPhysicsEnvironment:
             reference.transform.origin += positionError * referenceShare
             attached.transform.origin -= positionError * attachedShare
 
-            let angularVelocityError = attached.angularVelocity -
-                reference.angularVelocity
-            reference.angularVelocity += angularVelocityError * referenceShare
-            attached.angularVelocity -= angularVelocityError * attachedShare
+            // Local angular components cannot be subtracted across differently
+            // oriented bodies. Preserve their world velocities through pose
+            // correction, solve there, then publish in each new local frame.
+            let referenceWorldAngular = originalReference.transform
+                .transformDirectionFromLocal(originalReference.angularVelocity)
+            let attachedWorldAngular = originalAttached.transform
+                .transformDirectionFromLocal(originalAttached.angularVelocity)
+            let angularVelocityError = attachedWorldAngular -
+                referenceWorldAngular
+            let resolvedReferenceWorldAngular = referenceWorldAngular +
+                angularVelocityError * referenceShare
+            let resolvedAttachedWorldAngular = attachedWorldAngular -
+                angularVelocityError * attachedShare
+            reference.angularVelocity = reference.transform
+                .inverseTransformDirectionToLocal(resolvedReferenceWorldAngular)
+            attached.angularVelocity = attached.transform
+                .inverseTransformDirectionToLocal(resolvedAttachedWorldAngular)
 
             let offset = attached.transform.origin - reference.transform.origin
-            let angularRadians = reference.angularVelocity *
+            let angularRadians = resolvedReferenceWorldAngular *
                 (Float.pi / 180)
             let linearVelocityError = attached.linearVelocity -
                 reference.linearVelocity - angularRadians.cross(offset)
@@ -2283,7 +2296,8 @@ public final class SourceDeterministicPhysicsEnvironment:
         _ body: BodyState,
         offset: SourceVector3
     ) -> SourceVector3 {
-        let radiansPerSecond = body.angularVelocity * (Float.pi / 180)
+        let radiansPerSecond = body.transform
+            .transformDirectionFromLocal(body.angularVelocity) * (Float.pi / 180)
         return body.linearVelocity + radiansPerSecond.cross(offset)
     }
 
@@ -2308,7 +2322,7 @@ public final class SourceDeterministicPhysicsEnvironment:
     ) {
         guard body.isDynamic else { return }
         body.linearVelocity += impulse * inverseMass(body)
-        let angularDeltaRadians = inverseInertiaMultiply(
+        let angularDeltaRadians = inverseInertiaLocalMultiply(
             body: body,
             worldVector: offset.cross(impulse)
         )
@@ -2320,22 +2334,23 @@ public final class SourceDeterministicPhysicsEnvironment:
         body: BodyState,
         worldVector: SourceVector3
     ) -> SourceVector3 {
-        let basis = body.transform.angles.sourceBasis
-        let localX = basis.forward
-        let localY = -basis.right
-        let localZ = basis.up
-        let local = SourceVector3(
-            worldVector.dot(localX),
-            worldVector.dot(localY),
-            worldVector.dot(localZ)
-        )
+        body.transform.transformDirectionFromLocal(inverseInertiaLocalMultiply(
+            body: body,
+            worldVector: worldVector
+        ))
+    }
+
+    private func inverseInertiaLocalMultiply(
+        body: BodyState,
+        worldVector: SourceVector3
+    ) -> SourceVector3 {
+        let local = body.transform.inverseTransformDirectionToLocal(worldVector)
         let inertia = body.massProperties.principalInertia
-        let scaled = SourceVector3(
+        return SourceVector3(
             local.x / inertia.x,
             local.y / inertia.y,
             local.z / inertia.z
         )
-        return localX * scaled.x + localY * scaled.y + localZ * scaled.z
     }
 
     private func wake(_ body: inout BodyState) {
@@ -3221,11 +3236,12 @@ public final class SourceDeterministicPhysicsEnvironment:
         angularVelocity: SourceVector3,
         delta: Float
     ) -> SourceQAngle {
-        SourceQAngle(
-            pitch: angles.pitch + angularVelocity.x * delta,
-            yaw: angles.yaw + angularVelocity.y * delta,
-            roll: angles.roll + angularVelocity.z * delta
-        )
+        guard angularVelocity != .zero else { return angles }
+        return SourcePhysicsConstraintQuaternion(angles)
+            .advanced(
+                localAngularVelocity: angularVelocity,
+                deltaSeconds: delta
+            ).sourceAngles
     }
 
     private func makeSnapshot(

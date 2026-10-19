@@ -108,6 +108,8 @@ struct SourcePhysicsFixedConstraintTests {
         #expect(attached.transform.origin.x > relativeOrigin.x)
         #expect(reference.angularVelocity.y > 0)
         #expect(attached.angularVelocity.y > 0)
+        expectVectorClose(reference.transform.transformDirectionFromLocal(reference.angularVelocity),
+            attached.transform.transformDirectionFromLocal(attached.angularVelocity), tolerance: 0.0002)
         expectRelativePose(
             reference: reference.transform,
             attached: attached.transform,

@@ -13,6 +13,7 @@ public struct SourceCanonicalPhysicsObjectSnapshot: Equatable, Sendable {
     public let massProperties: SourcePhysicsMassProperties
     public let transform: SourceEntityTransform
     public let linearVelocity: SourceVector3
+    /// Object-local axis/twist degrees/second, as in PhysObj:GetAngleVelocity.
     public let angularVelocity: SourceVector3
     public let damping: SourcePhysicsDamping
     public let motionType: SourcePhysicsMotionType
@@ -397,9 +398,9 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
                 localAngularImpulse.y / inertia.y,
                 localAngularImpulse.z / inertia.z
             )
-            let angularVelocity = snapshot.transform
-                .transformDirectionFromLocal(localAngularVelocity) *
-                (180 / Float.pi)
+            // CalculateVelocityOffset feeds AddAngleVelocity directly. Both
+            // use body-local AngularImpulse axes, not world Euler rates.
+            let angularVelocity = localAngularVelocity * (180 / Float.pi)
             let linearVelocity = impulse /
                 snapshot.massProperties.massKilograms
             guard Self.isFinite(linearVelocity),
@@ -418,6 +419,24 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
         }
         try setPhysicsReadMethod("GetAngleVelocity") { snapshot in
             [try self.vector(snapshot.angularVelocity)]
+        }
+        try setPhysicsReadMethod("GetVelocityAtPoint") { snapshot, arguments in
+            let point = try self.requiredFiniteVector(
+                arguments,
+                at: 1,
+                function: "PhysObj:GetVelocityAtPoint"
+            )
+            let worldAngularRadians = snapshot.transform
+                .transformDirectionFromLocal(snapshot.angularVelocity) *
+                (Float.pi / 180)
+            let velocity = snapshot.linearVelocity + Self.cross(
+                worldAngularRadians,
+                point - snapshot.transform.origin
+            )
+            guard Self.isFinite(velocity) else {
+                throw LuaError.runtime("PhysObj:GetVelocityAtPoint produced non-finite velocity")
+            }
+            return [try self.vector(velocity)]
         }
         try setPhysicsReadMethod("GetDamping") { snapshot in
             [

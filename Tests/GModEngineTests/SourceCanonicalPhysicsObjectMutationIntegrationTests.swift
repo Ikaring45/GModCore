@@ -272,7 +272,19 @@ final class SourceCanonicalPhysicsObjectMutationIntegrationTests: XCTestCase {
             SourceVector3(8.46, 6.58, 8.46)
         )
         XCTAssertEqual(firstBody.transform.origin.x, 10.220_432, accuracy: 0.000_01)
-        XCTAssertEqual(firstBody.transform.angles.pitch, 0.1269, accuracy: 0.000_01)
+        // Independent Rodrigues projection of the local axis/twist vector.
+        // Pitch is not simply angularVelocity.x * dt.
+        let localOmega = SourceVector3(8.46, 6.58, 8.46)
+        let axis = localOmega / localOmega.length
+        let theta = localOmega.length * 0.015 * Float.pi / 180
+        let c = cos(theta), s = sin(theta)
+        let expectedForward = SourceVector3(c + axis.x * axis.x * (1 - c),
+            axis.z * s + axis.y * axis.x * (1 - c),
+            -axis.y * s + axis.z * axis.x * (1 - c))
+        let forward = firstBody.transform.angles.sourceBasis.forward
+        XCTAssertEqual(forward.x, expectedForward.x, accuracy: 0.000_01)
+        XCTAssertEqual(forward.y, expectedForward.y, accuracy: 0.000_01)
+        XCTAssertEqual(forward.z, expectedForward.z, accuracy: 0.000_01)
         try setup.adapter.commitCanonicalPropPhysicsStep(firstStep)
 
         try setup.server.execute(

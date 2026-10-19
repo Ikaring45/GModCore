@@ -348,6 +348,15 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
             assert(math.abs(angular.y) < 0.0001)
             assert(math.abs(angular.z - 343.7747) < 0.001)
 
+            -- World -Y torque maps to local -X at yaw 90. The return value
+            -- feeds AddAngleVelocity and must therefore stay LOCAL.
+            local _, localAngular = phys:CalculateVelocityOffset(
+                Vector(0, 0, 24), Vector(11, 20, 30)
+            )
+            assert(math.abs(localAngular.x + 687.5494) < 0.002)
+            assert(math.abs(localAngular.y) < 0.001)
+            assert(math.abs(localAngular.z) < 0.001)
+
             local ok, message = pcall(function()
                 phys:CalculateVelocityOffset(
                     Vector(0 / 0, 0, 0),
@@ -361,6 +370,33 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
         )
 
         XCTAssertEqual(host.mutations, [])
+    }
+
+    func testVelocityAtWorldPointRotatesLocalAngularStateBeforeCrossProduct() throws {
+        let runtime = makeRuntime()
+        defer { _ = runtime.close() }
+        try XCTUnwrap(runtime.typeSystem).installFallbackUtilities()
+        let entity = makeProp(entryIndex: 63, serialNumber: 14, lifecycle: .active,
+            transform: SourceEntityTransform(origin: SourceVector3(10, 20, 30), angles: SourceQAngle(yaw: 90)),
+            linearVelocity: SourceVector3(4, 5, 6), angularVelocity: SourceVector3(90, 0, 0))
+        let body = try SourceCanonicalPhysicsObjectSnapshot(pendingEntity: entity, definition: makeDefinition(solidIndex: 0))
+        let host = RecordingCanonicalPhysicsObjectHost()
+        host.publish(body, asPrimary: true)
+        _ = try XCTUnwrap(runtime.entityRegistry).applyAuthoritativeSnapshot(entity)
+        _ = try SourceCanonicalPhysicsObjectGLuaBridge.install(into: runtime, host: host)
+        try runtime.execute("""
+            local phys = Entity(63):GetPhysicsObject()
+            local center = phys:GetVelocityAtPoint(Vector(10, 20, 30))
+            assert(center.x == 4 and center.y == 5 and center.z == 6)
+            -- Local +X is world +Y; world +Y cross offset +Z is world +X.
+            local point = phys:GetVelocityAtPoint(Vector(10, 20, 31))
+            assert(math.abs(point.x - (4 + math.pi / 2)) < 0.0001)
+            assert(math.abs(point.y - 5) < 0.0001)
+            assert(math.abs(point.z - 6) < 0.0001)
+            local ok = pcall(function() phys:GetVelocityAtPoint(Vector(0/0, 0, 0)) end)
+            assert(not ok)
+            """)
+        XCTAssertTrue(host.mutations.isEmpty)
     }
 
     func testCacheUsesFullBodyIdentityAndInvalidatesReusedEntityGeneration() throws {

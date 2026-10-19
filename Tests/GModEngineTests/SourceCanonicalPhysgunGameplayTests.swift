@@ -245,10 +245,10 @@ final class SourceCanonicalPhysgunGameplayTests: XCTestCase {
         let rotationDelta = SourceQAngle(pitch: 5, yaw: 15, roll: -2)
         let moved = try session.runFixedTick(
             movementInput: .init(
-                viewAngles: SourceQAngle(pitch: 0, yaw: 20, roll: 0),
+                viewAngles: SourceQAngle(pitch: 0, yaw: 1, roll: 0),
                 buttons: [.attack],
                 physgunManipulation: .init(
-                    distanceDeltaSourceUnits: 32,
+                    distanceDeltaSourceUnits: 1,
                     rotationDelta: rotationDelta
                 )
             )
@@ -263,7 +263,7 @@ final class SourceCanonicalPhysgunGameplayTests: XCTestCase {
         )
         XCTAssertEqual(
             heldAfterManipulation.grabDistance,
-            heldBeforeManipulation.grabDistance + 32,
+            heldBeforeManipulation.grabDistance + 1,
             accuracy: 0.001
         )
         XCTAssertEqual(
@@ -282,11 +282,50 @@ final class SourceCanonicalPhysgunGameplayTests: XCTestCase {
             session.sourceAdapter.canonicalPhysicsObject(for: first.body.bodyID)
         )
         XCTAssertNotEqual(afterMove.transform.origin, beforeMove.transform.origin)
-        XCTAssertLessThanOrEqual(
-            afterMove.linearVelocity.length,
-            SourceCanonicalPhysgunGameplayController.maximumLinearSpeed +
-                SourceDeterministicPhysicsEnvironment.sourceDefaultGravity.length *
-                SourcePhysicsContract.fixedTimeStepSeconds + 0.001
+        let actualBasis = afterMove.transform.angles.sourceBasis
+        let targetBasis = heldAfterManipulation.targetAngles.sourceBasis
+        for (actual, expected) in [(actualBasis.forward, targetBasis.forward),
+                                  (actualBasis.right, targetBasis.right), (actualBasis.up, targetBasis.up)] {
+            XCTAssertLessThan((actual - expected).length, 0.001,
+                "Physgun axis/twist velocity must rotate toward the actual target orientation, not permuted Euler axes")
+        }
+        let playerAfterMove = try canonicalPlayer(in: session)
+        let targetGrabPoint = playerAfterMove.transform.origin +
+            playerAfterMove.viewOffset +
+            playerAfterMove.transform.angles.sourceBasis.forward *
+                heldAfterManipulation.grabDistance
+        // This controller queues velocity; ordinary gravity still runs in
+        // the same semi-implicit solver tick. It does not teleport the prop
+        // or silently disable gravity while held.
+        let gravityVelocityDelta = SourceDeterministicPhysicsEnvironment
+            .sourceDefaultGravity * SourcePhysicsContract.fixedTimeStepSeconds
+        let expectedGrabPoint = targetGrabPoint + gravityVelocityDelta *
+            SourcePhysicsContract.fixedTimeStepSeconds
+        XCTAssertGreaterThan(heldAfterManipulation.localGrabPoint.length, 1)
+        XCTAssertLessThan(
+            (afterMove.transform.transformPointFromLocal(
+                heldAfterManipulation.localGrabPoint
+            ) - expectedGrabPoint).length,
+            0.002,
+            "A simultaneous translation/rotation must keep the off-center grab at its target"
+        )
+
+        let speedLimitedMove = try session.runFixedTick(
+            movementInput: .init(
+                viewAngles: SourceQAngle(pitch: 0, yaw: 20, roll: 0),
+                buttons: [.attack],
+                physgunManipulation: .init(distanceDeltaSourceUnits: 32)
+            )
+        )
+        XCTAssertEqual(speedLimitedMove.physgunGameplay.failures, [])
+        let speedLimitedBody = try XCTUnwrap(
+            session.sourceAdapter.canonicalPhysicsObject(for: first.body.bodyID)
+        )
+        XCTAssertEqual(
+            (speedLimitedBody.linearVelocity - gravityVelocityDelta).length,
+            SourceCanonicalPhysgunGameplayController.maximumLinearSpeed,
+            accuracy: 0.001,
+            "A distant target must remain speed limited rather than teleporting"
         )
 
         try session.serverRuntime.execute(
