@@ -177,10 +177,14 @@ public struct SourcePhysicsShapeSnapshot: Equatable, Sendable {
 public struct SourcePhysicsMassProperties: Equatable, Sendable {
     public let massKilograms: Float
     public let principalInertia: SourceVector3
+    /// Authored mass center in the body's model-local Source coordinates.
+    /// Principal inertia is measured about this center, not the model origin.
+    public let massCenterLocal: SourceVector3
 
     public init(
         massKilograms: Float,
-        principalInertia: SourceVector3
+        principalInertia: SourceVector3,
+        massCenterLocal: SourceVector3 = .zero
     ) throws {
         guard massKilograms.isFinite else {
             throw SourcePhysicsContractError.nonFinite(field: "massKilograms")
@@ -193,6 +197,7 @@ public struct SourcePhysicsMassProperties: Equatable, Sendable {
             throw SourcePhysicsContractError.massOutsideVPhysicsRange(massKilograms)
         }
         try sourcePhysicsRequireFinite(principalInertia, field: "principalInertia")
+        try sourcePhysicsRequireFinite(massCenterLocal, field: "massCenterLocal")
         guard
             principalInertia.x > 0,
             principalInertia.y > 0,
@@ -202,6 +207,18 @@ public struct SourcePhysicsMassProperties: Equatable, Sendable {
         }
         self.massKilograms = massKilograms
         self.principalInertia = principalInertia
+        // Omitting this argument preserves the original zero-center body
+        // contract. It does not derive a center from arbitrary PHY geometry.
+        self.massCenterLocal = massCenterLocal
+    }
+
+    public func worldMassCenter(
+        for transform: SourceEntityTransform
+    ) -> SourceVector3 {
+        // Preserve the common zero-center path without extra trigonometry
+        // inside each contact iteration or snapshot validation.
+        guard massCenterLocal != .zero else { return transform.origin }
+        return transform.transformPointFromLocal(massCenterLocal)
     }
 }
 
@@ -321,6 +338,10 @@ public struct SourcePhysicsBodyCreationCommand: Equatable, Sendable {
         buoyancyRatio: SourcePhysicsBuoyancyRatio = .automatic
     ) throws {
         try sourcePhysicsRequireFinite(transform, field: "transform")
+        try sourcePhysicsRequireFinite(
+            massProperties.worldMassCenter(for: transform),
+            field: "worldMassCenter"
+        )
         try sourcePhysicsRequireFinite(linearVelocity, field: "linearVelocity")
         try sourcePhysicsRequireFinite(angularVelocity, field: "angularVelocity")
         guard materialIndex >= 0 else {
@@ -698,6 +719,10 @@ public struct SourcePhysicsBodySnapshot: Equatable, Sendable {
         buoyancyRatio: SourcePhysicsBuoyancyRatio = .automatic
     ) throws {
         try sourcePhysicsRequireFinite(transform, field: "transform")
+        try sourcePhysicsRequireFinite(
+            massProperties.worldMassCenter(for: transform),
+            field: "worldMassCenter"
+        )
         try sourcePhysicsRequireFinite(linearVelocity, field: "linearVelocity")
         try sourcePhysicsRequireFinite(angularVelocity, field: "angularVelocity")
         guard materialIndex >= 0 else {

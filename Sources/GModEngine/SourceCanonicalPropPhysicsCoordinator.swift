@@ -806,6 +806,8 @@ public final class SourceCanonicalPropPhysicsCoordinator {
             }
             guard
                 body.shape == desired.definition.shape,
+                body.massProperties.massCenterLocal ==
+                    desired.definition.massProperties.massCenterLocal,
                 body.motionType == desired.definition.motionType,
                 body.damping == expectedMutableState.damping,
                 body.materialIndex == expectedMutableState.materialIndex,

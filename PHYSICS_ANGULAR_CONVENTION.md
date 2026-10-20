@@ -47,10 +47,11 @@ solver parity. The same applies to the physgun's existing velocity controller.
 This does not replace the backend with Valve's VPhysics binary or authenticate
 arbitrary PHY geometry. Existing exact-asset validation remains in place; no
 fallback collider, mass, inertia, material, or successful PhysObj is fabricated.
-The current body contract still assumes the body origin is its mass center.
-Nonzero local mass-center offsets, full asymmetric torque-free dynamics,
-rotational continuous collision, contact manifolds and native shadow-controller
-matching remain separate physical work, not implied by correct axis conversion.
+Nonzero local mass-center offsets are now carried through the body contract,
+solver and Lua bridge as described in [the mass-center extension](PHYSICS_MASS_CENTER.md).
+Full asymmetric torque-free dynamics, rotational continuous collision, contact
+manifolds and native shadow-controller matching remain separate physical work,
+not implied by correct axis conversion.
 
 The numerical reference tests compare basis vectors with independent Rodrigues
 rotation, not the production quaternion conversion. Physical iPad prop spawn,
@@ -73,7 +74,8 @@ body lifecycle, and deterministic replay. Fixture attestations are synthetic
 test data, not new approvals for arbitrary models in the user's content pack.
 The optional owned-content diagnostic suite is not selected by this command.
 
-The replay byte schema is unchanged. This does not promise that recorded
-outputs from the older faulty angular solver match the corrected simulation.
+The angular-only change in `b51985b` did not change the replay byte schema.
+The subsequent mass-center extension uses replay v12. Neither change promises
+that recorded outputs from the older faulty solver match the new simulation.
 Apple compilation/Simulator validation for this physics change and physical
 iPad acceptance remain separate gates; Windows passing does not establish them.

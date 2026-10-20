@@ -641,6 +641,31 @@ struct SourceCanonicalPropPhysicsCoordinatorTests {
         #expect(coordinator.committedBodyIDs.isEmpty)
     }
 
+    @Test("SetMass cannot silently replace the authored mass center")
+    func rejectsBackendCenterChangeDuringMassMutation() throws {
+        let environment = RecordingPhysicsEnvironment()
+        let sequences = RecordingPhysicsSequenceSource(first: 1_300)
+        let coordinator = SourceCanonicalPropPhysicsCoordinator(
+            environment: environment, commandSequenceSource: sequences
+        )
+        let input = try SourceCanonicalPropPhysicsInput(
+            entity: makeProp(entryIndex: 132, serialNumber: 4, lifecycle: .active),
+            bodyDefinition: makeBodyDefinition()
+        )
+        let initial = try coordinator.step(inputs: [input], simulationTick: 1)
+        let bodyID = try #require(initial.bodies.first).bodyID
+        let queued = try sequences.enqueueCanonicalPhysicsBodyCommands([
+            .mutate(SourcePhysicsBodyMutationCommand(bodyID: bodyID, mutation: .setMassKilograms(24)))
+        ])
+        environment.corruptMassCenterOnSetMass = true
+        #expect(throws: SourceCanonicalPropPhysicsCoordinatorError.environmentBodyConfigurationMismatch(bodyID)) {
+            _ = try coordinator.step(inputs: [input], simulationTick: 2)
+        }
+        #expect(coordinator.committedSimulationTick == 1)
+        #expect(coordinator.latestStepSnapshot?.bodies == initial.bodies)
+        #expect(sequences.pendingCommands == queued)
+    }
+
     private func makeProp(
         entryIndex: Int,
         serialNumber: Int,
@@ -834,6 +859,7 @@ private final class RecordingPhysicsEnvironment: SourcePhysicsEnvironment {
         SourcePhysicsConstraintID: SourcePhysicsNoCollideConstraintSnapshot
     ] = [:]
     var failNextExecution = false
+    var corruptMassCenterOnSetMass = false
     private var simulationTick: UInt64 = 0
 
     func execute(
@@ -1061,7 +1087,9 @@ private final class RecordingPhysicsEnvironment: SourcePhysicsEnvironment {
             let scale = massKilograms / body.massProperties.massKilograms
             massProperties = try SourcePhysicsMassProperties(
                 massKilograms: massKilograms,
-                principalInertia: body.massProperties.principalInertia * scale
+                principalInertia: body.massProperties.principalInertia * scale,
+                massCenterLocal: corruptMassCenterOnSetMass
+                    ? SourceVector3(99, 0, 0) : body.massProperties.massCenterLocal
             )
             buoyancyRatio = .automatic
         case let .setMaterialIndex(value):

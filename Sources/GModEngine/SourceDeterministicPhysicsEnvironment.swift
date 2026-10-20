@@ -307,6 +307,9 @@ public final class SourceDeterministicPhysicsEnvironment:
 
         var bodyID: SourcePhysicsBodyID { creation.bodyID }
         var motionType: SourcePhysicsMotionType { creation.motionType }
+        var worldMassCenter: SourceVector3 {
+            massProperties.worldMassCenter(for: transform)
+        }
         var supportsMotion: Bool { motionType != .staticBody }
         var isDynamic: Bool {
             motionType == .dynamicBody && isMotionEnabled
@@ -1089,7 +1092,7 @@ public final class SourceDeterministicPhysicsEnvironment:
         case let .applyForceOffset(force, worldPosition):
             try requireEnabledDynamicMotion()
             let offset = try checked(
-                worldPosition - body.transform.origin,
+                worldPosition - body.worldMassCenter,
                 operation: "applyForceOffsetWorldOffset"
             )
             let angularImpulse = try checked(
@@ -1157,7 +1160,8 @@ public final class SourceDeterministicPhysicsEnvironment:
             let scale = massKilograms / authored.massKilograms
             body.massProperties = try SourcePhysicsMassProperties(
                 massKilograms: massKilograms,
-                principalInertia: authored.principalInertia * scale
+                principalInertia: authored.principalInertia * scale,
+                massCenterLocal: authored.massCenterLocal
             )
             // Garry's Mod recalculates the material/object-density buoyancy
             // after SetMass. Keep that unresolved automatic state distinct
@@ -1211,12 +1215,7 @@ public final class SourceDeterministicPhysicsEnvironment:
                 break
             case .kinematicBody:
                 guard body.isMotionEnabled else { break }
-                body.transform.origin += body.linearVelocity * delta
-                body.transform.angles = integrating(
-                    body.transform.angles,
-                    angularVelocity: body.angularVelocity,
-                    delta: delta
-                )
+                integratePose(&body, delta: delta)
             case .dynamicBody:
                 guard body.isMotionEnabled, !body.isSleeping else { break }
                 let startTransform = body.transform
@@ -1266,12 +1265,7 @@ public final class SourceDeterministicPhysicsEnvironment:
                 let angularScale = max(0, 1 - body.damping.angular * delta)
                 body.linearVelocity *= linearScale
                 body.angularVelocity *= angularScale
-                body.transform.origin += body.linearVelocity * delta
-                body.transform.angles = integrating(
-                    body.transform.angles,
-                    angularVelocity: body.angularVelocity,
-                    delta: delta
-                )
+                integratePose(&body, delta: delta)
                 if body.isCollisionEnabled,
                    let contact = continuousStaticContact(
                        body: body,
@@ -1578,6 +1572,16 @@ public final class SourceDeterministicPhysicsEnvironment:
             )
             reference.transform.angles = referenceRotation.sourceAngles
             attached.transform.angles = attachedRotation.sourceAngles
+            // Joint pose correction must not rotate an off-center model
+            // origin about itself and thereby create center-of-mass motion.
+            reference.transform.origin = originalReference.worldMassCenter -
+                reference.transform.transformDirectionFromLocal(
+                    reference.massProperties.massCenterLocal
+                )
+            attached.transform.origin = originalAttached.worldMassCenter -
+                attached.transform.transformDirectionFromLocal(
+                    attached.massProperties.massCenterLocal
+                )
 
             let desiredAttachedOrigin = reference.transform
                 .transformPointFromLocal(
@@ -1606,7 +1610,7 @@ public final class SourceDeterministicPhysicsEnvironment:
             attached.angularVelocity = attached.transform
                 .inverseTransformDirectionToLocal(resolvedAttachedWorldAngular)
 
-            let offset = attached.transform.origin - reference.transform.origin
+            let offset = attached.worldMassCenter - reference.worldMassCenter
             let angularRadians = resolvedReferenceWorldAngular *
                 (Float.pi / 180)
             let linearVelocityError = attached.linearVelocity -
@@ -1662,8 +1666,8 @@ public final class SourceDeterministicPhysicsEnvironment:
     ) -> ContinuousStaticContact? {
         guard let scene = staticCollisionScene,
               let worldShape = staticCollisionWorldShape else { return nil }
-        let start = startTransform.origin
-        let end = body.transform.origin
+        let start = body.massProperties.worldMassCenter(for: startTransform)
+        let end = body.worldMassCenter
         guard start != end else { return nil }
 
         let startShape = makeWorldShape(
@@ -1708,7 +1712,9 @@ public final class SourceDeterministicPhysicsEnvironment:
         }
         guard let hit = best, hit.normal.lengthSquared > 0 else { return nil }
 
-        let clampedOrigin = start + (end - start) * hit.fraction
+        let clampedCenter = start + (end - start) * hit.fraction
+        let clampedOrigin = clampedCenter - body.transform
+            .transformDirectionFromLocal(body.massProperties.massCenterLocal)
         var clampedBody = body
         clampedBody.transform.origin = clampedOrigin
         let clampedShape = makeWorldShape(body: clampedBody)
@@ -2099,9 +2105,9 @@ public final class SourceDeterministicPhysicsEnvironment:
         let inverseMassSum = firstInverseMass + secondInverseMass
         guard inverseMassSum > 0 else { return }
 
-        let firstOrigin = first?.transform.origin ??
+        let firstOrigin = first?.worldMassCenter ??
             staticCollisionScene!.transform.origin
-        let secondOrigin = second?.transform.origin ??
+        let secondOrigin = second?.worldMassCenter ??
             staticCollisionScene!.transform.origin
         let firstOffset = contact.position - firstOrigin
         let secondOffset = contact.position - secondOrigin
@@ -2183,9 +2189,9 @@ public final class SourceDeterministicPhysicsEnvironment:
         }
 
         if appliedNormalImpulseMagnitude > 0 {
-            let updatedFirstOrigin = first?.transform.origin ??
+            let updatedFirstOrigin = first?.worldMassCenter ??
                 staticCollisionScene!.transform.origin
-            let updatedSecondOrigin = second?.transform.origin ??
+            let updatedSecondOrigin = second?.worldMassCenter ??
                 staticCollisionScene!.transform.origin
             let updatedFirstOffset = contact.position - updatedFirstOrigin
             let updatedSecondOffset = contact.position - updatedSecondOrigin
@@ -3229,6 +3235,34 @@ public final class SourceDeterministicPhysicsEnvironment:
         let denominator = 1 / (va + vb + vc)
         return triangle.first + ab * (vb * denominator) +
             ac * (vc * denominator)
+    }
+
+    private func integratePose(_ body: inout BodyState, delta: Float) {
+        // Public linear velocity translates the center of mass. Model-local
+        // geometry and GetPos retain their authored origin as the body turns.
+        if body.massProperties.massCenterLocal == .zero ||
+            body.angularVelocity == .zero {
+            body.transform.origin += body.linearVelocity * delta
+            body.transform.angles = integrating(
+                body.transform.angles,
+                angularVelocity: body.angularVelocity,
+                delta: delta
+            )
+            return
+        }
+        let previousMassOffset = body.transform.transformDirectionFromLocal(
+            body.massProperties.massCenterLocal
+        )
+        body.transform.origin += body.linearVelocity * delta
+        body.transform.angles = integrating(
+            body.transform.angles,
+            angularVelocity: body.angularVelocity,
+            delta: delta
+        )
+        body.transform.origin += previousMassOffset -
+            body.transform.transformDirectionFromLocal(
+                body.massProperties.massCenterLocal
+            )
     }
 
     private func integrating(

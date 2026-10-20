@@ -326,6 +326,9 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
         try setPhysicsReadMethod("GetInertia") { snapshot in
             [try self.vector(snapshot.massProperties.principalInertia)]
         }
+        try setPhysicsReadMethod("GetMassCenter") { snapshot in
+            [try self.vector(snapshot.massProperties.massCenterLocal)]
+        }
         try setPhysicsReadMethod("GetPos") { snapshot in
             [try self.vector(snapshot.transform.origin)]
         }
@@ -388,7 +391,8 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
                 at: 2,
                 function: "PhysObj:CalculateVelocityOffset"
             )
-            let offset = worldPosition - snapshot.transform.origin
+            let offset = worldPosition - snapshot.massProperties
+                .worldMassCenter(for: snapshot.transform)
             let angularImpulse = Self.cross(offset, impulse)
             let localAngularImpulse = snapshot.transform
                 .inverseTransformDirectionToLocal(angularImpulse)
@@ -431,7 +435,9 @@ public final class SourceCanonicalPhysicsObjectGLuaBridge: @unchecked Sendable {
                 (Float.pi / 180)
             let velocity = snapshot.linearVelocity + Self.cross(
                 worldAngularRadians,
-                point - snapshot.transform.origin
+                point - snapshot.massProperties.worldMassCenter(
+                    for: snapshot.transform
+                )
             )
             guard Self.isFinite(velocity) else {
                 throw LuaError.runtime("PhysObj:GetVelocityAtPoint produced non-finite velocity")

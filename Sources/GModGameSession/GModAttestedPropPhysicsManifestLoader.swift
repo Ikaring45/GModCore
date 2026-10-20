@@ -115,7 +115,7 @@ public enum GModAttestedPropPhysicsManifestLoader {
     }
 
     public static let format = "GarrysPADAttestedPropPhysics"
-    public static let schemaVersion = 1
+    public static let schemaVersion = 2
     public static let sourceAxisConvention =
         "source-x-forward-y-left-z-up"
 
@@ -142,7 +142,7 @@ public enum GModAttestedPropPhysicsManifestLoader {
             )
         }
         guard manifest.format == format,
-              manifest.schemaVersion == schemaVersion else {
+              (1 ... schemaVersion).contains(manifest.schemaVersion) else {
             throw GModAttestedPropPhysicsManifestError.unsupportedSchema(
                 format: manifest.format,
                 version: manifest.schemaVersion
@@ -186,6 +186,7 @@ public enum GModAttestedPropPhysicsManifestLoader {
             result.append(try load(
                 record,
                 canonicalPath: canonicalPath.value,
+                schemaVersion: manifest.schemaVersion,
                 content: content,
                 budget: budget
             ))
@@ -196,9 +197,31 @@ public enum GModAttestedPropPhysicsManifestLoader {
     private static func load(
         _ record: AssetRecord,
         canonicalPath: String,
+        schemaVersion: Int,
         content: any GModAttestedPropPhysicsContentReading,
         budget: Budget
     ) throws -> SourceAttestedPropPhysicsAsset {
+        let massCenterLocal: SourceVector3
+        if schemaVersion == 1 {
+            // v1's documented body contract identifies model origin and COM.
+            // Never silently accept a v2 nonzero center under an old schema.
+            guard record.massCenterLocal == nil ||
+                    record.massCenterLocal?.vector == .zero else {
+                throw GModAttestedPropPhysicsManifestError.invalidAsset(
+                    path: canonicalPath,
+                    reason: "nonzero massCenterLocal requires schemaVersion 2"
+                )
+            }
+            massCenterLocal = .zero
+        } else {
+            guard let center = record.massCenterLocal else {
+                throw GModAttestedPropPhysicsManifestError.invalidAsset(
+                    path: canonicalPath,
+                    reason: "schemaVersion 2 requires massCenterLocal"
+                )
+            }
+            massCenterLocal = center.vector
+        }
         guard isCanonicalSHA256(record.mdlSHA256),
               isCanonicalSHA256(record.phySHA256) else {
             throw GModAttestedPropPhysicsManifestError.invalidAsset(
@@ -315,7 +338,8 @@ public enum GModAttestedPropPhysicsManifestLoader {
                 shapeEvidence: .independentlyAttested(shape),
                 massProperties: SourcePhysicsMassProperties(
                     massKilograms: record.massKilograms,
-                    principalInertia: record.principalInertia.vector
+                    principalInertia: record.principalInertia.vector,
+                    massCenterLocal: massCenterLocal
                 ),
                 solidIndex: record.solidIndex,
                 materialIndex: record.materialIndex,
@@ -470,6 +494,7 @@ private struct AssetRecord: Decodable {
     let shape: ShapeRecord
     let massKilograms: Float
     let principalInertia: VectorRecord
+    let massCenterLocal: VectorRecord?
     let solidIndex: Int
     let materialIndex: Int
     let bodyBehavior: BodyBehaviorRecord

@@ -354,7 +354,7 @@ struct SourcePhysicsFixedConstraintTests {
                 configuration: configuration
             )
         )
-        #expect(SourcePhysicsReplayLog.formatVersion == 11)
+        #expect(SourcePhysicsReplayLog.formatVersion == 12)
         #expect(log.frames[0].environmentSnapshot.fixedConstraints.count == 1)
         #expect(log.frames[1].environmentSnapshot.fixedConstraints.count == 1)
         #expect(log.frames[2].environmentSnapshot.fixedConstraints.isEmpty)

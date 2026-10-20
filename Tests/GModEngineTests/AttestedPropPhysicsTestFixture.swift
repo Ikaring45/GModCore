@@ -8,7 +8,8 @@ func makeAttestedPropPhysicsTestAsset(
     mdlSHA256: String = String(repeating: "a", count: 64),
     phySHA256: String = String(repeating: "b", count: 64),
     studioChecksum: Int32 = 1_234,
-    bodyBehavior: SourceAttestedPropPhysicsBodyBehavior? = nil
+    bodyBehavior: SourceAttestedPropPhysicsBodyBehavior? = nil,
+    massCenterLocal: SourceVector3 = .zero
 ) throws -> SourceAttestedPropPhysicsAsset {
     let materialIndex = 7
     let vertices = [
@@ -50,7 +51,8 @@ func makeAttestedPropPhysicsTestAsset(
         shapeEvidence: .independentlyAttested(shape),
         massProperties: SourcePhysicsMassProperties(
             massKilograms: massKilograms,
-            principalInertia: SourceVector3(2, 3, 4)
+            principalInertia: SourceVector3(2, 3, 4),
+            massCenterLocal: massCenterLocal
         ),
         solidIndex: solidIndex,
         materialIndex: materialIndex,

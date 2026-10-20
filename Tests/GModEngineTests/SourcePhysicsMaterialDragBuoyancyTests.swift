@@ -142,7 +142,7 @@ final class SourcePhysicsMaterialDragBuoyancyTests: XCTestCase {
         XCTAssertEqual(contact.secondMaterialIndex, 7)
     }
 
-    func testReplayV11RoundTripsCreationMutationsAndSnapshots() throws {
+    func testReplayV12RoundTripsCreationMutationsAndSnapshots() throws {
         let bodyID = try makeBodyID(entry: 73, serial: 8)
         let creation = try makeCreation(
             bodyID: bodyID,
@@ -181,7 +181,7 @@ final class SourcePhysicsMaterialDragBuoyancyTests: XCTestCase {
             )
         )
 
-        XCTAssertEqual(SourcePhysicsReplayLog.formatVersion, 11)
+        XCTAssertEqual(SourcePhysicsReplayLog.formatVersion, 12)
         let decoded = try SourcePhysicsReplayLog(
             canonicalBytes: log.canonicalBytes
         )

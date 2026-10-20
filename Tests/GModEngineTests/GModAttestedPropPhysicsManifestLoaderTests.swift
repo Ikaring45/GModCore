@@ -23,6 +23,8 @@ struct GModAttestedPropPhysicsManifestLoaderTests {
         #expect(asset.bodyDefinition.massProperties.massKilograms == 12)
         #expect(asset.bodyDefinition.massProperties.principalInertia ==
             SourceVector3(8, 9, 10))
+        #expect(asset.bodyDefinition.massProperties.massCenterLocal ==
+            SourceVector3(0.25, -0.5, 0.75))
         #expect(asset.bodyDefinition.materialIndex == 7)
         #expect(asset.bodyDefinition.shape.topology == .convexParts)
         #expect(asset.collisionProperty.mins == SourceVector3(-1, -1, -1))
@@ -87,6 +89,52 @@ struct GModAttestedPropPhysicsManifestLoaderTests {
         }
     }
 
+    @Test("v2 requires an explicit mass center rather than inventing zero")
+    func currentSchemaRequiresCenter() throws {
+        let fixture = makeFixture(solidIndex: 0, massCenterLocal: nil)
+        #expect(throws: GModAttestedPropPhysicsManifestError.invalidAsset(
+            path: fixture.modelPath,
+            reason: "schemaVersion 2 requires massCenterLocal"
+        )) {
+            _ = try GModAttestedPropPhysicsManifestLoader.load(
+                independentManifestData: fixture.manifest, content: fixture.content
+            )
+        }
+    }
+
+    @Test("v1 retains its original zero-center contract only")
+    func legacySchemaRetainsZeroCenter() throws {
+        let centers: [SourceVector3?] = [nil, .zero]
+        for center in centers {
+            let fixture = makeFixture(solidIndex: 0, schemaVersion: 1, massCenterLocal: center)
+            let assets = try GModAttestedPropPhysicsManifestLoader.load(
+                independentManifestData: fixture.manifest, content: fixture.content
+            )
+            #expect(assets.first?.bodyDefinition.massProperties.massCenterLocal == .zero)
+        }
+        let nonzero = makeFixture(solidIndex: 0, schemaVersion: 1)
+        #expect(throws: GModAttestedPropPhysicsManifestError.invalidAsset(
+            path: nonzero.modelPath,
+            reason: "nonzero massCenterLocal requires schemaVersion 2"
+        )) {
+            _ = try GModAttestedPropPhysicsManifestLoader.load(
+                independentManifestData: nonzero.manifest, content: nonzero.content
+            )
+        }
+    }
+
+    @Test("unknown schema does not reinterpret mass properties")
+    func unknownSchemaFailsClosed() throws {
+        let fixture = makeFixture(solidIndex: 0, schemaVersion: 3)
+        #expect(throws: GModAttestedPropPhysicsManifestError.unsupportedSchema(
+            format: GModAttestedPropPhysicsManifestLoader.format, version: 3
+        )) {
+            _ = try GModAttestedPropPhysicsManifestLoader.load(
+                independentManifestData: fixture.manifest, content: fixture.content
+            )
+        }
+    }
+
     private struct Fixture {
         let modelPath: String
         let checksum: Int32
@@ -112,7 +160,9 @@ struct GModAttestedPropPhysicsManifestLoaderTests {
     private func makeFixture(
         solidIndex: Int,
         overrideMDLDigest: String? = nil,
-        includeAxisConvention: Bool = true
+        includeAxisConvention: Bool = true,
+        schemaVersion: Int = GModAttestedPropPhysicsManifestLoader.schemaVersion,
+        massCenterLocal: SourceVector3? = SourceVector3(0.25, -0.5, 0.75)
     ) -> Fixture {
         let path = "models/props/attested_manifest_cube.mdl"
         let phyPath = "models/props/attested_manifest_cube.phy"
@@ -139,7 +189,7 @@ struct GModAttestedPropPhysicsManifestLoaderTests {
             ]
         }
         var manifest: [String: Any] = [
-            "schemaVersion": 1,
+            "schemaVersion": schemaVersion,
             "format": GModAttestedPropPhysicsManifestLoader.format,
             "attestationAuthority": "test-owned independent oracle",
             "evidenceSHA256": String(repeating: "a", count: 64),
@@ -174,6 +224,11 @@ struct GModAttestedPropPhysicsManifestLoaderTests {
         if includeAxisConvention {
             manifest["axisConvention"] =
                 GModAttestedPropPhysicsManifestLoader.sourceAxisConvention
+        }
+        if let center = massCenterLocal {
+            var assets = manifest["assets"] as! [[String: Any]]
+            assets[0]["massCenterLocal"] = vector(center.x, center.y, center.z)
+            manifest["assets"] = assets
         }
         return Fixture(
             modelPath: path,

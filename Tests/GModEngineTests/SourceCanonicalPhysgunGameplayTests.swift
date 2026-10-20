@@ -69,7 +69,8 @@ final class SourceCanonicalPhysgunGameplayTests: XCTestCase {
             "models/props/physgun_target.mdl"
         )
         let propAsset = try makeAttestedPropPhysicsTestAsset(
-            modelPath: model.path
+            modelPath: model.path,
+            massCenterLocal: SourceVector3(2, -3, 1)
         )
         let session = try GModPlayableSession(
             configuration: .init(map: .construct),

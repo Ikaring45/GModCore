@@ -286,7 +286,7 @@ public struct SourcePhysicsReplayFrame: Equatable, Sendable {
 
 /// Decoded value transcript plus its canonical little-endian binary form.
 public struct SourcePhysicsReplayLog: Equatable, Sendable {
-    public static let formatVersion: UInt16 = 11
+    public static let formatVersion: UInt16 = 12
 
     public let fixedTimeStepSeconds: Float
     public let frames: [SourcePhysicsReplayFrame]
@@ -1129,7 +1129,9 @@ private struct SourcePhysicsReplayTranscriptValidator {
                 )
             }
             if let pendingMassKilograms = liveBody.pendingMassKilograms {
-                guard body.massProperties.massKilograms == pendingMassKilograms else {
+                guard body.massProperties.massKilograms == pendingMassKilograms,
+                      body.massProperties.massCenterLocal ==
+                        liveBody.massProperties.massCenterLocal else {
                     throw SourcePhysicsReplayError
                         .environmentBodyDefinitionMismatch(body.bodyID)
                 }
@@ -2042,6 +2044,7 @@ private struct SourcePhysicsReplayEncoder {
     ) throws {
         try writeFloat(mass.massKilograms, field: "massKilograms")
         try write(mass.principalInertia, field: "principalInertia")
+        try write(mass.massCenterLocal, field: "massCenterLocal")
     }
 
     private mutating func write(
@@ -2848,7 +2851,8 @@ private struct SourcePhysicsReplayDecoder {
     {
         try SourcePhysicsMassProperties(
             massKilograms: readFloat(field: "massKilograms"),
-            principalInertia: readVector(field: "principalInertia")
+            principalInertia: readVector(field: "principalInertia"),
+            massCenterLocal: readVector(field: "massCenterLocal")
         )
     }
 

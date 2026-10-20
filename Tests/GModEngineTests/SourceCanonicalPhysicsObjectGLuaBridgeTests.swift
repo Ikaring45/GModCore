@@ -67,7 +67,8 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
             assert(phys:IsCollisionEnabled() == false)
             assert(phys:IsAsleep() == true)
 
-            assert(phys.GetMassCenter == nil)
+            local massCenter = phys:GetMassCenter()
+            assert(massCenter.x == 0 and massCenter.y == 0 and massCenter.z == 0)
             assert(phys:IsMotionEnabled() == true)
             assert(phys:IsMoveable() == true)
             assert(type(phys.SetMass) == "function")
@@ -399,6 +400,50 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
         XCTAssertTrue(host.mutations.isEmpty)
     }
 
+    func testMassCenterRemainsLocalAndDrivesOffsetVelocityReads() throws {
+        let runtime = makeRuntime()
+        defer { _ = runtime.close() }
+        try XCTUnwrap(runtime.typeSystem).installFallbackUtilities()
+        let entity = makeProp(
+            entryIndex: 64, serialNumber: 14, lifecycle: .active,
+            transform: SourceEntityTransform(
+                origin: SourceVector3(10, 20, 30), angles: SourceQAngle(yaw: 90)
+            ),
+            linearVelocity: SourceVector3(4, 5, 6),
+            angularVelocity: SourceVector3(0, 0, 90)
+        )
+        let definition = try makeDefinition(
+            solidIndex: 0, massCenterLocal: SourceVector3(2, 0, 0)
+        )
+        let body = try SourceCanonicalPhysicsObjectSnapshot(
+            pendingEntity: entity, definition: definition
+        )
+        let host = RecordingCanonicalPhysicsObjectHost()
+        host.publish(body, asPrimary: true)
+        _ = try XCTUnwrap(runtime.entityRegistry).applyAuthoritativeSnapshot(entity)
+        _ = try SourceCanonicalPhysicsObjectGLuaBridge.install(into: runtime, host: host)
+        try runtime.execute("""
+            local phys = Entity(64):GetPhysicsObject()
+            local center = phys:GetMassCenter()
+            assert(center.x == 2 and center.y == 0 and center.z == 0)
+            local origin = phys:GetPos()
+            assert(origin.x == 10 and origin.y == 20 and origin.z == 30)
+            local worldCenter = phys:LocalToWorld(center)
+            assert(math.abs(worldCenter.x - 10) < 0.0001)
+            assert(math.abs(worldCenter.y - 22) < 0.0001)
+            local velocity = phys:GetVelocityAtPoint(worldCenter)
+            assert(velocity.x == 4 and velocity.y == 5 and velocity.z == 6)
+            local atOrigin = phys:GetVelocityAtPoint(origin)
+            assert(math.abs(atOrigin.x - (4 + math.pi)) < 0.0001)
+            assert(math.abs(atOrigin.y - 5) < 0.0001)
+            local _, angular = phys:CalculateVelocityOffset(Vector(0, 0, 4), worldCenter)
+            assert(angular:Length() < 0.0001, "center impulse must not rotate")
+            local _, offsetAngular = phys:CalculateVelocityOffset(Vector(0, 0, 4), origin)
+            assert(math.abs(offsetAngular.y - 8 / 3 * 180 / math.pi) < 0.001)
+            """)
+        XCTAssertTrue(host.mutations.isEmpty)
+    }
+
     func testCacheUsesFullBodyIdentityAndInvalidatesReusedEntityGeneration() throws {
         let runtime = makeRuntime()
         defer { _ = runtime.close() }
@@ -559,14 +604,16 @@ final class SourceCanonicalPhysicsObjectGLuaBridgeTests: XCTestCase {
         solidIndex: Int,
         damping: SourcePhysicsDamping = .zero,
         isCollisionEnabled: Bool = true,
-        startsAwake: Bool = true
+        startsAwake: Bool = true,
+        massCenterLocal: SourceVector3 = .zero
     ) throws -> SourceCanonicalPropPhysicsBodyDefinition {
         try SourceCanonicalPropPhysicsBodyDefinition(
             solidIndex: solidIndex,
             shape: makeShape(),
             massProperties: SourcePhysicsMassProperties(
                 massKilograms: 12,
-                principalInertia: SourceVector3(2, 3, 4)
+                principalInertia: SourceVector3(2, 3, 4),
+                massCenterLocal: massCenterLocal
             ),
             damping: damping,
             motionType: .dynamicBody,

@@ -87,7 +87,7 @@ struct SourcePhysicsDeterministicReplayTests {
             commandBatches: [batch],
             using: SourceDeterministicPhysicsEnvironment()
         )
-        #expect(SourcePhysicsReplayLog.formatVersion == 11)
+        #expect(SourcePhysicsReplayLog.formatVersion == 12)
 
         let decoded = try SourcePhysicsReplayLog(
             canonicalBytes: log.canonicalBytes
@@ -151,7 +151,7 @@ struct SourcePhysicsDeterministicReplayTests {
         )
     }
 
-    @Test("damping creation, mutation, and snapshot round-trip in replay v11")
+    @Test("damping creation, mutation, and snapshot round-trip in replay v12")
     func dampingMutationRoundTrips() throws {
         let bodyID = try makeBodyID(entryIndex: 44, serialNumber: 9)
         let creation = try SourcePhysicsBodyCreationCommand(
@@ -190,7 +190,7 @@ struct SourcePhysicsDeterministicReplayTests {
             commandBatches: [batch],
             using: SourceDeterministicPhysicsEnvironment()
         )
-        #expect(SourcePhysicsReplayLog.formatVersion == 11)
+        #expect(SourcePhysicsReplayLog.formatVersion == 12)
 
         let decoded = try SourcePhysicsReplayLog(canonicalBytes: log.canonicalBytes)
         guard case let .createBody(decodedCreation) =
@@ -214,7 +214,7 @@ struct SourcePhysicsDeterministicReplayTests {
         )
     }
 
-    @Test("SetMass and backend-authored inertia round-trip in replay v11")
+    @Test("SetMass and backend-authored inertia round-trip in replay v12")
     func setMassMutationRoundTrips() throws {
         let bodyID = try makeBodyID(entryIndex: 45, serialNumber: 9)
         let creation = try SourcePhysicsBodyCreationCommand(
@@ -222,7 +222,8 @@ struct SourcePhysicsDeterministicReplayTests {
             shape: makeShape(),
             massProperties: SourcePhysicsMassProperties(
                 massKilograms: 12,
-                principalInertia: SourceVector3(3, 4, 5)
+                principalInertia: SourceVector3(3, 4, 5),
+                massCenterLocal: SourceVector3(2, 3, 4)
             ),
             transform: .identity,
             linearVelocity: .zero,
@@ -253,7 +254,7 @@ struct SourcePhysicsDeterministicReplayTests {
             commandBatches: [batch],
             using: SourceDeterministicPhysicsEnvironment()
         )
-        #expect(SourcePhysicsReplayLog.formatVersion == 11)
+        #expect(SourcePhysicsReplayLog.formatVersion == 12)
 
         let decoded = try SourcePhysicsReplayLog(canonicalBytes: log.canonicalBytes)
         guard case let .mutateBody(decodedMutation) =
@@ -266,7 +267,8 @@ struct SourcePhysicsDeterministicReplayTests {
             decoded.frames[0].bodySnapshots.first?.massProperties ==
                 (try SourcePhysicsMassProperties(
                     massKilograms: 24,
-                    principalInertia: SourceVector3(6, 8, 10)
+                    principalInertia: SourceVector3(6, 8, 10),
+                    massCenterLocal: SourceVector3(2, 3, 4)
                 ))
         )
         #expect(decoded == log)
@@ -276,7 +278,7 @@ struct SourcePhysicsDeterministicReplayTests {
         )
     }
 
-    @Test("SetPos and SetAngles round-trip through replay v11")
+    @Test("SetPos and SetAngles round-trip through replay v12")
     func transformMutationsRoundTrip() throws {
         let bodyID = try makeBodyID(entryIndex: 46, serialNumber: 9)
         let creation = try SourcePhysicsBodyCreationCommand(
@@ -322,7 +324,7 @@ struct SourcePhysicsDeterministicReplayTests {
             commandBatches: [batch],
             using: SourceDeterministicPhysicsEnvironment()
         )
-        #expect(SourcePhysicsReplayLog.formatVersion == 11)
+        #expect(SourcePhysicsReplayLog.formatVersion == 12)
 
         let decoded = try SourcePhysicsReplayLog(canonicalBytes: log.canonicalBytes)
         guard case let .mutateBody(decodedPosition) =
