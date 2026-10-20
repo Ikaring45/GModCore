@@ -5,6 +5,51 @@ import XCTest
 import GModLua
 
 final class SourceCanonicalEntityGLuaBridgeTests: XCTestCase {
+    func testActualSinglePlayerMenuBarHostCheckInBothRealms() throws {
+        let log = EntityQueryFailureLog()
+        let session = try GModPlayableSession(configuration: .init(map: .flatgrass),
+            logger: { _, message in log.append(message) })
+        defer { _ = try? session.close() }
+        for runtime in [session.serverRuntime, session.clientRuntime] {
+            try runtime.execute("""
+                local ply = Player(\(session.configuration.playerUserID))
+                assert(ply:IsListenServerHost() == true)
+                local first = ply:GetAngles()
+                local originalYaw = first.y
+                first.y = first.y + 180
+                assert(ply:GetAngles().y == originalYaw)
+                """, sourceName: "=(actual canonical host and angles queries)")
+        }
+        _ = try session.updateViewport(width: 1_024, height: 768)
+        try session.setSpawnMenuOpen(true)
+        for _ in 0..<3 { _ = try session.renderClientVGUIFrame() }
+        XCTAssertTrue(log.messages.filter {
+            $0.contains("Think failed") || $0.contains("IsListenServerHost")
+        }.isEmpty, log.messages.joined(separator: "\n"))
+    }
+
+    func testListenHostQueryUsesLiveSessionFactsRatherThanLocalPlayerGuess() throws {
+        let runtime = makeRuntime()
+        let adapter = try GMLuaSourceRuntimeAdapter(serverRuntime: runtime)
+        defer { try? adapter.close(); _ = runtime.close() }
+        try adapter.installCanonicalEntityLuaBridge()
+        _ = try adapter.createCanonicalEntity(kind: .player, at: 7, playerUserID: 41)
+        try runtime.execute("""
+            local ok, message = pcall(function() return Player(41):IsListenServerHost() end)
+            assert(not ok and string.find(message, 'host session is unavailable', 1, true))
+            """)
+        let environment = try XCTUnwrap(runtime.gameEnvironment)
+        for (kind, expected) in [(GMLuaHostSessionKind.singlePlayer, true), (.dedicatedServer, false)] {
+            environment.connect(try .init(maxPlayers: 1, mapName: "gm_flatgrass", sessionKind: kind, hostName: "fixture"))
+            try runtime.execute("assert(Player(41):IsListenServerHost() == \(expected))")
+        }
+        environment.connect(try .init(maxPlayers: 2, mapName: "gm_flatgrass", sessionKind: .listenServer, hostName: "fixture"))
+        try runtime.execute("""
+            local ok, message = pcall(function() return Player(41):IsListenServerHost() end)
+            assert(not ok and string.find(message, 'host identity is unavailable', 1, true))
+            """)
+    }
+
     func testCountOnlyLayoutCannotMasqueradeAsStudioAppearance() throws {
         let runtime = makeRuntime()
         let model = SourceEntityModelReference("models/test/count_only.mdl")
@@ -118,6 +163,12 @@ final class SourceCanonicalEntityGLuaBridgeTests: XCTestCase {
             assert(ply:Alive() == true)
             local pos = ply:GetPos()
             assert(pos.x == 10 and pos.y == 20 and pos.z == 30)
+            local bodyAngles = ply:GetAngles()
+            assert(bodyAngles.p == 11 and bodyAngles.y == 22 and bodyAngles.r == 3)
+            bodyAngles.pitch = 0
+            bodyAngles.roll = 0
+            bodyAngles.yaw = bodyAngles.yaw + 180
+            assert(ply:GetAngles().y == 22, 'vehicle spawn modified canonical player angles')
             local velocity = ply:GetVelocity()
             assert(velocity.x == 4 and velocity.y == 5 and velocity.z == 6)
             assert(ply:GetMoveType() == 2)
@@ -162,6 +213,8 @@ final class SourceCanonicalEntityGLuaBridgeTests: XCTestCase {
             assert(pcall(function() prop:SetBodygroup(1, -1) end) == false)
             prop:SetPos(Vector(100, 200, 300))
             prop:SetAngles(Angle(15, 25, 35))
+            local propAngles = prop:GetAngles()
+            assert(propAngles.p == 15 and propAngles.y == 25 and propAngles.r == 35)
             local localPoint = Vector(7, -11, 13)
             local worldPoint = prop:LocalToWorld(localPoint)
             local roundTrip = prop:WorldToLocal(worldPoint)
@@ -635,6 +688,21 @@ final class SourceCanonicalEntityGLuaBridgeTests: XCTestCase {
             logger: { _ in },
             netTransport: GMLuaNetTransport()
         )
+    }
+}
+
+private final class EntityQueryFailureLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String] = []
+    func append(_ message: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        storage.append(message)
+    }
+    var messages: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
     }
 }
 

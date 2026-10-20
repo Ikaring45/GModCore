@@ -172,6 +172,7 @@ public enum SourceCanonicalEntityGLuaBridge {
         state.registerGarbageCollectionRootProvider { [nullValue] in [nullValue] }
         let registryBox = SourceCanonicalEntityLuaWeakObject(registry)
         let typeSystemBox = SourceCanonicalEntityLuaWeakObject(typeSystem)
+        let gameEnvironment = runtime.gameEnvironment
 
         // Public GLua spellings for Source SDK `RenderMode_t`. Installing the
         // complete native enum keeps the bundled colour stool's alpha branch
@@ -654,6 +655,12 @@ public enum SourceCanonicalEntityGLuaBridge {
             let snapshot = try requiredSnapshot(arguments.first, function: "Entity:GetPos")
             return [try vector(snapshot.transform.origin)]
         }
+        try setMethod("Entity:GetAngles", on: entityMetatable) { arguments in
+            let snapshot = try requiredSnapshot(arguments.first, function: "Entity:GetAngles")
+            // Return a fresh Angle value, not an alias of canonical pose or
+            // Player EyeAngles. Stock vehicle spawning edits the result.
+            return [try angle(snapshot.transform.angles)]
+        }
         try setMethod("Entity:LocalToWorld", on: entityMetatable) { arguments in
             let snapshot = try requiredSnapshot(
                 arguments.first,
@@ -1101,6 +1108,22 @@ public enum SourceCanonicalEntityGLuaBridge {
                 kind: .player
             )
             return [try angle(snapshot.transform.angles)]
+        }
+        try setMethod("Player:IsListenServerHost", on: playerMetatable) { arguments in
+            _ = try requiredSnapshot(arguments.first,
+                function: "Player:IsListenServerHost", kind: .player)
+            guard let configuration = gameEnvironment?.configuration else {
+                throw LuaError.runtime("Player:IsListenServerHost host session is unavailable")
+            }
+            // Published GMod contract: always true in single-player, always
+            // false on dedicated servers. LocalPlayer is not sufficient proof
+            // of host ownership in a multiplayer listen-server session.
+            switch configuration.sessionKind {
+            case .singlePlayer: return [.boolean(true)]
+            case .dedicatedServer: return [.boolean(false)]
+            case .listenServer:
+                throw LuaError.runtime("Player:IsListenServerHost listen-server host identity is unavailable")
+            }
         }
         try setMethod("Player:GetVehicle", on: playerMetatable) { arguments in
             let snapshot = try requiredSnapshot(
