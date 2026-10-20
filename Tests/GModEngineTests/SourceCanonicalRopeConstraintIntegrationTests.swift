@@ -104,6 +104,89 @@ private final class AttestedRopeCommandQueue:
 }
 
 final class SourceCanonicalRopeConstraintIntegrationTests: XCTestCase {
+    func testStockRopeReachesAngularSolverAndCanonicalPhysObjState() throws {
+        let model = SourceEntityModelReference("models/props/angular_rope_fixture.mdl")
+        let asset = try makeAttestedPropPhysicsTestAsset(
+            modelPath: model.path,
+            // Keep this synthetic mechanical fixture outside the unrelated,
+            // unattested BSP contact-material boundary.
+            bodyBehavior: SourceAttestedPropPhysicsBodyBehavior(
+                motionType: .dynamicBody, damping: .zero,
+                isGravityEnabled: false, isCollisionEnabled: false, startsAwake: true
+            ),
+            massCenterLocal: SourceVector3(2, -3, 1)
+        )
+        let session = try GModPlayableSession(
+            configuration: .init(map: .construct), textMeasurer: nil,
+            logger: { _, _ in }, worldWalkCollisionProvider: nil,
+            canonicalModelValidator: { requested, kind in
+                requested == model && kind == .propPhysics ? .valid : .invalid
+            },
+            canonicalPropPhysicsAssetResolverForTesting: makeAttestedPropPhysicsTestResolver(asset: asset)
+        )
+        defer { _ = try? session.close() }
+        let first = try activeProp(in: session, model: model, origin: SourceVector3(0, 0, 100))
+        let second = try activeProp(in: session, model: model, origin: SourceVector3(10, -2, 100))
+        _ = try session.runFixedTick()
+        try executeReportingLuaErrors(session.serverRuntime,
+            """
+            local first = Entity(\(first.identity.entryIndex))
+            local second = Entity(\(second.identity.entryIndex))
+            first:GetPhysicsObject():EnableMotion(false)
+            second:GetPhysicsObject():SetVelocity(Vector(4, 0, 0))
+            local rope
+            ANGULAR_ROPE_CONSTRAINT, rope = constraint.Rope(
+                first, second, 0, 0, Vector(2, -3, 1), Vector(2, -1, 1),
+                10, 0, 0, 2, "cable/rope", false
+            )
+            assert(IsValid(ANGULAR_ROPE_CONSTRAINT))
+            assert(rope == nil and ANGULAR_ROPE_CONSTRAINT.RopeRenderAvailable == false)
+            """,
+            sourceName: "=(stock rope to actual physics solver)"
+        )
+        let report = try session.runFixedTick()
+        XCTAssertEqual(report.actionFailures, [])
+        XCTAssertEqual(report.propPhysics.lengthConstraints.count, 1)
+        let body = try XCTUnwrap(report.propPhysics.bodies.first { $0.bodyID.entityIdentity == second.identity })
+        let impulse: Float = 4 / (1 / 12 + 4 / 4)
+        XCTAssertEqual(body.linearVelocity.x, 4 - impulse / 12, accuracy: 0.0001)
+        XCTAssertEqual(body.angularVelocity.z, 2 * impulse / 4 * 180 / .pi, accuracy: 0.0001)
+        XCTAssertEqual(body.massProperties.massCenterLocal, SourceVector3(2, -3, 1))
+        let server = try XCTUnwrap(session.sourceAdapter.canonicalSnapshot(for: second.identity))
+        let client = try XCTUnwrap(session.clientCanonicalEntitySnapshots.first { $0.identity == second.identity })
+        XCTAssertEqual(server.motion.linearVelocity, body.linearVelocity)
+        XCTAssertEqual(server.motion.angularVelocity, body.angularVelocity)
+        XCTAssertEqual(server.transform, body.transform)
+        XCTAssertEqual(client.transform, body.transform)
+        try executeReportingLuaErrors(session.serverRuntime,
+            """
+            local phys = Entity(\(second.identity.entryIndex)):GetPhysicsObject()
+            assert(phys:GetAngleVelocity().z > 100, "rope angular velocity not published to PhysObj")
+            local velocity = phys:GetVelocityAtPoint(phys:LocalToWorld(Vector(2, -1, 1)))
+            assert(math.abs(velocity.x) < 0.001, "rope attachment still has outward speed")
+            assert(constraint.RemoveConstraints(Entity(\(first.identity.entryIndex)), "Rope"), "rope removal failed")
+            -- Entity removal is finalized at the next fixed-tick boundary.
+            """,
+            sourceName: "=(solved rope PhysObj reads and removal)"
+        )
+        let removed = try session.runFixedTick()
+        XCTAssertEqual(removed.actionFailures, [])
+        XCTAssertTrue(removed.propPhysics.lengthConstraints.isEmpty)
+        XCTAssertFalse(session.serverToolActionBridge.constraintGraph.hasConstraints(involving: first.identity))
+        try executeReportingLuaErrors(session.serverRuntime,
+            "assert(not IsValid(ANGULAR_ROPE_CONSTRAINT), 'removed rope Entity still valid after fixed tick')",
+            sourceName: "=(finalized rope removal)"
+        )
+    }
+
+    private func executeReportingLuaErrors(_ runtime: GMLuaRuntime, _ source: String, sourceName: String) throws {
+        do {
+            try runtime.execute(source, sourceName: sourceName)
+        } catch let raised as LuaRaisedError {
+            throw LuaError.runtime(raised.value.printable)
+        }
+    }
+
     func testStockRopeTwoClickRoutePreservesExactFIFOAndWorldBoundary()
         throws
     {

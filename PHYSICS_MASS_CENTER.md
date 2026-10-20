@@ -65,7 +65,9 @@ do not relabel old bytes as v12.
 
 This is an extension of the existing deterministic backend, not a connection
 to Valve's binary or a claim of complete VPhysics parity. The length-constraint
-solver remains its existing translation-only approximation. Full asymmetric
+velocity solver now uses angular anchor impulses as described in
+[Rope anchor impulses](PHYSICS_LENGTH_CONSTRAINTS.md); its positional drift
+correction still uses inverse-mass translation projection. Full asymmetric
 torque-free dynamics, rotational/body-body CCD, contact manifolds, native
 shadow-controller matching, and device acceptance remain open.
 

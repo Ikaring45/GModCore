@@ -891,14 +891,12 @@ public final class SourceDeterministicPhysicsEnvironment:
                     .transformPointFromLocal(creation.reference.localAnchor)
                 let attachedAnchor = attachedTransform
                     .transformPointFromLocal(creation.attached.localAnchor)
-                let anchorDelta = attachedAnchor - referenceAnchor
-                let initialDirection: SourceVector3
-                if anchorDelta.lengthSquared > 0 {
-                    initialDirection = anchorDelta /
-                        anchorDelta.lengthSquared.squareRoot()
-                } else {
-                    initialDirection = SourceVector3(1, 0, 0)
-                }
+                let (_, initialDirection) = try lengthConstraintSeparation(
+                    referenceAnchor: referenceAnchor,
+                    attachedAnchor: attachedAnchor,
+                    fallbackDirection: SourceVector3(1, 0, 0),
+                    constraintID: creation.constraintID
+                )
                 candidateLengthConstraints[creation.constraintID] =
                     LengthConstraintState(
                         creation: creation,
@@ -1029,7 +1027,10 @@ public final class SourceDeterministicPhysicsEnvironment:
 
         switch mutation {
         case .wake:
-            try requireEnabledDynamicMotion()
+            // Wake is not EnableMotion. Constraint creation may request it
+            // for a frozen prop; retain that freeze instead of rejecting the
+            // entire FIFO batch or silently thawing the endpoint.
+            try requireMotionSupport()
             wake(&body)
         case .sleep:
             try requireEnabledDynamicMotion()
@@ -1360,7 +1361,9 @@ public final class SourceDeterministicPhysicsEnvironment:
     /// Enforces VPhysics length limits in stable constraint-ID order. Flexible
     /// ropes only correct separation above `maximumLength`; rigid ropes also
     /// correct separation below the equal minimum. The implementation applies
-    /// translation and normal relative-velocity correction by inverse mass.
+    /// inverse-mass translation projection and anchor-point velocity impulses
+    /// using each endpoint's authored center and local principal inertia.
+    /// Flexible limits supply tension only; equal limits act as a rigid rod.
     /// Positive break limits are rejected at creation rather than approximated.
     private func solveLengthConstraints(
         _ constraints: inout [
@@ -1390,20 +1393,28 @@ public final class SourceDeterministicPhysicsEnvironment:
             let attachedAnchor = attachedTransform.transformPointFromLocal(
                 creation.attached.localAnchor
             )
-            let delta = attachedAnchor - referenceAnchor
-            let distanceSquared = delta.lengthSquared
-            let distance = max(0, distanceSquared).squareRoot()
-            let target: Float
-            if distance > creation.maximumLength {
-                target = creation.maximumLength
-            } else if distance < creation.minimumLength {
-                target = creation.minimumLength
-            } else {
-                continue
-            }
-            let normal = distance > 0
-                ? delta / distance
-                : state.initialReferenceToAttachedDirection
+            let (distance, normal) = try lengthConstraintSeparation(
+                referenceAnchor: referenceAnchor,
+                attachedAnchor: attachedAnchor,
+                fallbackDirection: state.initialReferenceToAttachedDirection,
+                constraintID: constraintID
+            )
+            let isRigid = creation.minimumLength == creation.maximumLength
+            // Admit roundoff at a boundary, not a gameplay-sized slack zone.
+            // Cap this to a quarter of the range so distinct limits cannot
+            // both become active in a narrow but valid interval.
+            let tolerance = isRigid ? 0 : min(
+                max(1, distance).ulp * 4,
+                (creation.maximumLength - creation.minimumLength) * 0.25
+            )
+            let atUpperLimit = distance >= creation.maximumLength - tolerance
+            let atLowerLimit = creation.minimumLength > 0 &&
+                distance <= creation.minimumLength + tolerance
+            guard isRigid || atUpperLimit || atLowerLimit else { continue }
+            let target = min(
+                creation.maximumLength,
+                max(creation.minimumLength, distance)
+            )
             let referenceInverseMass = constraintInverseMass(
                 creation.reference,
                 bodies: bodies
@@ -1413,44 +1424,104 @@ public final class SourceDeterministicPhysicsEnvironment:
                 bodies: bodies
             )
             let inverseMassSum = referenceInverseMass + attachedInverseMass
+            guard inverseMassSum.isFinite else {
+                throw Error.nonFiniteConstraintResult(constraintID)
+            }
             guard inverseMassSum > 0 else { continue }
             let referenceShare = referenceInverseMass / inverseMassSum
             let attachedShare = attachedInverseMass / inverseMassSum
             let correction = normal * (distance - target)
-            let relativeNormalVelocity = (
-                constraintLinearVelocity(creation.attached, bodies: bodies) -
-                    constraintLinearVelocity(creation.reference, bodies: bodies)
-            ).dot(normal)
 
             if creation.reference.kind == .body,
+               referenceInverseMass > 0,
                var reference = bodies[creation.reference.bodyID] {
                 reference.transform.origin += correction * referenceShare
-                reference.linearVelocity += normal *
-                    (relativeNormalVelocity * referenceShare)
                 guard reference.transform.origin.isSourcePhysicsFinite,
-                      reference.linearVelocity.isSourcePhysicsFinite else {
+                      reference.worldMassCenter.isSourcePhysicsFinite else {
                     throw Error.nonFiniteConstraintResult(constraintID)
                 }
-                if reference.isDynamic {
-                    reference.settledTicks = 0
+                if correction != .zero {
                     wake(&reference)
                 }
                 bodies[creation.reference.bodyID] = reference
             }
             if creation.attached.kind == .body,
+               attachedInverseMass > 0,
                var attached = bodies[creation.attached.bodyID] {
                 attached.transform.origin -= correction * attachedShare
-                attached.linearVelocity -= normal *
-                    (relativeNormalVelocity * attachedShare)
                 guard attached.transform.origin.isSourcePhysicsFinite,
-                      attached.linearVelocity.isSourcePhysicsFinite else {
+                      attached.worldMassCenter.isSourcePhysicsFinite else {
                     throw Error.nonFiniteConstraintResult(constraintID)
                 }
-                if attached.isDynamic {
-                    attached.settledTicks = 0
+                if correction != .zero {
                     wake(&attached)
                 }
                 bodies[creation.attached.bodyID] = attached
+            }
+
+            // Translation projection does not change a body's anchor lever
+            // arm. Evaluate it in the local frame to avoid subtracting two
+            // large world coordinates and losing the authored COM offset.
+            let reference = creation.reference.kind == .body
+                ? bodies[creation.reference.bodyID] : nil
+            let attached = creation.attached.kind == .body
+                ? bodies[creation.attached.bodyID] : nil
+            let referenceOffset = reference.map {
+                $0.transform.transformDirectionFromLocal(
+                    creation.reference.localAnchor -
+                        $0.massProperties.massCenterLocal
+                )
+            } ?? .zero
+            let attachedOffset = attached.map {
+                $0.transform.transformDirectionFromLocal(
+                    creation.attached.localAnchor -
+                        $0.massProperties.massCenterLocal
+                )
+            } ?? .zero
+            let referenceVelocity = reference.flatMap {
+                $0.isMovable ? pointVelocity($0, offset: referenceOffset) : nil
+            } ?? .zero
+            let attachedVelocity = attached.flatMap {
+                $0.isMovable ? pointVelocity($0, offset: attachedOffset) : nil
+            } ?? .zero
+            let relativeNormalVelocity = (attachedVelocity - referenceVelocity)
+                .dot(normal)
+            let denominator = inverseMassSum + (reference.map {
+                angularEffectiveMass(body: $0, offset: referenceOffset,
+                                     normal: normal)
+            } ?? 0) + (attached.map {
+                angularEffectiveMass(body: $0, offset: attachedOffset,
+                                     normal: normal)
+            } ?? 0)
+            guard referenceOffset.isSourcePhysicsFinite,
+                  attachedOffset.isSourcePhysicsFinite,
+                  relativeNormalVelocity.isFinite,
+                  denominator.isFinite, denominator > 0 else {
+                throw Error.nonFiniteConstraintResult(constraintID)
+            }
+            let constrainedSpeed: Float
+            if isRigid {
+                constrainedSpeed = relativeNormalVelocity
+            } else if atUpperLimit {
+                constrainedSpeed = max(0, relativeNormalVelocity)
+            } else {
+                constrainedSpeed = min(0, relativeNormalVelocity)
+            }
+            let impulse = normal * (constrainedSpeed / denominator)
+            guard impulse.isSourcePhysicsFinite else {
+                throw Error.nonFiniteConstraintResult(constraintID)
+            }
+            if impulse != .zero {
+                if var value = reference, referenceInverseMass > 0 {
+                    applyImpulse(impulse, at: referenceOffset, to: &value)
+                    try validateLengthConstraintVelocity(value, constraintID)
+                    bodies[value.bodyID] = value
+                }
+                if var value = attached, attachedInverseMass > 0 {
+                    applyImpulse(-impulse, at: attachedOffset, to: &value)
+                    try validateLengthConstraintVelocity(value, constraintID)
+                    bodies[value.bodyID] = value
+                }
             }
             if referenceInverseMass == 0, creation.attached.kind == .body {
                 supportedBodies.insert(creation.attached.bodyID)
@@ -1458,6 +1529,35 @@ public final class SourceDeterministicPhysicsEnvironment:
             if attachedInverseMass == 0, creation.reference.kind == .body {
                 supportedBodies.insert(creation.reference.bodyID)
             }
+        }
+    }
+
+    private func lengthConstraintSeparation(
+        referenceAnchor: SourceVector3,
+        attachedAnchor: SourceVector3,
+        fallbackDirection: SourceVector3,
+        constraintID: SourcePhysicsConstraintID
+    ) throws -> (distance: Float, normal: SourceVector3) {
+        let delta = attachedAnchor - referenceAnchor
+        // Float squared distance overflows for otherwise representable lengths.
+        let distance = Float((Double(delta.x) * Double(delta.x) +
+            Double(delta.y) * Double(delta.y) +
+            Double(delta.z) * Double(delta.z)).squareRoot())
+        guard referenceAnchor.isSourcePhysicsFinite,
+              attachedAnchor.isSourcePhysicsFinite,
+              delta.isSourcePhysicsFinite, distance.isFinite else {
+            throw Error.nonFiniteConstraintResult(constraintID)
+        }
+        return (distance, distance > 0 ? delta / distance : fallbackDirection)
+    }
+
+    private func validateLengthConstraintVelocity(
+        _ body: BodyState,
+        _ constraintID: SourcePhysicsConstraintID
+    ) throws {
+        guard body.linearVelocity.isSourcePhysicsFinite,
+              body.angularVelocity.isSourcePhysicsFinite else {
+            throw Error.nonFiniteConstraintResult(constraintID)
         }
     }
 
@@ -1495,16 +1595,6 @@ public final class SourceDeterministicPhysicsEnvironment:
             return 0
         }
         return inverseMass(body)
-    }
-
-    private func constraintLinearVelocity(
-        _ endpoint: SourcePhysicsLengthConstraintEndpoint,
-        bodies: [SourcePhysicsBodyID: BodyState]
-    ) -> SourceVector3 {
-        guard endpoint.kind == .body, let body = bodies[endpoint.bodyID] else {
-            return .zero
-        }
-        return body.linearVelocity
     }
 
     /// Solves the six fixed degrees of freedom in stable constraint-ID order.

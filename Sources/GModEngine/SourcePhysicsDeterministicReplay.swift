@@ -1014,8 +1014,7 @@ private struct SourcePhysicsReplayTranscriptValidator {
         let supportsMotion = body.creation.motionType != .staticBody
         let requiresEnabledDynamicMotion: Bool
         switch command.mutation {
-        case .wake,
-             .sleep,
+        case .sleep,
              .applyCenterForce,
              .applyForceOffset,
              .applyCenterImpulse,
@@ -1034,6 +1033,10 @@ private struct SourcePhysicsReplayTranscriptValidator {
             }
         }
         switch command.mutation {
+        case .wake:
+            guard supportsMotion else {
+                throw SourcePhysicsReplayError.bodyMutationNotSupported(bodyID)
+            }
         case let .setMotionEnabled(enabled):
             guard supportsMotion else {
                 throw SourcePhysicsReplayError.bodyMutationNotSupported(bodyID)
@@ -1069,8 +1072,7 @@ private struct SourcePhysicsReplayTranscriptValidator {
             guard supportsMotion else {
                 throw SourcePhysicsReplayError.bodyMutationNotSupported(bodyID)
             }
-        case .wake,
-             .sleep,
+        case .sleep,
              .applyCenterForce,
              .applyForceOffset,
              .applyCenterImpulse,
