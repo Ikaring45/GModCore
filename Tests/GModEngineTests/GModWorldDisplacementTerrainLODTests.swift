@@ -80,7 +80,7 @@ final class GModWorldDisplacementTerrainLODTests: XCTestCase {
         }
     }
 
-    func testBundledDisplacementsRemainWorldGeometryWithExactPVSSpans() throws {
+    func testBundledDisplacementsRetainWorldOrSkyMembershipWithExactPVSSpans() throws {
         let fixtures: [(map: GModBundledMap, materials: Set<String>)] = [
             (
                 .construct,
@@ -112,7 +112,7 @@ final class GModWorldDisplacementTerrainLODTests: XCTestCase {
                 fixture.map.rawValue
             )
             XCTAssertTrue(displacementRanges.allSatisfy {
-                $0.element.renderLayer == .world &&
+                ($0.element.renderLayer == .world || $0.element.renderLayer == .sky3D) &&
                     $0.element.waterSurface == nil
             }, fixture.map.rawValue)
             XCTAssertEqual(
@@ -138,7 +138,7 @@ final class GModWorldDisplacementTerrainLODTests: XCTestCase {
                 let terrain = flatgrass.filter(\.isDisplacement)
                 XCTAssertEqual(Set(brushes.map(\.renderLayer)), [.sky3D])
                 XCTAssertEqual(brushes.reduce(0) { $0 + $1.indexCount }, 84)
-                XCTAssertEqual(Set(terrain.map(\.renderLayer)), [.world])
+                XCTAssertEqual(Set(terrain.map(\.renderLayer)), [.sky3D])
                 XCTAssertEqual(terrain.reduce(0) { $0 + $1.indexCount }, 13_824)
             }
 
@@ -148,7 +148,10 @@ final class GModWorldDisplacementTerrainLODTests: XCTestCase {
                     .allSatisfy { index in
                         mesh.vertices[Int(index)].lightmapCoordinate != nil
                     }, "displacement indices must retain authored lightmap UVs")
-                let spans = visibility.spans.filter {
+                let layerSpans = range.renderLayer == .sky3D
+                    ? try XCTUnwrap(mesh.sky3DVisibility).bspVisibility.spans
+                    : visibility.spans
+                let spans = layerSpans.filter {
                     $0.materialRangeIndex == rangeIndex
                 }
                 XCTAssertFalse(spans.isEmpty, range.materialName ?? "<nil>")

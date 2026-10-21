@@ -192,12 +192,12 @@ final class GModWorldRenderMeshTests: XCTestCase {
         }
     }
 
-    func testBundledMapsRetainDominantOrdinaryWorldRanges() throws {
+    func testBundledMapsPartitionWorldAndAuthoredSkyTerrain() throws {
         let expectations: [
             (map: GModBundledMap, worldIndices: Int, sky3DIndices: Int)
         ] = [
-            (.construct, 120_570, 3_426),
-            (.flatgrass, 36_042, 54),
+            (.construct, 92_922, 31_074),
+            (.flatgrass, 11_466, 24_630),
         ]
 
         for expectation in expectations {
@@ -214,7 +214,6 @@ final class GModWorldRenderMeshTests: XCTestCase {
 
             XCTAssertEqual(worldIndices, expectation.worldIndices)
             XCTAssertEqual(sky3DIndices, expectation.sky3DIndices)
-            XCTAssertGreaterThan(worldIndices, sky3DIndices * 20)
             XCTAssertGreaterThan(worldIndices / 3, 1_000)
             XCTAssertTrue(mesh.materialRanges.contains {
                 $0.renderLayer == .world && $0.indexCount > 0
@@ -468,8 +467,8 @@ final class GModWorldRenderMeshTests: XCTestCase {
         throws
     {
         let expectations: [(map: GModBundledMap, indexCount: Int)] = [
-            (.construct, 120_162),
-            (.flatgrass, 36_042),
+            (.construct, 92_514),
+            (.flatgrass, 11_466),
         ]
         for expectation in expectations {
             let bsp = try SourceBSP(
@@ -541,8 +540,8 @@ final class GModWorldRenderMeshTests: XCTestCase {
             visibleIndices: Int,
             drawSpans: Int
         )] = [
-            (.construct, 6_421, 120_162, 988, 26_898, 245),
-            (.flatgrass, 1_648, 36_042, 367, 8_862, 46),
+            (.construct, 6_400, 92_514, 988, 26_898, 245),
+            (.flatgrass, 1_632, 11_466, 363, 2_718, 44),
         ]
         let verticalFOV = 2 * atan(
             tan(Float(75) * .pi / 360) / (Float(4) / 3)
@@ -774,10 +773,22 @@ final class GModWorldRenderMeshTests: XCTestCase {
                 expectedVisibleFaces.insert(Int(bsp.leafFaces[index]))
             }
         }
+        // These authored sky displacements have no LUMP_LEAFFACES entries.
+        // Fixture area checks are independent of the renderer's AABB query.
+        var skyTerrainFaces = Set<Int>()
+        for displacement in bsp.displacementInfo {
+            let p = displacement.startPosition
+            let leafIndex = try? bsp.leafIndex(containing: SourceVector3(p.x, p.y, p.z + 1))
+            if let leafIndex, bsp.leaves[leafIndex].area == sky.area {
+                skyTerrainFaces.insert(Int(displacement.mapFaceIndex))
+            }
+        }
+        XCTAssertEqual(skyTerrainFaces.count, 21)
+        expectedVisibleFaces.formUnion(skyTerrainFaces)
         XCTAssertEqual(
             sky.sourceFaceCount,
             expectedVisibleFaces.count,
-            "sky-camera geometry must come from its cluster PVS, not area union",
+            "sky-camera geometry includes spatially linked displacement faces",
             file: file,
             line: line
         )
@@ -800,9 +811,8 @@ final class GModWorldRenderMeshTests: XCTestCase {
         XCTAssertTrue(miniatureRanges.contains {
             $0.materialName == "gm_construct/flatgrass"
         })
-        XCTAssertTrue(mesh.materialRanges.contains {
-            $0.renderLayer == .world &&
-                $0.materialName == "gm_construct/flatgrass"
+        XCTAssertFalse(mesh.materialRanges.contains {
+            $0.renderLayer == .world && $0.materialName == "gm_construct/flatgrass"
         })
         XCTAssertTrue(miniatureRanges.allSatisfy {
             $0.firstIndex >= 0 &&
@@ -981,7 +991,13 @@ final class GModWorldRenderMeshTests: XCTestCase {
                 source.vector.y,
                 source.vector.z
             )
-            return flat + field * source.distance
+            let position = flat + field * source.distance
+            if let sky = mesh.sky3D,
+               let leaf = try? bsp.leafIndex(containing: start + SourceVector3(0, 0, 1)),
+               bsp.leaves[leaf].area == sky.area {
+                return (position - sky.origin) * sky.scale
+            }
+            return position
         }
         func expectedTextureUV(flat: SourceVector3) -> GModWorldTextureCoordinate {
             let info = bsp.textureInfo[Int(face.textureInfoIndex)]
@@ -1031,14 +1047,9 @@ final class GModWorldRenderMeshTests: XCTestCase {
             return
         }
         let rawField = bsp.displacementVertices[firstDispVertex]
-        let rawVector = SourceVector3(
-            rawField.vector.x,
-            rawField.vector.y,
-            rawField.vector.z
-        )
         XCTAssertEqual(
             lowerLeft.position,
-            corners[0] + rawVector * rawField.distance,
+            expectedPosition(flat: corners[0], localIndex: 0),
             "the direct VBSP field must not be normalized",
             file: file,
             line: line

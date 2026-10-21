@@ -4,6 +4,65 @@ import GModGameAssets
 @testable import GModGameSession
 
 final class GModWorldSky3DVisibilityTests: XCTestCase {
+    func testOutdoorSpawnActuallySelectsSkyTerrainInCardinalViews() throws {
+        for map in GModBundledMap.allCases {
+            let bsp = try SourceBSP(data: GModGameAssets.data(for: map, kind: .bsp))
+            let mesh = try GModWorldRenderMesh.build(from: bsp)
+            let sky = try XCTUnwrap(mesh.sky3DVisibility)
+            let spawn = try XCTUnwrap(bsp.entities.parsedEntities().first {
+                $0.value(forKey: "classname")?.hasPrefix("info_player_") == true
+            })
+            let coordinates = try XCTUnwrap(spawn.value(forKey: "origin")).split(whereSeparator: { $0.isWhitespace }).compactMap { Float($0) }
+            XCTAssertEqual(coordinates.count, 3)
+            let eye = SourceVector3(coordinates[0], coordinates[1], coordinates[2] + 64)
+            XCTAssertEqual(mesh.skyVisibility?.visibility(at: eye), .sky3D)
+            var counts: [Int] = []
+            for direction in [SourceVector3(1, 0, 0), SourceVector3(0, 1, 0),
+                              SourceVector3(-1, 0, 0), SourceVector3(0, -1, 0)] {
+                let metrics = try XCTUnwrap(sky.selectionMetrics(worldCameraEye: eye,
+                    cameraForward: direction, cameraUp: SourceVector3(0, 0, 1),
+                    verticalFieldOfViewRadians: .pi / 2, aspectRatio: 4 / 3,
+                    nearPlane: 32, farPlane: 1_000_000))
+                counts.append(metrics.visibleIndexCount)
+            }
+            print("Sky terrain spawn \(map): eye=\(eye) selected=\(counts)")
+            XCTAssertTrue(counts.allSatisfy { $0 > 1_000 }, "authored terrain must survive in every cardinal view")
+        }
+    }
+
+    func testFlatgrassUnreferencedDisplacementsAreBakedIntoSkyOnly() throws {
+        let bsp = try SourceBSP(data: GModGameAssets.data(for: .flatgrass, kind: .bsp))
+        let mesh = try GModWorldRenderMesh.build(from: bsp)
+        let sky = try XCTUnwrap(mesh.sky3D)
+        // Independent fixture evidence: none of these sixteen authored terrain
+        // faces has an ordinary leaf-face reference, despite being in area 2.
+        XCTAssertEqual(bsp.displacementInfo.count, 16)
+        for displacement in bsp.displacementInfo {
+            XCTAssertFalse(bsp.leafFaces.contains(displacement.mapFaceIndex))
+            let p = displacement.startPosition
+            let leaf = try bsp.leafIndex(containing: SourceVector3(p.x, p.y, p.z + 1))
+            XCTAssertEqual(bsp.leaves[leaf].area, sky.area)
+        }
+        let ranges = mesh.materialRanges.filter(\.isDisplacement)
+        XCTAssertEqual(Set(ranges.map(\.renderLayer)), [.sky3D])
+        XCTAssertEqual(ranges.reduce(0) { $0 + $1.indexCount }, 24_576)
+        let visibility = try XCTUnwrap(mesh.sky3DVisibility)
+        let spans = visibility.bspVisibility.spans.filter {
+            mesh.materialRanges[$0.materialRangeIndex].isDisplacement
+        }
+        XCTAssertEqual(spans.count, 16)
+        XCTAssertTrue(spans.allSatisfy { $0.clusterCount > 0 })
+        // A corner remains authored terrain, but its position must be baked
+        // relative to sky_camera, not left below the normal playable map.
+        let d = bsp.displacementInfo[0]
+        let v = bsp.displacementVertices[Int(d.firstVertex)]
+        let source = SourceVector3(d.startPosition.x, d.startPosition.y, d.startPosition.z)
+            + SourceVector3(v.vector.x, v.vector.y, v.vector.z) * v.distance
+        let expected = (source - sky.origin) * sky.scale
+        XCTAssertTrue(mesh.vertices.contains { ($0.position - expected).lengthSquared < 0.01 })
+        XCTAssertFalse(mesh.vertices.contains { ($0.position - source).lengthSquared < 0.01 })
+    }
+
     func testBundledMapsBuildSkyCameraPVSAndBakedFrustumSpans() throws {
         for map in GModBundledMap.allCases {
             let bsp = try SourceBSP(

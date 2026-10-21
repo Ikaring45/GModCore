@@ -1064,10 +1064,6 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
         let skyName = try bsp.worldspawnValue(forKey: "skyname")
             .flatMap(Self.normalizedSkyName)
         let potentialVisibility = Self.potentialVisibility(in: bsp)
-        let sky3DContext = try Self.sky3DContext(
-            in: bsp,
-            potentialVisibility: potentialVisibility
-        )
         let skyVisibility = Self.skyVisibility(in: bsp)
         let environmentLightingResult = Self.environmentLighting(in: bsp)
         let sunSpriteResult = try Self.sunSprites(in: bsp)
@@ -1077,6 +1073,12 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
             endFace: endFace,
             includesSkybox: skyName != nil,
             policy: allocationPolicy
+        )
+        let displacementLeaves = try Self.displacementLeafMembership(in: bsp)
+        let sky3DContext = try Self.sky3DContext(
+            in: bsp,
+            potentialVisibility: potentialVisibility,
+            displacementLeaves: displacementLeaves
         )
 
         var vertices: [GModWorldRenderVertex] = []
@@ -1565,7 +1567,8 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
         let faceClusters = Self.worldFaceClusters(
             in: bsp,
             firstFace: firstFace,
-            endFace: endFace
+            endFace: endFace,
+            displacementLeaves: displacementLeaves
         )
         var visibilitySpans: [GModWorldVisibilitySpan] = []
         visibilitySpans.reserveCapacity(
@@ -2578,7 +2581,8 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
     private static func worldFaceClusters(
         in bsp: SourceBSP,
         firstFace: Int,
-        endFace: Int
+        endFace: Int,
+        displacementLeaves: [Int: [Int]]
     ) -> [[Int16]]? {
         guard firstFace >= 0, endFace >= firstFace else { return nil }
         var result = [[Int16]](
@@ -2598,6 +2602,9 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
                       sourceFaceIndex < endFace else { continue }
                 result[sourceFaceIndex - firstFace].append(leaf.cluster)
             }
+        }
+        for (face, leaves) in displacementLeaves where face >= firstFace && face < endFace {
+            result[face - firstFace].append(contentsOf: leaves.map { bsp.leaves[$0].cluster })
         }
         for index in result.indices {
             result[index].sort()
@@ -2635,7 +2642,8 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
     /// from the ordinary world's per-view PVS/frustum metadata.
     private static func sky3DContext(
         in bsp: SourceBSP,
-        potentialVisibility: GModWorldPotentialVisibility?
+        potentialVisibility: GModWorldPotentialVisibility?,
+        displacementLeaves: [Int: [Int]]
     ) throws -> GModWorldSky3DContext? {
         let entities = try bsp.entities.parsedEntities()
         guard let entity = entities.first(where: {
@@ -2673,6 +2681,17 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
                 faceIndices.insert(Int(bsp.leafFaces[index]))
             }
         }
+        // VBSP displacement faces need not occur in LUMP_LEAFFACES. Their
+        // spatial membership is recovered separately from the deformed bounds.
+        for (face, leaves) in displacementLeaves {
+            if leaves.contains(where: {
+                let leaf = bsp.leaves[$0]
+                return leaf.area == cameraLeaf.area &&
+                    (visibleClusters?.contains(Int(leaf.cluster)) ?? true)
+            }) {
+                faceIndices.insert(face)
+            }
+        }
         guard !faceIndices.isEmpty else { return nil }
         return GModWorldSky3DContext(
             origin: origin,
@@ -2682,6 +2701,51 @@ public struct GModWorldRenderMesh: Sendable, Equatable {
             faceIndices: faceIndices,
             fogStatus: sky3DFogStatus(from: entity)
         )
+    }
+
+    /// Displacements are not ordinary leaf-face polygons. Query the validated
+    /// BSP tree with their full deformed AABB, not a corner/centroid sample
+    /// (which can lie in solid or miss a cluster crossed by a large patch).
+    /// This conservative render membership does not alter collision geometry.
+    private static func displacementLeafMembership(in bsp: SourceBSP) throws -> [Int: [Int]] {
+        guard let world = bsp.models.first else { return [:] }
+        var result: [Int: [Int]] = [:]
+        for faceIndex in Int(world.firstFace)..<Int(world.firstFace + world.faceCount) {
+            guard let displacement = bsp.displacement(forFaceAt: faceIndex) else { continue }
+            let face = bsp.faces[faceIndex]
+            let points = try facePoints(faceIndex: faceIndex,
+                firstSurfaceEdge: Int(face.firstSurfaceEdge),
+                endSurfaceEdge: Int(face.firstSurfaceEdge) + Int(face.surfaceEdgeCount), in: bsp)
+            let n = bsp.planes[Int(face.planeIndex)].normal
+            let geometry = try generateDisplacementGeometry(faceIndex: faceIndex,
+                basePoints: points,
+                faceNormal: SourceVector3(n.x, n.y, n.z) * (face.side == 0 ? 1 : -1),
+                materialInfo: nil, materialData: nil, lightmap: nil,
+                displacement: displacement, bsp: bsp)
+            guard let bounds = visibilityBounds(geometry.vertices[...]) else { continue }
+            let center = (bounds.minimum + bounds.maximum) * 0.5
+            let extent = (bounds.maximum - bounds.minimum) * 0.5
+            var stack = [world.headNode]
+            var visited = Set<Int32>()
+            var leaves: [Int] = []
+            while let child = stack.popLast() {
+                guard visited.insert(child).inserted else { continue }
+                if child < 0 {
+                    let index = Int(-1 - Int64(child))
+                    if bsp.leaves[index].cluster >= 0 { leaves.append(index) }
+                    continue
+                }
+                let node = bsp.nodes[Int(child)]
+                let plane = bsp.planes[Int(node.planeIndex)]
+                let normal = SourceVector3(plane.normal.x, plane.normal.y, plane.normal.z)
+                let distance = normal.dot(center) - plane.distance
+                let radius = abs(normal.x) * extent.x + abs(normal.y) * extent.y + abs(normal.z) * extent.z
+                if distance + radius >= 0 { stack.append(node.children[0]) }
+                if distance - radius <= 0 { stack.append(node.children[1]) }
+            }
+            result[faceIndex] = leaves.sorted()
+        }
+        return result
     }
 
     /// Mirrors the pinned SDK `CSkyCamera` keyfields and constructor defaults.
