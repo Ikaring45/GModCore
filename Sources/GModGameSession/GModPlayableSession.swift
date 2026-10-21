@@ -963,7 +963,17 @@ public final class GModPlayableSession {
             systemTimeSource: systemTime,
             inputConfiguration: GMLuaInputConfiguration(),
             languageConfiguration: GMLuaLanguageConfiguration(
-                phrases: configuration.languagePhrases
+                phrases: configuration.languagePhrases.isEmpty
+                    ? loadedContentPackAssetSource.map { source in
+                        var phrases = GModSourceLocalizationTokens.load(languageCode: "en", source: source,
+                            diagnostic: { logger(.client, "[Localization] \($0)") })
+                        if configuration.languageCode != "en" {
+                            phrases.merge(GModSourceLocalizationTokens.load(languageCode: configuration.languageCode,
+                                source: source, diagnostic: { logger(.client, "[Localization] \($0)") })) { _, selected in selected }
+                        }
+                        return phrases
+                    } ?? [:]
+                    : configuration.languagePhrases
             )
         )
 
@@ -1805,6 +1815,14 @@ public final class GModPlayableSession {
             )
         }
         return surface.drainSoundRequestReport()
+    }
+
+    /// Captured CLIENT sound.Play and replicated Entity:EmitSound events have
+    /// a separate queue from UI surface.PlaySound. Drain each exactly once on
+    /// the owner lane, including host frames that skip VGUI rendering.
+    public func drainClientGameplaySoundEvents() throws -> [GMLuaSoundPlayEvent] {
+        try ensureOpen()
+        return clientRuntime.sound?.drainCapturedPlayEvents() ?? []
     }
 
     /// Routes one value-only host pointer sample through the live CLIENT VGUI

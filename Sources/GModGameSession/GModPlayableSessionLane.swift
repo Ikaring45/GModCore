@@ -111,6 +111,7 @@ public struct GModPlayableHostFrameReport: Sendable, Equatable {
     /// Ordered, exactly-once handoff of CLIENT `surface.PlaySound` calls made
     /// since the preceding host-frame drain. Repeated paths remain repeated.
     public let clientSurfaceSounds: GMLuaSurfaceSoundRequestReport
+    public let clientGameplaySounds: [GMLuaSoundPlayEvent]
     public let viewportChanged: Bool
     public let playerWalkState: SourceWorldWalkState
     /// Cheap change token. The entity array is fetched from the lane only when
@@ -126,6 +127,7 @@ public struct GModPlayableHostFrameReport: Sendable, Equatable {
             SourceCanonicalPhysgunClientDisplaySnapshot? = nil,
         clientVGUIFrame: GMLuaSurfaceFrameSnapshot?,
         clientSurfaceSounds: GMLuaSurfaceSoundRequestReport,
+        clientGameplaySounds: [GMLuaSoundPlayEvent] = [],
         viewportChanged: Bool,
         playerWalkState: SourceWorldWalkState,
         canonicalEntityCursor: SourceEntityReplicationCursor?,
@@ -138,6 +140,7 @@ public struct GModPlayableHostFrameReport: Sendable, Equatable {
         self.physgunClientDisplay = physgunClientDisplay
         self.clientVGUIFrame = clientVGUIFrame
         self.clientSurfaceSounds = clientSurfaceSounds
+        self.clientGameplaySounds = clientGameplaySounds
         self.viewportChanged = viewportChanged
         self.playerWalkState = playerWalkState
         self.canonicalEntityCursor = canonicalEntityCursor
@@ -400,6 +403,7 @@ public actor GModPlayableSessionLane {
         // Drain only after every requested CLIENT boundary has completed. The
         // command-state queue owns total order and does not collapse repeats.
         let clientSurfaceSounds = try session.drainClientSurfaceSoundRequests()
+        let clientGameplaySounds = try session.drainClientGameplaySoundEvents()
         return GModPlayableHostFrameReport(
             fixedTicks: fixedTicks,
             inputButtons: inputButtons,
@@ -407,6 +411,7 @@ public actor GModPlayableSessionLane {
             physgunClientDisplay: physgunClientDisplay,
             clientVGUIFrame: clientVGUIFrame,
             clientSurfaceSounds: clientSurfaceSounds,
+            clientGameplaySounds: clientGameplaySounds,
             viewportChanged: viewportChanged,
             playerWalkState: session.playerWalkState,
             canonicalEntityCursor: session.clientCanonicalEntityReplicationCursor,
@@ -906,6 +911,7 @@ public actor GModPlayableSessionLane {
         // A paused host has no frame drain. Retire any pre-pause UI sounds so
         // Resume never replays stale taps from the prior input epoch.
         _ = try session.drainClientSurfaceSoundRequests()
+        _ = try session.drainClientGameplaySoundEvents()
         return GModPlayableInputBoundaryReport(
             pointerEpoch: pointerEpoch,
             inputEpoch: inputEpoch,

@@ -1184,6 +1184,8 @@ final class GModPlayableSessionLaneTests: XCTestCase {
             surface.PlaySound("ui/buttonclickrelease.wav")
             surface.PlaySound("ui/buttonclickrelease.wav")
             surface.PlaySound("buttons/button15.wav")
+            sound.Play("player/footsteps/concrete1.wav", Vector(10, 20, 30), 75, 100, 0.25)
+            sound.Play("player/footsteps/concrete1.wav", Vector(10, 20, 30), 75, 100, 0.5)
             """,
             realm: .client,
             sourceName: "@GModPlayableSurfaceSoundDrain.lua",
@@ -1209,6 +1211,10 @@ final class GModPlayableSessionLaneTests: XCTestCase {
         XCTAssertEqual(sequences.count, 3)
         XCTAssertEqual(sequences[1], sequences[0] + 1)
         XCTAssertEqual(sequences[2], sequences[1] + 1)
+        XCTAssertEqual(report.clientGameplaySounds.map { $0.sound.utf8String },
+            ["player/footsteps/concrete1.wav", "player/footsteps/concrete1.wav"])
+        XCTAssertEqual(report.clientGameplaySounds.map(\.volume), [0.25, 0.5])
+        XCTAssertEqual(report.clientGameplaySounds.map(\.x), [10, 10])
 
         let drainedAgain = try await lane.runHostFrame(
             fixedTickCount: 0,
@@ -1217,9 +1223,10 @@ final class GModPlayableSessionLaneTests: XCTestCase {
             expectedInputEpoch: snapshot.inputEpoch
         )
         XCTAssertTrue(drainedAgain.clientSurfaceSounds.requests.isEmpty)
+        XCTAssertTrue(drainedAgain.clientGameplaySounds.isEmpty)
 
         try await lane.execute(
-            "surface.PlaySound('ui/stale-on-pause.wav')",
+            "surface.PlaySound('ui/stale-on-pause.wav'); sound.Play('player/footsteps/stale.wav', Vector(0,0,0))",
             realm: .client,
             expectedGeneration: snapshot.generation
         )
@@ -1236,6 +1243,7 @@ final class GModPlayableSessionLaneTests: XCTestCase {
             expectedInputEpoch: suspended.inputEpoch
         )
         XCTAssertTrue(afterPause.clientSurfaceSounds.requests.isEmpty)
+        XCTAssertTrue(afterPause.clientGameplaySounds.isEmpty)
         _ = try await lane.close()
     }
 

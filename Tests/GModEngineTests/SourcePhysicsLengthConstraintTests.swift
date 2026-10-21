@@ -185,7 +185,8 @@ struct SourcePhysicsLengthConstraintTests {
         let snapshot = try simulate(first, second, referenceAnchor: firstAnchor, attachedAnchor: secondAnchor)
         let a = try body(first.bodyID, in: snapshot)
         let b = try body(second.bodyID, in: snapshot)
-        let impulse: Float = 4 / (0.5 + 0.1 + 1 / 4 + 4 / 5)
+        let inverseEffectiveMass: Float = 0.5 + 0.1 + 0.25 + 0.8
+        let impulse: Float = 4 / inverseEffectiveMass
         expectVector(a.linearVelocity, SourceVector3(impulse / 2, 3, 0))
         expectVector(b.linearVelocity, SourceVector3(4 - impulse / 10, 3, 0))
         expectVector(a.angularVelocity, SourceVector3(0, 0, -impulse / 4 * 180 / .pi))

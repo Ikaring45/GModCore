@@ -1620,6 +1620,7 @@ final class GModGameSessionModel: ObservableObject {
                 reportFailures(clientFrame)
             }
             playClientSurfaceSounds(report.clientSurfaceSounds)
+            playClientGameplaySounds(report.clientGameplaySounds)
             await refreshDynamicEntitySceneIfNeeded(
                 applicationGeneration: activeToken.generation.application,
                 laneGeneration: activeToken.generation.lane
@@ -2530,6 +2531,22 @@ final class GModGameSessionModel: ObservableObject {
     /// Preserves the surface queue's total order and repeated paths. The lane
     /// already drained this report exactly once; this method never retries a
     /// rejected or failed playback event.
+    private func playClientGameplaySounds(_ events: [GMLuaSoundPlayEvent]) {
+        for event in events {
+            // The current AVAudioPlayer path is a local, nonspatial bus. Do
+            // not silently discard DSP or claim Source pitch/spatial parity.
+            guard event.pitch == 100, event.dsp == 0 else {
+                appendLog("[CLIENT][AUDIO] unsupported gameplay pitch/DSP: \(event.sound)")
+                continue
+            }
+            guard let path = String(bytes: event.sound.bytes, encoding: .utf8) else {
+                appendLog("[CLIENT][AUDIO] gameplay sound path is not UTF-8")
+                continue
+            }
+            audioController.play(path, origin: .lua, bus: .gameplay, gain: event.volume)
+        }
+    }
+
     private func playClientSurfaceSounds(
         _ report: GMLuaSurfaceSoundRequestReport
     ) {
